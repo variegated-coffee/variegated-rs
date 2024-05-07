@@ -1,0 +1,35 @@
+[package]
+name = "open-lcc-serial-bootloader"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+open-lcc-board-features =  { version = "0.1.0", path = "../open-lcc-board-features" }
+open-lcc-board-r2a =  { version = "0.1.0", path = "../open-lcc-board-r2a" }
+
+defmt = { version = "0.3" }
+defmt-rtt = { version = "0.4"}
+
+embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver"] }
+embassy-boot-rp = { version = "0.2.0" }
+embassy-boot = { version = "0.2.0" }
+embassy-sync = { version = "0.5.0" }
+embassy-time = { version = "0.3.0"}
+embassy-embedded-hal = "0.1.0"
+
+cortex-m = { version = "0.7.6", features = ["inline-asm"] }
+cortex-m-rt = { version = "0.7" }
+embedded-storage = "0.3.1"
+embedded-storage-async = "0.4.0"
+cfg-if = "1.0.0"
+
+crc = "3.2.1"
+serde = { version = "1.0", default-features = false }
+postcard = "1.0.0"
+
+static_cell = "2"
+portable-atomic = { version = "1.5", features = ["critical-section"] }
+digest = "0.10.7"
+sha2 = "0.10"
