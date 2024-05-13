@@ -1,9 +1,12 @@
-workspace = { members = [ "open-lcc-board-features", "open-lcc-board-r2a", "open-lcc-controller", "open-lcc-embassy-fdc1004", "open-lcc-serial-bootloader"] }
-[package]
-name = "open-lcc-rs"
-version = "0.1.0"
-edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+[workspace]
+members = [
+    "open-lcc-embassy-ads124s08",
+    "open-lcc-board-features",
+    "open-lcc-board-r2a",
+    "open-lcc-controller",
+    "open-lcc-controller-lib",
+    "open-lcc-embassy-fdc1004",
+    "open-lcc-machine-definition-lelit-bianca",
+    "open-lcc-serial-bootloader"
+, "open-lcc-gicar-8-5-04"]
+resolver = "2"

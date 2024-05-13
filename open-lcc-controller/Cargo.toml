@@ -35,7 +35,9 @@ pio = "0.2.1"
 rand = { version = "0.8.5", default-features = false }
 
 hashbrown = "0.14.2"
-embedded-alloc = { version = "0.5.1"}
+embedded-alloc = { version = "0.5.1" }
 
 open-lcc-board-features =  { version = "0.1.0", path = "../open-lcc-board-features" }
 open-lcc-board-r2a = { version = "0.1.0", path = "../open-lcc-board-r2a" }
+open-lcc-controller-lib = { version = "0.1.0", path = "../open-lcc-controller-lib" }
+open-lcc-machine-definition-lelit-bianca = { version = "0.1.0", path = "../open-lcc-machine-definition-lelit-bianca" }

@@ -17,10 +17,11 @@ use serde::{Deserialize, Serialize};
 use postcard::from_bytes;
 use sha2::Sha256;
 use postcard::accumulator::{CobsAccumulator, FeedResult};
+use serde_big_array::Array;
 
 type RelativeAddress = u32;
 type Length = u32;
-type Page = [u8; 256];
+type Page = Array<u8, 256>;
 type Crc8Checksum = u8;
 type Sha256Checksum = [u8; 16];
 
@@ -48,7 +49,7 @@ fn main_loop<UartT: uart::Instance>(flash: FLASH, watchdog: WATCHDOG, mut uart: 
 
     let config = FirmwareUpdaterConfig::from_linkerfile_blocking(&flash);
     let mut aligned = AlignedBuffer([0; 1]);
-    let mut updater = BlockingFirmwareUpdater::new(config, &mut aligned.0);
+    let mut updater: BlockingFirmwareUpdater<BlockingPartition<NoopRawMutex, Flash<FLASH, Blocking, 2097152>>, BlockingPartition<NoopRawMutex, Flash<FLASH, Blocking, 2097152>>> = BlockingFirmwareUpdater::new(config, &mut aligned.0);
 
     watchdog.feed();
 
@@ -62,8 +63,8 @@ fn main_loop<UartT: uart::Instance>(flash: FLASH, watchdog: WATCHDOG, mut uart: 
                 }
                 _ => {}
             }
-        }
-
+        }         
+            
         let mut dfu: &mut BlockingPartition<NoopRawMutex, Flash<FLASH, Blocking, 2097152>> = updater.prepare_update().unwrap();
 
         loop {
@@ -71,12 +72,12 @@ fn main_loop<UartT: uart::Instance>(flash: FLASH, watchdog: WATCHDOG, mut uart: 
 
             match command {
                 SerialFlasherCommand::WritePage(addr, page, checksum) => {
-                    dfu.write(addr, &page);
+                    dfu.write(addr, &page.0).expect("TODO: panic message");
                 },
                 SerialFlasherCommand::CompareChecksum(len, checksum) => {
                     let mut buf = [0; 255];
                     let mut out = [0; 16];
-                    let hash = updater.hash::<Sha256>(len, &mut buf, &mut out);
+                    //let hash = updater.get_mut().get_mut().hash::<Sha256>(len, &mut buf, &mut out);
                 },
                 SerialFlasherCommand::MarkUpdated => {
                     break;
@@ -99,12 +100,12 @@ fn main_loop<UartT: uart::Instance>(flash: FLASH, watchdog: WATCHDOG, mut uart: 
 }
 
 fn read_command<UartT: uart::Instance>(uart: &mut BufferedUart<UartT>) -> SerialFlasherCommand {
-    let mut accumulator = CobsAccumulator::new();
+    let mut accumulator: CobsAccumulator<256> = CobsAccumulator::new();
 
     loop {
         let byte = uart.read().unwrap();
-        let array = [byte];
-        match accumulator.feed(&array) {
+        let array = [byte; 1];
+        match accumulator.feed::<SerialFlasherCommand>(&array) {
             FeedResult::Consumed => {},
             FeedResult::OverFull(d) => {},
             FeedResult::DeserError(d) => {},
@@ -112,8 +113,7 @@ fn read_command<UartT: uart::Instance>(uart: &mut BufferedUart<UartT>) -> Serial
                 data: d,
                 remaining: r,
             } => {
-                let command: SerialFlasherCommand = from_bytes(&d).unwrap();
-                return command;
+                return d;
             }
         }
     }
@@ -122,5 +122,5 @@ fn read_command<UartT: uart::Instance>(uart: &mut BufferedUart<UartT>) -> Serial
 fn write_response<UartT: uart::Instance>(uart: &mut BufferedUart<UartT>, response: SerialFlasherResponse) {
     let mut buf = [0; 255];
     let len = postcard::to_slice(&response, &mut buf).unwrap().len();
-    uart.write(&buf[..len]).unwrap();
+    uart.blocking_write(&buf);
 }

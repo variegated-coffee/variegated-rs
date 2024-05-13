@@ -28,8 +28,9 @@ cfg-if = "1.0.0"
 crc = "3.2.1"
 serde = { version = "1.0", default-features = false }
 postcard = "1.0.0"
+serde-big-array = "0.5.1"
 
 static_cell = "2"
 portable-atomic = { version = "1.5", features = ["critical-section"] }
 digest = "0.10.7"
-sha2 = "0.10"
+sha2 = { version = "0.10", default-features = false }
