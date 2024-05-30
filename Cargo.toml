@@ -1,12 +1,13 @@
 [workspace]
 members = [
-    "open-lcc-embassy-ads124s08",
-    "open-lcc-board-features",
-    "open-lcc-board-r2a",
-    "open-lcc-controller",
-    "open-lcc-controller-lib",
-    "open-lcc-embassy-fdc1004",
-    "open-lcc-machine-definition-lelit-bianca",
-    "open-lcc-serial-bootloader"
-, "open-lcc-gicar-8-5-04"]
+    "variegated-embassy-ads124s08",
+    "variegated-board-features",
+    "variegated-board-open-lcc-r2a",
+    "variegated-controller",
+    "variegated-controller-lib",
+    "variegated-embassy-fdc1004",
+    "variegated-machine-definition-lelit-bianca",
+    "variegated-serial-bootloader",
+    "variegated-gicar-8-5-04"
+]
 resolver = "2"
