@@ -3,11 +3,12 @@
 #![warn(missing_docs)]
 
 use core::fmt;
+use defmt::Format;
 use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c;
 use ux::i24;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Format)]
 pub enum FDC1004Error<E>{
     UnableToFindCapdacSetting,
     MeasurementNotComplete,
@@ -152,15 +153,23 @@ static FDC_REGISTER: u8 = 0x0C;
 static ATTOFARADS_UPPER_WORD:i32 = 488;
 static PICOFARADS_PER_CAPDAC: f32 = 3.125;
 
-pub(crate) enum SuccessfulMeasurement {
+#[derive(Debug, Clone, Copy, Format)]
+pub enum SuccessfulMeasurement {
     MeasurementInRange(MeasuredCapacitance),
     Underflow,
     Overflow,
 }
 
-pub(crate) struct MeasuredCapacitance {
+#[derive(Debug, Clone, Copy)]
+pub struct MeasuredCapacitance {
     pub(crate) value: i24,
     pub(crate) capdac: u8,
+}
+
+impl Format for MeasuredCapacitance {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "MeasuredCapacitance {} pF", self.to_pf());
+    }
 }
 
 impl MeasuredCapacitance {
@@ -331,20 +340,20 @@ impl FDCConfiguration {
     }
 }
 
-pub (crate) struct FDC1004 {
+pub struct FDC1004 {
     address: u8,
     output_rate: OutputRate,
 }
 
 impl FDC1004 {
-    pub(crate) fn new(address: u8, output_rate: OutputRate) -> Self {
+    pub fn new(address: u8, output_rate: OutputRate) -> Self {
         FDC1004 {
             address,
             output_rate,
         }
     }
 
-    pub(crate) async fn read_capacitance<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel) -> Result<SuccessfulMeasurement, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn read_capacitance<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel) -> Result<SuccessfulMeasurement, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         let mut capdac: u8 = 0x00;
 
         for _ in 0..33 {
@@ -368,7 +377,7 @@ impl FDC1004 {
         Err(FDC1004Error::UnableToFindCapdacSetting)
     }
 
-    pub(crate) async fn measure_channel<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel, capdac: u8) -> Result<i24, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn measure_channel<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel, capdac: u8) -> Result<i24, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         // @todo This static mapping is not a great idea
         let measurement = match channel {
             Channel::CIN1 => Measurement::Measurement1,
@@ -385,13 +394,13 @@ impl FDC1004 {
         return self.read_measurement(i2c, measurement).await;
     }
 
-    pub(crate) async fn configure_single_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel, measurement: Measurement, capdac: u8) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn configure_single_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel, measurement: Measurement, capdac: u8) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         let config = MeasurementConfiguration::new(channel, Channel::CAPDAC, capdac);
 
         self.write_u16(i2c, measurement.config_register(), config.to_u16()).await
     }
 
-    pub(crate) async fn trigger_single_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, measurement: Measurement) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn trigger_single_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, measurement: Measurement) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         let mut config = FDCConfiguration::default();
         let config = config.rate(self.output_rate);
         let config = match measurement {
@@ -404,7 +413,7 @@ impl FDC1004 {
         self.write_u16(i2c, RegisterAddress::FdcConf, config.to_u16()).await
     }
 
-    pub(crate) async fn read_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, measurement: Measurement) -> Result<i24, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn read_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, measurement: Measurement) -> Result<i24, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         let config = FDCConfiguration::from_u16(self.read_u16(i2c, RegisterAddress::FdcConf).await?);
 
         // @todo wait for measurement to complete instead of returning an error

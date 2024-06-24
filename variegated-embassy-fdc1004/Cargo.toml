@@ -8,3 +8,5 @@ embassy-time = { version = "0.3.0", features = ["defmt", "defmt-timestamp-uptime
 embedded-hal-async = "1.0"
 embassy-futures = "0.1.1"
 ux = "0.1.0"
+defmt = "0.3"
+defmt-rtt = "0.4"

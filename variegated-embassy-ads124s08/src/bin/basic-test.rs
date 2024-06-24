@@ -16,8 +16,9 @@ use variegated_embassy_ads124s08::ADS124S08;
 use variegated_embassy_ads124s08::registers;
 use variegated_embassy_ads124s08::registers::{IDACMagnitude, InternalVoltageReferenceConfiguration, PGAGain, ReferenceInput, ReferenceMonitorConfiguration};
 use variegated_embassy_ads124s08::registers::CalibrationSampleSize::Samples8;
+use variegated_embassy_ads124s08::registers::Mux::AIN5;
 use variegated_embassy_ads124s08::registers::SystemMonitorConfiguration::Disabled;
-use variegated_embassy_ads124s08::WaitStrategy::UseRiskyMiso;
+use variegated_embassy_ads124s08::WaitStrategy::{Delay, UseRiskyMiso};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => usb::InterruptHandler<USB>;
@@ -33,26 +34,36 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     
     let foo = unsafe {
-        p.PIN_28.clone_unchecked().degrade()
+        p.PIN_12.clone_unchecked().degrade()
     };
 
     let driver = Driver::new(p.USB, Irqs);
     spawner.spawn(logger_task(driver)).unwrap();
 
-    let cs = Output::new(p.PIN_29.degrade(), Level::High);
+    Timer::after_secs(3).await;
+
+    let sd_cs = Output::new(p.PIN_1.degrade(), Level::High);
+    let flash_cs = Output::new(p.PIN_13.degrade(), Level::High);
+    let mut cs = Output::new(p.PIN_0.degrade(), Level::High);
+    let mut adc_cs = Output::new(p.PIN_2.degrade(), Level::High);
+    let fake_cs = Output::new(p.PIN_3.degrade(), Level::High);
     let mut spi_config = Config::default();
-    spi_config.frequency = 1_000_000;
+    spi_config.frequency = 281_000;
     spi_config.phase = Phase::CaptureOnSecondTransition;
     spi_config.polarity = Polarity::IdleLow;
-    let mut spi = spi::Spi::new(p.SPI1, p.PIN_26, p.PIN_27, p.PIN_28, p.DMA_CH0, p.DMA_CH1, spi_config);
+    let mut spi = spi::Spi::new(p.SPI1, p.PIN_14, p.PIN_15, p.PIN_12, p.DMA_CH0, p.DMA_CH1, spi_config);
 
-    let mut ads128s08 = ADS124S08::new(cs, UseRiskyMiso(foo));
+//    let mut ads128s08 = ADS124S08::new(cs, UseRiskyMiso(foo));
+    let mut ads128s08 = ADS124S08::new(fake_cs, Delay);
+
+
+    log::info!("Starting test_ads124s08");
 
     let refmon_config = registers::ReferenceControlRegister {
         fl_ref_en: ReferenceMonitorConfiguration::L0Monitor10mohmPullTogetherThreshold03V,
         n_refp_buf: false,
         n_refn_buf: true,
-        refsel: ReferenceInput::Refp0Refn0,
+        refsel: ReferenceInput::Internal,
         refcon: InternalVoltageReferenceConfiguration::AlwaysOn,
     };
     ads128s08.write_refctrl_reg(&mut spi, refmon_config).await.expect("Refctl fail");
@@ -61,22 +72,41 @@ async fn main(spawner: Spawner) {
         sys_mon: Disabled,
         cal_samp: Samples8,
         timeout: false,
-        crc: false,
+        crc: true,
         sendstat: true,
     };
     ads128s08.write_sys_reg(&mut spi, sys_config).await.expect("Sysreg fail");
 
+    let sys = ads128s08.read_sys_reg(&mut spi).await;
+    if sys.is_err() {
+        log::info!("Error reading SysReg: {:?}", sys.err());
+    } else {
+        log::info!("SysReg: {:?}", sys.unwrap());
+    }
+
     log::info!("Starting test_ads124s08");
 
+
+
     loop {
-/*        let id = ads128s08.read_device_id(&mut spi).await;
+        cs.set_low();
+        Timer::after_millis(100).await;
+
+        let id = ads128s08.read_device_id(&mut spi).await;
 
         if id.is_err() {
             log::info!("Error reading DeviceId: {:?}", id.err());
         } else {
             log::info!("DeviceId: {:?}", id.unwrap());
-        }*/
-
+        }
+/*
+        let v = ads128s08.measure_single_ended(&mut spi, AIN5, ReferenceInput::Refp1Refn1).await;
+        if v.is_err() {
+            log::info!("Error reading AIN5: {:?}", v.err());
+        } else {
+            log::info!("AIN5: {:?} V", v.unwrap().externally_referenced_voltage(0.0, 5.0));
+        }
+*/
         let dvdd = ads128s08.read_dvdd_by_4(&mut spi).await;
 
         if dvdd.is_err() {
@@ -93,7 +123,7 @@ async fn main(spawner: Spawner) {
             log::info!("AVDD: {:?} V", avdd.unwrap().internally_referenced_voltage() * 4.0);
         }
 
-        let pt100 = ads128s08.measure_ratiometric_low_side(
+/*        let pt100 = ads128s08.measure_ratiometric_low_side(
             &mut spi,
             registers::Mux::AIN3,
             registers::Mux::AIN2,
@@ -108,7 +138,7 @@ async fn main(spawner: Spawner) {
             log::info!("Error reading PT100: {:?}", pt100.err());
         } else {
             log::info!("PT100: {:?}", pt100.unwrap().ratiometric_resistance(220_000f32));
-        }
+        }*/
 
 /*        let test = ads128s08.measure_single_ended(&mut spi, registers::Mux::AIN5, ReferenceInput::Internal).await;
         if test.is_err() {
@@ -116,6 +146,8 @@ async fn main(spawner: Spawner) {
         } else {
             log::info!("Test: {:?} V", test.unwrap().internally_referenced_voltage());
         }*/
+
+        cs.set_high();
 
         Timer::after_secs(2).await;
     }

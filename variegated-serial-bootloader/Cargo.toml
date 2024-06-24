@@ -15,7 +15,7 @@ defmt-rtt = { version = "0.4"}
 embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver"] }
 embassy-boot-rp = { version = "0.2.0" }
 embassy-boot = { version = "0.2.0" }
-embassy-sync = { version = "0.5.0" }
+embassy-sync = { version = "0.6.0" }
 embassy-time = { version = "0.3.0"}
 embassy-embedded-hal = "0.1.0"
 

@@ -30,6 +30,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c6cb57a04249c6480766f7f7cef5467412af1490f8d1e243141daddada3264f"
 
 [[package]]
+name = "apec-r0d-functional-test"
+version = "0.1.0"
+dependencies = [
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-boot-rp",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync 0.6.0",
+ "embassy-time",
+ "embassy-usb 0.1.0",
+ "embassy-usb-logger 0.1.0",
+ "embedded-alloc",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-io-async",
+ "embedded-storage",
+ "futures",
+ "hashbrown",
+ "log",
+ "panic-probe",
+ "pio",
+ "pio-proc",
+ "portable-atomic",
+ "rand",
+ "static_cell",
+ "variegated-board-apec",
+ "variegated-board-features",
+ "variegated-embassy-ads124s08",
+ "variegated-embassy-dual-c595-shift-register",
+ "variegated-embassy-fdc1004",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -107,6 +147,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "46afbd2983a5d5a7bd740ccb198caf5b82f45c40c09c0eed36052d91cb92e719"
 
 [[package]]
+name = "bitfield"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -168,7 +214,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ec610d8f49840a5b376c69663b6369e71f4b34484b9b2eb29fb918d92516cb9"
 dependencies = [
  "bare-metal",
- "bitfield",
+ "bitfield 0.13.2",
  "embedded-hal 0.2.7",
  "volatile-register",
 ]
@@ -291,9 +337,9 @@ checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
 
 [[package]]
 name = "defmt"
-version = "0.3.6"
+version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3939552907426de152b3c2c6f51ed53f98f448babd26f28694c95f5906194595"
+checksum = "a99dd22262668b887121d4672af5a64b238f026099f1a2a1b322066c9ecfe9e0"
 dependencies = [
  "bitflags 1.3.2",
  "defmt-macros",
@@ -552,6 +598,19 @@ checksum = "dd938f25c0798db4280fcd8026bf4c2f48789aebf8f77b6e5cf8a7693ba114ec"
 dependencies = [
  "cfg-if",
  "critical-section",
+ "embedded-io-async",
+ "futures-util",
+ "heapless 0.8.0",
+]
+
+[[package]]
+name = "embassy-sync"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3e0c49ff02ebe324faf3a8653ba91582e2d0a7fdef5bc88f449d5aa1bfcc05c"
+dependencies = [
+ "cfg-if",
+ "critical-section",
  "defmt",
  "embedded-io-async",
  "futures-util",
@@ -560,9 +619,9 @@ dependencies = [
 
 [[package]]
 name = "embassy-time"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9c844070d9f80dc66ee739299183312baee2e1cdeb6e90b4ea2af44f4676da5"
+checksum = "274c019608a9004aed3cafc871e2a3c87ce9351d537dcaab4cc5db184d4a04b1"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -605,7 +664,22 @@ dependencies = [
  "embassy-usb-driver",
  "heapless 0.8.0",
  "ssmarshal",
- "usbd-hid",
+ "usbd-hid 0.6.1",
+]
+
+[[package]]
+name = "embassy-usb"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66444f442f4efc155138a996e250821a6d83a0c40e28ce3de8f0d9033617838b"
+dependencies = [
+ "embassy-futures",
+ "embassy-net-driver-channel",
+ "embassy-sync 0.5.0",
+ "embassy-usb-driver",
+ "heapless 0.8.0",
+ "ssmarshal",
+ "usbd-hid 0.7.0",
 ]
 
 [[package]]
@@ -625,7 +699,19 @@ checksum = "80417656bff296da3394ad97fae231569a437d17bbea36af6f14a4a562c3c12c"
 dependencies = [
  "embassy-futures",
  "embassy-sync 0.5.0",
- "embassy-usb",
+ "embassy-usb 0.1.0",
+ "log",
+]
+
+[[package]]
+name = "embassy-usb-logger"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffefdf915abf7230f2e44753b552e60895540e4931fc9a743bb9b1c7dca242f7"
+dependencies = [
+ "embassy-futures",
+ "embassy-sync 0.5.0",
+ "embassy-usb 0.2.0",
  "log",
 ]
 
@@ -637,6 +723,15 @@ checksum = "ddae17915accbac2cfbc64ea0ae6e3b330e6ea124ba108dada63646fd3c6f815"
 dependencies = [
  "critical-section",
  "linked_list_allocator",
+]
+
+[[package]]
+name = "embedded-dma"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "994f7e5b5cb23521c22304927195f236813053eb9c065dd2226a32ba64695446"
+dependencies = [
+ "stable_deref_trait",
 ]
 
 [[package]]
@@ -800,6 +895,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "frunk"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11a351b59e12f97b4176ee78497dff72e4276fb1ceb13e19056aca7fa0206287"
+dependencies = [
+ "frunk_core",
+ "frunk_derives",
+]
+
+[[package]]
+name = "frunk_core"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af2469fab0bd07e64ccf0ad57a1438f63160c69b2e57f04a439653d68eb558d6"
+
+[[package]]
+name = "frunk_derives"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0fa992f1656e1707946bbba340ad244f0814009ef8c0118eb7b658395f19a2e"
+dependencies = [
+ "frunk_proc_macro_helpers",
+ "quote",
+ "syn 2.0.60",
+]
+
+[[package]]
+name = "frunk_proc_macro_helpers"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35b54add839292b743aeda6ebedbd8b11e93404f902c56223e51b9ec18a13d2c"
+dependencies = [
+ "frunk_core",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.60",
+]
+
+[[package]]
+name = "fugit"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17186ad64927d5ac8f02c1e77ccefa08ccd9eaa314d5a4772278aa204a22f7e7"
+dependencies = [
+ "gcd",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -871,6 +1014,12 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
 ]
+
+[[package]]
+name = "gcd"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d758ba1b47b00caf47f24925c0074ecb20d6dfcffe7f6d53395c0465674841a"
 
 [[package]]
 name = "generic-array"
@@ -1112,6 +1261,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -1142,9 +1292,9 @@ checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
 
 [[package]]
 name = "panic-probe"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa6fa5645ef5a760cd340eaa92af9c1ce131c8c09e7f8926d8a24b59d26652b9"
+checksum = "4047d9235d1423d66cc97da7d07eddb54d4f154d6c13805c6d0793956f4f25b0"
 dependencies = [
  "cortex-m",
  "defmt",
@@ -1196,6 +1346,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6796ad771acdc0123d2a88dc428b5e38ef24456743ddb1744ed628f9815c096"
 dependencies = [
  "siphasher",
+]
+
+[[package]]
+name = "pid-ctrl"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cde4c33251062625c11db9135bb165227b39d124b4ddb1be939ae81860d802ca"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1405,6 +1564,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c92f344f63f950ee36cf4080050e4dce850839b9175da38f9d2ffb69b4dbb21"
 dependencies = [
  "crc-any",
+]
+
+[[package]]
+name = "rp2040-hal"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d11e711940087f2cdff8aeae9f4b902e2014c06a00b39a1092686b81ec973d6f"
+dependencies = [
+ "bitfield 0.14.0",
+ "cortex-m",
+ "critical-section",
+ "embedded-dma",
+ "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-nb",
+ "embedded-io",
+ "frunk",
+ "fugit",
+ "itertools",
+ "nb 1.1.0",
+ "paste",
+ "pio",
+ "rand_core",
+ "rp2040-hal-macros",
+ "rp2040-pac",
+ "usb-device 0.3.2",
+ "vcell",
+ "void",
+]
+
+[[package]]
+name = "rp2040-hal-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86479063e497efe1ae81995ef9071f54fd1c7427e04d6c5b84cde545ff672a5e"
+dependencies = [
+ "cortex-m-rt",
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
+name = "rp2040-pac"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83cbcd3f7a0ca7bbe61dc4eb7e202842bee4e27b769a7bf3a4a72fa399d6e404"
+dependencies = [
+ "cortex-m",
+ "critical-section",
+ "vcell",
 ]
 
 [[package]]
@@ -1671,6 +1882,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f6cc3adc849b5292b4075fc0d5fdcf2f24866e88e336dd27a8943090a520508"
 
 [[package]]
+name = "usb-device"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98816b1accafbb09085168b90f27e93d790b4bfa19d883466b5e53315b5f06a6"
+dependencies = [
+ "heapless 0.8.0",
+ "portable-atomic",
+]
+
+[[package]]
 name = "usbd-hid"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1678,7 +1899,19 @@ checksum = "975bd411f4a939986751ea09992a24fa47c4d25c6ed108d04b4c2999a4fd0132"
 dependencies = [
  "serde",
  "ssmarshal",
- "usb-device",
+ "usb-device 0.2.9",
+ "usbd-hid-macros",
+]
+
+[[package]]
+name = "usbd-hid"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41a2d4546ca3e6a5c6a85584e5caf29feabf3ec35d6cd6b772eb35bd3cff7256"
+dependencies = [
+ "serde",
+ "ssmarshal",
+ "usb-device 0.3.2",
  "usbd-hid-macros",
 ]
 
@@ -1688,7 +1921,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcbee8c6735e90894fba04770bc41e11fd3c5256018856e15dc4dd1e6c8a3dd1"
 dependencies = [
- "bitfield",
+ "bitfield 0.13.2",
 ]
 
 [[package]]
@@ -1712,10 +1945,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b59fc5417e036e53226bbebd90196825d358624fd5577432c4e486c95b1b096"
 
 [[package]]
+name = "variegated-board-apec"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.5.0",
+ "cfg-if",
+ "embassy-rp",
+ "static_cell",
+ "variegated-board-features",
+ "variegated-embassy-dual-c595-shift-register",
+]
+
+[[package]]
 name = "variegated-board-features"
 version = "0.1.0"
 dependencies = [
  "embassy-rp",
+ "variegated-embassy-dual-c595-shift-register",
 ]
 
 [[package]]
@@ -1731,6 +1977,7 @@ dependencies = [
 name = "variegated-controller"
 version = "0.1.0"
 dependencies = [
+ "cfg-if",
  "cortex-m",
  "cortex-m-rt",
  "defmt",
@@ -1740,10 +1987,10 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
- "embassy-sync 0.5.0",
+ "embassy-sync 0.6.0",
  "embassy-time",
- "embassy-usb",
- "embassy-usb-logger",
+ "embassy-usb 0.1.0",
+ "embassy-usb-logger 0.1.0",
  "embedded-alloc",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
@@ -1759,9 +2006,11 @@ dependencies = [
  "portable-atomic",
  "rand",
  "static_cell",
+ "variegated-board-apec",
  "variegated-board-features",
  "variegated-board-open-lcc-r2a",
  "variegated-controller-lib",
+ "variegated-machine-definition-gear-pump-silvia",
  "variegated-machine-definition-lelit-bianca",
 ]
 
@@ -1770,7 +2019,11 @@ name = "variegated-controller-lib"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cfg-if",
+ "embassy-sync 0.6.0",
  "heapless 0.8.0",
+ "variegated-board-apec",
+ "variegated-board-open-lcc-r2a",
 ]
 
 [[package]]
@@ -1785,9 +2038,9 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
- "embassy-sync 0.5.0",
+ "embassy-sync 0.6.0",
  "embassy-time",
- "embassy-usb-logger",
+ "embassy-usb-logger 0.1.0",
  "fixed",
  "fixed-macro",
  "log",
@@ -1797,13 +2050,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-embassy-dual-c595-shift-register"
+version = "0.1.0"
+dependencies = [
+ "embassy-rp",
+ "embassy-time",
+]
+
+[[package]]
 name = "variegated-embassy-fdc1004"
 version = "0.1.0"
 dependencies = [
+ "defmt",
+ "defmt-rtt",
  "embassy-futures",
  "embassy-time",
  "embedded-hal-async",
  "ux",
+]
+
+[[package]]
+name = "variegated-embassy-rp2040-double-tap"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-time",
+ "embassy-usb-logger 0.2.0",
+ "log",
+ "panic-probe",
+ "rp2040-hal",
 ]
 
 [[package]]
@@ -1813,8 +2093,28 @@ dependencies = [
  "async-trait",
  "bitflags 2.5.0",
  "embassy-rp",
+ "embassy-sync 0.6.0",
  "libm",
  "variegated-controller-lib",
+]
+
+[[package]]
+name = "variegated-machine-definition-gear-pump-silvia"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "embassy-rp",
+ "embassy-sync 0.6.0",
+ "embassy-time",
+ "heapless 0.8.0",
+ "num-traits",
+ "pid-ctrl",
+ "variegated-board-apec",
+ "variegated-board-features",
+ "variegated-controller-lib",
+ "variegated-embassy-ads124s08",
+ "variegated-embassy-dual-c595-shift-register",
+ "variegated-soft-pwm",
 ]
 
 [[package]]
@@ -1823,10 +2123,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "embassy-rp",
+ "embassy-sync 0.6.0",
+ "embassy-time",
  "heapless 0.8.0",
+ "num-traits",
+ "pid-ctrl",
  "variegated-board-features",
  "variegated-controller-lib",
  "variegated-gicar-8-5-04",
+ "variegated-soft-pwm",
 ]
 
 [[package]]
@@ -1844,7 +2149,7 @@ dependencies = [
  "embassy-boot-rp",
  "embassy-embedded-hal",
  "embassy-rp",
- "embassy-sync 0.5.0",
+ "embassy-sync 0.6.0",
  "embassy-time",
  "embedded-storage",
  "embedded-storage-async",
@@ -1856,6 +2161,13 @@ dependencies = [
  "static_cell",
  "variegated-board-features",
  "variegated-board-open-lcc-r2a",
+]
+
+[[package]]
+name = "variegated-soft-pwm"
+version = "0.1.0"
+dependencies = [
+ "embassy-time",
 ]
 
 [[package]]

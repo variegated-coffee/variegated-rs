@@ -3,13 +3,19 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use async_trait::async_trait;
 use variegated_board_features::OpenLCCBoardFeatures;
 use variegated_controller_lib::*;
-use embassy_rp::{i2c, spi, uart, pwm};
-use embassy_rp::uart::{Instance, UartRx};
-use variegated_gicar_8_5_04::{ntc_ohm_to_celsius, high_gain_adc_to_ohm};
+use embassy_rp::{i2c, pwm, spi, uart};
+use embassy_sync::mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::{ThreadModeRawMutex};
+use embassy_time::Instant;
+use num_traits::ToPrimitive;
+use pid_ctrl::{PidCtrl, PidIn};
+use actuator_cluster::BiancaGicarActuatorCluster;
+use variegated_soft_pwm::SoftPwm;
 
+mod sensor_cluster;
+mod actuator_cluster;
 
 #[derive(Default, Copy, Clone)]
 pub struct BiancaSystemSensorState {
@@ -25,10 +31,10 @@ impl SystemSensorState for BiancaSystemSensorState {}
 #[derive(Default, Copy, Clone)]
 pub struct BiancaSystemActuatorState {
     status_led: bool,
-    brew_boiler_heating_element: bool,
+    brew_boiler_heating_element: SoftPwm,
     service_boiler_diversion_solenoid: bool,
     line_solenoid: bool,
-    service_boiler_heating_element: bool,
+    service_boiler_heating_element: SoftPwm,
     pump: bool,
 }
 
@@ -43,57 +49,51 @@ pub struct BiancaSystemConfiguration {
     service_boiler_temp_setpoint_c: f32,
 }
 
-struct BiancaGicarSensorCluster<'a, UartT: Instance> {
-    gicar_cluster: variegated_gicar_8_5_04::Gicar8504SensorCluster<'a, BiancaSystemSensorState, UartT>
+struct BiancaController {
+    prev_update: Instant,
+    brew_boiler_pid: PidCtrl<f32>,
+    service_boiler_pid: PidCtrl<f32>,
 }
 
-impl<'a, UartT: Instance> BiancaGicarSensorCluster<'a, UartT> {
-    pub fn new(uart_rx: UartRx<'a, UartT, uart::Async>) -> BiancaGicarSensorCluster<'a, UartT> {
-        BiancaGicarSensorCluster {
-            gicar_cluster: variegated_gicar_8_5_04::Gicar8504SensorCluster::new(
-                |msg, state: BiancaSystemSensorState| {
-                    let mut new_state = state.clone();
-                    new_state.brew_switch = msg.cn7;
-                    new_state.water_tank_empty = msg.cn2;
-
-                    new_state.brew_boiler_temp_c = ntc_ohm_to_celsius(high_gain_adc_to_ohm(msg.cn3_adc_high_gain.to_u16()), 50000, 4016);
-
-                    new_state
-                }, uart_rx
-            )
-        }
+impl Default for BiancaController {
+    fn default() -> Self {
+        BiancaController::new(PidCtrl::default(), PidCtrl::default())
     }
 }
 
-#[async_trait]
-impl<'a, UartT: Instance + Send + Sync> SensorCluster<BiancaSystemSensorState> for BiancaGicarSensorCluster<'a, UartT> {
-    async fn update_sensor_state(&mut self, previous_state: BiancaSystemSensorState) -> BiancaSystemSensorState {
-        self.gicar_cluster.update_sensor_state(previous_state).await
+impl BiancaController {
+    pub fn new(brew_boiler_pid: PidCtrl<f32>, service_boiler_pid: PidCtrl<f32>) -> Self {
+        Self { prev_update: Instant::now(), brew_boiler_pid, service_boiler_pid }
     }
 }
 
-
-struct DummyController {}
-
-impl Controller<BiancaSystemSensorState, BiancaSystemActuatorState> for DummyController {
+impl Controller<BiancaSystemSensorState, BiancaSystemActuatorState> for BiancaController {
     fn update_actuator_state_from_sensor_state(&mut self, system_sensor_state: &BiancaSystemSensorState, system_actuator_state: BiancaSystemActuatorState) -> BiancaSystemActuatorState {
-        BiancaSystemActuatorState {
-            status_led: true,
-            brew_boiler_heating_element: if system_sensor_state.brew_boiler_temp_c < 90.0 { true } else { false },
-            service_boiler_diversion_solenoid: false,
-            line_solenoid: false,
-            service_boiler_heating_element: false,
-            pump: false,
-        }
+        let now = Instant::now();
+        let mut new_state = system_actuator_state.clone();
+
+        let delta = now - self.prev_update;
+        let delta_millis = delta.as_micros().to_f32().expect("For some weird reason, we couldn't convet a u64 to a f32") / 1000f32;
+
+        let brew_out = self.brew_boiler_pid.step(PidIn::new(system_sensor_state.brew_boiler_temp_c, delta_millis));
+        let service_out = self.service_boiler_pid.step(PidIn::new(system_sensor_state.service_boiler_temp_c, delta_millis));
+
+        new_state.brew_boiler_heating_element.set_duty_cycle((brew_out.out * 100f32) as u8);
+        new_state.service_boiler_heating_element.set_duty_cycle((service_out.out * 100f32) as u8);
+
+        new_state.brew_boiler_heating_element.update(now);
+        new_state.service_boiler_heating_element.update(now);
+
+        self.prev_update = now;
+        new_state
     }
 }
-
 
 pub fn create
     <LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT>
     (mut board_features: OpenLCCBoardFeatures<'static, LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT>)
      -> (
-        Context<BiancaSystemSensorState, BiancaSystemActuatorState, 1, 0, 1>, 
+        Context<BiancaSystemSensorState, BiancaSystemActuatorState, 1, 1, 1>,
         BiancaSystemSensorState, 
         BiancaSystemActuatorState,
         OpenLCCBoardFeatures<LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT>
@@ -115,11 +115,13 @@ pub fn create
         return (
             Context {
                 sensors: [
-                    Box::new(BiancaGicarSensorCluster::new(iox_uart_rx))
+                    Box::new(sensor_cluster::BiancaGicarSensorCluster::new(iox_uart_rx))
                 ],
-                actuators: [],
+                actuators: [
+                    Box::new(BiancaGicarActuatorCluster::new(iox_uart_tx))
+                ],
                 controllers: [
-                    Box::new(DummyController {}),
+                    Box::new(BiancaController::default()),
                 ]
             }, 
             BiancaSystemSensorState::default(), 

@@ -8,6 +8,10 @@ members = [
     "variegated-embassy-fdc1004",
     "variegated-machine-definition-lelit-bianca",
     "variegated-serial-bootloader",
-    "variegated-gicar-8-5-04"
-]
+    "variegated-gicar-8-5-04",
+    "variegated-soft-pwm",
+    "variegated-embassy-rp2040-double-tap",
+    "variegated-machine-definition-gear-pump-silvia",
+    "variegated-embassy-dual-c595-shift-register"
+, "variegated-board-apec", "apec-r0d-functional-test"]
 resolver = "2"

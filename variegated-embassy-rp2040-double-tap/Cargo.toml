@@ -1,0 +1,21 @@
+[package]
+name = "variegated-embassy-rp2040-double-tap"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+embassy-time = { version = "0.3.1", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+defmt = { version = "0.3.8" }
+panic-probe = "0.3.2"
+rp2040-hal = { version = "0.10.2" }
+
+#[dev-dependencies]
+embassy-executor = { version = "0.5.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
+cortex-m = { version = "0.7.6", features = ["inline-asm"] }
+defmt-rtt = "0.4"
+cortex-m-rt = "0.7.0"
+embassy-usb-logger = { version = "0.2.0"}
+log = "0.4.21"

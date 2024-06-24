@@ -19,7 +19,7 @@ bind_interrupts!(struct Irqs {
 
 pub const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
-pub fn create_board_features(p: Peripherals) -> OpenLCCBoardFeatures<
+pub type R2ABoardFeatures = OpenLCCBoardFeatures<
     'static,
     peripherals::PWM_CH4,
     peripherals::UART0,
@@ -27,8 +27,9 @@ pub fn create_board_features(p: Peripherals) -> OpenLCCBoardFeatures<
     peripherals::I2C0,
     peripherals::I2C1,
     peripherals::SPI1,
-    peripherals::SPI0
-> {
+    peripherals::SPI0>;
+
+pub fn create_board_features(p: Peripherals) -> R2ABoardFeatures {
     let mut led_pwm: Option<Pwm<PWM_CH4>> = None;
     let mut led_pin: Option<AnyPin> = None;
     

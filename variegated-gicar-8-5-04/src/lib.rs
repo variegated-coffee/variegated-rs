@@ -3,10 +3,13 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use core::cell::RefCell;
 use async_trait::async_trait;
 use bitflags::bitflags;
-use embassy_rp::uart::{Async, BufferedUartRx, Instance, UartRx, UartTx};
-use variegated_controller_lib::{ActuatorCluster, SensorCluster, SystemActuatorState, SystemSensorState};
+use embassy_rp::uart::{Async, Instance, UartRx, UartTx};
+use embassy_sync::mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use variegated_controller_lib::{ActualBoardFeatures, ActualBoardFeaturesMutex, ActuatorCluster, ActuatorClusterError, SensorCluster, SensorClusterError, SystemActuatorState, SystemSensorState};
 use libm::{powf, log};
 
 pub struct SensorMessage {
@@ -89,20 +92,21 @@ bitflags! {
     }
 }
 
-struct ActuatorMessage {
-    cn5: bool,
-    fa10: bool,
-    fa9: bool,
-    cn6_1: bool,
-    cn6_3: bool,
-    cn6_5: bool,
-    cn7: bool, // Only available on Elizabeth
-    fa7: bool,
-    fa8: bool,
-    cn10_n_12v: bool,
-    cn10_n_3v3: bool,
-    minus_button: bool,
-    plus_button: bool,
+pub struct ActuatorMessage {
+    pub cn5: bool,
+    pub fa10: bool,
+    pub fa9: bool,
+    pub cn6_1: bool,
+    pub cn6_3: bool,
+    pub cn6_5: bool,
+    pub cn9: bool,
+    pub cn7: bool, // Only available on Elizabeth
+    pub fa7: bool,
+    pub fa8: bool,
+    pub cn10_n_12v: bool,
+    pub cn10_n_3v3: bool,
+    pub minus_button: bool,
+    pub plus_button: bool,
 }
 
 impl ActuatorMessage {
@@ -181,16 +185,25 @@ pub fn ntc_ohm_to_celsius(ohm: u32, r25: u32, b: u32) -> f32 {
     (1.0 / (log(ohm_f32 / r25_f32) as f32 / b_f32 + 1.0 / 298.15)) - 273.15
 }
 
-pub struct Gicar8504ActuatorCluster<'a, UartT: Instance + Send, ActuatorStateT: SystemActuatorState> {
+pub struct Gicar8504ActuatorCluster<'a, ActuatorStateT: SystemActuatorState, UartT: Instance> {
     mapper: fn(&ActuatorStateT) -> ActuatorMessage,
     uart_tx: UartTx<'a, UartT, Async>
 }
 
+impl<'a, ActuatorStateT: SystemActuatorState, UartT: Instance> Gicar8504ActuatorCluster<'a, ActuatorStateT, UartT> {
+    pub fn new(mapper: fn(&ActuatorStateT) -> ActuatorMessage, uart_tx: UartTx<'a, UartT, embassy_rp::uart::Async>) -> Self {
+        Gicar8504ActuatorCluster {
+            mapper,
+            uart_tx
+        }
+    }
+}
+
 #[async_trait]
-impl<'a, ActuatorStateT: SystemActuatorState, UartT: Instance + Send + Sync> ActuatorCluster<ActuatorStateT> for Gicar8504ActuatorCluster<'a, UartT, ActuatorStateT> {
-    async fn update_from_actuator_state(&mut self, system_actuator_state: &ActuatorStateT) {
+impl<'a, ActuatorStateT: SystemActuatorState, UartT: Instance + Send + Sync> ActuatorCluster<ActuatorStateT> for Gicar8504ActuatorCluster<'a, ActuatorStateT, UartT> {
+    async fn update_from_actuator_state(&mut self, system_actuator_state: &ActuatorStateT) -> Result<(), ActuatorClusterError> {
         let buf = (self.mapper)(system_actuator_state).to_bytes();
-        let res = self.uart_tx.write(&buf).await;
+        self.uart_tx.write(&buf).await.map_err(|_| ActuatorClusterError::UnknownError)
     }
 }
 
@@ -209,21 +222,21 @@ impl<'a, SensorStateT: SystemSensorState, UartT: Instance> Gicar8504SensorCluste
 }
 
 #[async_trait]
-impl<'a, SensorStateT: SystemSensorState, UartT: Instance + Send + Sync> SensorCluster<SensorStateT> for Gicar8504SensorCluster<'a, SensorStateT, UartT> {
-    async fn update_sensor_state(&mut self, previous_state: SensorStateT) -> SensorStateT {
+impl<'a, SensorStateT: SystemSensorState, UartT: 'a + Instance + Send + Sync> SensorCluster<SensorStateT> for Gicar8504SensorCluster<'a, SensorStateT, UartT> {
+    async fn update_sensor_state(&mut self, previous_state: SensorStateT, _board_features: &ActualBoardFeaturesMutex) -> Result<SensorStateT, SensorClusterError> {
         let mut buf: [u8; 18] = [0; 18];
 
         let res = self.uart_rx.read(&mut buf).await;
 
         if res.is_err() {
-            return previous_state.clone();
+            return Err(SensorClusterError::UnknownError);
         }
 
         let sensor_message = match SensorMessage::from_bytes(buf) {
             Ok(msg) => msg,
-            Err(_) => return previous_state.clone()
+            Err(_) => return Err(SensorClusterError::UnknownError)
         };
 
-        (self.mapper)(sensor_message, previous_state.clone())
+        Ok((self.mapper)(sensor_message, previous_state.clone()))
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "variegated-machine-definition-lelit-bianca"
+name = "variegated-machine-definition-gear-pump-silvia"
 version = "0.1.0"
 edition = "2021"
 
@@ -10,9 +10,11 @@ embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-dri
 embassy-time = "0.3.0"
 embassy-sync = "0.6.0"
 variegated-board-features = { version = "0.1.0", path = "../variegated-board-features" }
+variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec" }
+variegated-embassy-dual-c595-shift-register = { version = "0.1.0", path = "../variegated-embassy-dual-c595-shift-register" }
+variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
 variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
-variegated-gicar-8-5-04 = { version = "0.1.0", path = "../variegated-gicar-8-5-04" }
 pid-ctrl = "0.1.4"
 heapless = "0.8.0"
 async-trait = "0.1.80"

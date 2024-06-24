@@ -8,3 +8,12 @@ edition = "2021"
 [dependencies]
 heapless = "0.8.0"
 async-trait = "0.1.80"
+embassy-sync = { version = "0.6.0", features = ["defmt"] }
+cfg-if = "1.0.0"
+variegated-board-open-lcc-r2a = { path = "../variegated-board-open-lcc-r2a", optional = true }
+variegated-board-apec = { path = "../variegated-board-apec", optional = true }
+
+[features]
+# Defines a feature named `webp` that does not enable any other features.
+apec-r0d = ["dep:variegated-board-apec"]
+open-lcc-r2a = ["dep:variegated-board-open-lcc-r2a"]

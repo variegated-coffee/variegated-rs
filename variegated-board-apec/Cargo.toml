@@ -1,0 +1,20 @@
+[package]
+name = "variegated-board-apec"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
+embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+static_cell = "2.1.0"
+variegated-embassy-dual-c595-shift-register = { version = "0.1.0", path = "../variegated-embassy-dual-c595-shift-register" }
+cfg-if = "1.0.0"
+bitflags = "2.5.0"
+
+[features]
+default = []
+cn94-pwm = []
+cn96-pwm = []
+cn98-pwm = []
