@@ -68,9 +68,8 @@ impl BiancaController {
 }
 
 impl Controller<BiancaSystemSensorState, BiancaSystemActuatorState> for BiancaController {
-    fn update_actuator_state_from_sensor_state(&mut self, system_sensor_state: &BiancaSystemSensorState, system_actuator_state: BiancaSystemActuatorState) -> BiancaSystemActuatorState {
+    fn update_actuator_state_from_sensor_state(&mut self, system_sensor_state: &BiancaSystemSensorState, system_actuator_state: &mut BiancaSystemActuatorState) -> Result<(), ControllerError> {
         let now = Instant::now();
-        let mut new_state = system_actuator_state.clone();
 
         let delta = now - self.prev_update;
         let delta_millis = delta.as_micros().to_f32().expect("For some weird reason, we couldn't convet a u64 to a f32") / 1000f32;
@@ -78,14 +77,15 @@ impl Controller<BiancaSystemSensorState, BiancaSystemActuatorState> for BiancaCo
         let brew_out = self.brew_boiler_pid.step(PidIn::new(system_sensor_state.brew_boiler_temp_c, delta_millis));
         let service_out = self.service_boiler_pid.step(PidIn::new(system_sensor_state.service_boiler_temp_c, delta_millis));
 
-        new_state.brew_boiler_heating_element.set_duty_cycle((brew_out.out * 100f32) as u8);
-        new_state.service_boiler_heating_element.set_duty_cycle((service_out.out * 100f32) as u8);
+        system_actuator_state.brew_boiler_heating_element.set_duty_cycle((brew_out.out * 100f32) as u8);
+        system_actuator_state.service_boiler_heating_element.set_duty_cycle((service_out.out * 100f32) as u8);
 
-        new_state.brew_boiler_heating_element.update(now);
-        new_state.service_boiler_heating_element.update(now);
+        system_actuator_state.brew_boiler_heating_element.update(now);
+        system_actuator_state.service_boiler_heating_element.update(now);
 
         self.prev_update = now;
-        new_state
+
+        Ok(())
     }
 }
 

@@ -39,7 +39,6 @@ impl<'a, UartT: Instance> BiancaGicarActuatorCluster<'a, UartT> {
     }
 }
 
-#[async_trait]
 impl<'a, UartT: Instance + Send + Sync> ActuatorCluster<BiancaSystemActuatorState> for BiancaGicarActuatorCluster<'a, UartT> {
     async fn update_from_actuator_state(&mut self, system_actuator_state: &BiancaSystemActuatorState) -> Result<(), ActuatorClusterError>{
         self.gicar_cluster.update_from_actuator_state(system_actuator_state).await

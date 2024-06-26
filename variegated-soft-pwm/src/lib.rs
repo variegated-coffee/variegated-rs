@@ -1,5 +1,7 @@
 #![no_std]
 
+use core::fmt::{Debug, Formatter};
+use defmt::Format;
 use embassy_time::{Duration, Instant};
 
 #[derive(Copy, Clone)]
@@ -9,6 +11,28 @@ pub struct SoftPwm {
     next_duty_cycle_percent: u8,
     current_cycle_start: Instant,
     update_time: Instant,
+}
+
+impl Debug for SoftPwm {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        write!(f, "SoftPwm {{ current_duty_cycle_percent: {}, next_duty_cycle_percent: {}, current_output: {} }}",
+            self.current_duty_cycle_percent,
+            self.next_duty_cycle_percent,
+            self.get_output(),
+        )
+    }
+
+}
+
+impl Format for SoftPwm {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "SoftPwm {{ current_duty_cycle_percent: {}, next_duty_cycle_percent: {}, current_output: {} }}",
+            self.current_duty_cycle_percent,
+            self.next_duty_cycle_percent,
+            self.get_output(),
+        );
+    }
+
 }
 
 impl Default for SoftPwm {

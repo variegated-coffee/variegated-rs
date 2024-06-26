@@ -5,6 +5,7 @@ use embassy_rp::{i2c, spi, uart};
 use embassy_rp::peripherals::{FLASH, I2C0, SPI1, USB, WATCHDOG};
 use embassy_rp::pwm::{Channel, Pwm};
 use embassy_rp::uart::Blocking;
+use variegated_embassy_ads124s08::ADS124S08;
 use variegated_embassy_dual_c595_shift_register::DualC595ShiftRegister;
 
 pub struct
@@ -71,6 +72,9 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
         Cn98ChT: Channel
 {
     pub adc_cs_pin: Option<AnyPin>,
+    
+    pub ads124s08: Option<ADS124S08<'a>>,
+    
     pub sd_cs_pin: Option<AnyPin>,
 
     pub cn14_10_pin: Option<AnyPin>,

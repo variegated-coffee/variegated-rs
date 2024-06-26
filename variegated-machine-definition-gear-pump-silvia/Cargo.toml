@@ -13,9 +13,12 @@ variegated-board-features = { version = "0.1.0", path = "../variegated-board-fea
 variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec" }
 variegated-embassy-dual-c595-shift-register = { version = "0.1.0", path = "../variegated-embassy-dual-c595-shift-register" }
 variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
-variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
+variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib", features = ["apec-r0d"] }
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
+variegated-log = { version = "0.1.0", path = "../variegated-log" }
 pid-ctrl = "0.1.4"
 heapless = "0.8.0"
 async-trait = "0.1.80"
 num-traits = { version ="0.2", default-features = false, features = ["libm"]}
+defmt = "0.3.8"
+log = "0.4.21"

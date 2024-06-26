@@ -1953,6 +1953,7 @@ dependencies = [
  "embassy-rp",
  "static_cell",
  "variegated-board-features",
+ "variegated-embassy-ads124s08",
  "variegated-embassy-dual-c595-shift-register",
 ]
 
@@ -1961,6 +1962,7 @@ name = "variegated-board-features"
 version = "0.1.0"
 dependencies = [
  "embassy-rp",
+ "variegated-embassy-ads124s08",
  "variegated-embassy-dual-c595-shift-register",
 ]
 
@@ -2010,8 +2012,55 @@ dependencies = [
  "variegated-board-features",
  "variegated-board-open-lcc-r2a",
  "variegated-controller-lib",
+ "variegated-log",
  "variegated-machine-definition-gear-pump-silvia",
  "variegated-machine-definition-lelit-bianca",
+]
+
+[[package]]
+name = "variegated-controller-gear-pump-silvia"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-boot-rp",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync 0.6.0",
+ "embassy-time",
+ "embassy-usb 0.1.0",
+ "embassy-usb-logger 0.1.0",
+ "embedded-alloc",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-io-async",
+ "embedded-storage",
+ "futures",
+ "hashbrown",
+ "heapless 0.8.0",
+ "log",
+ "num-traits",
+ "panic-probe",
+ "pid-ctrl",
+ "pio",
+ "pio-proc",
+ "portable-atomic",
+ "rand",
+ "static_cell",
+ "variegated-board-apec",
+ "variegated-board-features",
+ "variegated-controller-lib",
+ "variegated-embassy-ads124s08",
+ "variegated-embassy-dual-c595-shift-register",
+ "variegated-log",
+ "variegated-soft-pwm",
 ]
 
 [[package]]
@@ -2099,14 +2148,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-log"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-usb-logger 0.1.0",
+ "log",
+]
+
+[[package]]
 name = "variegated-machine-definition-gear-pump-silvia"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "defmt",
  "embassy-rp",
  "embassy-sync 0.6.0",
  "embassy-time",
  "heapless 0.8.0",
+ "log",
  "num-traits",
  "pid-ctrl",
  "variegated-board-apec",
@@ -2114,6 +2177,7 @@ dependencies = [
  "variegated-controller-lib",
  "variegated-embassy-ads124s08",
  "variegated-embassy-dual-c595-shift-register",
+ "variegated-log",
  "variegated-soft-pwm",
 ]
 
@@ -2167,6 +2231,7 @@ dependencies = [
 name = "variegated-soft-pwm"
 version = "0.1.0"
 dependencies = [
+ "defmt",
  "embassy-time",
 ]
 

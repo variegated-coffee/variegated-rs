@@ -1,5 +1,5 @@
 [package]
-name = "variegated-controller"
+name = "variegated-controller-gear-pump-silvia"
 version = "0.1.0"
 edition = "2021"
 
@@ -40,14 +40,14 @@ embedded-alloc = { version = "0.5.1" }
 cfg-if = "1.0.0"
 
 variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
-variegated-board-open-lcc-r2a = { version = "0.1.0", path = "../variegated-board-open-lcc-r2a", optional = true }
-variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec", optional = true}
-variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
-variegated-machine-definition-lelit-bianca = { version = "0.1.0", path = "../variegated-machine-definition-lelit-bianca" }
-variegated-machine-definition-gear-pump-silvia = { version = "0.1.0", path = "../variegated-machine-definition-gear-pump-silvia" }
+variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec" }
+variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib", features = ["apec-r0d"] }
 variegated-log = { version = "0.1.0", path = "../variegated-log" }
 
-[features]
-default = ["apec-r0d"]
-open-lcc-r2a = ["dep:variegated-board-open-lcc-r2a", "variegated-controller-lib/open-lcc-r2a"]
-apec-r0d = ["dep:variegated-board-apec", "variegated-controller-lib/apec-r0d"]
+variegated-embassy-dual-c595-shift-register = { version = "0.1.0", path = "../variegated-embassy-dual-c595-shift-register" }
+variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
+variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
+pid-ctrl = "0.1.4"
+heapless = "0.8.0"
+async-trait = "0.1.80"
+num-traits = { version ="0.2", default-features = false, features = ["libm"]}

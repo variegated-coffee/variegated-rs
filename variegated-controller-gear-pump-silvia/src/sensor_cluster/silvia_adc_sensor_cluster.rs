@@ -141,7 +141,7 @@ impl<'a> SensorCluster<SilviaSystemSensorState> for SilviaAdcSensorCluster<'a> {
 
         sensor_state.boiler_temp_c = boiler_temp_c;
         sensor_state.boiler_pressure_bar = boiler_pressure_bar.internally_referenced_voltage();
-
+        
         Ok(())
     }
 }

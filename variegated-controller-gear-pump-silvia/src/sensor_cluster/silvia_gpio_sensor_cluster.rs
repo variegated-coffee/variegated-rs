@@ -22,7 +22,6 @@ impl<'a> SilviaGpioSensorCluster<'a> {
     }
 }
 
-#[async_trait]
 impl<'a> SensorCluster<SilviaSystemSensorState> for SilviaGpioSensorCluster<'a> {
     async fn update_sensor_state(&mut self, state: &mut SilviaSystemSensorState, _board_features: &ActualBoardFeaturesMutex) -> Result<(), SensorClusterError> {
         state.brew_switch = self.brew_button_input.is_low();

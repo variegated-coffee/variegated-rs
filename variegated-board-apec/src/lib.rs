@@ -3,12 +3,13 @@
 use bitflags::bitflags;
 use variegated_board_features::{AllPurposeEspressoControllerBoardFeatures, BootloaderFeatures, OpenLCCBoardFeatures};
 use embassy_rp::{bind_interrupts, i2c, peripherals, Peripherals, pwm, spi, uart};
-use embassy_rp::gpio::{AnyPin, Level, Output, Pin};
+use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pin, Pull};
 use embassy_rp::i2c::Config;
 use embassy_rp::pwm::Pwm;
 use embassy_rp::spi::{Phase, Polarity, Spi};
 use embassy_rp::uart::{BufferedInterruptHandler, BufferedUart, Uart};
 use static_cell::StaticCell;
+use variegated_embassy_ads124s08::{ADS124S08, WaitStrategy};
 use variegated_embassy_dual_c595_shift_register::DualC595ShiftRegister;
 
 bind_interrupts!(struct Irqs {
@@ -120,9 +121,17 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
     let (esp32_uart_tx, esp32_uart_rx) = esp32_uart.split();
 
     let i2c_bus = i2c::I2c::new_async(p.I2C1, p.PIN_19, p.PIN_18, Irqs, Config::default());
+
+    let adc = ADS124S08::new(
+        Output::new(p.PIN_0.degrade(), Level::High),
+        WaitStrategy::UseDrdyPin(Input::new(p.PIN_23.degrade(), Pull::Up)),
+    );
     
     AllPurposeEspressoControllerBoardFeatures {
-        adc_cs_pin: Some(p.PIN_0.degrade()),
+        adc_cs_pin: None,
+        
+        ads124s08: Some(adc),
+        
         sd_cs_pin: Some(p.PIN_1.degrade()),
 
         cn14_10_pin: Some(p.PIN_2.degrade()),
@@ -157,7 +166,7 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
         esp32_uart_tx,
         
         serial_boot_pin: Some(p.PIN_22.degrade()),
-        adc_drdy_pin: Some(p.PIN_23.degrade()),
+        adc_drdy_pin: None,
         
         cn12_pin: Some(p.PIN_24.degrade()),
         cn13_pin: Some(p.PIN_25.degrade()),

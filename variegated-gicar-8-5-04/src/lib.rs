@@ -199,7 +199,6 @@ impl<'a, ActuatorStateT: SystemActuatorState, UartT: Instance> Gicar8504Actuator
     }
 }
 
-#[async_trait]
 impl<'a, ActuatorStateT: SystemActuatorState, UartT: Instance + Send + Sync> ActuatorCluster<ActuatorStateT> for Gicar8504ActuatorCluster<'a, ActuatorStateT, UartT> {
     async fn update_from_actuator_state(&mut self, system_actuator_state: &ActuatorStateT) -> Result<(), ActuatorClusterError> {
         let buf = (self.mapper)(system_actuator_state).to_bytes();
@@ -208,12 +207,12 @@ impl<'a, ActuatorStateT: SystemActuatorState, UartT: Instance + Send + Sync> Act
 }
 
 pub struct Gicar8504SensorCluster<'a, SensorStateT: SystemSensorState, UartT: Instance> {
-    mapper: fn(SensorMessage, SensorStateT) -> SensorStateT,
+    mapper: fn(SensorMessage, &mut SensorStateT),
     uart_rx: UartRx<'a, UartT, Async>
 }
 
 impl<'a, SensorStateT: SystemSensorState, UartT: Instance> Gicar8504SensorCluster<'a, SensorStateT, UartT> {
-    pub fn new(mapper: fn(SensorMessage, SensorStateT) -> SensorStateT, uart_rx: UartRx<'a, UartT, embassy_rp::uart::Async>) -> Self {
+    pub fn new(mapper: fn(SensorMessage, &mut SensorStateT), uart_rx: UartRx<'a, UartT, embassy_rp::uart::Async>) -> Self {
         Gicar8504SensorCluster {
             mapper,
             uart_rx
@@ -221,9 +220,8 @@ impl<'a, SensorStateT: SystemSensorState, UartT: Instance> Gicar8504SensorCluste
     }
 }
 
-#[async_trait]
 impl<'a, SensorStateT: SystemSensorState, UartT: 'a + Instance + Send + Sync> SensorCluster<SensorStateT> for Gicar8504SensorCluster<'a, SensorStateT, UartT> {
-    async fn update_sensor_state(&mut self, previous_state: SensorStateT, _board_features: &ActualBoardFeaturesMutex) -> Result<SensorStateT, SensorClusterError> {
+    async fn update_sensor_state(&mut self, previous_state: &mut SensorStateT, _board_features: &ActualBoardFeaturesMutex) -> Result<(), SensorClusterError> {
         let mut buf: [u8; 18] = [0; 18];
 
         let res = self.uart_rx.read(&mut buf).await;
@@ -237,6 +235,6 @@ impl<'a, SensorStateT: SystemSensorState, UartT: 'a + Instance + Send + Sync> Se
             Err(_) => return Err(SensorClusterError::UnknownError)
         };
 
-        Ok((self.mapper)(sensor_message, previous_state.clone()))
+        Ok((self.mapper)(sensor_message, previous_state))
     }
 }

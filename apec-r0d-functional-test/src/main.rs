@@ -3,16 +3,18 @@
 
 use cortex_m::prelude::_embedded_hal_blocking_spi_Write;
 use defmt::*;
-use embassy_executor::Spawner;
+use embassy_executor::{Executor, Spawner};
 use embassy_rp::{bind_interrupts, gpio, usb};
 use embassy_rp::gpio::{AnyPin, Drive, Input, Pull};
 use embassy_rp::peripherals::{SPI1, USB};
 use embassy_rp::spi::{Async, Spi};
 use embassy_rp::usb::Driver;
 use embassy_time::Timer;
+use embedded_alloc::Heap;
 use embedded_hal_1::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
 use gpio::{Level, Output};
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_board_apec::{ApecR0DBoardFeatures, ApecR0dShiftRegisterPositions};
 use variegated_embassy_ads124s08::{ADS124S08, WaitStrategy};
@@ -28,8 +30,39 @@ async fn logger_task(driver: Driver<'static, USB>) {
     embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver);
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
+
+static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    {
+        use core::mem::MaybeUninit;
+        const HEAP_SIZE: usize = 1024;
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+    }
+/*
+    let p = embassy_rp::init(Default::default());
+
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "open-lcc-board-r2a")] {
+            let board_features = variegated_board_open_lcc_r2a::create_board_features(p);
+        } else if #[cfg(feature = "apec-r0d")] {
+            let board_features = variegated_board_apec::create_board_features(p);
+        } else {
+            compile_error!("No board feature set selected");
+        }
+    }*/
+
+    let executor0 = EXECUTOR0.init(Executor::new());
+    executor0.run(|spawner| {
+        unwrap!(spawner.spawn(main_task(spawner)))
+    });
+}
+
+#[embassy_executor::task]
+async fn main_task(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
 
     let mut board_features = variegated_board_apec::create_board_features(p);
