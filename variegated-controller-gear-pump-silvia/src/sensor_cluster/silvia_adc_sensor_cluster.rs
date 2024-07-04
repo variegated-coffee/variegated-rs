@@ -2,9 +2,11 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use async_trait::async_trait;
+use embassy_embedded_hal::SetConfig;
+use embassy_rp::spi::{Config, Phase, Polarity};
 use variegated_controller_lib::{ActualBoardFeaturesMutex, ActualMutexType, ApecBoardFeatures, SensorCluster, SensorClusterError};
 use variegated_embassy_ads124s08::ADS124S08;
-use variegated_embassy_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
+use variegated_embassy_ads124s08::registers::{ClockSource, DataRate, DataRateRegister, IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_log::log_info;
 use crate::SilviaSystemSensorState;
 
@@ -40,6 +42,7 @@ pub struct SilviaPressureTransducerConfiguration {
 
 pub struct SilviaAdcSensorCluster<'a> {
     adc: ADS124S08<'a>,
+    spi_config: Config,
     boiler_temperature_sensor_p_mux: Mux,
     boiler_temperature_sensor_n_mux: Mux,
     boiler_temperature_sensor_idac1: IDACMux,
@@ -71,8 +74,14 @@ impl<'a> SilviaAdcSensorCluster<'a> {
         boiler_temperature_reference_resistor: Option<f32>,
         boiler_temperature_reference_voltage: Option<(f32, f32)>
     ) -> SilviaAdcSensorCluster<'a> {
+        let mut config = Config::default();
+        config.frequency = 1_000_000; // According to docs, max frequency is 10 MHz, we're doing 1 though
+        config.phase = Phase::CaptureOnSecondTransition;
+        config.polarity = Polarity::IdleLow;
+
         SilviaAdcSensorCluster {
             adc,
+            spi_config: config,
             boiler_temperature_sensor_p_mux,
             boiler_temperature_sensor_n_mux,
             boiler_temperature_sensor_idac1,
@@ -85,12 +94,27 @@ impl<'a> SilviaAdcSensorCluster<'a> {
             boiler_temperature_reference_voltage,
         }
     }
-}
 
-impl<'a> SensorCluster<SilviaSystemSensorState> for SilviaAdcSensorCluster<'a> {
-    async fn update_sensor_state(&mut self, sensor_state: &mut SilviaSystemSensorState, board_features: &ActualMutexType<ApecBoardFeatures>) -> Result<(), SensorClusterError> {
+    pub(crate) async fn init_adc(&mut self, board_features: &ActualMutexType<ApecBoardFeatures>) -> Result<(), SensorClusterError> {
         let mut features = board_features.lock().await;
         let spi = features.spi_bus.as_mut().expect("SPI not initialized");
+        spi.set_config(&self.spi_config).expect("SPI config failed");
+
+        self.adc.begin_transaction().await;
+        self.adc.reset(spi).await.map_err(|_| SensorClusterError::UnknownError)?;
+        let mut datarate = self.adc.read_datarate_reg(spi).await.map_err(|_| SensorClusterError::UnknownError)?;
+        datarate.rate = DataRate::SPS400;
+        self.adc.write_datarate_reg(spi, datarate).await.map_err(|_| SensorClusterError::UnknownError)?;
+        self.adc.end_transaction().await;
+
+        Ok(())
+    }
+
+    pub(crate) async fn update_sensor_state(&mut self, sensor_state: &mut SilviaSystemSensorState, board_features: &ActualMutexType<ApecBoardFeatures>) -> Result<(), SensorClusterError> {
+        let mut features = board_features.lock().await;
+        let spi = features.spi_bus.as_mut().expect("SPI not initialized");
+        spi.set_config(&self.spi_config).expect("SPI config failed");
+
 
         let boiler_code = self.adc.measure_ratiometric_low_side(
             spi,
@@ -108,9 +132,9 @@ impl<'a> SensorCluster<SilviaSystemSensorState> for SilviaAdcSensorCluster<'a> {
             Err(_) => return Err(SensorClusterError::UnknownError),
         };
 
-        log_info!("Boiler code: {:?}", boiler_code.ratiometric_resistance(3300.0));
+        //log_info!("Boiler code: {:?}", boiler_code.ratiometric_resistance(3300.0));
 
-        let referenced_voltage = match self.boiler_temperature_reference_input {
+        let referenced_code = match self.boiler_temperature_reference_input {
             ReferenceInput::Internal => boiler_code.internally_referenced_voltage(),
             _ => match self.boiler_temperature_reference_resistor {
                 Some(resistor) => boiler_code.ratiometric_resistance(resistor),
@@ -121,26 +145,29 @@ impl<'a> SensorCluster<SilviaSystemSensorState> for SilviaAdcSensorCluster<'a> {
             }
         };
 
-        let boiler_temp_c = (referenced_voltage + self.boiler_temperature_conversion_parameters.m) * self.boiler_temperature_conversion_parameters.k;
+        log_info!("Boiler temp V: {:?}", referenced_code);
+/*        let bto = -1f32 * (75000f32 * referenced_code) / (referenced_code - 5f32);
+        log_info!("Boiler temp R: {:?}", bto);*/
 
-        /*
-        let dvdd = self.adc.read_dvdd_by_4(spi).await;
+        let boiler_temp_c = (referenced_code + self.boiler_temperature_conversion_parameters.m) * self.boiler_temperature_conversion_parameters.k;
 
-        let boiler_temp_c = match dvdd {
+
+/*        let dvdd = self.adc.read_dvdd_by_4(spi).await;
+
+        let dvdd = match dvdd {
             Ok(dvdd) => dvdd,
             Err(_) => return Err(SensorClusterError::UnknownError),
         };
 */
+        let pressure_v = self.adc.measure_single_ended(spi, Mux::AIN4, ReferenceInput::Refp1Refn1).await;
 
-        let avcc = self.adc.read_avdd_by_4(spi).await;
-
-        let boiler_pressure_bar = match avcc {
-            Ok(avcc) => avcc,
+        let boiler_pressure_bar = match pressure_v {
+            Ok(avcc) => avcc.externally_referenced_voltage(0.0, 5.00),
             Err(_) => return Err(SensorClusterError::UnknownError),
         };
 
         sensor_state.boiler_temp_c = boiler_temp_c;
-        sensor_state.boiler_pressure_bar = boiler_pressure_bar.internally_referenced_voltage();
+        sensor_state.boiler_pressure_bar = boiler_pressure_bar;
         
         Ok(())
     }

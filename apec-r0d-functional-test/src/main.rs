@@ -76,15 +76,16 @@ async fn main_task(spawner: Spawner) {
 
     let flash_cs = Output::new(board_features.settings_flash_cs_pin.take().expect("Flash CS must be unused"), Level::High);
     let sd_cs = Output::new(board_features.sd_cs_pin.take().expect("SD CS must be unused"), Level::High);
-    let adc_cs = Output::new(board_features.adc_cs_pin.take().expect("ADC CS must be unused"), Level::High);
+    let ads = board_features.ads124s08.take().expect("ADS124S08 must be unused");
+//    let adc_cs = Output::new(board_features.adc_cs_pin.take().expect("ADC CS must be unused"), Level::High);
     let mut spi = board_features.spi_bus.take().expect("SPI bus must be unused");
 
-    let adc_drdy = Input::new(board_features.adc_drdy_pin.take().expect("DRDY must be unused"), Pull::Up);
+//    let adc_drdy = Input::new(board_features.adc_drdy_pin.take().expect("DRDY must be unused"), Pull::Up);
 
     let mut board_features = test_fdc1004(board_features).await;
     let mut spi = test_settings_flash(flash_cs, spi).await;
     let mut spi = test_sd_card(sd_cs, spi).await;
-    let mut spi = test_ads124s08(adc_cs, spi, adc_drdy).await;
+    let mut spi = test_ads124s08(ads, spi).await;
     let mut board_features = test_c595(board_features).await;
     let mut board_features = test_gpio(board_features).await;
 
@@ -344,12 +345,7 @@ async fn test_settings_flash<'a>(mut cs: Output<'a, AnyPin>, mut spi: Spi<'a, SP
     spi
 }
 
-async fn test_ads124s08<'a>(mut cs: Output<'a, AnyPin>, mut spi: Spi<'a, SPI1, Async>, mut drdy: Input<'a, AnyPin>) -> Spi<'a, SPI1, Async> {
-    let mut ads124s08 = ADS124S08::new(
-        cs,
-        WaitStrategy::UseDrdyPin(drdy)
-    );
-
+async fn test_ads124s08<'a>(mut ads124s08: ADS124S08<'a>, mut spi: Spi<'a, SPI1, Async>) -> Spi<'a, SPI1, Async> {
     log("Starting ADS124S08 test");
 
     let res = ads124s08.read_device_id(&mut spi).await;
@@ -376,6 +372,22 @@ async fn test_ads124s08<'a>(mut cs: Output<'a, AnyPin>, mut spi: Spi<'a, SPI1, A
         }
     } else {
         log("FAIL: Failed to read AVDD by 4");
+    }
+
+    let res = ads124s08.read_dvdd_by_4(&mut spi).await;
+
+    if let Ok(res) = res {
+        let dvdd = res.internally_referenced_voltage() * 4.0;
+
+        if dvdd > 3.0 && dvdd < 3.6 {
+            log("PASS: Successfully read DVDD by 4");
+        } else if dvdd > 3.6 {
+            log("FAIL: Read DVDD by 4, but value is too high");
+        } else {
+            log("FAIL: Read DVDD by 4, but value is too low");
+        }
+    } else {
+        log("FAIL: Failed to read DVDD by 4");
     }
 
     log("---------");

@@ -10,7 +10,7 @@ use embassy_rp::spi;
 use embassy_rp::spi::{Async, Instance, Spi};
 use embassy_time::{Duration, Timer};
 use registers::{RegisterAddress, ByteRepresentation, ConfigurationRegisters};
-use crate::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput, StatusRegisterValue};
+use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue};
 
 pub enum WaitStrategy<'a> {
     UseRiskyMiso(AnyPin),
@@ -84,6 +84,31 @@ pub struct Code {
 }
 
 impl Code {
+    pub fn new(data: [u8; 3], reference: ReferenceInput, pga_enabled: bool, gain: PGAGain, idac1_magnitude: Option<IDACMagnitude>, idac2_magnitude: Option<IDACMagnitude>) -> Self {
+        Code {
+            data,
+            reference,
+            pga_enabled,
+            gain,
+            idac1_magnitude,
+            idac2_magnitude,
+        }
+    }
+
+    pub fn from_code(code: i32, reference: ReferenceInput, pga_enabled: bool, gain: PGAGain, idac1_magnitude: Option<IDACMagnitude>, idac2_magnitude: Option<IDACMagnitude>) -> Self {
+        let original: [u8; 4] = code.to_be_bytes();
+        let result: [u8; 3] = original[1..].try_into().unwrap();
+
+        Code {
+            data: result,
+            reference,
+            pga_enabled,
+            gain,
+            idac1_magnitude,
+            idac2_magnitude,
+        }
+    }
+
     pub fn over_fs(&self) -> bool {
         self.data[0] == 0x7f && self.data[1] == 0xff && self.data[2] == 0xff
     }
@@ -99,22 +124,22 @@ impl Code {
     }
 
     pub fn internally_referenced_voltage(&self) -> f32 {
-        self.externally_referenced_voltage(-2.5, 2.5)
+        self.externally_referenced_voltage(0.0, 2.5)
     }
 
     pub fn externally_referenced_voltage(&self, v_ref_n: f32, v_ref_p: f32) -> f32 {
-        // @todo Consider gain
         let code = self.code();
-//        let v_ref = v_ref_p - v_ref_n;
-        let v_per_lsb = (2.0 * v_ref_p) / (0x0100_0000 as f32);
+        let v_ref = v_ref_p - v_ref_n;
+        let gain = if self.pga_enabled { self.gain.value() as f32 } else { 1.0 };
+        let v_per_lsb = (2.0 * v_ref) / (gain * (1 << 24) as f32);
 
         code as f32 * v_per_lsb
     }
 
     pub fn ratiometric_resistance(&self, r_ref: f32) -> f32 {
         let code = self.code() as f32;
-        // @todo Consider gain
-        r_ref * code / (0x0080_0000 as f32)
+        let gain = if self.pga_enabled { self.gain.value() as f32 } else { 1.0 };
+        (r_ref * code * gain) / ((1 << 23) as f32)
     }
 }
 
@@ -238,6 +263,48 @@ impl ADS124S08<'_> {
             config.refctrl.refcon = registers::InternalVoltageReferenceConfiguration::OnButPowersDown;
             config.pga.enable = true;
             config.pga.gain = gain;
+            config.datarate.mode = Mode::Continuous;
+            config.datarate.rate = registers::DataRate::SPS400;
+            config.datarate.filter = Filter::SINC3;
+
+            config = self.swap_all_configuration_registers(spi, config).await?;
+
+            self.start_conversion(spi).await?;
+            let res = self.read_n_sample_average(spi, 10).await;
+
+            let res = self.start_wait_for_drdy_read_and_stop(spi).await;
+
+            self.swap_all_configuration_registers(spi, config).await?;
+
+            res
+        };
+
+        self.end_transaction().await;
+
+        data
+    }
+
+    pub async fn measure_differential<'a, T>(
+        &mut self,
+        spi: &mut Spi<'a, T, Async>,
+        input_p: registers::Mux,
+        input_n: registers::Mux,
+        reference_input: registers::ReferenceInput,
+        gain: registers::PGAGain,
+    ) -> Result<Code, ADS124S08Error> where T: Instance {
+        self.begin_transaction().await;
+
+        let data = {
+            let mut config = self.configuration_registers.clone();
+
+            config.inpmux.p = input_p;
+            config.inpmux.n = input_n;
+            config.pga.enable = gain != PGAGain::Gain1;
+            config.pga.gain = gain;
+            config.idacmag.imag = IDACMagnitude::Off;
+            config.idacmux.i2mux = IDACMux::Disconnected;
+            config.idacmux.i1mux = IDACMux::Disconnected;
+            config.refctrl.refsel = reference_input;
 
             config = self.swap_all_configuration_registers(spi, config).await?;
 
@@ -310,6 +377,7 @@ impl ADS124S08<'_> {
             let prev_refctl = self.swap_refctrl_reg(spi, new_refctl).await?;
 
             let res = self.start_wait_for_drdy_read_and_stop(spi).await;
+            //let res = Err(ADS124S08Error::ReadTimeoutError);
 
             self.write_sys_reg(spi, prev_config).await?;
             self.write_refctrl_reg(spi, prev_refctl).await?;
@@ -403,6 +471,17 @@ impl ADS124S08<'_> {
         self.stop_conversion(spi).await?;
 
         Ok(d)
+    }
+
+    pub async fn read_n_sample_average<'a, T>(&mut self, spi: &mut Spi<'_, T, Async>, n: i32) -> Result<Code, ADS124S08Error> where T: Instance {
+        let mut sum = 0;
+
+        for _ in 0..n {
+            self.wait_for_drdy(spi).await?;
+            sum += self.read_data(spi).await?.code();
+        }
+
+        Ok(Code::from_code(sum / n, ReferenceInput::Internal, false, PGAGain::Gain1, None, None))
     }
 
     pub async fn read_configuration_registers<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<ConfigurationRegisters, ADS124S08Error> where T: Instance {
@@ -568,6 +647,16 @@ impl ADS124S08<'_> {
 //        log::info!("Read register: {:?} 0x{:x}", register, reg_buf[0]);
 
         Ok(reg_buf[0])
+    }
+
+    pub async fn reset<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
+        let command = Command::RESET;
+
+        self.write_command(spi, command).await?;
+        Timer::after_millis(100).await;
+        self.read_configuration_registers_from_device(spi).await?;
+
+        Ok(())
     }
 
     async fn write_command<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, command: Command) -> Result<(), ADS124S08Error> where T: Instance {

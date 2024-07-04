@@ -55,3 +55,21 @@ pub enum ControllerError {
 pub trait Controller<SensorStateT: SystemSensorState, ActuatorStateT: SystemActuatorState> {
     async fn update_actuator_state_from_sensor_state(&mut self, system_sensor_state: &SensorStateT, system_actuator_state: &mut ActuatorStateT) -> Result<(), ControllerError>;
 }
+
+pub type BoilerId = u8;
+
+pub type GroupId = u8;
+
+pub enum RunMode {
+    Heatup,
+    Normal,
+    Standby,
+}
+
+pub enum Command {
+    SetBoilerSetPoint(BoilerId, f32),
+    SetGroupPressureTarget(GroupId, f32),
+    DisableBoiler(BoilerId),
+    EnableBoiler(BoilerId),
+    RequestRunMode(RunMode)
+}

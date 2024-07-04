@@ -1,7 +1,7 @@
 #![no_std]
 
 use embassy_rp::gpio::{AnyPin, Output};
-use embassy_time::Timer;
+use embassy_time::{Delay, Duration, Instant, Timer};
 
 pub struct DualC595ShiftRegister<'a> {
     serial_pin: Output<'a, AnyPin>,
@@ -28,20 +28,28 @@ impl<'a> DualC595ShiftRegister<'a> {
                 true => self.serial_pin.set_high(),
                 false => self.serial_pin.set_low(),
             }
-            Timer::after_millis(1).await;
+            busy_wait_us(1);
             self.shift_register_clock_pin.set_high();
-            Timer::after_millis(1).await;
+            busy_wait_us(1);
             self.shift_register_clock_pin.set_low();
         }
 
         self.serial_pin.set_low();
 
         self.storage_register_clock_pin.set_high();
-        Timer::after_millis(5).await;
+        busy_wait_us(5);
         self.storage_register_clock_pin.set_low();
     }
 
     pub(crate) async fn clear(&mut self) {
         self.write(0).await;
+    }
+}
+
+fn busy_wait_us(us: u64) {
+    let duration = Duration::from_micros(us);
+    let start = Instant::now();
+    while Instant::now() - start < duration {
+        core::hint::spin_loop();
     }
 }

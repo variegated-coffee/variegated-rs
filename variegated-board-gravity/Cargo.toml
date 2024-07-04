@@ -1,0 +1,11 @@
+[package]
+name = "variegated-board-gravity"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
+embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
+cfg-if = "1.0.0"
+bitflags = "2.5.0"

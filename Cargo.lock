@@ -43,7 +43,7 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "embassy-time",
  "embassy-usb 0.1.0",
  "embassy-usb-logger 0.1.0",
@@ -598,19 +598,6 @@ checksum = "dd938f25c0798db4280fcd8026bf4c2f48789aebf8f77b6e5cf8a7693ba114ec"
 dependencies = [
  "cfg-if",
  "critical-section",
- "embedded-io-async",
- "futures-util",
- "heapless 0.8.0",
-]
-
-[[package]]
-name = "embassy-sync"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3e0c49ff02ebe324faf3a8653ba91582e2d0a7fdef5bc88f449d5aa1bfcc05c"
-dependencies = [
- "cfg-if",
- "critical-section",
  "defmt",
  "embedded-io-async",
  "futures-util",
@@ -1043,6 +1030,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "gravity-r0a-functional-test"
+version = "0.1.0"
+dependencies = [
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-boot-rp",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync 0.5.0",
+ "embassy-time",
+ "embassy-usb 0.1.0",
+ "embassy-usb-logger 0.1.0",
+ "embedded-alloc",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-io-async",
+ "embedded-storage",
+ "futures",
+ "hashbrown",
+ "log",
+ "panic-probe",
+ "pio",
+ "pio-proc",
+ "portable-atomic",
+ "rand",
+ "static_cell",
+ "variegated-board-features",
+ "variegated-board-gravity",
+ "variegated-embassy-ads124s08",
+]
+
+[[package]]
 name = "half"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1232,6 +1257,12 @@ name = "memchr"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
+
+[[package]]
+name = "micromath"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
 
 [[package]]
 name = "nb"
@@ -1852,6 +1883,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml"
+version = "0.5.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "typenum"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1945,6 +1985,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b59fc5417e036e53226bbebd90196825d358624fd5577432c4e486c95b1b096"
 
 [[package]]
+name = "variegated-adc-tools"
+version = "0.1.0"
+dependencies = [
+ "micromath",
+]
+
+[[package]]
 name = "variegated-board-apec"
 version = "0.1.0"
 dependencies = [
@@ -1967,54 +2014,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-board-gravity"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.5.0",
+ "cfg-if",
+ "embassy-rp",
+ "variegated-board-features",
+ "variegated-embassy-ads124s08",
+]
+
+[[package]]
 name = "variegated-board-open-lcc-r2a"
 version = "0.1.0"
 dependencies = [
  "embassy-rp",
  "static_cell",
  "variegated-board-features",
-]
-
-[[package]]
-name = "variegated-controller"
-version = "0.1.0"
-dependencies = [
- "cfg-if",
- "cortex-m",
- "cortex-m-rt",
- "defmt",
- "defmt-rtt",
- "embassy-boot-rp",
- "embassy-embedded-hal",
- "embassy-executor",
- "embassy-futures",
- "embassy-rp",
- "embassy-sync 0.6.0",
- "embassy-time",
- "embassy-usb 0.1.0",
- "embassy-usb-logger 0.1.0",
- "embedded-alloc",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-io-async",
- "embedded-storage",
- "futures",
- "hashbrown",
- "log",
- "panic-probe",
- "pio",
- "pio-proc",
- "portable-atomic",
- "rand",
- "static_cell",
- "variegated-board-apec",
- "variegated-board-features",
- "variegated-board-open-lcc-r2a",
- "variegated-controller-lib",
- "variegated-log",
- "variegated-machine-definition-gear-pump-silvia",
- "variegated-machine-definition-lelit-bianca",
 ]
 
 [[package]]
@@ -2032,7 +2048,7 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "embassy-time",
  "embassy-usb 0.1.0",
  "embassy-usb-logger 0.1.0",
@@ -2042,6 +2058,8 @@ dependencies = [
  "embedded-hal-bus",
  "embedded-io-async",
  "embedded-storage",
+ "fixed",
+ "fixed-macro",
  "futures",
  "hashbrown",
  "heapless 0.8.0",
@@ -2052,8 +2070,11 @@ dependencies = [
  "pio",
  "pio-proc",
  "portable-atomic",
+ "postcard",
  "rand",
+ "serde",
  "static_cell",
+ "toml",
  "variegated-board-apec",
  "variegated-board-features",
  "variegated-controller-lib",
@@ -2069,7 +2090,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "cfg-if",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "heapless 0.8.0",
  "variegated-board-apec",
  "variegated-board-open-lcc-r2a",
@@ -2087,7 +2108,7 @@ dependencies = [
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "embassy-time",
  "embassy-usb-logger 0.1.0",
  "fixed",
@@ -2142,7 +2163,7 @@ dependencies = [
  "async-trait",
  "bitflags 2.5.0",
  "embassy-rp",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "libm",
  "variegated-controller-lib",
 ]
@@ -2160,34 +2181,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "variegated-machine-definition-gear-pump-silvia"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "defmt",
- "embassy-rp",
- "embassy-sync 0.6.0",
- "embassy-time",
- "heapless 0.8.0",
- "log",
- "num-traits",
- "pid-ctrl",
- "variegated-board-apec",
- "variegated-board-features",
- "variegated-controller-lib",
- "variegated-embassy-ads124s08",
- "variegated-embassy-dual-c595-shift-register",
- "variegated-log",
- "variegated-soft-pwm",
-]
-
-[[package]]
 name = "variegated-machine-definition-lelit-bianca"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "embassy-rp",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "embassy-time",
  "heapless 0.8.0",
  "num-traits",
@@ -2213,7 +2212,7 @@ dependencies = [
  "embassy-boot-rp",
  "embassy-embedded-hal",
  "embassy-rp",
- "embassy-sync 0.6.0",
+ "embassy-sync 0.5.0",
  "embassy-time",
  "embedded-storage",
  "embedded-storage-async",

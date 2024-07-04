@@ -101,24 +101,24 @@ impl ByteRepresentation for DataRate {
     fn bits(&self) -> u8{
         match self {
             DataRate::SPS2_5  => 0b0000,
-            DataRate::SPS5    => 0b0001 << 4,
-            DataRate::SPS10   => 0b0010 << 4,
-            DataRate::SPS16_6 => 0b0011 << 4,
-            DataRate::SPS20   => 0b0100 << 4,
-            DataRate::SPS50   => 0b0101 << 4,
-            DataRate::SPS60   => 0b0110 << 4,
-            DataRate::SPS100  => 0b0111 << 4,
-            DataRate::SPS200  => 0b1000 << 4,
-            DataRate::SPS400  => 0b1001 << 4,
-            DataRate::SPS800  => 0b1010 << 4,
-            DataRate::SPS1000 => 0b1011 << 4,
-            DataRate::SPS2000 => 0b1100 << 4,
-            DataRate::SPS4000 => 0b1101 << 4,
+            DataRate::SPS5    => 0b0001,
+            DataRate::SPS10   => 0b0010,
+            DataRate::SPS16_6 => 0b0011,
+            DataRate::SPS20   => 0b0100,
+            DataRate::SPS50   => 0b0101,
+            DataRate::SPS60   => 0b0110,
+            DataRate::SPS100  => 0b0111,
+            DataRate::SPS200  => 0b1000,
+            DataRate::SPS400  => 0b1001,
+            DataRate::SPS800  => 0b1010,
+            DataRate::SPS1000 => 0b1011,
+            DataRate::SPS2000 => 0b1100,
+            DataRate::SPS4000 => 0b1101,
         }
     }
 
     fn from_bits(bits: u8) -> Option<Self> {
-        match bits >> 4 & 0b1111 {
+        match bits & 0b1111 {
             0b0000 => Some(DataRate::SPS2_5),
             0b0001 => Some(DataRate::SPS5),
             0b0010 => Some(DataRate::SPS10),
@@ -323,6 +323,21 @@ pub enum PGAGain {
     Gain32,
     Gain64,
     Gain128,
+}
+
+impl PGAGain {
+    pub fn value(&self) -> u8 {
+        match self {
+            PGAGain::Gain1 => 1,
+            PGAGain::Gain2 => 2,
+            PGAGain::Gain4 => 4,
+            PGAGain::Gain8 => 8,
+            PGAGain::Gain16 => 16,
+            PGAGain::Gain32 => 32,
+            PGAGain::Gain64 => 64,
+            PGAGain::Gain128 => 128,
+        }
+    }
 }
 
 impl ByteRepresentation for PGAGain {
@@ -837,9 +852,9 @@ pub struct PgaRegister {
 impl ByteRepresentation for PgaRegister {
     fn bits(&self) -> u8 {
         let mut bits = 0b0000_0000;
-        bits |= self.gain.bits() << 4;
-        bits |= if self.enable { 0b0000_1000 } else { 0b0000_0000 };
-        bits |= self.delay.bits();
+        bits |= self.gain.bits();
+        bits |= if self.enable { 0b000_1000 } else { 0b0000_0000 };
+        bits |= self.delay.bits() << 5;
         bits
     }
 

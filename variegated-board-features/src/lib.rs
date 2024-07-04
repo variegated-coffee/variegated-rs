@@ -61,7 +61,7 @@ unsafe impl<LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlash
     SettingsFlashSpiT: spi::Instance,
     SdCardSpiT: spi::Instance, {}
 
-pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT>
+pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT, Cn1410ChT>
     where
         EspUartT: uart::Instance,
         Cn1UartT: uart::Instance,
@@ -69,7 +69,8 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
         SpiT: spi::Instance,
         Cn94ChT: Channel,
         Cn96ChT: Channel,
-        Cn98ChT: Channel
+        Cn98ChT: Channel,
+        Cn1410ChT: Channel,
 {
     pub adc_cs_pin: Option<AnyPin>,
     
@@ -81,6 +82,8 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub cn14_8_pin: Option<AnyPin>,
     pub cn14_6_pin: Option<AnyPin>,
     pub cn14_4_pin: Option<AnyPin>,
+    
+    pub cn14_10_pwm: Option<Pwm<'a, Cn1410ChT>>,
 
     pub ser_pin: Option<AnyPin>,
     pub rclk_pin: Option<AnyPin>,
@@ -120,6 +123,40 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
 
     pub usb: Option<USB>,
 }
+
+pub struct GravityBoardFeatures<'a, UartT, I2cT, SpiT, LedChT>
+where
+    UartT: uart::Instance,
+    I2cT: i2c::Instance,
+    SpiT: spi::Instance,
+    LedChT: Channel,
+{
+    pub adc_cs_pin: Option<AnyPin>,
+
+    pub ads124s08: Option<ADS124S08<'a>>,
+    
+    pub spi_bus: Option<spi::Spi<'a, SpiT, spi::Async>>,
+    
+    pub i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Async>>,
+
+    pub uart_rx: uart::UartRx<'a, UartT, uart::Async>,
+    pub uart_tx: uart::UartTx<'a, UartT, uart::Async>,
+
+    pub adc_res_pin: Option<AnyPin>,
+    pub adc_drdy_pin: Option<AnyPin>,
+    pub adc_start_pin: Option<AnyPin>,
+
+    pub excitation1_en_pin: Option<AnyPin>,
+    pub excitation2_en_pin: Option<AnyPin>,
+    pub excitation3_en_pin: Option<AnyPin>,
+    pub excitation4_en_pin: Option<AnyPin>,
+    
+    pub led_pin: Option<AnyPin>,
+    pub led_pwm: Option<Pwm<'a, LedChT>>,
+
+    pub usb: Option<USB>,
+}
+
 
 pub struct BootloaderFeatures<'a, UartT> where UartT: uart::Instance{
     pub bootloader_uart: uart::Uart<'a, UartT, Blocking>,

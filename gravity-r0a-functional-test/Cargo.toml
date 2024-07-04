@@ -1,11 +1,11 @@
 [package]
-name = "variegated-controller"
+name = "gravity-r0a-functional-test"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 embassy-embedded-hal = { version = "0.1.0", features = ["defmt"] }
-embassy-sync = { version = "0.6.0", features = ["defmt"] }
+embassy-sync = { version = "0.5.0", features = ["defmt"] }
 embassy-executor = { version = "0.5.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
 embassy-time = { version = "0.3.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
@@ -40,14 +40,5 @@ embedded-alloc = { version = "0.5.1" }
 cfg-if = "1.0.0"
 
 variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
-variegated-board-open-lcc-r2a = { version = "0.1.0", path = "../variegated-board-open-lcc-r2a", optional = true }
-variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec", optional = true}
-variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
-variegated-machine-definition-lelit-bianca = { version = "0.1.0", path = "../variegated-machine-definition-lelit-bianca" }
-variegated-machine-definition-gear-pump-silvia = { version = "0.1.0", path = "../variegated-machine-definition-gear-pump-silvia" }
-variegated-log = { version = "0.1.0", path = "../variegated-log" }
-
-[features]
-default = ["apec-r0d"]
-open-lcc-r2a = ["dep:variegated-board-open-lcc-r2a", "variegated-controller-lib/open-lcc-r2a"]
-apec-r0d = ["dep:variegated-board-apec", "variegated-controller-lib/apec-r0d"]
+variegated-board-gravity = { version = "0.1.0", path = "../variegated-board-gravity"}
+variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }

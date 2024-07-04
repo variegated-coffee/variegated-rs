@@ -10,9 +10,10 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{I2C0, I2C1, PWM_CH4, SPI0, SPI1, UART0, UART1, USB};
 use embassy_rp::usb::{Driver, self};
-use embassy_sync::blocking_mutex::raw::{ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
+use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
-use embassy_time::Timer;
+use embassy_time::{Instant, Timer};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -21,7 +22,7 @@ use variegated_board_features::OpenLCCBoardFeatures;
 use variegated_controller_lib::{ActualBoardFeatures, ActualBoardFeaturesMutex, ActualMutexType, ActuatorCluster, Controller, SensorCluster};
 use variegated_embassy_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_log::{log_info, logger_task};
-use crate::controller::SilviaController;
+use crate::controller::{SilviaCommands, SilviaController};
 use crate::sensor_cluster::silvia_adc_sensor_cluster::SilviaLinearVoltageToCelsiusConversionParameters;
 use crate::state::{SilviaSystemActuatorState, SilviaSystemConfiguration, SilviaSystemGeneralState, SilviaSystemSensorState};
 
@@ -44,28 +45,43 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
     let board_features_mutex: ActualBoardFeaturesMutex = Mutex::new(board_features);
 //    let configuration_mutex: ActualMutexType<SilviaSystemConfiguration> = Mutex::new(SilviaSystemConfiguration::default());
 
+    let channel = Channel::<NoopRawMutex, SilviaCommands, 10>::new();
+    
+    let channel_ref = &channel;
+    
     let (mut gpio_sensor_cluster, mut adc_sensor_cluster) =
         sensor_cluster::create_sensor_clusters(&board_features_mutex).await;
 
-    let mut controller = SilviaController::default();
+    let mut controller = SilviaController::new(&channel);
 
-    let (mut shift_reg_actuator_cluster) = actuator_cluster::create_actuator_clusters(&board_features_mutex).await;
+    let (mut shift_reg_actuator_cluster, mut pwm_output) = actuator_cluster::create_actuator_clusters(&board_features_mutex).await;
 
     let mut sensor_state = SilviaSystemSensorState::default();
     let mut actuator_state = SilviaSystemActuatorState::default();
     let mut general_state = SilviaSystemGeneralState::default();
 
+    Timer::after_millis(2000).await;
+    
+    adc_sensor_cluster.init_adc(&board_features_mutex).await;
+    
     loop {
-        log_info!("Loop!");
+        let time = Instant::now();
+        //log_info!("Loop!");
+        
+        controller.handle_commands().await;
 
         let res = gpio_sensor_cluster.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
         let res = adc_sensor_cluster.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
 
-        let res = controller.update_actuator_state_from_sensor_state(&sensor_state, &mut actuator_state).await;
+        let res = controller.update_actuator_state_from_sensor_state(&sensor_state, &mut actuator_state, &mut general_state).await;
 
         let res = shift_reg_actuator_cluster.update_from_actuator_state(&actuator_state).await;
+        let res = pwm_output.update_from_actuator_state(&actuator_state).await;
 
-        Timer::after_millis(1000).await;
+//        log_info!("Sensor state: {:?}", sensor_state);
+//        log_info!("Actuator state: {:?}", actuator_state);
+        
+        Timer::after_millis(50).await;
     }
 }
 

@@ -3,9 +3,12 @@ name = "variegated-controller-gear-pump-silvia"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+toml = "0.5"
+
 [dependencies]
 embassy-embedded-hal = { version = "0.1.0", features = ["defmt"] }
-embassy-sync = { version = "0.6.0", features = ["defmt"] }
+embassy-sync = { version = "0.5.0", features = ["defmt"] }
 embassy-executor = { version = "0.5.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
 embassy-time = { version = "0.3.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
@@ -40,7 +43,7 @@ embedded-alloc = { version = "0.5.1" }
 cfg-if = "1.0.0"
 
 variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
-variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec" }
+variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec", features = ["cn94-pwm"] }
 variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib", features = ["apec-r0d"] }
 variegated-log = { version = "0.1.0", path = "../variegated-log" }
 
@@ -51,3 +54,8 @@ pid-ctrl = "0.1.4"
 heapless = "0.8.0"
 async-trait = "0.1.80"
 num-traits = { version ="0.2", default-features = false, features = ["libm"]}
+fixed = "1.23.1"
+fixed-macro = "1.2"
+
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+postcard = "1.0.0"

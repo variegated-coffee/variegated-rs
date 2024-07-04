@@ -29,7 +29,8 @@ pub type ApecR0DBoardFeatures = AllPurposeEspressoControllerBoardFeatures<
     peripherals::SPI1,
     peripherals::PWM_CH4,
     peripherals::PWM_CH5,
-    peripherals::PWM_CH5
+    peripherals::PWM_CH5,
+    peripherals::PWM_CH1
 >;
 
 bitflags! {
@@ -71,7 +72,7 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
     let dual_shift_register = DualC595ShiftRegister::new(serial_out, rclk, sclk);
 
     cfg_if::cfg_if! {
-        if #[cfg(feature = "cn94_pwm")] {
+        if #[cfg(feature = "cn94-pwm")] {
             let cn9_4_pin = None;
             let cn9_4_pwm = Some(Pwm::new_output_b(p.PWM_CH4, p.PIN_9, pwm::Config::default()));
         } else {
@@ -81,19 +82,19 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
     }
 
     cfg_if::cfg_if! {
-        if #[cfg(all(feature = "cn96_pwm", not(feature = "cn98_pwm")))] {
+        if #[cfg(all(feature = "cn96-pwm", not(feature = "cn98-pwm")))] {
             let cn9_6_pin = None;
             let cn9_6_pwm = Some(Pwm::new_output_a(p.PWM_CH5, p.PIN_10, pwm::Config::default()));;
             
             let cn9_8_pin = Some(p.PIN_11.degrade());
             let cn9_8_pwm = None;
-        } else if #[cfg(all(not(feature = "cn96_pwm"), feature = "cn98_pwm"))] {
+        } else if #[cfg(all(not(feature = "cn96-pwm"), feature = "cn98-pwm"))] {
             let cn9_6_pin = Some(p.PIN_10.degrade());
             let cn9_6_pwm = None;
 
             let cn9_8_pin = None;
             let cn9_8_pwm = Some(Pwm::new_output_b(p.PWM_CH5, p.PIN_11, pwm::Config::default()));;
-        } else if #[cfg(all(feature = "cn96_pwm", feature = "cn98_pwm"))] {
+        } else if #[cfg(all(feature = "cn96-pwm", feature = "cn98-pwm"))] {
             let cn9_6_pin = None;
             let cn9_8_pin = None;
             
@@ -134,10 +135,12 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
         
         sd_cs_pin: Some(p.PIN_1.degrade()),
 
-        cn14_10_pin: Some(p.PIN_2.degrade()),
+        cn14_10_pin: None, //Some(p.PIN_2.degrade()),
         cn14_8_pin: Some(p.PIN_3.degrade()),
         cn14_6_pin: Some(p.PIN_4.degrade()),
         cn14_4_pin: Some(p.PIN_5.degrade()),
+        
+        cn14_10_pwm: Some(Pwm::new_output_a(p.PWM_CH1, p.PIN_2, pwm::Config::default())),
 
         ser_pin: None,
         rclk_pin: None,

@@ -13,9 +13,10 @@ use embassy_rp::{gpio, uart};
 use embassy_rp::flash::Flash;
 use embassy_rp::Peripherals;
 use embassy_rp::peripherals::{FLASH, WATCHDOG};
-use embassy_rp::uart::BufferedUart;
+use embassy_rp::uart::{Blocking, BufferedUart, Uart};
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::{Duration, Timer};
 use embedded_storage::nor_flash::NorFlash;
 use variegated_board_features::BootloaderFeatures;
@@ -35,7 +36,7 @@ fn main() -> ! {
     }
 }
 
-fn boot_flasher<UartT>(uart: BufferedUart<UartT>, flash: FLASH, watchdog: WATCHDOG) -> ! where UartT: uart::Instance {
+fn boot_flasher<UartT>(uart: Uart<UartT, Blocking>, flash: FLASH, watchdog: WATCHDOG) -> ! where UartT: uart::Instance {
     // Override bootloader watchdog
     let mut watchdog = Watchdog::new(watchdog);
     watchdog.start(Duration::from_secs(8));
@@ -80,7 +81,7 @@ fn boot_normally(flash: FLASH, watchdog: WATCHDOG) -> ! {
     */
 
     let flash = WatchdogFlash::<{variegated_board_open_lcc_r2a::FLASH_SIZE}>::start(flash, watchdog, Duration::from_secs(8));
-    let flash = Mutex::new(RefCell::new(flash));
+    let flash: Mutex<NoopRawMutex, _> = Mutex::new(RefCell::new(flash));
 
     let config = BootLoaderConfig::from_linkerfile_blocking(&flash);
     let active_offset = config.active.offset();

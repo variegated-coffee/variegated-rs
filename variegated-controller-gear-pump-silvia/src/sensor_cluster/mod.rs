@@ -23,6 +23,24 @@ pub async fn create_sensor_clusters(board_features_mutex: &ActualMutexType<ApecR
 
     let adc = board_features.ads124s08.take().expect("Board features needs to have an ADS124S08");
 
+/*    
+        // NTC Thermistor
+        
+        let adc_sensor_cluster = SilviaAdcSensorCluster::new(
+        adc,
+        Mux::AIN2,
+        Mux::AIN1,
+        IDACMux::Disconnected,
+        IDACMux::Disconnected,
+        ReferenceInput::Internal,
+        IDACMagnitude::Mag1000uA,
+        PGAGain::Gain1,
+        SilviaLinearVoltageToCelsiusConversionParameters { k: 2.597065316192702, m: -103.51 },
+        None,
+        None
+    );
+*/
+    // PT100
     let adc_sensor_cluster = SilviaAdcSensorCluster::new(
         adc,
         Mux::AIN1,
@@ -30,10 +48,10 @@ pub async fn create_sensor_clusters(board_features_mutex: &ActualMutexType<ApecR
         IDACMux::AIN0,
         IDACMux::Disconnected,
         ReferenceInput::Refp0Refn0,
-        IDACMagnitude::Mag500uA,
+        IDACMagnitude::Mag1000uA,
         PGAGain::Gain1,
         SilviaLinearVoltageToCelsiusConversionParameters { k: 2.597065316192702, m: -103.51 },
-        Some(3300.0),
+        Some(499.0),
         None
     );
 
