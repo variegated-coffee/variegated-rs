@@ -7,7 +7,7 @@ use embassy_time::{Duration, Instant};
 #[derive(Copy, Clone)]
 pub struct SoftPwm {
     cycle_duration: Duration,
-    current_duty_cycle_percent: u8,
+    pub current_duty_cycle_percent: u8,
     next_duty_cycle_percent: u8,
     current_cycle_start: Instant,
     update_time: Instant,

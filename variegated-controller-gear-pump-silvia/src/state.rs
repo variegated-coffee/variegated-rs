@@ -1,4 +1,5 @@
 use defmt::Format;
+use pid_ctrl::PidOut;
 use variegated_controller_lib::{SystemActuatorState, SystemSensorState};
 use variegated_soft_pwm::SoftPwm;
 
@@ -9,6 +10,9 @@ pub struct SilviaSystemSensorState {
     pub steam_switch: bool,
     pub boiler_temp_c: f32,
     pub boiler_pressure_bar: f32,
+    pub pump_rpm: f32,
+    
+    pub scale_untared_g: f32,
 }
 
 impl SystemSensorState for SilviaSystemSensorState {}
@@ -23,14 +27,52 @@ pub struct SilviaSystemActuatorState {
 impl SystemActuatorState for SilviaSystemActuatorState {}
 
 #[derive(Default, Copy, Clone, Debug, Format)]
+pub enum SilviaExtractionPhase {
+    #[default]
+    Preinfusion,
+    Extraction,
+    Postinfusion,
+}
+
+impl SilviaExtractionPhase {
+    pub fn next(&self) -> SilviaExtractionPhase {
+        match self {
+            SilviaExtractionPhase::Preinfusion => SilviaExtractionPhase::Extraction,
+            SilviaExtractionPhase::Extraction => SilviaExtractionPhase::Postinfusion,
+            SilviaExtractionPhase::Postinfusion => SilviaExtractionPhase::Preinfusion,
+        }
+    }
+}
+
+#[derive(Default, Copy, Clone, Debug)]
 pub struct SilviaSystemGeneralState {
     pub is_brewing: bool,
     pub steam_mode: bool,
     pub water_dispenser_mode: bool,
+    pub extraction_phase: SilviaExtractionPhase,
+    pub brew_time_s: Option<f32>,
+    pub current_pressure_set_point: f32,
+    
+    pub brew_boiler_pid: PidOut<f32>,
+    pub brew_pressure_pid: PidOut<f32>,
+    
+    pub scale_tared_g: f32,
 }
 
 #[derive(Default, Copy, Clone, Debug, Format)]
 pub struct SilviaSystemConfiguration {
     pub boiler_temp_setpoint_c: f32,
-    pub pump_pressure_setpoint_bar: f32,
+    pub pump_pressure_setpoint_preinfusion_bar: f32,
+    pub pump_pressure_setpoint_extraction_bar: f32,
+    pub pump_pressure_setpoint_postinfusion_bar: f32,
+}
+
+impl SilviaSystemConfiguration {
+    pub fn pressure_set_point_for_phase(&self, phase: SilviaExtractionPhase) -> f32 {
+        match phase {
+            SilviaExtractionPhase::Preinfusion => self.pump_pressure_setpoint_preinfusion_bar,
+            SilviaExtractionPhase::Extraction => self.pump_pressure_setpoint_extraction_bar,
+            SilviaExtractionPhase::Postinfusion => self.pump_pressure_setpoint_postinfusion_bar,
+        }
+    }
 }

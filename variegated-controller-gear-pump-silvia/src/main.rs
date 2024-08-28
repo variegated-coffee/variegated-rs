@@ -18,11 +18,14 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
 use embedded_alloc::Heap;
+use postcard::{to_allocvec_cobs, to_vec};
+use serde::{Deserialize, Serialize};
 use variegated_board_features::OpenLCCBoardFeatures;
 use variegated_controller_lib::{ActualBoardFeatures, ActualBoardFeaturesMutex, ActualMutexType, ActuatorCluster, Controller, SensorCluster};
 use variegated_embassy_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_log::{log_info, logger_task};
 use crate::controller::{SilviaCommands, SilviaController};
+use crate::demo_proto::PertinentData;
 use crate::sensor_cluster::silvia_adc_sensor_cluster::SilviaLinearVoltageToCelsiusConversionParameters;
 use crate::state::{SilviaSystemActuatorState, SilviaSystemConfiguration, SilviaSystemGeneralState, SilviaSystemSensorState};
 
@@ -30,6 +33,7 @@ mod actuator_cluster;
 mod sensor_cluster;
 mod state;
 mod controller;
+mod demo_proto;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -42,6 +46,9 @@ bind_interrupts!(struct Irqs {
 async fn main_loop(mut board_features: ActualBoardFeatures) {
     log_info!("Starting main loop");
 
+    let mut control_uart_tx = board_features.cn1_uart_tx.take().expect("UART TX must be present");
+    let control_uart_rx = board_features.cn1_uart_rx.take().expect("UART RX must be present");
+    
     let board_features_mutex: ActualBoardFeaturesMutex = Mutex::new(board_features);
 //    let configuration_mutex: ActualMutexType<SilviaSystemConfiguration> = Mutex::new(SilviaSystemConfiguration::default());
 
@@ -49,7 +56,7 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
     
     let channel_ref = &channel;
     
-    let (mut gpio_sensor_cluster, mut adc_sensor_cluster) =
+    let (mut gpio_sensor_cluster, mut adc_sensor_cluster, mut pump_freq, mut nau7802) =
         sensor_cluster::create_sensor_clusters(&board_features_mutex).await;
 
     let mut controller = SilviaController::new(&channel);
@@ -72,17 +79,65 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
 
         let res = gpio_sensor_cluster.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
         let res = adc_sensor_cluster.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
-
-        let res = controller.update_actuator_state_from_sensor_state(&sensor_state, &mut actuator_state, &mut general_state).await;
+        let res = pump_freq.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
+        let res = nau7802.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
+        
+        let res = controller.update_states_from_sensor_state(&sensor_state, &mut actuator_state, &mut general_state).await;
 
         let res = shift_reg_actuator_cluster.update_from_actuator_state(&actuator_state).await;
         let res = pwm_output.update_from_actuator_state(&actuator_state).await;
 
-//        log_info!("Sensor state: {:?}", sensor_state);
-//        log_info!("Actuator state: {:?}", actuator_state);
+        let data = PertinentData {
+            boiler_temp: sensor_state.boiler_temp_c,
+            boiler_pressure: sensor_state.boiler_pressure_bar,
+            boiler_duty_cycle: actuator_state.brew_boiler_heating_element.current_duty_cycle_percent as f32,
+            pump_duty_cycle: actuator_state.pump_duty_cycle,
+            is_brewing: general_state.is_brewing,
+        };
+        
+/*        let data_vec = to_allocvec_cobs(&data).unwrap();
+        control_uart_tx.write(&data_vec).await;*/
+
+        structured_log(sensor_state, actuator_state, general_state);
         
         Timer::after_millis(50).await;
     }
+}
+
+fn structured_log(sensor_state: SilviaSystemSensorState, actuator_state: SilviaSystemActuatorState, general_state: SilviaSystemGeneralState) {
+    
+
+    log_info!("/*{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?}*/", 
+        sensor_state.boiler_temp_c, 
+        sensor_state.boiler_pressure_bar, 
+        actuator_state.brew_boiler_heating_element.current_duty_cycle_percent, 
+        actuator_state.pump_duty_cycle, 
+        general_state.extraction_phase,
+        if let Some(brew_time_s) = general_state.brew_time_s {
+            brew_time_s
+        } else {
+            0.0
+        },
+        general_state.current_pressure_set_point,
+        general_state.brew_boiler_pid.p,
+        general_state.brew_boiler_pid.i,
+        general_state.brew_boiler_pid.d,
+        general_state.brew_pressure_pid.p,
+        general_state.brew_pressure_pid.i,
+        general_state.brew_pressure_pid.d,
+    );
+    /*    log_info!(
+        "BREW: {:?}, B_T: {:?}, B_P: {:?}, B_D_C: {:?}, P_D_C: {:?}, B_S: {:?}, W_S: {:?}, P: {:?}, P_R: {:?}",
+        general_state.is_brewing,
+        sensor_state.boiler_temp_c,
+        sensor_state.boiler_pressure_bar,
+        actuator_state.brew_boiler_heating_element.current_duty_cycle_percent,
+        actuator_state.pump_duty_cycle,
+        actuator_state.brew_solenoid,
+        sensor_state.water_switch,
+        general_state.extraction_phase,
+        sensor_state.pump_rpm,
+    );*/
 }
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();

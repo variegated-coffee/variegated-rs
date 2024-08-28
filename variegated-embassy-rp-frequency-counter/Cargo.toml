@@ -1,0 +1,18 @@
+[package]
+name = "variegated-embassy-rp-frequency-counter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-executor = { version = "0.5.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
+embassy-time = "0.3.2"
+pio-proc = "0.2"
+pio = "0.2"
+log = "0.4.22"
+variegated-log = { version = "0.1.0", path = "../variegated-log" }
+defmt = "0.3"
+defmt-rtt = "0.4"
+cortex-m = { version = "0.7.6", features = ["inline-asm"] }
+cortex-m-rt = "0.7.0"
+panic-probe = { version = "0.3", features = ["print-defmt"] }

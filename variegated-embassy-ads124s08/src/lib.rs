@@ -8,7 +8,7 @@ use embassy_futures::select::{Either, select};
 use embassy_rp::gpio::{AnyPin, Input, Output, Pin, Pull};
 use embassy_rp::spi;
 use embassy_rp::spi::{Async, Instance, Spi};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use registers::{RegisterAddress, ByteRepresentation, ConfigurationRegisters};
 use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue};
 
@@ -292,6 +292,7 @@ impl ADS124S08<'_> {
         reference_input: registers::ReferenceInput,
         gain: registers::PGAGain,
     ) -> Result<Code, ADS124S08Error> where T: Instance {
+        //let begin1 = Instant::now();
         self.begin_transaction().await;
 
         let data = {
@@ -306,10 +307,13 @@ impl ADS124S08<'_> {
             config.idacmux.i1mux = IDACMux::Disconnected;
             config.refctrl.refsel = reference_input;
 
+            // Takes around 2 ms
             config = self.swap_all_configuration_registers(spi, config).await?;
 
+            // This call has about 2 ms of overhead
             let res = self.start_wait_for_drdy_read_and_stop(spi).await;
 
+            // Takes around 2 ms
             self.swap_all_configuration_registers(spi, config).await?;
 
             res
@@ -317,6 +321,9 @@ impl ADS124S08<'_> {
 
         self.end_transaction().await;
 
+/*        let end1 = Instant::now();
+        let duration = end1 - begin1;
+        log::info!("measure_differential total: {} ms", duration.as_millis());*/
         data
     }
 
@@ -390,28 +397,32 @@ impl ADS124S08<'_> {
         data
     }
 
+
     pub async fn read_temperature<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
         self.begin_transaction().await;
 
         let data = {
-            let prev_sys = self.swap_sys_reg(
+            let mut new_config = self.configuration_registers.sys.clone();
+            new_config.sys_mon = registers::SystemMonitorConfiguration::InternalTemperatureSensor;
+            new_config.sendstat = true;
+            new_config.crc = true;
+
+            let prev_config = self.swap_sys_reg(
                 spi,
-                self.configuration_registers.sys.copy_with_configuration(registers::SystemMonitorConfiguration::InternalTemperatureSensor)
+                new_config
             ).await?;
 
-            let mut new_pga = self.configuration_registers.pga.clone();
-            new_pga.enable = true;
-            new_pga.gain = registers::PGAGain::Gain1;
+            let mut new_refctl = self.configuration_registers.refctrl.clone();
+            new_refctl.refsel = registers::ReferenceInput::Internal;
+            new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
 
-            let prev_pga = self.swap_pga_reg(
-                spi,
-                new_pga
-            ).await?;
+            let prev_refctl = self.swap_refctrl_reg(spi, new_refctl).await?;
 
             let res = self.start_wait_for_drdy_read_and_stop(spi).await;
+            //let res = Err(ADS124S08Error::ReadTimeoutError);
 
-            self.write_sys_reg(spi, prev_sys).await?;
-            self.write_pga_reg(spi, prev_pga).await?;
+            self.write_sys_reg(spi, prev_config).await?;
+            self.write_refctrl_reg(spi, prev_refctl).await?;
 
             res
         };
@@ -491,7 +502,7 @@ impl ADS124S08<'_> {
 
     // Why are you even looking at this?
 
-    async fn wait_for_drdy<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
+    pub async fn wait_for_drdy<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
         // @todo Use an either with a timeout
         
         match &mut self.wait_strategy {
@@ -504,6 +515,8 @@ impl ADS124S08<'_> {
     }
     
     async fn swap_all_configuration_registers<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, configuration_registers: ConfigurationRegisters) -> Result<ConfigurationRegisters, ADS124S08Error> where T: Instance {
+//        let start = Instant::now();
+
         let prev = self.configuration_registers.clone();
         self.configuration_registers = configuration_registers;
         let res = self.write_modified_configuration_registers_to_device(spi).await;
@@ -513,6 +526,11 @@ impl ADS124S08<'_> {
             self.write_all_configuration_registers_to_device(spi).await?;
             return Err(ADS124S08Error::UnableToRestorePreviousConfigurationWhileHandlingError);
         }
+
+/*        let end = Instant::now();
+        let duration = end - start;
+
+        log::info!("swap_all_configuration_registers total: {} µs", duration.as_micros());*/
 
         Ok(prev)
     }
@@ -628,11 +646,12 @@ impl ADS124S08<'_> {
         self.write_command(spi, command).await?;
         self.spi_write(spi, &[value]).await?;
 
-        let read_back = self.read_reg(spi, reg).await?;
+        // @fixme Performance measurment workaround
+/*        let read_back = self.read_reg(spi, reg).await?;
 
         if read_back != value {
             return Err(ADS124S08Error::ConfigurationReadBackFailed(reg));
-        }
+        }*/
 
         Ok(())
     }
@@ -678,6 +697,10 @@ impl ADS124S08<'_> {
             return Err(ADS124S08Error::NotInTransaction);
         }
 
+        return spi.read(buffer).await.map_err(|e| ADS124S08Error::SPIError(e));
+
+        // @fixme Performance measurment workaround. Make this optional.
+
         let t1 = spi.read(buffer);
         let t2 = async {
             Timer::after(Duration::from_millis(1)).await;
@@ -698,6 +721,9 @@ impl ADS124S08<'_> {
             return Err(ADS124S08Error::NotInTransaction);
         }
 
+        return spi.write(buffer).await.map_err(|e| ADS124S08Error::SPIError(e));
+
+        // @fixme Performance measurment workaround. Make this optional.
         let t1 = spi.write(buffer);
         let t2 = async {
             Timer::after(Duration::from_millis(1)).await;
@@ -714,15 +740,15 @@ impl ADS124S08<'_> {
     }
 
     async fn assert_cs(&mut self) {
-        Timer::after_micros(1).await;
+        busy_wait_us(1);
         self.cs.set_low();
-        Timer::after_micros(1).await;
+        busy_wait_us(1);
     }
 
     async fn deassert_cs(&mut self) {
-        Timer::after_micros(1).await;
+        busy_wait_us(1);
         self.cs.set_high();
-        Timer::after_micros(1).await;
+        busy_wait_us(1);
     }
 }
 
@@ -738,4 +764,13 @@ async fn wait_for_unsafe_miso_pin(pin: &mut AnyPin) {
     // Obviously, this isn't exactly safe
     let bank = embassy_rp::pac::IO_BANK0;
     bank.gpio(pin_num as _).ctrl().write(|w| w.set_funcsel(1));
+}
+
+use cortex_m::asm;
+
+fn busy_wait_us(us: u32) {
+    // This constant should be calibrated for your specific MCU and clock speed
+    const CYCLES_PER_US: u32 = 133;
+    let cycles = us * CYCLES_PER_US;
+    asm::delay(cycles);
 }

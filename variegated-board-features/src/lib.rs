@@ -1,8 +1,9 @@
 #![no_std]
 
-use embassy_rp::gpio::AnyPin;
+use embassy_rp::gpio::{AnyPin, Pin};
 use embassy_rp::{i2c, spi, uart};
-use embassy_rp::peripherals::{FLASH, I2C0, SPI1, USB, WATCHDOG};
+use embassy_rp::peripherals::{FLASH, I2C0, PIO0, PIO1, SPI1, USB, WATCHDOG};
+use embassy_rp::pio::{Pio, PioPin};
 use embassy_rp::pwm::{Channel, Pwm};
 use embassy_rp::uart::Blocking;
 use variegated_embassy_ads124s08::ADS124S08;
@@ -61,7 +62,7 @@ unsafe impl<LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlash
     SettingsFlashSpiT: spi::Instance,
     SdCardSpiT: spi::Instance, {}
 
-pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT, Cn1410ChT>
+pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT, Cn1410ChT, Cn96PinT>
     where
         EspUartT: uart::Instance,
         Cn1UartT: uart::Instance,
@@ -71,6 +72,7 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
         Cn96ChT: Channel,
         Cn98ChT: Channel,
         Cn1410ChT: Channel,
+        Cn96PinT: Pin + PioPin
 {
     pub adc_cs_pin: Option<AnyPin>,
     
@@ -92,7 +94,7 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub dual_shift_register: Option<DualC595ShiftRegister<'a>>,
     
     pub cn9_4_pin: Option<AnyPin>,
-    pub cn9_6_pin: Option<AnyPin>,
+    pub cn9_6_pin: Option<Cn96PinT>,
     pub cn9_8_pin: Option<AnyPin>,
 
     pub cn9_4_pwm: Option<Pwm<'a, Cn94ChT>>,
@@ -120,6 +122,9 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub cn14_5_pin: Option<AnyPin>,
     pub cn14_7_pin: Option<AnyPin>,
     pub cn14_9_pin: Option<AnyPin>,
+    
+    pub pio0: Option<PIO0>,
+    pub pio1: Option<PIO1>,
 
     pub usb: Option<USB>,
 }
@@ -136,11 +141,15 @@ where
     pub ads124s08: Option<ADS124S08<'a>>,
     
     pub spi_bus: Option<spi::Spi<'a, SpiT, spi::Async>>,
-    
-    pub i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Async>>,
 
-    pub uart_rx: uart::UartRx<'a, UartT, uart::Async>,
-    pub uart_tx: uart::UartTx<'a, UartT, uart::Async>,
+    pub blocking_i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Blocking>>,
+    pub async_i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Async>>,
+
+    pub uart_rx: Option<uart::UartRx<'a, UartT, uart::Async>>,
+    pub uart_tx: Option<uart::UartTx<'a, UartT, uart::Async>>,
+
+    pub uart_tx_pin: Option<AnyPin>,
+    pub uart_rx_pin: Option<AnyPin>,
 
     pub adc_res_pin: Option<AnyPin>,
     pub adc_drdy_pin: Option<AnyPin>,

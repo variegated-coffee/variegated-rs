@@ -4,11 +4,11 @@ use fixed::traits::ToFixed;
 use crate::state::SilviaSystemActuatorState;
 
 pub struct SilviaPwmOutputCluster<'a> {
-    pwm: PwmSlice<'a, PWM_CH1>
+    pwm: PwmSlice<'a, PWM_CH4>
 }
 
 impl<'a> SilviaPwmOutputCluster<'a> {
-    pub fn new(pwm: Pwm<'a, PWM_CH1>) -> Self {
+    pub fn new(pwm: Pwm<'a, PWM_CH4>) -> Self {
         let slice = PwmSlice::new(10_000, 0.0, 0.0, pwm);
         
         Self { 
@@ -17,8 +17,8 @@ impl<'a> SilviaPwmOutputCluster<'a> {
     }
     
     pub(crate) async fn update_from_actuator_state(&mut self, actuator_state: &SilviaSystemActuatorState) {
-        self.pwm.set_duty_cycle_a(actuator_state.pump_duty_cycle);
-        //self.pwm.set_duty_cycle_b(actuator_state.pump_duty_cycle);
+        //self.pwm.set_duty_cycle_a(actuator_state.pump_duty_cycle);
+        self.pwm.set_duty_cycle_b(actuator_state.pump_duty_cycle);
     }
 }
 

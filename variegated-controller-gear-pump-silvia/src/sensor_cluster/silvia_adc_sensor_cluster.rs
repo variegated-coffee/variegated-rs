@@ -103,7 +103,7 @@ impl<'a> SilviaAdcSensorCluster<'a> {
         self.adc.begin_transaction().await;
         self.adc.reset(spi).await.map_err(|_| SensorClusterError::UnknownError)?;
         let mut datarate = self.adc.read_datarate_reg(spi).await.map_err(|_| SensorClusterError::UnknownError)?;
-        datarate.rate = DataRate::SPS400;
+        datarate.rate = DataRate::SPS100;
         self.adc.write_datarate_reg(spi, datarate).await.map_err(|_| SensorClusterError::UnknownError)?;
         self.adc.end_transaction().await;
 
@@ -145,7 +145,7 @@ impl<'a> SilviaAdcSensorCluster<'a> {
             }
         };
 
-        log_info!("Boiler temp V: {:?}", referenced_code);
+        //log_info!("Boiler temp V: {:?}", referenced_code);
 /*        let bto = -1f32 * (75000f32 * referenced_code) / (referenced_code - 5f32);
         log_info!("Boiler temp R: {:?}", bto);*/
 
@@ -159,12 +159,14 @@ impl<'a> SilviaAdcSensorCluster<'a> {
             Err(_) => return Err(SensorClusterError::UnknownError),
         };
 */
-        let pressure_v = self.adc.measure_single_ended(spi, Mux::AIN4, ReferenceInput::Refp1Refn1).await;
+        let pressure_code = self.adc.measure_single_ended(spi, Mux::AIN4, ReferenceInput::Refp1Refn1).await;
 
-        let boiler_pressure_bar = match pressure_v {
+        let boiler_pressure_v = match pressure_code {
             Ok(avcc) => avcc.externally_referenced_voltage(0.0, 5.00),
             Err(_) => return Err(SensorClusterError::UnknownError),
         };
+        
+        let boiler_pressure_bar = (boiler_pressure_v - 0.5) * 4.0;
 
         sensor_state.boiler_temp_c = boiler_temp_c;
         sensor_state.boiler_pressure_bar = boiler_pressure_bar;

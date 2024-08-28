@@ -15,7 +15,7 @@ pub async fn create_actuator_clusters(board_features_mutex: &ActualMutexType<Ape
         shift_register
     );
     
-    let silvia_pwm_actuator_cluster = SilviaPwmOutputCluster::new(board_features.cn14_10_pwm.take().expect("Must have CN9_4 PWM"));
+    let silvia_pwm_actuator_cluster = SilviaPwmOutputCluster::new(board_features.cn9_4_pwm.take().expect("Must have CN9_4 PWM"));
     
     (shift_register_output_cluster, silvia_pwm_actuator_cluster)
 }

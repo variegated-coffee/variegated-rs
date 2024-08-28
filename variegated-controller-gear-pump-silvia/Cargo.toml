@@ -49,6 +49,9 @@ variegated-log = { version = "0.1.0", path = "../variegated-log" }
 
 variegated-embassy-dual-c595-shift-register = { version = "0.1.0", path = "../variegated-embassy-dual-c595-shift-register" }
 variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
+variegated-embassy-rp-frequency-counter = { version = "0.1.0", path = "../variegated-embassy-rp-frequency-counter" }
+variegated-embassy-nau7802 = { version = "0.1.0", path = "../variegated-embassy-nau7802" }
+
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
 pid-ctrl = "0.1.4"
 heapless = "0.8.0"
@@ -57,5 +60,7 @@ num-traits = { version ="0.2", default-features = false, features = ["libm"]}
 fixed = "1.23.1"
 fixed-macro = "1.2"
 
+movavg = { version = "2", default-features = false }
+
 serde = { version = "1.0", default-features = false, features = ["derive"] }
-postcard = "1.0.0"
+postcard = { version = "1.0.0", features = ["alloc"] }

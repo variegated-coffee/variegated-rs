@@ -30,7 +30,8 @@ pub type ApecR0DBoardFeatures = AllPurposeEspressoControllerBoardFeatures<
     peripherals::PWM_CH4,
     peripherals::PWM_CH5,
     peripherals::PWM_CH5,
-    peripherals::PWM_CH1
+    peripherals::PWM_CH1,
+    peripherals::PIN_10
 >;
 
 bitflags! {
@@ -101,7 +102,7 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
             let cn9_6_pwm = None;
             let cn9_8_pwm = None;
         } else {
-            let cn9_6_pin = Some(p.PIN_10.degrade());
+            let cn9_6_pin = Some(p.PIN_10);
             let cn9_6_pwm = None;
             let cn9_8_pin = Some(p.PIN_11.degrade());
             let cn9_8_pwm = None;
@@ -178,6 +179,9 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
         cn14_5_pin: Some(p.PIN_27.degrade()),
         cn14_7_pin: Some(p.PIN_28.degrade()),
         cn14_9_pin: Some(p.PIN_29.degrade()),
+        
+        pio0: Some(p.PIO0),
+        pio1: Some(p.PIO1),
         
         usb: Some(p.USB),
     }

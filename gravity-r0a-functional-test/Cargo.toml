@@ -42,3 +42,8 @@ cfg-if = "1.0.0"
 variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
 variegated-board-gravity = { version = "0.1.0", path = "../variegated-board-gravity"}
 variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
+variegated-embassy-nau7802 = { version = "0.1.0", path = "../variegated-embassy-nau7802" }
+
+ssd1306 = "0.8.4"
+embedded-graphics = "0.8.1"
+movavg = { version = "2", default-features = false }
