@@ -62,7 +62,7 @@ unsafe impl<LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlash
     SettingsFlashSpiT: spi::Instance,
     SdCardSpiT: spi::Instance, {}
 
-pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT, Cn1410ChT, Cn96PinT>
+pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT, Cn1410ChT, Cn96PinT, Cn12PinT, Cn13PinT, Cn143PinT>
     where
         EspUartT: uart::Instance,
         Cn1UartT: uart::Instance,
@@ -72,7 +72,10 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
         Cn96ChT: Channel,
         Cn98ChT: Channel,
         Cn1410ChT: Channel,
-        Cn96PinT: Pin + PioPin
+        Cn96PinT: Pin + PioPin,
+        Cn12PinT: Pin + PioPin,
+        Cn13PinT: Pin + PioPin,
+        Cn143PinT: Pin + PioPin,
 {
     pub adc_cs_pin: Option<AnyPin>,
     
@@ -115,10 +118,10 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub serial_boot_pin: Option<AnyPin>,
     pub adc_drdy_pin: Option<AnyPin>,
 
-    pub cn12_pin: Option<AnyPin>,
-    pub cn13_pin: Option<AnyPin>,
+    pub cn12_pin: Option<Cn12PinT>,
+    pub cn13_pin: Option<Cn13PinT>,
 
-    pub cn14_3_pin: Option<AnyPin>,
+    pub cn14_3_pin: Option<Cn143PinT>,
     pub cn14_5_pin: Option<AnyPin>,
     pub cn14_7_pin: Option<AnyPin>,
     pub cn14_9_pin: Option<AnyPin>,

@@ -48,16 +48,22 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
 
     let mut control_uart_tx = board_features.cn1_uart_tx.take().expect("UART TX must be present");
     let control_uart_rx = board_features.cn1_uart_rx.take().expect("UART RX must be present");
-    
+
+    log_info!("Foo");
+
     let board_features_mutex: ActualBoardFeaturesMutex = Mutex::new(board_features);
 //    let configuration_mutex: ActualMutexType<SilviaSystemConfiguration> = Mutex::new(SilviaSystemConfiguration::default());
-
+    
     let channel = Channel::<NoopRawMutex, SilviaCommands, 10>::new();
     
     let channel_ref = &channel;
-    
+    log_info!("Bar");
+
     let (mut gpio_sensor_cluster, mut adc_sensor_cluster, mut pump_freq, mut nau7802) =
         sensor_cluster::create_sensor_clusters(&board_features_mutex).await;
+
+    log_info!("Baz");
+
 
     let mut controller = SilviaController::new(&channel);
 
@@ -107,7 +113,7 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
 fn structured_log(sensor_state: SilviaSystemSensorState, actuator_state: SilviaSystemActuatorState, general_state: SilviaSystemGeneralState) {
     
 
-    log_info!("/*{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?}*/", 
+    log_info!("/*{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?}*/", 
         sensor_state.boiler_temp_c, 
         sensor_state.boiler_pressure_bar, 
         actuator_state.brew_boiler_heating_element.current_duty_cycle_percent, 
@@ -125,6 +131,8 @@ fn structured_log(sensor_state: SilviaSystemSensorState, actuator_state: SilviaS
         general_state.brew_pressure_pid.p,
         general_state.brew_pressure_pid.i,
         general_state.brew_pressure_pid.d,
+        general_state.scale_tared_g,
+        sensor_state.pump_rpm,
     );
     /*    log_info!(
         "BREW: {:?}, B_T: {:?}, B_P: {:?}, B_D_C: {:?}, P_D_C: {:?}, B_S: {:?}, W_S: {:?}, P: {:?}, P_R: {:?}",

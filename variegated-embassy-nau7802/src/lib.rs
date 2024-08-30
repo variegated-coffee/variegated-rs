@@ -2,7 +2,9 @@
 
 use byteorder::ByteOrder as _;
 use core::{fmt, slice};
+use embedded_hal_async::digital::Wait;
 use embedded_hal_async::i2c::I2c;
+use embedded_hal_async::delay::DelayNs;
 
 mod constants;
 pub use constants::*;
@@ -15,15 +17,23 @@ pub enum Error {
     PowerupFailed,
 }
 
-pub struct Nau7802 {
+pub enum Nau7802DataAvailableStrategy<W: Wait>{
+    Polling,
+    DrdyPin(W),
 }
 
-impl Nau7802 {
+pub struct Nau7802<W: Wait, D: DelayNs> {
+    wait_strategy: Nau7802DataAvailableStrategy<W>,
+    delay: D
+}
+
+impl<W: Wait, D: DelayNs> Nau7802<W, D> {
     const DEVICE_ADDRESS: u8 = 0x2A;
 
-    pub fn new() -> Self {
+    pub fn new(wait_strategy: Nau7802DataAvailableStrategy<W>, delay: D) -> Self {
         Self {
-
+            wait_strategy,
+            delay
         }
     }
 
@@ -48,23 +58,27 @@ impl Nau7802 {
         Ok(())
     }
 
-    pub async fn data_available<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<bool> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
-        self.get_bit(i2c, Register::PuCtrl, PuCtrlBits::CR).await
-    }
-
-    /// Checks for new data, returns nb::Error::WouldBlock if unavailable
-    pub async fn read<I2C, I2CError>(&self, i2c: &mut I2C) -> nb::Result<i32, Error> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
-        let data_available = self.data_available(i2c).await.map_err(nb::Error::Other)?;
-
-        if !data_available {
-            return Err(nb::Error::WouldBlock);
+    pub async fn wait_for_data_available<I2C, I2CError>(&mut self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+        match self.wait_strategy {
+            Nau7802DataAvailableStrategy::Polling => self.wait_for_data_available_i2c(i2c).await?,
+            Nau7802DataAvailableStrategy::DrdyPin(ref mut w) => w.wait_for_high().await.map_err(|_| Error::I2cError)?
         }
-
-        self.read_unchecked(i2c).await.map_err(nb::Error::Other)
+        
+        Ok(())
     }
 
-    /// assumes that data_avaiable has been called and returned true
-    pub async fn read_unchecked<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<i32> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    async fn wait_for_data_available_i2c<I2C, I2CError>(&mut self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+        loop {
+            if self.get_bit(i2c, Register::PuCtrl, PuCtrlBits::CR).await? {
+                return Ok(());
+            }
+            self.delay.delay_ms(1).await;
+        }
+    }
+    
+    pub async fn read<I2C, I2CError>(&mut self, i2c: &mut I2C) -> Result<i32> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+        self.wait_for_data_available(i2c).await?;
+
         self.request_register(i2c, Register::AdcoB2).await?;
 
         let mut buf = [0u8; 3]; // will hold an i24

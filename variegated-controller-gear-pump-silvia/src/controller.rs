@@ -20,9 +20,9 @@ pub struct SilviaController<'a> {
 
     boiler_temperature_ma: MovAvg<f32, f32, 5>,
     boiler_pressure_ma: MovAvg<f32, f32, 5>,
-    
+
     scale_value_ma: MovAvg<f32, f32, 5>,
-    
+
     scale_tare_g: f32,
     
     prev_update: Instant,
@@ -54,9 +54,9 @@ impl<'a> SilviaController<'a> {
 
         let mut system_configuration = SilviaSystemConfiguration::default();
         system_configuration.boiler_temp_setpoint_c = 100.0;
-        system_configuration.pump_pressure_setpoint_preinfusion_bar = 2.0;
+        system_configuration.pump_pressure_setpoint_preinfusion_bar = 3.0;
+        system_configuration.pump_pressure_setpoint_ramp_up_bar = 6.0;
         system_configuration.pump_pressure_setpoint_extraction_bar = 9.0;
-        system_configuration.pump_pressure_setpoint_postinfusion_bar = 1.0;
 
         Self {
             command_channel,
@@ -93,6 +93,41 @@ impl<'a> SilviaController<'a> {
             general_state.is_brewing = false;
         }
 
+        if general_state.is_brewing {
+            if !self.solenoid_open {
+                self.solenoid_open = true;
+            }
+
+            if self.brew_started_at.is_none() {
+                self.brew_started_at = Some(now);
+                self.scale_tare_g = self.scale_value_ma.get();
+            }
+
+            general_state.scale_tared_g = self.scale_value_ma.get() - self.scale_tare_g;
+        } else {
+            if self.solenoid_open && self.close_solenoid_at.is_none() {
+                self.close_solenoid_at = Some(now + Duration::from_millis(400));
+            }
+
+            if let Some(close_solenoid_at) = self.close_solenoid_at {
+                if now > close_solenoid_at {
+                    self.solenoid_open = false;
+                    self.close_solenoid_at = None;
+                }
+            }
+
+            self.brew_started_at = None;
+            //general_state.scale_tared_g = self.scale_value_ma.get();
+            general_state.scale_tared_g = 0.0;
+        }
+
+        system_actuator_state.brew_solenoid = self.solenoid_open;
+        if let Some(brew_started_at) = self.brew_started_at {
+            general_state.brew_time_s = Some((now - brew_started_at).as_millis() as f32 / 1000.0);
+        } else {
+            general_state.brew_time_s = None;
+        }
+
         if system_sensor_state.water_switch != self.prev_water_switch.unwrap() {
             // Debounce the water switch
             if let Some(prev_water_switch_at) = self.prev_water_switch_at {
@@ -110,8 +145,8 @@ impl<'a> SilviaController<'a> {
         let delta_millis = delta.as_micros().to_f32().expect("For some weird reason, we couldn't convert a u64 to a f32") / 1000f32;
 
         self.brew_boiler_pid.setpoint = self.system_configuration.boiler_temp_setpoint_c;
-        general_state.current_pressure_set_point = if system_sensor_state.brew_switch {
-            self.system_configuration.pressure_set_point_for_phase(general_state.extraction_phase)
+        general_state.current_pressure_set_point = if general_state.is_brewing {
+            self.system_configuration.pressure_set_point_for_phase(general_state.extraction_phase, general_state.brew_time_s.unwrap_or(0.0))
         } else {
             0.0
         };
@@ -136,43 +171,13 @@ impl<'a> SilviaController<'a> {
         system_actuator_state.brew_boiler_heating_element.set_duty_cycle(brew_out.out as u8);
         system_actuator_state.brew_boiler_heating_element.update(now);
 
+        self.prev_update = now;
+
         if general_state.is_brewing {
             system_actuator_state.pump_duty_cycle = pressure_out.out;
-            if !self.solenoid_open {
-                self.solenoid_open = true;
-            }
-
-            if self.brew_started_at.is_none() {
-                self.brew_started_at = Some(now);
-                self.scale_tare_g = self.scale_value_ma.get();
-            }
-            
-            general_state.scale_tared_g = self.scale_value_ma.get() - self.scale_tare_g;
         } else {
             system_actuator_state.pump_duty_cycle = 0.0;
-            if self.solenoid_open && self.close_solenoid_at.is_none() {
-                self.close_solenoid_at = Some(now + Duration::from_millis(400));
-            }
-
-            if let Some(close_solenoid_at) = self.close_solenoid_at {
-                if now > close_solenoid_at {
-                    self.solenoid_open = false;
-                    self.close_solenoid_at = None;
-                }
-            }
-
-            self.brew_started_at = None;
-            general_state.scale_tared_g = 0.0;
         }
-
-        system_actuator_state.brew_solenoid = self.solenoid_open;
-        if let Some(brew_started_at) = self.brew_started_at {
-            general_state.brew_time_s = Some((now - brew_started_at).as_millis() as f32 / 1000.0);
-        } else {
-            general_state.brew_time_s = None;
-        }
-
-        self.prev_update = now;
 
         Ok(())
     }

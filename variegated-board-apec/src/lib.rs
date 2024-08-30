@@ -31,7 +31,10 @@ pub type ApecR0DBoardFeatures = AllPurposeEspressoControllerBoardFeatures<
     peripherals::PWM_CH5,
     peripherals::PWM_CH5,
     peripherals::PWM_CH1,
-    peripherals::PIN_10
+    peripherals::PIN_10,
+    peripherals::PIN_24,
+    peripherals::PIN_25,
+    peripherals::PIN_26,
 >;
 
 bitflags! {
@@ -172,10 +175,10 @@ pub fn create_board_features(p: Peripherals) -> ApecR0DBoardFeatures {
         serial_boot_pin: Some(p.PIN_22.degrade()),
         adc_drdy_pin: None,
         
-        cn12_pin: Some(p.PIN_24.degrade()),
-        cn13_pin: Some(p.PIN_25.degrade()),
+        cn12_pin: Some(p.PIN_24),
+        cn13_pin: Some(p.PIN_25),
         
-        cn14_3_pin: Some(p.PIN_26.degrade()),
+        cn14_3_pin: Some(p.PIN_26),
         cn14_5_pin: Some(p.PIN_27.degrade()),
         cn14_7_pin: Some(p.PIN_28.degrade()),
         cn14_9_pin: Some(p.PIN_29.degrade()),

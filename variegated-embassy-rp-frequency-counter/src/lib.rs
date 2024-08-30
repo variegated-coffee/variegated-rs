@@ -1,18 +1,18 @@
 #![no_std]
 
 use defmt::info;
-use embassy_rp::pio::{Config, Direction, FifoJoin, Instance, Pio, PioPin, ShiftDirection};
+use embassy_rp::pio::{Common, Config, Direction, FifoJoin, Instance, Pio, PioPin, ShiftDirection, StateMachine};
 use embassy_time::Instant;
 use log::log;
 use variegated_log::log_info;
 
-pub struct PioFrequencyCounter<'a, P: Instance> {
-    pio: Pio<'a, P>,
+pub struct PioFrequencyCounter<'a, P: Instance, const SM: usize> {
+    sm: StateMachine<'a, P, SM>,
     edges: [u32;2],
 }
 
-impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
-    pub fn new_either_edge<PinT: PioPin>(pin: PinT, mut pio: Pio<'a, P>) -> Self {
+impl<'a, P: Instance, const SM: usize> PioFrequencyCounter<'a, P, SM> {
+    pub fn new<PinT: PioPin>(pin: PinT, common: &mut Common<'a, P>, mut sm: StateMachine<'a, P, SM>) -> Self {
         let program = pio_proc::pio_asm!(
     "mov y, ~null"        //Initialize Y with the value from OSR
     "set x, 0"            //Initialize X to 0
@@ -47,8 +47,8 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
 ".wrap"
         );
 
-        let loaded = pio.common.load_program(&program.program);
-        let pin = pio.common.make_pio_pin(pin);
+        let loaded = common.load_program(&program.program);
+        let pin = common.make_pio_pin(pin);
 
         let mut cfg = Config::default();
         cfg.use_program(&loaded, &[]);
@@ -57,15 +57,14 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
         
         // Configure FIFO joining
         cfg.fifo_join = FifoJoin::RxOnly;
-
-        let sm = &mut pio.sm0;
+        
         sm.set_config(&cfg);
         sm.set_pin_dirs(Direction::In, &[&pin]);
 
         sm.set_enable(true);
 
         PioFrequencyCounter {
-            pio,
+            sm,
             edges: [0, 0]
         }
     }
@@ -73,8 +72,8 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
     pub fn read_frequency(&mut self) -> f32 {
         let mut latest_val: Option<u32> = None;
 
-        while !self.pio.sm0.rx().empty() {
-            latest_val = self.pio.sm0.rx().try_pull();
+        while !self.sm.rx().empty() {
+            latest_val = self.sm.rx().try_pull();
 
             self.edges[1] = self.edges[0];
             self.edges[0] = latest_val.unwrap();
