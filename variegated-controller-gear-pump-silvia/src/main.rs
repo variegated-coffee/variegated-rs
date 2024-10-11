@@ -4,11 +4,13 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::format;
 use defmt::unwrap;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{I2C0, I2C1, PWM_CH4, SPI0, SPI1, UART0, UART1, USB};
+use embassy_rp::peripherals::{I2C0, I2C1, SPI0, SPI1, UART0, UART1, USB};
+use embassy_rp::uart::{Async, UartTx};
 use embassy_rp::usb::{Driver, self};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
@@ -46,8 +48,8 @@ bind_interrupts!(struct Irqs {
 async fn main_loop(mut board_features: ActualBoardFeatures) {
     log_info!("Starting main loop");
 
-    let mut control_uart_tx = board_features.cn1_uart_tx.take().expect("UART TX must be present");
-    let control_uart_rx = board_features.cn1_uart_rx.take().expect("UART RX must be present");
+    let mut control_uart_tx = board_features.esp32_uart_tx.take().expect("UART TX must be present");
+    let control_uart_rx = board_features.esp32_uart_rx.take().expect("UART RX must be present");
 
     log_info!("Foo");
 
@@ -86,7 +88,7 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
         let res = gpio_sensor_cluster.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
         let res = adc_sensor_cluster.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
         let res = pump_freq.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
-        let res = nau7802.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
+        //let res = nau7802.update_sensor_state(&mut sensor_state, &board_features_mutex).await;
         
         let res = controller.update_states_from_sensor_state(&sensor_state, &mut actuator_state, &mut general_state).await;
 
@@ -104,16 +106,15 @@ async fn main_loop(mut board_features: ActualBoardFeatures) {
 /*        let data_vec = to_allocvec_cobs(&data).unwrap();
         control_uart_tx.write(&data_vec).await;*/
 
-        structured_log(sensor_state, actuator_state, general_state);
+        structured_log(&mut control_uart_tx, sensor_state, actuator_state, general_state).await;
         
         Timer::after_millis(50).await;
     }
 }
 
-fn structured_log(sensor_state: SilviaSystemSensorState, actuator_state: SilviaSystemActuatorState, general_state: SilviaSystemGeneralState) {
-    
-
-    log_info!("/*{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?}*/", 
+async fn structured_log(uart: &mut UartTx<'_, UART1, Async>,sensor_state: SilviaSystemSensorState, actuator_state: SilviaSystemActuatorState, general_state: SilviaSystemGeneralState) {
+    log_info!("Writing stuff to UART");
+    let s = format!("/*{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?},{:?}*/\n",
         sensor_state.boiler_temp_c, 
         sensor_state.boiler_pressure_bar, 
         actuator_state.brew_boiler_heating_element.current_duty_cycle_percent, 
@@ -134,18 +135,8 @@ fn structured_log(sensor_state: SilviaSystemSensorState, actuator_state: SilviaS
         general_state.scale_tared_g,
         sensor_state.pump_rpm,
     );
-    /*    log_info!(
-        "BREW: {:?}, B_T: {:?}, B_P: {:?}, B_D_C: {:?}, P_D_C: {:?}, B_S: {:?}, W_S: {:?}, P: {:?}, P_R: {:?}",
-        general_state.is_brewing,
-        sensor_state.boiler_temp_c,
-        sensor_state.boiler_pressure_bar,
-        actuator_state.brew_boiler_heating_element.current_duty_cycle_percent,
-        actuator_state.pump_duty_cycle,
-        actuator_state.brew_solenoid,
-        sensor_state.water_switch,
-        general_state.extraction_phase,
-        sensor_state.pump_rpm,
-    );*/
+    
+    uart.write(s.as_bytes()).await.expect("Writing stuff");
 }
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();

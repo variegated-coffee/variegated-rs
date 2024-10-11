@@ -7,7 +7,7 @@ use crate::state::SilviaSystemSensorState;
 use variegated_embassy_nau7802::{Nau7802, Nau7802DataAvailableStrategy};
 
 pub struct SilviaNau7802SensorCluster<'a> {
-    nau7802: Nau7802<Input<'a, AnyPin>, Delay>,
+    nau7802: Nau7802<Input<'a>, Delay>,
 }
 
 #[derive(Debug)]

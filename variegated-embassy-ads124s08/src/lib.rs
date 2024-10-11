@@ -14,7 +14,7 @@ use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceI
 
 pub enum WaitStrategy<'a> {
     UseRiskyMiso(AnyPin),
-    UseDrdyPin(Input<'a, AnyPin>),
+    UseDrdyPin(Input<'a>),
     Delay
 }
 
@@ -54,7 +54,7 @@ impl Command {
 }
 
 pub struct ADS124S08<'a> {
-    cs: Output<'a, AnyPin>,
+    cs: Output<'a>,
     wait_strategy: WaitStrategy<'a>,
     configuration_registers: ConfigurationRegisters,
 
@@ -195,7 +195,7 @@ macro_rules! define_read_only_register_ops {
 
 impl ADS124S08<'_> {
     // High level API
-    pub fn new<'a>(cs: Output<'a, AnyPin>, wait_strategy: WaitStrategy<'a>) -> ADS124S08<'a> {
+    pub fn new<'a>(cs: Output<'a>, wait_strategy: WaitStrategy<'a>) -> ADS124S08<'a> {
         ADS124S08 {
             cs,
             wait_strategy,

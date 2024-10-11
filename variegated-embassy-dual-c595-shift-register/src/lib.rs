@@ -4,16 +4,16 @@ use embassy_rp::gpio::{AnyPin, Output};
 use embassy_time::{Delay, Duration, Instant, Timer};
 
 pub struct DualC595ShiftRegister<'a> {
-    serial_pin: Output<'a, AnyPin>,
-    shift_register_clock_pin: Output<'a, AnyPin>,
-    storage_register_clock_pin: Output<'a, AnyPin>,
+    serial_pin: Output<'a>,
+    shift_register_clock_pin: Output<'a>,
+    storage_register_clock_pin: Output<'a>,
 }
 
 impl<'a> DualC595ShiftRegister<'a> {
     pub fn new(
-        serial_pin: Output<'a, AnyPin>,
-        shift_register_clock_pin: Output<'a, AnyPin>,
-        storage_register_clock_pin: Output<'a, AnyPin>,
+        serial_pin: Output<'a>,
+        shift_register_clock_pin: Output<'a>,
+        storage_register_clock_pin: Output<'a>,
     ) -> Self {
         DualC595ShiftRegister {
             serial_pin,

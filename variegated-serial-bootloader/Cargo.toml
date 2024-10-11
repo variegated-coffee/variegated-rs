@@ -6,18 +6,19 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+variegated-board-cfg = { version = "0.1.2" }
 variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
-variegated-board-open-lcc-r2a =  { version = "0.1.0", path = "../variegated-board-open-lcc-r2a" }
+variegated-board-open-lcc-r2a =  { version = "0.1.0", path = "../variegated-board-open-lcc-r2a", features = ["bootloader"] }
 
 defmt = { version = "0.3" }
 defmt-rtt = { version = "0.4"}
 
-embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver"] }
-embassy-boot-rp = { version = "0.2.0" }
-embassy-boot = { version = "0.2.0" }
-embassy-sync = { version = "0.5.0", features = ["defmt"] }
-embassy-time = { version = "0.3.0"}
-embassy-embedded-hal = "0.1.0"
+embassy-rp = { version = "0.2.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-boot-rp = { version = "0.3.0"}
+embassy-boot = { version = "0.3.0" }
+embassy-sync = { version = "0.6.0", features = ["defmt"] }
+embassy-time = { version = "0.3.2",  features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-embedded-hal = {  version = "0.2.0"}
 
 cortex-m = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt = { version = "0.7" }
@@ -26,7 +27,7 @@ embedded-storage-async = "0.4.0"
 cfg-if = "1.0.0"
 
 crc = "3.2.1"
-serde = { version = "1.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = "1.0.0"
 serde-big-array = "0.5.1"
 
@@ -34,3 +35,22 @@ static_cell = "2"
 portable-atomic = { version = "1.5", features = ["critical-section"] }
 digest = "0.10.7"
 sha2 = { version = "0.10", default-features = false }
+
+embassy-futures = { version = "0.1.0" }
+embassy-executor = { version = "0.5.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
+embassy-usb-logger = { version = "0.2.0"}
+
+embedded-io = "0.6.1"
+
+log = "0.4"
+
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+
+assign-resources = "0.4.1"
+
+[build-dependencies]
+toml = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+
+[patch.crates-io]
+embassy_rp = { path = "../../../embassy/embassy-rp" }

@@ -2,13 +2,13 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use async_trait::async_trait;
-use embassy_embedded_hal::SetConfig;
 use embassy_rp::spi::{Config, Phase, Polarity};
 use variegated_controller_lib::{ActualBoardFeaturesMutex, ActualMutexType, ApecBoardFeatures, SensorCluster, SensorClusterError};
 use variegated_embassy_ads124s08::ADS124S08;
 use variegated_embassy_ads124s08::registers::{ClockSource, DataRate, DataRateRegister, IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_log::log_info;
 use crate::SilviaSystemSensorState;
+use embassy_embedded_hal::SetConfig;
 
 pub struct DifferentialAdcMeasurementConfiguration {
     pub sensor_p_mux: Mux,
@@ -98,7 +98,7 @@ impl<'a> SilviaAdcSensorCluster<'a> {
     pub(crate) async fn init_adc(&mut self, board_features: &ActualMutexType<ApecBoardFeatures>) -> Result<(), SensorClusterError> {
         let mut features = board_features.lock().await;
         let spi = features.spi_bus.as_mut().expect("SPI not initialized");
-        spi.set_config(&self.spi_config).expect("SPI config failed");
+        // spi.set_config(&self.spi_config).expect("SPI config failed"); @fixme This needs to change
 
         self.adc.begin_transaction().await;
         self.adc.reset(spi).await.map_err(|_| SensorClusterError::UnknownError)?;
@@ -113,7 +113,7 @@ impl<'a> SilviaAdcSensorCluster<'a> {
     pub(crate) async fn update_sensor_state(&mut self, sensor_state: &mut SilviaSystemSensorState, board_features: &ActualMutexType<ApecBoardFeatures>) -> Result<(), SensorClusterError> {
         let mut features = board_features.lock().await;
         let spi = features.spi_bus.as_mut().expect("SPI not initialized");
-        spi.set_config(&self.spi_config).expect("SPI config failed");
+        // spi.set_config(&self.spi_config).expect("SPI config failed"); @fixme This needs to change
 
 
         let boiler_code = self.adc.measure_ratiometric_low_side(

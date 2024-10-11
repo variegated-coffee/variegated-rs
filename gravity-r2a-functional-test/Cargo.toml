@@ -1,5 +1,5 @@
 [package]
-name = "apec-r0d-functional-test"
+name = "gravity-r2a-functional-test"
 version = "0.1.0"
 edition = "2021"
 
@@ -39,8 +39,12 @@ embedded-alloc = { version = "0.5.1" }
 
 cfg-if = "1.0.0"
 
+variegated-board-cfg = { version = "0.1.2" }
 variegated-board-features =  { version = "0.1.0", path = "../variegated-board-features" }
-variegated-board-apec = { version = "0.1.0", path = "../variegated-board-apec"}
+variegated-board-gravity = { version = "0.1.0", path = "../variegated-board-gravity"}
 variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
-variegated-embassy-fdc1004 = { version = "0.1.0", path = "../variegated-embassy-fdc1004" }
-variegated-embassy-dual-c595-shift-register = { version = "0.1.0", path = "../variegated-embassy-dual-c595-shift-register" }
+variegated-embassy-nau7802 = { version = "0.1.0", path = "../variegated-embassy-nau7802" }
+variegated-log = { version = "0.1.0", path = "../variegated-log" }
+
+movavg = { version = "2", default-features = false }
+i2c-pio = { git = "https://github.com/variegated-coffee/i2c-pio-rs.git", branch = "async-embassy" }

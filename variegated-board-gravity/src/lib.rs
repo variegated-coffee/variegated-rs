@@ -13,71 +13,74 @@ use variegated_embassy_ads124s08::{ADS124S08, WaitStrategy};
 bind_interrupts!(struct Irqs {
     UART0_IRQ => uart::InterruptHandler<peripherals::UART0>;
     I2C0_IRQ => i2c::InterruptHandler<peripherals::I2C0>;
+/*    I2C1_IRQ => i2c::InterruptHandler<peripherals::I2C1>;*/
 });
 
-pub type GravityR0ABoardFeatures = GravityBoardFeatures<
+pub type GravityR2ABoardFeatures = GravityBoardFeatures<
     'static,
     peripherals::UART0,
     peripherals::I2C0,
-    peripherals::SPI0,
-    peripherals::PWM_CH0,
+    peripherals::I2C1,
+    peripherals::I2C1,
+    peripherals::PWM_CH7,
+    peripherals::PWM_CH7,
 >;
 
-pub fn create_board_features(p: Peripherals) -> GravityR0ABoardFeatures<> {
+pub fn create_board_features(p: Peripherals) -> GravityR2ABoardFeatures<> {
     cfg_if::cfg_if! {
-        if #[cfg(feature = "led-pwm")] {
-            let led_pin = None;
-            let led_pwm = Some(Pwm::new_output_b(p.PWM_CH0, p.PIN_17, pwm::Config::default()));
+        if #[cfg(feature = "led1-pwm")] {
+            let led1_pin = None;
+            let led1_pwm = Some(Pwm::new_output_b(p.PWM_CH0, p.PIN_14, pwm::Config::default()));
         } else {
-            let led_pin = Some(p.PIN_17.degrade());
-            let led_pwm = None;
+            let led1_pin = Some(p.PIN_14.degrade());
+            let led1_pwm = None;
         }
     }
 
-    let mut spi_config = spi::Config::default();
-    spi_config.frequency = 5_000_000;
-    spi_config.phase = Phase::CaptureOnSecondTransition;
-    spi_config.polarity = Polarity::IdleLow;
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "led2-pwm")] {
+            let led2_pin = None;
+            let led2_pwm = Some(Pwm::new_output_b(p.PWM_CH0, p.PIN_15, pwm::Config::default()));
+        } else {
+            let led2_pin = Some(p.PIN_15.degrade());
+            let led2_pwm = None;
+        }
+    }
 
     let uart_rx_pin = p.PIN_0;
     let uart_tx_pin = p.PIN_1;
 
-    let spi_bus = Some(spi::Spi::new(p.SPI0, p.PIN_6, p.PIN_7, p.PIN_4, p.DMA_CH0, p.DMA_CH1, spi_config));
 /*    let uart = Uart::new(p.UART0, uart_rx_pin, uart_tx_pin, Irqs, p.DMA_CH6, p.DMA_CH7, uart::Config::default());
 
     let (uart_tx, uart_rx) = uart.split();*/
     
-    let mut i2c_config = Config::default();
-    i2c_config.frequency = 400_000;
+    let mut i2c0_config = Config::default();
+    i2c0_config.frequency = 400_000;
     
-    let blocking_i2c_bus = if true {
-        Some(i2c::I2c::new_blocking(p.I2C0, p.PIN_21, p.PIN_20, i2c_config))
+    let blocking_i2c0_bus = if false {
+        None
+        //Some(i2c::I2c::new_blocking(p.I2C0, p.PIN_21, p.PIN_20, i2c0_config))
     } else {
         None
         //i2c::I2c::new_async(p.I2C0, p.PIN_21, p.PIN_20, Irqs, i2c_config)
     };
     
-    let async_i2c_bus = if false {
-        None
-        //Some(i2c::I2c::new_async(p.I2C0, p.PIN_21, p.PIN_20, Irqs, i2c_config))
+    let async_i2c0_bus = if true {
+        Some(i2c::I2c::new_async(p.I2C0, p.PIN_21, p.PIN_20, Irqs, i2c0_config))
     } else {
         None
     };
     
-
-    let adc = ADS124S08::new(
-        Output::new(p.PIN_8.degrade(), Level::High),
-        WaitStrategy::UseDrdyPin(Input::new(p.PIN_3.degrade(), Pull::Up)),
-    );
+    let nau7082_i2c_config = Config::default();
 
     GravityBoardFeatures {
-        adc_cs_pin: None,
+        blocking_i2c0_bus,
+        async_i2c0_bus,
 
-        ads124s08: Some(adc),
-
-        spi_bus,
-        blocking_i2c_bus,
-        async_i2c_bus,
+        nau7802_a_i2c_bus: None, //Some(i2c::I2c::new_async(p.I2C1, p.PIN_11, p.PIN_10, Irqs, nau7082_i2c_config)),
+        nau7802_a_drdy_pin: Some(p.PIN_7.degrade()),
+        nau7802_b_i2c_bus: None,
+        nau7802_b_drdy_pin: Some(p.PIN_6.degrade()),
 
         uart_rx: None,
         uart_tx: None,
@@ -85,18 +88,18 @@ pub fn create_board_features(p: Peripherals) -> GravityR0ABoardFeatures<> {
         uart_rx_pin: Some(uart_rx_pin.degrade()),
         uart_tx_pin: Some(uart_tx_pin.degrade()),
 
-        adc_res_pin: Some(p.PIN_2.degrade()),
-        adc_drdy_pin: None,
-        adc_start_pin: Some(p.PIN_9.degrade()),
+        button1_pin: Some(p.PIN_25.degrade()),
+        button2_pin: Some(p.PIN_12.degrade()),
 
-        excitation1_en_pin: Some(p.PIN_15.degrade()),
-        excitation2_en_pin: Some(p.PIN_14.degrade()),
-        excitation3_en_pin: Some(p.PIN_13.degrade()),
-        excitation4_en_pin: Some(p.PIN_12.degrade()),
+        led1_pin,
+        led1_pwm,
 
-        led_pin,
-        led_pwm,
+        led2_pin,
+        led2_pwm,
 
         usb: Some(p.USB),
+        
+        pio0: Some(p.PIO0),
+        pio1: Some(p.PIO1)
     }
 }

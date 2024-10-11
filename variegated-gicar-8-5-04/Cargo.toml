@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 bitflags = "2.5.0"
 variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
-embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-rp = { version = "0.2.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 embassy-sync = { version = "0.5.0", features = ["defmt"] }
 async-trait = "0.1.80"
 libm = "0.2.1"

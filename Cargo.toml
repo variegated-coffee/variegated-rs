@@ -15,7 +15,13 @@ members = [
     "apec-r0d-functional-test",
     "variegated-log",
     "variegated-controller-gear-pump-silvia",
-    "gravity-r0a-functional-test"
-, "variegated-board-gravity", "variegated-adc-tools", "variegated-embassy-nau7802", "variegated-embassy-rp-frequency-counter"]
+    "gravity-r0a-functional-test",
+    "variegated-board-gravity",
+    "variegated-adc-tools",
+    "variegated-embassy-nau7802",
+    "variegated-embassy-rp-frequency-counter",
+    "gravity-r2a-functional-test",
+    "variegated-pio-i2c",
+]
 resolver = "2"
 package = { rust-version = "1.75" }

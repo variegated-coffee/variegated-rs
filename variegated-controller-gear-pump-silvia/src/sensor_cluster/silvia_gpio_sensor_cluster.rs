@@ -7,13 +7,13 @@ use variegated_controller_lib::{ActualBoardFeaturesMutex, SensorCluster, SensorC
 use crate::SilviaSystemSensorState;
 
 pub struct SilviaGpioSensorCluster<'a> {
-    brew_button_input: Input<'a, AnyPin>,
-    water_button_input: Input<'a, AnyPin>,
-    steam_button_input: Input<'a, AnyPin>,
+    brew_button_input: Input<'a>,
+    water_button_input: Input<'a>,
+    steam_button_input: Input<'a>,
 }
 
 impl<'a> SilviaGpioSensorCluster<'a> {
-    pub fn new(brew_button_input: Input<'a, AnyPin>, water_button_input: Input<'a, AnyPin>, steam_button_input: Input<'a, AnyPin>) -> SilviaGpioSensorCluster<'a> {
+    pub fn new(brew_button_input: Input<'a>, water_button_input: Input<'a>, steam_button_input: Input<'a>) -> SilviaGpioSensorCluster<'a> {
         SilviaGpioSensorCluster {
             brew_button_input,
             water_button_input,

@@ -1,0 +1,4 @@
+[flags]
+feature_x = true
+target_device = "PIN_0"
+optimization_level = 2

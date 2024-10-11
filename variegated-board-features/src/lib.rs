@@ -4,15 +4,14 @@ use embassy_rp::gpio::{AnyPin, Pin};
 use embassy_rp::{i2c, spi, uart};
 use embassy_rp::peripherals::{FLASH, I2C0, PIO0, PIO1, SPI1, USB, WATCHDOG};
 use embassy_rp::pio::{Pio, PioPin};
-use embassy_rp::pwm::{Channel, Pwm};
-use embassy_rp::uart::Blocking;
+use embassy_rp::pwm::Pwm;
+use embassy_rp::uart::{Async, Blocking};
 use variegated_embassy_ads124s08::ADS124S08;
 use variegated_embassy_dual_c595_shift_register::DualC595ShiftRegister;
 
 pub struct
-OpenLCCBoardFeatures<'a, LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT>
+OpenLCCBoardFeatures<'a, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT>
     where
-        LedPwmChT: Channel,
         EspUartT: uart::Instance,
         IoxUartT: uart::Instance,
         Qwiic1I2cT: i2c::Instance,
@@ -48,13 +47,12 @@ OpenLCCBoardFeatures<'a, LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, 
     pub sd_dat2_pin: Option<AnyPin>,
 
     pub led_pin: Option<AnyPin>,
-    pub led_pwm: Option<Pwm<'a, LedPwmChT>>,
+    pub led_pwm: Option<Pwm<'a>>,
 
     pub usb: USB,
 }
 
-unsafe impl<LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT> Send for OpenLCCBoardFeatures<'_, LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT> where
-    LedPwmChT: Channel,
+unsafe impl<EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT> Send for OpenLCCBoardFeatures<'_, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlashSpiT, SdCardSpiT> where
     EspUartT: uart::Instance,
     IoxUartT: uart::Instance,
     Qwiic1I2cT: i2c::Instance,
@@ -62,16 +60,12 @@ unsafe impl<LedPwmChT, EspUartT, IoxUartT, Qwiic1I2cT, Qwiic2I2cT, SettingsFlash
     SettingsFlashSpiT: spi::Instance,
     SdCardSpiT: spi::Instance, {}
 
-pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn94ChT, Cn96ChT, Cn98ChT, Cn1410ChT, Cn96PinT, Cn12PinT, Cn13PinT, Cn143PinT>
+pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2cT, SpiT, Cn96PinT, Cn12PinT, Cn13PinT, Cn143PinT>
     where
         EspUartT: uart::Instance,
         Cn1UartT: uart::Instance,
         I2cT: i2c::Instance,
         SpiT: spi::Instance,
-        Cn94ChT: Channel,
-        Cn96ChT: Channel,
-        Cn98ChT: Channel,
-        Cn1410ChT: Channel,
         Cn96PinT: Pin + PioPin,
         Cn12PinT: Pin + PioPin,
         Cn13PinT: Pin + PioPin,
@@ -88,7 +82,7 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub cn14_6_pin: Option<AnyPin>,
     pub cn14_4_pin: Option<AnyPin>,
     
-    pub cn14_10_pwm: Option<Pwm<'a, Cn1410ChT>>,
+    pub cn14_10_pwm: Option<Pwm<'a>>,
 
     pub ser_pin: Option<AnyPin>,
     pub rclk_pin: Option<AnyPin>,
@@ -100,9 +94,9 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub cn9_6_pin: Option<Cn96PinT>,
     pub cn9_8_pin: Option<AnyPin>,
 
-    pub cn9_4_pwm: Option<Pwm<'a, Cn94ChT>>,
-    pub cn9_6_pwm: Option<Pwm<'a, Cn96ChT>>,
-    pub cn9_8_pwm: Option<Pwm<'a, Cn98ChT>>,
+    pub cn9_4_pwm: Option<Pwm<'a>>,
+    pub cn9_6_pwm: Option<Pwm<'a>>,
+    pub cn9_8_pwm: Option<Pwm<'a>>,
 
     pub spi_bus: Option<spi::Spi<'a, SpiT, spi::Async>>,
     pub settings_flash_cs_pin: Option<AnyPin>,
@@ -112,8 +106,8 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
 
     pub i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Async>>,
 
-    pub esp32_uart_rx: uart::UartRx<'a, EspUartT, uart::Async>,
-    pub esp32_uart_tx: uart::UartTx<'a, EspUartT, uart::Async>,
+    pub esp32_uart_rx: Option<uart::UartRx<'a, EspUartT, uart::Async>>,
+    pub esp32_uart_tx: Option<uart::UartTx<'a, EspUartT, uart::Async>>,
 
     pub serial_boot_pin: Option<AnyPin>,
     pub adc_drdy_pin: Option<AnyPin>,
@@ -132,47 +126,47 @@ pub struct AllPurposeEspressoControllerBoardFeatures<'a, EspUartT, Cn1UartT, I2c
     pub usb: Option<USB>,
 }
 
-pub struct GravityBoardFeatures<'a, UartT, I2cT, SpiT, LedChT>
+pub struct GravityBoardFeatures<'a, UartT, I2cT, Nau7802AI2cT, Nau7802BI2cT>
 where
     UartT: uart::Instance,
     I2cT: i2c::Instance,
-    SpiT: spi::Instance,
-    LedChT: Channel,
+    Nau7802AI2cT: i2c::Instance,
+    Nau7802BI2cT: i2c::Instance,
 {
-    pub adc_cs_pin: Option<AnyPin>,
+    pub blocking_i2c0_bus: Option<i2c::I2c<'a, I2cT, i2c::Blocking>>,
+    pub async_i2c0_bus: Option<i2c::I2c<'a, I2cT, i2c::Async>>,
 
-    pub ads124s08: Option<ADS124S08<'a>>,
+    pub nau7802_a_i2c_bus: Option<i2c::I2c<'a, Nau7802AI2cT, i2c::Async>>,
+    pub nau7802_a_drdy_pin: Option<AnyPin>,
+    pub nau7802_b_i2c_bus: Option<i2c::I2c<'a, Nau7802BI2cT, i2c::Async>>,
+    pub nau7802_b_drdy_pin: Option<AnyPin>,
     
-    pub spi_bus: Option<spi::Spi<'a, SpiT, spi::Async>>,
-
-    pub blocking_i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Blocking>>,
-    pub async_i2c_bus: Option<i2c::I2c<'a, I2cT, i2c::Async>>,
-
     pub uart_rx: Option<uart::UartRx<'a, UartT, uart::Async>>,
     pub uart_tx: Option<uart::UartTx<'a, UartT, uart::Async>>,
 
     pub uart_tx_pin: Option<AnyPin>,
     pub uart_rx_pin: Option<AnyPin>,
 
-    pub adc_res_pin: Option<AnyPin>,
-    pub adc_drdy_pin: Option<AnyPin>,
-    pub adc_start_pin: Option<AnyPin>,
+    pub button1_pin: Option<AnyPin>,
+    pub button2_pin: Option<AnyPin>,
 
-    pub excitation1_en_pin: Option<AnyPin>,
-    pub excitation2_en_pin: Option<AnyPin>,
-    pub excitation3_en_pin: Option<AnyPin>,
-    pub excitation4_en_pin: Option<AnyPin>,
-    
-    pub led_pin: Option<AnyPin>,
-    pub led_pwm: Option<Pwm<'a, LedChT>>,
+    pub led1_pin: Option<AnyPin>,
+    pub led1_pwm: Option<Pwm<'a>>,
+
+    pub led2_pin: Option<AnyPin>,
+    pub led2_pwm: Option<Pwm<'a>>,
 
     pub usb: Option<USB>,
+
+    pub pio0: Option<PIO0>,
+    pub pio1: Option<PIO1>,
 }
 
 
-pub struct BootloaderFeatures<'a, UartT> where UartT: uart::Instance{
-    pub bootloader_uart: uart::Uart<'a, UartT, Blocking>,
-    pub bootloader_trigger_pin: AnyPin,
+pub struct BootloaderFeatures<'a, UartT, TriggerPinT: Pin, LedPinT: Pin> where UartT: uart::Instance{
+    pub bootloader_uart: uart::BufferedUart<'a, UartT>,
+    pub bootloader_trigger_pin: TriggerPinT,
+    pub led_pin: LedPinT,
     pub watchdog: WATCHDOG,
     pub flash: FLASH,
     pub flash_size: usize

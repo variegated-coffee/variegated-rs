@@ -1,14 +1,14 @@
-use embassy_rp::peripherals::{PWM_CH1, PWM_CH4};
-use embassy_rp::pwm::{Channel, Config, Pwm};
+use embassy_rp::peripherals::PWM_SLICE4;
+use embassy_rp::pwm::{Slice, Config, Pwm};
 use fixed::traits::ToFixed;
 use crate::state::SilviaSystemActuatorState;
 
 pub struct SilviaPwmOutputCluster<'a> {
-    pwm: PwmSlice<'a, PWM_CH4>
+    pwm: PwmSlice<'a>
 }
 
 impl<'a> SilviaPwmOutputCluster<'a> {
-    pub fn new(pwm: Pwm<'a, PWM_CH4>) -> Self {
+    pub fn new(pwm: Pwm<'a>) -> Self {
         let slice = PwmSlice::new(10_000, 0.0, 0.0, pwm);
         
         Self { 
@@ -22,17 +22,17 @@ impl<'a> SilviaPwmOutputCluster<'a> {
     }
 }
 
-pub(crate) struct PwmSlice<'a, T: Channel> {
+pub(crate) struct PwmSlice<'a> {
     frequency: u32,
     duty_cycle_a: PwmDutyCyclePercent,
     duty_cycle_b: PwmDutyCyclePercent,
-    pwm: Pwm<'a, T>
+    pwm: Pwm<'a>
 }
 
 type PwmDutyCyclePercent = f32;
 
-impl<'a, T: Channel> PwmSlice<'a, T> {
-    pub(crate) fn new(frequency: u32, duty_cycle_a: PwmDutyCyclePercent, duty_cycle_b: PwmDutyCyclePercent, pwm: Pwm<'a, T>) -> Self {
+impl<'a> PwmSlice<'a> {
+    pub(crate) fn new(frequency: u32, duty_cycle_a: PwmDutyCyclePercent, duty_cycle_b: PwmDutyCyclePercent, pwm: Pwm<'a>) -> Self {
         let mut slice = PwmSlice {
             frequency,
             duty_cycle_a,

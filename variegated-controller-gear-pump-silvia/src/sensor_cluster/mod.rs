@@ -62,7 +62,7 @@ pub async fn create_sensor_clusters(board_features_mutex: &ActualMutexType<Actua
     
     let i2c = board_features.i2c_bus.as_mut().expect("I2c not initialized");
     let nau7802 = SilviaNau7802SensorCluster::new().await.expect("Failed to initialize NAU7802");
-    nau7802.init(i2c).await.expect("Failed to initialize NAU7802");
+    //nau7802.init(i2c).await.expect("Failed to initialize NAU7802");
     log_info!("Xyzzy334");
 
     // PT100

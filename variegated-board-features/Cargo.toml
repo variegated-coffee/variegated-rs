@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-rp = { version = "0.2.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 variegated-embassy-dual-c595-shift-register = { path = "../variegated-embassy-dual-c595-shift-register", version = "0.1.0" }
 variegated-embassy-ads124s08 = { path = "../variegated-embassy-ads124s08", version = "0.1.0" }
 

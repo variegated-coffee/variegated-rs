@@ -1,5 +1,5 @@
 use embassy_rp::bind_interrupts;
-use embassy_rp::peripherals::PIO0;
+use embassy_rp::peripherals::{PIN_0, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio, PioPin};
 use variegated_controller_lib::{ActualBoardFeaturesMutex, SensorCluster, SensorClusterError};
 use variegated_embassy_rp_frequency_counter::PioFrequencyCounter;
@@ -7,8 +7,7 @@ use variegated_log::log_info;
 use crate::state::SilviaSystemSensorState;
 
 pub struct SilviaPioFrequencyCounter<'a> {
-    pump_rpm_counter: PioFrequencyCounter<'a, PIO0, 0>,
-    //flow_meter_rpm_counter: PioFrequencyCounter<'a, PIO0, 1>,
+    frequency_counter: PioFrequencyCounter<'a, PIO0>,
 }
 
 bind_interrupts!(struct Irqs {
@@ -20,25 +19,22 @@ impl<'a> SilviaPioFrequencyCounter<'a> {
         let mut pio = Pio::new(p, Irqs);
 
         log_info!("Creating SilviaPioFrequencyCounter 1");
-        let pump_rpm_counter = PioFrequencyCounter::new(pump_rpm_pin, &mut pio.common, pio.sm0);
-        log_info!("Creating SilviaPioFrequencyCounter 2");
-        //let flow_meter_rpm_counter = PioFrequencyCounter::new(flow_meter_rpm_pin, &mut pio.common, pio.sm1);
+        let frequency_counter = PioFrequencyCounter::new::<Pin1T, Pin2T, PIN_0, PIN_0>(pio, Some(pump_rpm_pin), Some(flow_meter_rpm_pin), None, None);
         log_info!("Creating SilviaPioFrequencyCounter 3");
 
 
         SilviaPioFrequencyCounter {
-            pump_rpm_counter,
-            //flow_meter_rpm_counter,
+            frequency_counter,
         }
     }
 }
 
 impl<'a> SensorCluster<SilviaSystemSensorState> for SilviaPioFrequencyCounter<'a> {
     async fn update_sensor_state(&mut self, state: &mut SilviaSystemSensorState, _board_features: &ActualBoardFeaturesMutex) -> Result<(), SensorClusterError> {
-        let freq = self.pump_rpm_counter.read_frequency();
+        let freq1 = self.frequency_counter.read_frequency_pin_1();
 
-        state.pump_rpm = if freq < 10000.0 { freq } else { 0.0 };
-        //state.flow_meter_rpm = self.flow_meter_rpm_counter.read_frequency();
+        state.pump_rpm = if freq1 < 10000.0 { freq1 * (60.0/32.0) } else { 0.0 };
+        //state.flow_meter_rpm = self.frequency_counter.read_frequency_pin_2();
 
         Ok(())
     }
