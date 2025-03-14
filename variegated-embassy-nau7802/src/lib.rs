@@ -3,7 +3,7 @@
 use byteorder::ByteOrder as _;
 use core::{fmt, slice};
 use embedded_hal_async::digital::Wait;
-use embedded_hal_async::i2c::I2c;
+use embedded_hal_async::i2c::{I2c, SevenBitAddress};
 use embedded_hal_async::delay::DelayNs;
 
 mod constants;
@@ -23,22 +23,28 @@ pub enum Nau7802DataAvailableStrategy<W: Wait>{
 }
 
 pub struct Nau7802<W: Wait, D: DelayNs> {
+    address: u8,
     wait_strategy: Nau7802DataAvailableStrategy<W>,
     delay: D
 }
 
 impl<W: Wait, D: DelayNs> Nau7802<W, D> {
-    const DEVICE_ADDRESS: u8 = 0x2A;
+    pub fn new(wait_strategy: Nau7802DataAvailableStrategy<W>, delay: D, address: Option<u8>) -> Self {
+        let addr = if let Some(a) = address {
+            a
+        } else {
+            0x2A
+        };
 
-    pub fn new(wait_strategy: Nau7802DataAvailableStrategy<W>, delay: D) -> Self {
         Self {
             wait_strategy,
-            delay
+            delay,
+            address: addr
         }
     }
 
     pub async fn init<I2C, I2CError>(
-        &self,
+        &mut self,
         i2c: &mut I2C,
         ldo: Ldo,
         gain: Gain,
@@ -83,7 +89,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
 
         let mut buf = [0u8; 3]; // will hold an i24
         i2c
-            .read(Self::DEVICE_ADDRESS, &mut buf)
+            .read(self.address, &mut buf)
             .await
             .map_err(|_| Error::I2cError)?;
 
@@ -210,7 +216,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         let transaction = [reg as _, val];
 
         i2c
-            .write(Self::DEVICE_ADDRESS, &transaction)
+            .write(self.address, &transaction)
             .await
             .map_err(|_| Error::I2cError)
     }
@@ -220,7 +226,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
 
         let mut val = 0;
         i2c
-            .read(Self::DEVICE_ADDRESS, slice::from_mut(&mut val))
+            .read(self.address, slice::from_mut(&mut val))
             .await
             .map_err(|_| Error::I2cError)?;
 
@@ -231,7 +237,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         let reg = reg as u8;
 
         i2c
-            .write(Self::DEVICE_ADDRESS, slice::from_ref(&reg))
+            .write(self.address, slice::from_ref(&reg))
             .await
             .map_err(|_| Error::I2cError)
     }
