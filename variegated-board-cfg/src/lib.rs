@@ -1,6 +1,5 @@
 use proc_macro::TokenStream as TS1;
 use std::collections::HashMap;
-use std::fmt::Error;
 use std::path::{Path, PathBuf};
 use either::{Either, Left, Right};
 use inflector::Inflector;
@@ -102,8 +101,10 @@ impl PeripheralField {
 
 // Define a struct to represent the input syntax
 struct AliasedBindInterrupts {
+    #[allow(dead_code)]
     struct_token: Token![struct],
     struct_name: Ident,
+    #[allow(dead_code)]
     brace_token: syn::token::Brace,
     fields: Punctuated<BindInterruptField, Token![;]>,
 }
@@ -111,6 +112,7 @@ struct AliasedBindInterrupts {
 // Define a struct to represent each field in the input
 struct BindInterruptField {
     left_ident: Ident,
+    #[allow(dead_code)]
     arrow_token: Token![=>],
     right_type: Type,
 }
