@@ -1,18 +1,20 @@
 use proc_macro::TokenStream as TS1;
 use std::collections::HashMap;
+use std::fmt::Error;
 use std::path::{Path, PathBuf};
 use either::{Either, Left, Right};
 use inflector::Inflector;
 use proc_macro2::{ Span, TokenStream as TS2 };
-use quote::{quote, ToTokens};
-use syn::{Attribute, Expr, Ident, ItemStruct, ItemType, LitStr, parse_macro_input, Token, Type, TypeParamBound};
+use quote::{quote, ToTokens, format_ident};
+use syn::{Attribute, Expr, Ident, ItemStruct, ItemType, LitStr, parse_macro_input, parse_str, braced, Token, Type, TypeParamBound, Result as SynResult};
+use syn::parse::{Parse, ParseStream};
 use serde::Deserialize;
 use syn::punctuated::Punctuated;
 
 #[derive(Deserialize, Clone, Debug)]
 struct Config {
     #[serde(flatten)]
-    crates: HashMap<String, Defn>,
+    sections: HashMap<String, Defn>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -50,7 +52,7 @@ impl PeripheralField {
         let altered_type = match original_type {
             Type::ImplTrait(ref ty) => {
                 let toml::Value::String(t) = config else {
-                    panic!("Type of {:?} in board-config.toml is not a string", ident.to_string());
+                    panic!("Type of {:?} in board-cfg.toml is not a string", ident.to_string());
                 };
 
                 impls = Some(ty.bounds.clone());
@@ -59,7 +61,7 @@ impl PeripheralField {
             },
             Type::Tuple(_) => {
                 let toml::Value::String(t) = config else {
-                    panic!("Type of {:?} in board-config.toml is not a string", ident.to_string());
+                    panic!("Type of {:?} in board-cfg.toml is not a string", ident.to_string());
                 };
 
                 syn::parse_str::<Type>(t.as_str()).expect("Exp:7")
@@ -97,34 +99,165 @@ impl PeripheralField {
     }
 }
 
+
+// Define a struct to represent the input syntax
+struct AliasedBindInterrupts {
+    struct_token: Token![struct],
+    struct_name: Ident,
+    brace_token: syn::token::Brace,
+    fields: Punctuated<BindInterruptField, Token![;]>,
+}
+
+// Define a struct to represent each field in the input
+struct BindInterruptField {
+    left_ident: Ident,
+    arrow_token: Token![=>],
+    right_type: Type,
+}
+
+// Implement the Parse trait for AliasedBindInterrupts
+impl Parse for AliasedBindInterrupts {
+    fn parse(input: ParseStream) -> SynResult<Self> {
+        let struct_token = input.parse()?;
+        let struct_name = input.parse()?;
+        let content;
+        let brace_token = braced!(content in input);
+        let fields = content.parse_terminated(BindInterruptField::parse, Token![;])?;
+
+        Ok(AliasedBindInterrupts {
+            struct_token,
+            struct_name,
+            brace_token,
+            fields,
+        })
+    }
+}
+
+// Implement the Parse trait for BindInterruptField
+impl Parse for BindInterruptField {
+    fn parse(input: ParseStream) -> SynResult<Self> {
+        let left_ident = input.parse()?;
+        let arrow_token = input.parse()?;
+        let right_type = input.parse()?;
+
+        Ok(BindInterruptField {
+            left_ident,
+            arrow_token,
+            right_type,
+        })
+    }
+}
+
+
+#[proc_macro]
+pub fn aliased_bind_interrupts(input: TS1) -> TS1
+{
+    let cfg_path = get_cfg_path();
+
+    let maybe_cfg = get_board_cfg(&cfg_path);
+
+    let Some(cfg) = maybe_cfg else {
+        panic!("Couldn't find board-cfg.toml (searched at {:?})", cfg_path);
+    };
+
+    let Some(irq_aliases) = cfg.sections.get("irq_aliases") else {
+        panic!("board-cfg.toml doesn't contain a section for irq_aliases");
+    };
+
+    let alias_map: HashMap<String, String> = irq_aliases.clone().vals.into_iter().map(|(k, v)| {
+        (k, v.as_str().unwrap().to_string())
+    } ).collect();
+
+//    panic!("Alias map: {}", alias_map);
+
+/*    // Define your mapping here
+    let mut alias_map = HashMap::new();
+    alias_map.insert("Nau7802Irq", "I2C0_IRQ");
+    alias_map.insert("DispIrq", "I2C1_IRQ");*/
+
+    // Parse the input tokens
+    let aliased_input = parse_macro_input!(input as AliasedBindInterrupts);
+    let struct_name = &aliased_input.struct_name;
+
+    // Process each field, replacing identifiers according to the map
+    let updated_fields = aliased_input.fields.iter().map(|field| {
+        let left_ident_str = field.left_ident.to_string();
+        let right_type = &field.right_type;
+
+        // Check if the identifier is in our map and replace it if it is
+        let mapped_ident = if let Some(new_ident) = alias_map.get(left_ident_str.as_str()) {
+            format_ident!("{}", new_ident)
+        } else {
+            field.left_ident.clone()
+        };
+
+        quote! {
+            #mapped_ident => #right_type
+        }
+    });
+
+    // Generate the output token stream
+    let output = quote! {
+        bind_interrupts!(struct #struct_name {
+            #(#updated_fields;)*
+        });
+    };
+
+    output.into()
+}
+
+#[proc_macro]
+pub fn type_aliases(_input: TS1) -> TS1 {
+    let cfg_path = get_cfg_path();
+
+    let maybe_cfg = get_board_cfg(&cfg_path);
+
+    let Some(cfg) = maybe_cfg else {
+        panic!("Couldn't find board-cfg.toml (searched at {:?})", cfg_path);
+    };
+
+    let Some(type_aliases) = cfg.sections.get("type_aliases") else {
+        panic!("board-cfg.toml doesn't contain a section for type_aliases");
+    };
+
+    let aliases_map = type_aliases.clone().vals.into_iter().map(|(k, v)| {
+        let v_str = v.as_str().unwrap();
+
+        let alias_ident = format_ident!("{}", k);
+        let parsed_type: Type = parse_str(v_str).unwrap();
+
+        syn::parse2(quote! { type #alias_ident = #parsed_type; }).expect("ExpT:1")
+    } );
+    let aliases_vec: Vec<TS2> = aliases_map.into_iter().collect();
+
+    // Create a single TS2 from all the tokens
+    let ts: TS2 = aliases_vec.into_iter().flatten().collect();
+
+    // Convert the proc_macro2::TokenStream to proc_macro::TokenStream
+    ts.into()
+}
+
 /// Mark a struct as a resource for extraction from the `Peripherals` instance.
 #[proc_macro_attribute]
 pub fn board_cfg(args: TS1, item: TS1) -> TS1 {
     let mut s: ItemStruct = syn::parse2(item.into()).expect("Resource item must be a struct.");
 
-    let root_path = find_root_path();
-    let cfg_path = root_path.clone();
-    let cfg_path = cfg_path.as_ref().and_then(|c| {
-        let mut x = c.to_owned();
-        x.push("board-cfg.toml");
-        Some(x)
-    });
+    let cfg_path = get_cfg_path();
+
+    let maybe_cfg = get_board_cfg(&cfg_path);
 
     let input = parse_macro_input!(args as LitStr);
     let section = input.value();
 
-    let maybe_cfg = cfg_path.as_ref().and_then(|c| load_crate_cfg(&c));
-
     let Some(cfg) = maybe_cfg else {
-        panic!("Couldn't find board-config.toml");
+        panic!("Couldn't find board-cfg.toml (searched at {:?})", cfg_path);
     };
 
-    let Some(defs) = cfg.crates.get(&section) else {
-        panic!("board-config.toml doesn't contain a section for {}", section);
+    let Some(defs) = cfg.sections.get(&section) else {
+        panic!("board-cfg.toml doesn't contain a section for {}", section);
     };
 
-    let cfg_path_binding = cfg_path.unwrap();
-    let cfg_path_str = cfg_path_binding.to_str().unwrap();
+    let cfg_path_str = cfg_path.to_str().unwrap();
 
     let macro_ident = Ident::new(
         inflector::cases::snakecase::to_snake_case(s.ident.to_string().as_str()).as_str(),
@@ -226,6 +359,10 @@ pub fn board_cfg(args: TS1, item: TS1) -> TS1 {
 
 }
 
+fn get_board_cfg(cfg_path: &PathBuf) -> Option<Config> {
+    load_crate_cfg(cfg_path.as_path())
+}
+
 fn load_crate_cfg(path: &Path) -> Option<Config> {
     let contents = std::fs::read_to_string(&path).ok()?;
 
@@ -247,6 +384,16 @@ fn find_root_path() -> Option<PathBuf> {
         }
     }
 
+    if out_dir.is_none() {
+        // Sometimes (like when RustRover expands macros, we don't have an out-dir.
+        // In that case, let's use the current working directory, if one exists.
+
+        let current_dir = std::env::current_dir();
+        if let Ok(current_dir) = current_dir {
+            return Some(current_dir);
+        }
+    }
+
     // Finally we clean out_dir by removing all trailing directories, until it ends with target
     let mut out_dir = PathBuf::from(out_dir?);
     while !out_dir.ends_with("target") {
@@ -259,4 +406,24 @@ fn find_root_path() -> Option<PathBuf> {
     out_dir.pop();
 
     Some(out_dir)
+}
+
+fn get_cfg_path() -> PathBuf {
+    let arg = std::env::var("BOARD_CFG_PATH");
+
+    let cfg_path = if let Ok(arg) = arg {
+        Some(PathBuf::from(arg))
+    } else {
+        find_root_path().map(|path| {
+            let mut cfg_path = path;
+            cfg_path.push("board-cfg.toml");
+            cfg_path
+        })
+    };
+
+    if cfg_path.is_none() {
+        panic!("Couldn't find root path, and BOARD_CFG_PATH is not set.");
+    }
+
+    cfg_path.unwrap()
 }

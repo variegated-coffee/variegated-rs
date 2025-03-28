@@ -2,22 +2,31 @@
 
 Substantial credits go to James Munns for the [toml-cfg](https://github.com/jamesmunns/toml-cfg) crate, Adam Greig for the [assign-resources](https://github.com/adamgreig/assign-resources) crate, and Adin Ackerman for [the procedural overhaul PR for assign-resources](https://github.com/adamgreig/assign-resources/pull/11).
 
-## Example configuration
+The idea of this crate is to be able to store pin and peripheral configration in a config file, and then use that configuration to split the Peripherals struct into smaller, more purpose-built structs.
 
-### lib.rs
+## Usage
+
+### Config file path
+This crate expects a `board-cfg.toml` to be located in your project root. If you want to place it somewhere else, you can by setting the `BOARD_CFG_PATH` environment variable.
+
+### Splitting peripherals
+
+The main features here are the ability to split a peripherals struct, set type aliases, and enforce correct types from the configuration.
+
+#### lib.rs
 
 ```rust
-#[variegated_board_cfg::config_section("hid_bus")]
+#[variegated_board_cfg::board_cfg("hid_bus")]
 struct HidBus {
     tx_pin: (),
     rx_pin: impl embassy_rp::peripherals::Pin, // Forces a compile error if the type of rx_pin doesn't implement Pin
     uart: (),
-    baud_rate: u32,
+    baud_rate: u32
 }
 
 ```
 
-### board-cfg.toml
+#### board-cfg.toml
 
 ```toml
 [hid_bus]
@@ -27,7 +36,7 @@ uart = "embassy_rp::peripherals::UART0"
 baud_rate = 115200
 ```
 
-## Expansion
+#### Expansion
 
 ```rust
 type HidBusTxPin = embassy_rp::peripherals::PIN_0;
@@ -56,4 +65,32 @@ macro_rules! hid_bus {
     };
 }
 
+```
+
+### Binding interrupts
+
+#### board-cfg.toml
+
+```toml
+[irq_aliases]
+Nau7802Irq = "I2C0_IRQ"
+DispIrq = "I2C1_IRQ"
+```
+
+#### lib.rs
+```rust
+variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
+    USBCTRL_IRQ => usb::InterruptHandler<USB>;
+    Nau7802Irq => i2c::InterruptHandler<Nau7802ConfigI2CInstance>;
+    DispIrq => i2c::InterruptHandler<Sh1107I2cDisplayConfigI2CInstance>;
+});
+```
+
+#### Expansion
+```rust
+bind_interrupts!(struct Irqs {
+    USBCTRL_IRQ => usb::InterruptHandler<USB>;
+    I2C0_IRQ => i2c::InterruptHandler<Nau7802ConfigI2CInstance>;
+    I2C1_IRQ => i2c::InterruptHandler<Sh1107I2cDisplayConfigI2CInstance>;
+});
 ```
