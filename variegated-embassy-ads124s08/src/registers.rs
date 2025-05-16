@@ -53,7 +53,7 @@ impl RegisterAddress {
         }
     }
 
-    fn from_addr(bits: u8) -> Option<Self> {
+    pub fn from_addr(bits: u8) -> Option<Self> {
         match bits {
             0x00 => Some(RegisterAddress::ID),
             0x01 => Some(RegisterAddress::STATUS),
@@ -696,7 +696,7 @@ impl ByteRepresentation for DeviceId {
     }
 
     fn from_bits(bits: u8) -> Option<Self> {
-        match (bits & 0b111) {
+        match bits & 0b111 {
             0b000 => Some(DeviceId::ADS124S08),
             0b001 => Some(DeviceId::ADS124S06),
             _ => None,

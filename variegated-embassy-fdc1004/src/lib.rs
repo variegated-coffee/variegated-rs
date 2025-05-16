@@ -447,37 +447,3 @@ impl FDC1004 {
     }
 }
 
-
-#[cfg(test)]
-mod tests {
-    use embassy_futures::block_on;
-    use embedded_hal_async::i2c::{ErrorKind, ErrorType, Operation, SevenBitAddress};
-    use super::*;
-    
-    struct MockI2C {
-    }
-
-    impl ErrorType for MockI2C { type Error = ErrorKind; }
-
-    impl I2c for MockI2C {
-        async fn transaction(&mut self, address: SevenBitAddress, operations: &mut [Operation<'_>]) -> Result<(), Self::Error> {
-            assert_eq!(address, 0x50);
-            assert_eq!(operations.len(), 1);
-            
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn write_endianness() {
-        let mut fdc = FDC1004::new(0x50, OutputRate::SPS100);
-        let mut i2c = MockI2C {
-
-        };
-        block_on(async {
-            let _ = fdc.write_u16(&mut i2c, RegisterAddress::FdcConf, 0x1234).await;
-        });
-
-        assert_eq!(4, 4);
-    }
-}

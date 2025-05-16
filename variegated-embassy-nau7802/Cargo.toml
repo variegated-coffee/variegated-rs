@@ -11,7 +11,7 @@ bench = false
 default = []
 
 [dependencies]
-embassy-time = { version = "0.3.2", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embedded-hal-async = "1.0"
 embassy-futures = "0.1.1"
 ux = "0.1.0"

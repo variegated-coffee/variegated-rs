@@ -2,24 +2,22 @@
 
 pub mod registers;
 
-use core::cmp::PartialEq;
 use defmt::Format;
-use embassy_futures::select::{Either, select};
-use embassy_rp::gpio::{AnyPin, Input, Output, Pin, Pull};
-use embassy_rp::spi;
-use embassy_rp::spi::{Async, Instance, Spi};
-use embassy_time::{Duration, Instant, Timer};
-use registers::{RegisterAddress, ByteRepresentation, ConfigurationRegisters};
-use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue};
+use embassy_time::{Duration, Timer};
+use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue, RegisterAddress, ByteRepresentation, ConfigurationRegisters};
+use embedded_hal::digital::InputPin;
+use embedded_hal::spi::Operation;
+use embedded_hal_async::digital::Wait;
+use embedded_hal_async::spi::SpiDevice;
 
-pub enum WaitStrategy<'a> {
-    UseRiskyMiso(AnyPin),
-    UseDrdyPin(Input<'a>),
+
+pub enum WaitStrategy<INPUT: InputPin + Wait> {
+    UseDrdyPin(INPUT),
     Delay
 }
 
 #[derive(Debug, Clone, Copy, Format)]
-enum Command {
+pub enum Command {
     NOP,
     WAKEUP,
     POWERDOWN,
@@ -53,17 +51,9 @@ impl Command {
     }
 }
 
-pub struct ADS124S08<'a> {
-    cs: Output<'a>,
-    wait_strategy: WaitStrategy<'a>,
-    configuration_registers: ConfigurationRegisters,
-
-    read_configuration_registers: ConfigurationRegisters,
-}
-
-#[derive(Debug, Format)]
+#[derive(Debug, Format, Clone, Copy)]
 pub enum ADS124S08Error {
-    SPIError(spi::Error),
+    SPIError,
     ReadTimeoutError,
     WriteTimeoutError,
     UnableToRestorePreviousConfigurationWhileHandlingError,
@@ -139,7 +129,7 @@ impl Code {
     pub fn ratiometric_resistance(&self, r_ref: f32) -> f32 {
         let code = self.code() as f32;
         let gain = if self.pga_enabled { self.gain.value() as f32 } else { 1.0 };
-        (r_ref * code * gain) / ((1 << 23) as f32)
+        (r_ref * code) / ((1 << 23) as f32 * gain)
     }
 }
 
@@ -147,9 +137,10 @@ macro_rules! define_read_write_register_ops {
     ($base_name:ident, $reg:ident, $reg_type:ty) => {
         paste::item! {
             // Generate read function name
-            pub async fn [<read_ $base_name _reg>]<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<$reg_type, ADS124S08Error>
-            where T: Instance {
-                let bits = self.read_reg(spi, registers::RegisterAddress::$reg).await?;
+            #[allow(dead_code)]
+            pub async fn [<read_ $base_name _reg>]<'a>(&mut self) -> Result<$reg_type, ADS124S08Error>
+             {
+                let bits = self.read_reg(registers::RegisterAddress::$reg).await?;
                 let res = $reg_type::from_bits(bits).ok_or(ADS124S08Error::InvalidRegisterValue(registers::RegisterAddress::$reg, bits));
                 if res.is_ok() {
                     let d = res.unwrap();
@@ -161,19 +152,21 @@ macro_rules! define_read_write_register_ops {
             }
 
             // Generate write function name
-            pub async fn [<write_ $base_name _reg>]<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, value: $reg_type) -> Result<(), ADS124S08Error>
-            where T: Instance {
-                self.write_reg(spi, registers::RegisterAddress::$reg, value.bits()).await?;
+            #[allow(dead_code)]
+            pub async fn [<write_ $base_name _reg>]<'a>(&mut self, value: $reg_type) -> Result<(), ADS124S08Error>
+             {
+                self.write_reg(registers::RegisterAddress::$reg, value.bits()).await?;
                 self.configuration_registers.$base_name = value;
                 self.read_configuration_registers.$base_name = value;
                 Ok(())
             }
 
             // Generate swap function name
-            pub async fn [<swap_ $base_name _reg>]<'a, T>(&mut self, spi: &mut Spi<'_, T, Async>, value: $reg_type) -> Result<$reg_type, ADS124S08Error>
-            where T: Instance {
-                let current = self.[<read_ $base_name _reg>](spi).await?;
-                self.[<write_ $base_name _reg>](spi, value).await?;
+            #[allow(dead_code)]
+            pub async fn [<swap_ $base_name _reg>]<'a>(&mut self, value: $reg_type) -> Result<$reg_type, ADS124S08Error>
+             {
+                let current = self.[<read_ $base_name _reg>]().await?;
+                self.[<write_ $base_name _reg>](value).await?;
                 Ok(current)
             }
         }
@@ -184,59 +177,58 @@ macro_rules! define_read_only_register_ops {
     ($base_name:ident, $reg:ident, $reg_type:ty) => {
         paste::item! {
             // Generate read function name
-            async fn [<read_ $base_name _reg>]<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<$reg_type, ADS124S08Error>
-            where T: Instance {
-                let bits = self.read_reg(spi, registers::RegisterAddress::$reg).await?;
+            #[allow(dead_code)]
+            async fn [<read_ $base_name _reg>]<'a>(&mut self) -> Result<$reg_type, ADS124S08Error>
+             {
+                let bits = self.read_reg(registers::RegisterAddress::$reg).await?;
                 $reg_type::from_bits(bits).ok_or(ADS124S08Error::InvalidRegisterValue(registers::RegisterAddress::$reg, bits))
             }
         }
     };
 }
 
-impl ADS124S08<'_> {
+pub struct ADS124S08<SpiDevT: SpiDevice, InputPinT: InputPin + Wait> {
+    spi: SpiDevT,
+    wait_strategy: WaitStrategy<InputPinT>,
+    configuration_registers: ConfigurationRegisters,
+
+    read_configuration_registers: ConfigurationRegisters,
+}
+
+impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait> ADS124S08<SpiDevT, InputPinT> {
     // High level API
-    pub fn new<'a>(cs: Output<'a>, wait_strategy: WaitStrategy<'a>) -> ADS124S08<'a> {
+    pub fn new(spi: SpiDevT, wait_strategy: WaitStrategy<InputPinT>) -> ADS124S08<SpiDevT, InputPinT> {
         ADS124S08 {
-            cs,
+            spi,
             wait_strategy,
             configuration_registers: ConfigurationRegisters::default(),
             read_configuration_registers: ConfigurationRegisters::default(),
         }
     }
 
-    pub async fn measure_single_ended<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, input: registers::Mux, reference_input: ReferenceInput) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.begin_transaction().await;
+    pub async fn measure_single_ended<'a>(&mut self, input: registers::Mux, reference_input: ReferenceInput) -> Result<Code, ADS124S08Error>  {
+        // This assumes that AVss is connected to GND, not to a negative voltage, and that AINCOM is connected to 0V
+        let mut config = self.configuration_registers.clone();
 
-        let data = {
-            // This assumes that AVss is connected to GND, not to a negative voltage, and that AINCOM is connected to 0V
-            let mut config = self.configuration_registers.clone();
+        config.inpmux.p = input;
+        config.inpmux.n = registers::Mux::AINCOM;
+        config.pga.enable = false;
+        config.pga.gain = registers::PGAGain::Gain1;
+        config.idacmag.imag = registers::IDACMagnitude::Off;
+        config.idacmux.i2mux = registers::IDACMux::Disconnected;
+        config.idacmux.i1mux = registers::IDACMux::Disconnected;
+        config.refctrl.refsel = reference_input;
 
-            config.inpmux.p = input;
-            config.inpmux.n = registers::Mux::AINCOM;
-            config.pga.enable = false;
-            config.pga.gain = registers::PGAGain::Gain1;
-            config.idacmag.imag = registers::IDACMagnitude::Off;
-            config.idacmux.i2mux = registers::IDACMux::Disconnected;
-            config.idacmux.i1mux = registers::IDACMux::Disconnected;
-            config.refctrl.refsel = reference_input;
+        config = self.swap_all_configuration_registers(config).await?;
 
-            config = self.swap_all_configuration_registers(spi, config).await?;
+        let res = self.start_wait_for_drdy_read_and_stop().await;
+        self.swap_all_configuration_registers(config).await?;
 
-            let res = self.start_wait_for_drdy_read_and_stop(spi).await;
-
-            self.swap_all_configuration_registers(spi, config).await?;
-
-            res
-        };
-
-        self.end_transaction().await;
-
-        data
+        res
     }
 
-    pub async fn measure_ratiometric_low_side<'a, T>(
+    pub async fn measure_ratiometric_low_side<'a>(
         &mut self,
-        spi: &mut Spi<'a, T, Async>,
         input_p: registers::Mux,
         input_n: registers::Mux,
         idac1: registers::IDACMux,
@@ -244,354 +236,283 @@ impl ADS124S08<'_> {
         reference_input: registers::ReferenceInput,
         idac_magnitude: registers::IDACMagnitude,
         gain: registers::PGAGain,
-    ) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.begin_transaction().await;
+    ) -> Result<Code, ADS124S08Error>  {
+        // See SBAA275A, 2.3 for schematic
+        // SBAA275A, 2.6 and 2.1 also works, but set idac2 to disconnected
+        let mut config = self.configuration_registers.clone();
 
-        let data = {
-            // See SBAA275A, 2.3 for schematic
-            // SBAA275A, 2.6 and 2.1 also works, but set idac2 to disconnected
-            let mut config = self.configuration_registers.clone();
+        config.inpmux.p = input_p;
+        config.inpmux.n = input_n;
+        config.idacmag.imag = idac_magnitude;
+        config.idacmux.i2mux = idac2;
+        config.idacmux.i1mux = idac1;
+        config.refctrl.n_refp_buf = true;
+        config.refctrl.n_refn_buf = true;
+        config.refctrl.refsel = reference_input;
+        config.refctrl.refcon = registers::InternalVoltageReferenceConfiguration::OnButPowersDown;
+        config.pga.enable = true;
+        config.pga.gain = gain;
+        config.datarate.mode = Mode::Continuous;
+        config.datarate.rate = registers::DataRate::SPS20;
+        config.datarate.filter = Filter::SINC3;
 
-            config.inpmux.p = input_p;
-            config.inpmux.n = input_n;
-            config.idacmag.imag = idac_magnitude;
-            config.idacmux.i2mux = idac2;
-            config.idacmux.i1mux = idac1;
-            config.refctrl.n_refp_buf = true;
-            config.refctrl.n_refn_buf = true;
-            config.refctrl.refsel = reference_input;
-            config.refctrl.refcon = registers::InternalVoltageReferenceConfiguration::OnButPowersDown;
-            config.pga.enable = true;
-            config.pga.gain = gain;
-            config.datarate.mode = Mode::Continuous;
-            config.datarate.rate = registers::DataRate::SPS400;
-            config.datarate.filter = Filter::SINC3;
+        config = self.swap_all_configuration_registers(config).await?;
 
-            config = self.swap_all_configuration_registers(spi, config).await?;
+        self.start_conversion().await?;
+//        let res = self.read_n_sample_average(10).await;
+        let res = self.start_wait_for_drdy_read_and_stop().await;
 
-            self.start_conversion(spi).await?;
-            let res = self.read_n_sample_average(spi, 10).await;
-
-            let res = self.start_wait_for_drdy_read_and_stop(spi).await;
-
-            self.swap_all_configuration_registers(spi, config).await?;
-
-            res
-        };
-
-        self.end_transaction().await;
-
-        data
-    }
-
-    pub async fn measure_differential<'a, T>(
-        &mut self,
-        spi: &mut Spi<'a, T, Async>,
-        input_p: registers::Mux,
-        input_n: registers::Mux,
-        reference_input: registers::ReferenceInput,
-        gain: registers::PGAGain,
-    ) -> Result<Code, ADS124S08Error> where T: Instance {
-        //let begin1 = Instant::now();
-        self.begin_transaction().await;
-
-        let data = {
-            let mut config = self.configuration_registers.clone();
-
-            config.inpmux.p = input_p;
-            config.inpmux.n = input_n;
-            config.pga.enable = gain != PGAGain::Gain1;
-            config.pga.gain = gain;
-            config.idacmag.imag = IDACMagnitude::Off;
-            config.idacmux.i2mux = IDACMux::Disconnected;
-            config.idacmux.i1mux = IDACMux::Disconnected;
-            config.refctrl.refsel = reference_input;
-
-            // Takes around 2 ms
-            config = self.swap_all_configuration_registers(spi, config).await?;
-
-            // This call has about 2 ms of overhead
-            let res = self.start_wait_for_drdy_read_and_stop(spi).await;
-
-            // Takes around 2 ms
-            self.swap_all_configuration_registers(spi, config).await?;
-
-            res
-        };
-
-        self.end_transaction().await;
-
-/*        let end1 = Instant::now();
-        let duration = end1 - begin1;
-        log::info!("measure_differential total: {} ms", duration.as_millis());*/
-        data
-    }
-
-    pub async fn read_dvdd_by_4<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.begin_transaction().await;
-
-        let data = {
-            let mut new_config = self.configuration_registers.sys.clone();
-            new_config.sys_mon = registers::SystemMonitorConfiguration::DvddBy4Measurement;
-            new_config.sendstat = true;
-            new_config.crc = true;
-
-            let prev_config = self.swap_sys_reg(
-                spi,
-                new_config
-            ).await?;
-
-            let mut new_refctl = self.configuration_registers.refctrl.clone();
-            new_refctl.refsel = registers::ReferenceInput::Internal;
-            new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
-
-            let prev_refctl = self.swap_refctrl_reg(spi, new_refctl).await?;
-
-            let curr_cfg_read = self.read_sys_reg(spi).await?;
-            //log::info!("Current SYS: {:?}", curr_cfg_read);
-
-            let res = self.start_wait_for_drdy_and_read(spi).await;
-
-            self.write_sys_reg(spi, prev_config).await?;
-            self.write_refctrl_reg(spi, prev_refctl).await?;
-
-            res
-        };
-
-        self.end_transaction().await;
-
-        data
-    }
-
-    pub async fn read_avdd_by_4<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.begin_transaction().await;
-
-        let data = {
-            let mut new_config = self.configuration_registers.sys.clone();
-            new_config.sys_mon = registers::SystemMonitorConfiguration::AvddMinusAvssBy4Measurement;
-            new_config.sendstat = true;
-            new_config.crc = true;
-
-            let prev_config = self.swap_sys_reg(
-                spi,
-                new_config
-            ).await?;
-
-            let mut new_refctl = self.configuration_registers.refctrl.clone();
-            new_refctl.refsel = registers::ReferenceInput::Internal;
-            new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
-
-            let prev_refctl = self.swap_refctrl_reg(spi, new_refctl).await?;
-
-            let res = self.start_wait_for_drdy_read_and_stop(spi).await;
-            //let res = Err(ADS124S08Error::ReadTimeoutError);
-
-            self.write_sys_reg(spi, prev_config).await?;
-            self.write_refctrl_reg(spi, prev_refctl).await?;
-
-            res
-        };
-
-        self.end_transaction().await;
-
-        data
-    }
-
-
-    pub async fn read_temperature<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.begin_transaction().await;
-
-        let data = {
-            let mut new_config = self.configuration_registers.sys.clone();
-            new_config.sys_mon = registers::SystemMonitorConfiguration::InternalTemperatureSensor;
-            new_config.sendstat = true;
-            new_config.crc = true;
-
-            let prev_config = self.swap_sys_reg(
-                spi,
-                new_config
-            ).await?;
-
-            let mut new_refctl = self.configuration_registers.refctrl.clone();
-            new_refctl.refsel = registers::ReferenceInput::Internal;
-            new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
-
-            let prev_refctl = self.swap_refctrl_reg(spi, new_refctl).await?;
-
-            let res = self.start_wait_for_drdy_read_and_stop(spi).await;
-            //let res = Err(ADS124S08Error::ReadTimeoutError);
-
-            self.write_sys_reg(spi, prev_config).await?;
-            self.write_refctrl_reg(spi, prev_refctl).await?;
-
-            res
-        };
-
-        self.end_transaction().await;
-
-        data
-    }
-
-    pub async fn read_device_id<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<registers::DeviceId, ADS124S08Error> where T: Instance {
-        self.begin_transaction().await;
-
-        let res = self.read_id_reg(spi).await;
-
-        self.end_transaction().await;
+        self.swap_all_configuration_registers(config).await?;
 
         res
     }
 
+    pub async fn measure_differential<'a>(
+        &mut self,
+        input_p: registers::Mux,
+        input_n: registers::Mux,
+        reference_input: registers::ReferenceInput,
+        gain: registers::PGAGain,
+    ) -> Result<Code, ADS124S08Error>  {
+        let mut config = self.configuration_registers.clone();
+
+        config.inpmux.p = input_p;
+        config.inpmux.n = input_n;
+        config.pga.enable = gain != PGAGain::Gain1;
+        config.pga.gain = gain;
+        config.idacmag.imag = IDACMagnitude::Off;
+        config.idacmux.i2mux = IDACMux::Disconnected;
+        config.idacmux.i1mux = IDACMux::Disconnected;
+        config.refctrl.refsel = reference_input;
+
+        // Takes around 2 ms
+        config = self.swap_all_configuration_registers(config).await?;
+
+        // This call has about 2 ms of overhead
+        let res = self.start_wait_for_drdy_read_and_stop().await;
+
+        // Takes around 2 ms
+        self.swap_all_configuration_registers(config).await?;
+
+        res
+    }
+
+    pub async fn read_dvdd_by_4<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        let mut new_config = self.configuration_registers.sys.clone();
+        new_config.sys_mon = registers::SystemMonitorConfiguration::DvddBy4Measurement;
+        new_config.sendstat = true;
+        new_config.crc = true;
+
+        let prev_config = self.swap_sys_reg(
+            new_config
+        ).await?;
+
+        let mut new_refctl = self.configuration_registers.refctrl.clone();
+        new_refctl.refsel = registers::ReferenceInput::Internal;
+        new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
+
+        let prev_refctl = self.swap_refctrl_reg(new_refctl).await?;
+
+        let _curr_cfg_read = self.read_sys_reg().await?;
+        //log::info!("Current SYS: {:?}", curr_cfg_read);
+
+        let res = self.start_wait_for_drdy_and_read().await;
+
+        self.write_sys_reg(prev_config).await?;
+        self.write_refctrl_reg(prev_refctl).await?;
+
+        res
+    }
+
+    pub async fn read_avdd_by_4<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        let mut new_config = self.configuration_registers.sys.clone();
+        new_config.sys_mon = registers::SystemMonitorConfiguration::AvddMinusAvssBy4Measurement;
+        new_config.sendstat = true;
+        new_config.crc = true;
+
+        let prev_config = self.swap_sys_reg(
+            new_config
+        ).await?;
+
+        let mut new_refctl = self.configuration_registers.refctrl.clone();
+        new_refctl.refsel = registers::ReferenceInput::Internal;
+        new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
+
+        let prev_refctl = self.swap_refctrl_reg(new_refctl).await?;
+
+        let res = self.start_wait_for_drdy_read_and_stop().await;
+
+        self.write_sys_reg(prev_config).await?;
+        self.write_refctrl_reg(prev_refctl).await?;
+
+        res
+    }
+
+
+    pub async fn read_temperature<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        let mut new_config = self.configuration_registers.sys.clone();
+        new_config.sys_mon = registers::SystemMonitorConfiguration::InternalTemperatureSensor;
+        new_config.sendstat = true;
+        new_config.crc = true;
+
+        let prev_config = self.swap_sys_reg(
+            new_config
+        ).await?;
+
+        let mut new_refctl = self.configuration_registers.refctrl.clone();
+        new_refctl.refsel = registers::ReferenceInput::Internal;
+        new_refctl.refcon = registers::InternalVoltageReferenceConfiguration::AlwaysOn;
+
+        let prev_refctl = self.swap_refctrl_reg(new_refctl).await?;
+
+        let res = self.start_wait_for_drdy_read_and_stop().await;
+
+        self.write_sys_reg(prev_config).await?;
+        self.write_refctrl_reg(prev_refctl).await?;
+
+        res
+    }
+
+    pub async fn read_device_id<'a>(&mut self) -> Result<registers::DeviceId, ADS124S08Error>  {
+        self.read_id_reg().await
+    }
+
     // Lower level API
-    pub async fn begin_transaction(&mut self) {
-        self.assert_cs().await;
-    }
-
-    pub async fn end_transaction(&mut self) {
-        self.deassert_cs().await;
-    }
-
-    pub async fn configure_measurement<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, configuration_registers: ConfigurationRegisters) -> Result<(), ADS124S08Error> where T: Instance {
+    pub async fn configure_measurement<'a>(&mut self, configuration_registers: ConfigurationRegisters) -> Result<(), ADS124S08Error>  {
         self.configuration_registers = configuration_registers;
-        self.write_modified_configuration_registers_to_device(spi).await
+        self.write_modified_configuration_registers_to_device().await
     }
 
-    pub async fn start_conversion<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
-        self.write_command(spi, Command::START).await
+    pub async fn start_conversion<'a>(&mut self) -> Result<(), ADS124S08Error>  {
+        self.write_command(Command::START).await
     }
 
-    pub async fn stop_conversion<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
-        self.write_command(spi, Command::STOP).await
+    pub async fn stop_conversion<'a>(&mut self) -> Result<(), ADS124S08Error>  {
+        self.write_command(Command::STOP).await
     }
 
-    pub async fn wait_for_drdy_and_read<'a, T>(&mut self, spi: &mut Spi<'_, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.wait_for_drdy(spi).await?;
-        self.read_data(spi).await
+    pub async fn wait_for_drdy_and_read<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        self.wait_for_drdy().await?;
+        self.read_data().await
     }
 
-    pub async fn start_wait_for_drdy_and_read<'a, T>(&mut self, spi: &mut Spi<'_, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.start_conversion(spi).await?;
-        self.wait_for_drdy(spi).await?;
-        self.read_data(spi).await
+    pub async fn start_wait_for_drdy_and_read<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        self.start_conversion().await?;
+        self.wait_for_drdy().await?;
+        self.read_data().await
     }
 
-    pub async fn start_wait_for_drdy_read_and_stop<'a, T>(&mut self, spi: &mut Spi<'_, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.start_conversion(spi).await?;
-        self.wait_for_drdy(spi).await?;
-        let d = self.read_data(spi).await?;
-        self.stop_conversion(spi).await?;
+    pub async fn start_wait_for_drdy_read_and_stop<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        self.start_conversion().await?;
+        self.wait_for_drdy().await?;
+
+        let d = self.read_data().await?;
+
+        self.stop_conversion().await?;
 
         Ok(d)
     }
 
-    pub async fn read_n_sample_average<'a, T>(&mut self, spi: &mut Spi<'_, T, Async>, n: i32) -> Result<Code, ADS124S08Error> where T: Instance {
+    pub async fn read_n_sample_average<'a>(&mut self, n: i32) -> Result<Code, ADS124S08Error>  {
         let mut sum = 0;
 
         for _ in 0..n {
-            self.wait_for_drdy(spi).await?;
-            sum += self.read_data(spi).await?.code();
+            self.wait_for_drdy().await?;
+            sum += self.read_data().await?.code();
         }
 
         Ok(Code::from_code(sum / n, ReferenceInput::Internal, false, PGAGain::Gain1, None, None))
     }
 
-    pub async fn read_configuration_registers<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<ConfigurationRegisters, ADS124S08Error> where T: Instance {
-        self.read_configuration_registers_from_device(spi).await?;
+    pub async fn read_configuration_registers<'a>(&mut self) -> Result<ConfigurationRegisters, ADS124S08Error>  {
+        self.read_configuration_registers_from_device().await?;
         Ok(self.read_configuration_registers.clone())
     }
 
     // Why are you even looking at this?
 
-    pub async fn wait_for_drdy<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
+    pub async fn wait_for_drdy<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         // @todo Use an either with a timeout
-        
+
         match &mut self.wait_strategy {
-            WaitStrategy::UseRiskyMiso(miso_pin) => wait_for_unsafe_miso_pin(miso_pin).await,
-            WaitStrategy::UseDrdyPin(drdy_input) => drdy_input.wait_for_low().await,
+            WaitStrategy::UseDrdyPin(drdy_input) => drdy_input.wait_for_low().await.map_err(|_e| ADS124S08Error::SPIError)?,
             WaitStrategy::Delay => Timer::after(Duration::from_millis(1000)).await, // @todo Change delay to match sample rate
         }
-        
+
         Ok(())
     }
-    
-    async fn swap_all_configuration_registers<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, configuration_registers: ConfigurationRegisters) -> Result<ConfigurationRegisters, ADS124S08Error> where T: Instance {
-//        let start = Instant::now();
 
+    async fn swap_all_configuration_registers<'a>(&mut self, configuration_registers: ConfigurationRegisters) -> Result<ConfigurationRegisters, ADS124S08Error>  {
         let prev = self.configuration_registers.clone();
         self.configuration_registers = configuration_registers;
-        let res = self.write_modified_configuration_registers_to_device(spi).await;
+        let res = self.write_modified_configuration_registers_to_device().await;
 
         if res.is_err() {
             self.configuration_registers = prev;
-            self.write_all_configuration_registers_to_device(spi).await?;
+            self.write_all_configuration_registers_to_device().await?;
             return Err(ADS124S08Error::UnableToRestorePreviousConfigurationWhileHandlingError);
         }
-
-/*        let end = Instant::now();
-        let duration = end - start;
-
-        log::info!("swap_all_configuration_registers total: {} µs", duration.as_micros());*/
 
         Ok(prev)
     }
 
-    async fn read_configuration_registers_from_device<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
-        self.configuration_registers.inpmux = self.read_inpmux_reg(spi).await?;
-        self.configuration_registers.pga = self.read_pga_reg(spi).await?;
-        self.configuration_registers.datarate = self.read_datarate_reg(spi).await?;
-        self.configuration_registers.refctrl = self.read_refctrl_reg(spi).await?;
-        self.configuration_registers.idacmag = self.read_idacmag_reg(spi).await?;
-        self.configuration_registers.idacmux = self.read_idacmux_reg(spi).await?;
-        self.configuration_registers.vbias = self.read_vbias_reg(spi).await?;
-        self.configuration_registers.sys = self.read_sys_reg(spi).await?;
+    async fn read_configuration_registers_from_device<'a>(&mut self) -> Result<(), ADS124S08Error>  {
+        self.configuration_registers.inpmux = self.read_inpmux_reg().await?;
+        self.configuration_registers.pga = self.read_pga_reg().await?;
+        self.configuration_registers.datarate = self.read_datarate_reg().await?;
+        self.configuration_registers.refctrl = self.read_refctrl_reg().await?;
+        self.configuration_registers.idacmag = self.read_idacmag_reg().await?;
+        self.configuration_registers.idacmux = self.read_idacmux_reg().await?;
+        self.configuration_registers.vbias = self.read_vbias_reg().await?;
+        self.configuration_registers.sys = self.read_sys_reg().await?;
 
         Ok(())
     }
 
-    async fn write_all_configuration_registers_to_device<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
-        self.write_inpmux_reg(spi, self.configuration_registers.inpmux).await?;
-        self.write_pga_reg(spi, self.configuration_registers.pga).await?;
-        self.write_datarate_reg(spi, self.configuration_registers.datarate).await?;
-        self.write_refctrl_reg(spi, self.configuration_registers.refctrl).await?;
-        self.write_idacmag_reg(spi, self.configuration_registers.idacmag).await?;
-        self.write_idacmux_reg(spi, self.configuration_registers.idacmux).await?;
-        self.write_vbias_reg(spi, self.configuration_registers.vbias).await?;
-        self.write_sys_reg(spi, self.configuration_registers.sys).await?;
+    async fn write_all_configuration_registers_to_device<'a>(&mut self) -> Result<(), ADS124S08Error>  {
+        self.write_inpmux_reg(self.configuration_registers.inpmux).await?;
+        self.write_pga_reg(self.configuration_registers.pga).await?;
+        self.write_datarate_reg(self.configuration_registers.datarate).await?;
+        self.write_refctrl_reg(self.configuration_registers.refctrl).await?;
+        self.write_idacmag_reg(self.configuration_registers.idacmag).await?;
+        self.write_idacmux_reg(self.configuration_registers.idacmux).await?;
+        self.write_vbias_reg(self.configuration_registers.vbias).await?;
+        self.write_sys_reg(self.configuration_registers.sys).await?;
 
         Ok(())
     }
 
-    async fn write_modified_configuration_registers_to_device<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
+    async fn write_modified_configuration_registers_to_device<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         if self.configuration_registers.inpmux != self.read_configuration_registers.inpmux {
-            self.write_inpmux_reg(spi, self.configuration_registers.inpmux).await?;
+            self.write_inpmux_reg(self.configuration_registers.inpmux).await?;
         }
 
         if self.configuration_registers.pga != self.read_configuration_registers.pga {
-            self.write_pga_reg(spi, self.configuration_registers.pga).await?;
+            self.write_pga_reg(self.configuration_registers.pga).await?;
         }
 
         if self.configuration_registers.datarate != self.read_configuration_registers.datarate {
-            self.write_datarate_reg(spi, self.configuration_registers.datarate).await?;
+            self.write_datarate_reg(self.configuration_registers.datarate).await?;
         }
 
         if self.configuration_registers.refctrl != self.read_configuration_registers.refctrl {
-            self.write_refctrl_reg(spi, self.configuration_registers.refctrl).await?;
+            self.write_refctrl_reg(self.configuration_registers.refctrl).await?;
         }
 
         if self.configuration_registers.idacmag != self.read_configuration_registers.idacmag {
-            self.write_idacmag_reg(spi, self.configuration_registers.idacmag).await?;
+            self.write_idacmag_reg(self.configuration_registers.idacmag).await?;
         }
 
         if self.configuration_registers.idacmux != self.read_configuration_registers.idacmux {
-            self.write_idacmux_reg(spi, self.configuration_registers.idacmux).await?;
+            self.write_idacmux_reg(self.configuration_registers.idacmux).await?;
         }
 
         if self.configuration_registers.vbias != self.read_configuration_registers.vbias {
-            self.write_vbias_reg(spi, self.configuration_registers.vbias).await?;
+            self.write_vbias_reg(self.configuration_registers.vbias).await?;
         }
 
         if self.configuration_registers.sys != self.read_configuration_registers.sys {
-            self.write_sys_reg(spi, self.configuration_registers.sys).await?;
+            self.write_sys_reg(self.configuration_registers.sys).await?;
         }
 
         Ok(())
@@ -608,25 +529,25 @@ impl ADS124S08<'_> {
     define_read_write_register_ops!(vbias, VBIAS, registers::SensorBiasingRegister);
     define_read_write_register_ops!(sys, SYS, registers::SystemControlRegister);
 
-    pub async fn read_data<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<Code, ADS124S08Error> where T: Instance {
-        self.write_command(spi, Command::RDATA).await?;
+    pub async fn read_data<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
+        self.write_command(Command::RDATA).await?;
 
         if self.configuration_registers.sys.sendstat {
             let mut status_buf = [0x00];
-            self.spi_read(spi, &mut status_buf).await?;
+            self.spi_read(&mut status_buf).await?;
 
-            let res = StatusRegisterValue::from_bits(status_buf[0]);
+            let _ = StatusRegisterValue::from_bits(status_buf[0]);
             //log::info!("Status: {:?}", res);
         }
 
         let mut data_buf = [0x00; 3];
-        self.spi_read(spi, &mut data_buf).await?;
+        self.spi_read(&mut data_buf).await?;
 
         //log::info!("Data: 0x{:x} 0x{:x} 0x{:x}", data_buf[0], data_buf[1], data_buf[2]);
 
         if self.configuration_registers.sys.crc {
             let mut crc_buf = [0x00];
-            self.spi_read(spi, &mut crc_buf).await?;
+            self.spi_read(&mut crc_buf).await?;
             //log::info!("CRC: 0x{:x}", crc_buf[0])
         }
 
@@ -635,16 +556,21 @@ impl ADS124S08<'_> {
             reference: self.configuration_registers.refctrl.refsel,
             pga_enabled: self.configuration_registers.pga.enable,
             gain: self.configuration_registers.pga.gain,
-            idac1_magnitude: if (self.configuration_registers.idacmux.i1mux != IDACMux::Disconnected) { Some(self.configuration_registers.idacmag.imag) } else { None },
-            idac2_magnitude: if (self.configuration_registers.idacmux.i2mux != IDACMux::Disconnected) { Some(self.configuration_registers.idacmag.imag) } else { None },
+            idac1_magnitude: if self.configuration_registers.idacmux.i1mux != IDACMux::Disconnected { Some(self.configuration_registers.idacmag.imag) } else { None },
+            idac2_magnitude: if self.configuration_registers.idacmux.i2mux != IDACMux::Disconnected { Some(self.configuration_registers.idacmag.imag) } else { None },
         })
     }
 
-    async fn write_reg<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, reg: RegisterAddress, value: u8) -> Result<(), ADS124S08Error> where T: Instance {
+    async fn write_reg<'a>(&mut self, reg: RegisterAddress, value: u8) -> Result<(), ADS124S08Error>  {
         let command = Command::WREG { address: reg.addr(), n: 0 };
 
-        self.write_command(spi, command).await?;
-        self.spi_write(spi, &[value]).await?;
+        let (byte0, byte1) = command.bits();
+
+        if byte1.is_some() {
+            self.spi_transaction(&mut [Operation::DelayNs(100000), Operation::Write(&[byte0, byte1.unwrap()]), Operation::Write(&[value]), Operation::DelayNs(100000)]).await.map_err(|_e| ADS124S08Error::SPIError)?;
+        } else {
+            self.spi_transaction(&mut [Operation::DelayNs(100000), Operation::Write(&[byte0]), Operation::Write(&[value]), Operation::DelayNs(100000)]).await.map_err(|_e| ADS124S08Error::SPIError)?;
+        }
 
         // @fixme Performance measurment workaround
 /*        let read_back = self.read_reg(spi, reg).await?;
@@ -656,52 +582,55 @@ impl ADS124S08<'_> {
         Ok(())
     }
 
-    async fn read_reg<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, register: RegisterAddress) -> Result<u8, ADS124S08Error> where T: Instance {
+    async fn read_reg<'a>(&mut self, register: RegisterAddress) -> Result<u8, ADS124S08Error>  {
         let command = Command::RREG { address: register.addr(), n: 0 };
-
-        self.write_command(spi, command).await?;
         let mut reg_buf = [0x00];
-        self.spi_read(spi, &mut reg_buf).await?;
+
+        let (byte0, byte1) = command.bits();
+        
+        if byte1.is_some() {
+            self.spi_transaction(&mut [Operation::DelayNs(100), Operation::Write(&[byte0, byte1.unwrap()]), Operation::Read(&mut reg_buf), Operation::DelayNs(100)]).await.map_err(|_e| ADS124S08Error::SPIError)?;
+        } else {
+            self.spi_transaction(&mut [Operation::DelayNs(100), Operation::Write(&[byte0]), Operation::Read(&mut reg_buf), Operation::DelayNs(100)]).await.map_err(|_e| ADS124S08Error::SPIError)?;
+        }
 
 //        log::info!("Read register: {:?} 0x{:x}", register, reg_buf[0]);
 
         Ok(reg_buf[0])
     }
 
-    pub async fn reset<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>) -> Result<(), ADS124S08Error> where T: Instance {
-        let command = Command::RESET;
-
-        self.write_command(spi, command).await?;
+    pub async fn reset<'a>(&mut self) -> Result<(), ADS124S08Error>  {
+        self.write_command(Command::RESET).await?;
         Timer::after_millis(100).await;
-        self.read_configuration_registers_from_device(spi).await?;
+        self.read_configuration_registers_from_device().await?;
 
         Ok(())
     }
 
-    async fn write_command<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, command: Command) -> Result<(), ADS124S08Error> where T: Instance {
+    async fn write_command<'a>(&mut self, command: Command) -> Result<(), ADS124S08Error>  {
         let (byte0, byte1) = command.bits();
 
         if byte1.is_some() {
-            self.spi_write(spi, &[byte0, byte1.unwrap()]).await?;
+            self.spi_write(&[byte0, byte1.unwrap()]).await?;
         } else {
-            self.spi_write(spi, &[byte0]).await?;
+            self.spi_write(&[byte0]).await?;
         }
 
         //log::info!("Wrote command: {:?} 0x{:x} {:?}", command, byte0, byte1);
 
         Ok(())
     }
+    
+    async fn spi_read<'a>(&mut self, buffer: &mut [u8]) -> Result<(), ADS124S08Error>  {
+        let ret = self.spi.transaction(&mut[Operation::DelayNs(100), Operation::Read(buffer), Operation::DelayNs(100)]).await.map_err(|_e| ADS124S08Error::SPIError);
 
-    async fn spi_read<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, buffer: &mut [u8]) -> Result<(), ADS124S08Error> where T: Instance {
-        if self.cs.is_set_high() {
-            return Err(ADS124S08Error::NotInTransaction);
-        }
+        ret
 
-        return spi.read(buffer).await.map_err(|e| ADS124S08Error::SPIError(e));
+//        return self.spi.read(buffer).await.map_err(|e| ADS124S08Error::SPIError);
 
         // @fixme Performance measurment workaround. Make this optional.
-
-        let t1 = spi.read(buffer);
+/*
+        let t1 = self.spi.read(buffer);
         let t2 = async {
             Timer::after(Duration::from_millis(1)).await;
         };
@@ -713,18 +642,18 @@ impl ADS124S08<'_> {
             Either::Second(_) => Err(ADS124S08Error::ReadTimeoutError),
         };
 
-        res
+        res*/
     }
 
-    async fn spi_write<'a, T>(&mut self, spi: &mut Spi<'a, T, Async>, buffer: &[u8]) -> Result<(), ADS124S08Error> where T: Instance {
-        if self.cs.is_set_high() {
-            return Err(ADS124S08Error::NotInTransaction);
-        }
+    async fn spi_write<'a>(&mut self, buffer: &[u8]) -> Result<(), ADS124S08Error>  {
+        let ret = self.spi.transaction(&mut[Operation::DelayNs(100), Operation::Write(buffer), Operation::DelayNs(100)]).await.map_err(|_e| ADS124S08Error::SPIError);
 
-        return spi.write(buffer).await.map_err(|e| ADS124S08Error::SPIError(e));
+        ret
+
+        //return self.spi.write(buffer).await.map_err(|e| ADS124S08Error::SPIError);
 
         // @fixme Performance measurment workaround. Make this optional.
-        let t1 = spi.write(buffer);
+/*        let t1 = self.spi.write(buffer);
         let t2 = async {
             Timer::after(Duration::from_millis(1)).await;
         };
@@ -736,41 +665,12 @@ impl ADS124S08<'_> {
             Either::Second(_) => Err(ADS124S08Error::ReadTimeoutError),
         };
 
-        res
+        res*/
     }
 
-    async fn assert_cs(&mut self) {
-        busy_wait_us(1);
-        self.cs.set_low();
-        busy_wait_us(1);
+    async fn spi_transaction<'a>(&mut self, ops: &mut [Operation<'_, u8>]) -> Result<(), ADS124S08Error>  {
+        let ret = self.spi.transaction(ops).await.map_err(|_e| ADS124S08Error::SPIError);
+
+        ret
     }
-
-    async fn deassert_cs(&mut self) {
-        busy_wait_us(1);
-        self.cs.set_high();
-        busy_wait_us(1);
-    }
-}
-
-async fn wait_for_unsafe_miso_pin(pin: &mut AnyPin) {
-    let pin_num = pin.pin();
-
-    // @todo Use an either to handle timeout
-    async {
-        let mut input = Input::new(pin, Pull::Up);
-        input.wait_for_low().await;
-    }.await;
-
-    // Obviously, this isn't exactly safe
-    let bank = embassy_rp::pac::IO_BANK0;
-    bank.gpio(pin_num as _).ctrl().write(|w| w.set_funcsel(1));
-}
-
-use cortex_m::asm;
-
-fn busy_wait_us(us: u32) {
-    // This constant should be calibrated for your specific MCU and clock speed
-    const CYCLES_PER_US: u32 = 133;
-    let cycles = us * CYCLES_PER_US;
-    asm::delay(cycles);
 }

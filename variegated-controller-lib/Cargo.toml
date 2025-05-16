@@ -9,12 +9,16 @@ rust-version = "1.75"
 [dependencies]
 heapless = "0.8.0"
 async-trait = "0.1.80"
-embassy-sync = { version = "0.5.0", features = ["defmt"] }
-cfg-if = "1.0.0"
-variegated-board-open-lcc-r2a = { path = "../variegated-board-open-lcc-r2a", optional = true }
-variegated-board-apec = { path = "../variegated-board-apec", optional = true }
+embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
+embassy-sync = { version = "0.6.2", features = ["defmt"] }
+embassy-futures = { version = "0.1.1" }
+pid-ctrl = "0.1.4"
+num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
-[features]
-# Defines a feature named `webp` that does not enable any other features.
-apec-r0d = ["dep:variegated-board-apec"]
-open-lcc-r2a = ["dep:variegated-board-open-lcc-r2a"]
+defmt = "0.3"
+
+cfg-if = "1.0.0"
+variegated-hal = { version = "0.1.0", path = "../variegated-hal" }

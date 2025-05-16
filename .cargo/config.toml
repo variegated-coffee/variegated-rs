@@ -2,8 +2,15 @@
 # Choose a default "cargo run" tool (see README for more info)
 # - `probe-rs` provides flashing and defmt via a hardware debugger, and stack unwind on panic
 # - elf2uf2-rs loads firmware over USB when the rp2040 is in boot mode
-runner = "probe-rs run --chip RP2040 --protocol swd --probe 1366:0105"
+#runner = "probe-rs run --chip RP2040 --protocol swd --probe 1366:0105"
+runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E66430A64B3D6822"
 #runner = "elf2uf2-rs -d"
+
+[target.'cfg(test)']
+rustflags = ["--cfg", "test"]
+
+[alias]
+test-aarch64 = "test --target aarch64-apple-darwin"  # Run tests with this target
 
 rustflags = [
 #    "-C", "linker=flip-link",
@@ -20,7 +27,8 @@ rustflags = [
 ]
 
 [build]
-target = "thumbv6m-none-eabi"
+target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "debug"
+EMBASSY_EXECUTOR_TASK_ARENA_SIZE="8192"

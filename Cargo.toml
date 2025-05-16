@@ -1,27 +1,20 @@
 [workspace]
 members = [
-    "variegated-embassy-ads124s08",
-    "variegated-board-features",
-    "variegated-board-open-lcc-r2a",
-    "variegated-controller-lib",
-    "variegated-embassy-fdc1004",
-    "variegated-machine-definition-lelit-bianca",
-    "variegated-serial-bootloader",
-    "variegated-gicar-8-5-04",
-    "variegated-soft-pwm",
-    "variegated-embassy-rp2040-double-tap",
-    "variegated-embassy-dual-c595-shift-register",
-    "variegated-board-apec",
-    "apec-r0d-functional-test",
-    "variegated-log",
-    "variegated-controller-gear-pump-silvia",
-    "gravity-r0a-functional-test",
-    "variegated-board-gravity",
+#    "test-bin",
     "variegated-adc-tools",
+    "variegated-controller-lib",
+#    "variegated-control-algorithm",
+    "variegated-embassy-ads124s08",
+    "variegated-embassy-dual-c595-shift-register",
+    "variegated-embassy-fdc1004",
     "variegated-embassy-nau7802",
     "variegated-embassy-rp-frequency-counter",
-    "gravity-r2a-functional-test",
-    "variegated-pio-i2c",
+    "variegated-hal",
+    "variegated-log",
+    "variegated-soft-pwm",
 ]
 resolver = "2"
 package = { rust-version = "1.75" }
+
+[patch.crates-io]
+embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "rp-0.4.0" }
