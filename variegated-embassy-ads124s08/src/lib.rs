@@ -3,7 +3,7 @@
 pub mod registers;
 
 use defmt::Format;
-use embassy_time::{Duration, Timer};
+use embedded_hal_async::delay::DelayNs;
 use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue, RegisterAddress, ByteRepresentation, ConfigurationRegisters};
 use embedded_hal::digital::InputPin;
 use embedded_hal::spi::Operation;
@@ -187,20 +187,22 @@ macro_rules! define_read_only_register_ops {
     };
 }
 
-pub struct ADS124S08<SpiDevT: SpiDevice, InputPinT: InputPin + Wait> {
+pub struct ADS124S08<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> {
     spi: SpiDevT,
     wait_strategy: WaitStrategy<InputPinT>,
+    delay: D,
     configuration_registers: ConfigurationRegisters,
 
     read_configuration_registers: ConfigurationRegisters,
 }
 
-impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait> ADS124S08<SpiDevT, InputPinT> {
+impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDevT, InputPinT, D> {
     // High level API
-    pub fn new(spi: SpiDevT, wait_strategy: WaitStrategy<InputPinT>) -> ADS124S08<SpiDevT, InputPinT> {
+    pub fn new(spi: SpiDevT, wait_strategy: WaitStrategy<InputPinT>, delay: D) -> ADS124S08<SpiDevT, InputPinT, D> {
         ADS124S08 {
             spi,
             wait_strategy,
+            delay,
             configuration_registers: ConfigurationRegisters::default(),
             read_configuration_registers: ConfigurationRegisters::default(),
         }
@@ -436,7 +438,8 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait> ADS124S08<SpiDevT, InputPin
 
         match &mut self.wait_strategy {
             WaitStrategy::UseDrdyPin(drdy_input) => drdy_input.wait_for_low().await.map_err(|_e| ADS124S08Error::SPIError)?,
-            WaitStrategy::Delay => Timer::after(Duration::from_millis(1000)).await, // @todo Change delay to match sample rate
+            // @todo Change delay to match sample rate
+            WaitStrategy::Delay => self.delay.delay_ms(1000).await,
         }
 
         Ok(())
@@ -601,7 +604,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait> ADS124S08<SpiDevT, InputPin
 
     pub async fn reset<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         self.write_command(Command::RESET).await?;
-        Timer::after_millis(100).await;
+        self.delay.delay_ms(100).await;
         self.read_configuration_registers_from_device().await?;
 
         Ok(())
