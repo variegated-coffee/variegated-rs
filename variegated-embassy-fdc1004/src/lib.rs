@@ -4,8 +4,9 @@
 
 use core::fmt;
 use defmt::Format;
-use embassy_time::{Duration, Timer};
+// embassy_time::{Duration, Timer}; // Removed
 use embedded_hal_async::i2c::I2c;
+use embedded_hal_async::delay::DelayNs;
 use ux::i24;
 
 #[derive(Debug, Clone, Copy, Format)]
@@ -24,11 +25,11 @@ pub enum OutputRate {
 }
 
 impl OutputRate {
-    fn delay(&self) -> Duration {
+    fn delay(&self) -> u64 { // Changed Duration to u64
         match self {
-            OutputRate::SPS100 => Duration::from_millis(11),
-            OutputRate::SPS200 => Duration::from_millis(6),
-            OutputRate::SPS400 => Duration::from_millis(3),
+            OutputRate::SPS100 => 11_000_000, // 11 ms in ns
+            OutputRate::SPS200 => 6_000_000,  // 6 ms in ns
+            OutputRate::SPS400 => 3_000_000,  // 3 ms in ns
         }
     }
 }
@@ -340,14 +341,26 @@ impl FDCConfiguration {
     }
 }
 
-pub struct FDC1004 {
+pub struct FDC1004<I2C, D> // Added generic parameters
+where
+    I2C: I2c, // Added trait bound
+    D: DelayNs, // Added trait bound
+{
+    i2c: I2C, // Added field
+    delay: D, // Added field
     address: u8,
     output_rate: OutputRate,
 }
 
-impl FDC1004 {
-    pub fn new(address: u8, output_rate: OutputRate) -> Self {
+impl<I2C, D> FDC1004<I2C, D> // Added generic parameters
+where
+    I2C: I2c, // Added trait bound
+    D: DelayNs, // Added trait bound
+{
+    pub fn new(i2c: I2C, delay: D, address: u8, output_rate: OutputRate) -> Self { // Added i2c and delay parameters
         FDC1004 {
+            i2c,
+            delay,
             address,
             output_rate,
         }
