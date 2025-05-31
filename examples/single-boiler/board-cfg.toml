@@ -1,0 +1,60 @@
+[internal_spi_bus_peripherals]
+spi = "embassy_rp::peripherals::SPI1"
+sclk_pin = "embassy_rp::peripherals::PIN_30"
+mosi_pin = "embassy_rp::peripherals::PIN_31"
+miso_pin = "embassy_rp::peripherals::PIN_28"
+dma_tx = "embassy_rp::peripherals::DMA_CH0"
+dma_rx = "embassy_rp::peripherals::DMA_CH1"
+
+[ads124s08_peripherals]
+pin_drdy = "embassy_rp::peripherals::PIN_29"
+pin_cs = "embassy_rp::peripherals::PIN_32"
+
+[esp32_peripherals]
+uart = "embassy_rp::peripherals::UART1"
+tx_pin = "embassy_rp::peripherals::PIN_8"
+rx_pin = "embassy_rp::peripherals::PIN_9"
+cts_pin = "embassy_rp::peripherals::PIN_10"
+rts_pin = "embassy_rp::peripherals::PIN_11"
+dma_tx = "embassy_rp::peripherals::DMA_CH4"
+dma_rx = "embassy_rp::peripherals::DMA_CH5"
+
+
+[display_peripherals]
+spi = "embassy_rp::peripherals::SPI0"
+sclk_pin = "embassy_rp::peripherals::PIN_2"
+mosi_pin = "embassy_rp::peripherals::PIN_3"
+miso_pin = "embassy_rp::peripherals::PIN_4"
+dma_tx = "embassy_rp::peripherals::DMA_CH2"
+dma_rx = "embassy_rp::peripherals::DMA_CH3"
+cs_pin = "embassy_rp::peripherals::PIN_12"
+dc_pin = "embassy_rp::peripherals::PIN_6"
+rst_pin = "embassy_rp::peripherals::PIN_7"
+
+[rotary_encoder_peripherals]
+pin_clk = "embassy_rp::peripherals::PIN_21"
+pin_dt = "embassy_rp::peripherals::PIN_22"
+pin_sw = "embassy_rp::peripherals::PIN_1"
+
+[button_peripherals]
+pin_brew = "embassy_rp::peripherals::PIN_15"
+pin_water = "embassy_rp::peripherals::PIN_14"
+pin_steam = "embassy_rp::peripherals::PIN_13"
+
+[pump_peripherals]
+pwm_speed = "embassy_rp::peripherals::PWM_SLICE9"
+pin_speed = "embassy_rp::peripherals::PIN_34"
+pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE8"
+pin_tacho_out = "embassy_rp::peripherals::PIN_33"
+pin_dir = "embassy_rp::peripherals::PIN_35"
+
+[flow_meter_peripherals]
+pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE2"
+pin_flow_meter = "embassy_rp::peripherals::PIN_5"
+
+[mechanism_peripherals]
+pin_he = "embassy_rp::peripherals::PIN_37"
+pin_solenoid = "embassy_rp::peripherals::PIN_36"
+
+[irq_aliases]
+EspIrq = "UART1_IRQ"

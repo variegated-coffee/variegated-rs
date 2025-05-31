@@ -8,21 +8,13 @@ use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
+pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
 
 pub mod gpio;
 pub mod adc;
 pub mod machine_mechanism;
 
-pub type TemperatureType = f32; // Celsius
-pub type PressureType = f32; // Bar
-pub type WaterLevelType = u8; // Percent
-pub type FlowRateType = f32; // ml/s
-pub type WeightType = f32; // g
-pub type FrequencyType = f32; // Hz
-pub type RPMType = f32; // RPM
-pub type DutyCycleType = u8; // Percent
-pub type ValveOpenType = u8; // Percent
-pub type MixingProportionType = u8; // Percent
+
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {

@@ -1,0 +1,71 @@
+[internal_spi_bus_peripherals]
+spi = "embassy_rp::peripherals::SPI1"
+sclk_pin = "embassy_rp::peripherals::PIN_30"
+mosi_pin = "embassy_rp::peripherals::PIN_31"
+miso_pin = "embassy_rp::peripherals::PIN_28"
+dma_tx = "embassy_rp::peripherals::DMA_CH0"
+dma_rx = "embassy_rp::peripherals::DMA_CH1"
+
+[internal_i2c_bus_peripherals]
+i2c = "embassy_rp::peripherals::I2C1"
+scl_pin = "embassy_rp::peripherals::PIN_39"
+sda_pin = "embassy_rp::peripherals::PIN_38"
+
+[ads124s08_peripherals]
+pin_drdy = "embassy_rp::peripherals::PIN_29"
+pin_cs = "embassy_rp::peripherals::PIN_32"
+
+[esp32_peripherals]
+uart = "embassy_rp::peripherals::UART1"
+tx_pin = "embassy_rp::peripherals::PIN_8"
+rx_pin = "embassy_rp::peripherals::PIN_9"
+cts_pin = "embassy_rp::peripherals::PIN_10"
+rts_pin = "embassy_rp::peripherals::PIN_11"
+dma_tx = "embassy_rp::peripherals::DMA_CH4"
+dma_rx = "embassy_rp::peripherals::DMA_CH5"
+
+[button_peripherals]
+pin_brew = "embassy_rp::peripherals::PIN_34"
+
+[linear_encoder_peripherals]
+adc = "embassy_rp::peripherals::ADC"
+pin_linear_encoder_a = "embassy_rp::peripherals::PIN_43"
+
+[pump_peripherals]
+pwm_speed = "embassy_rp::peripherals::PWM_SLICE3"
+pin_speed = "embassy_rp::peripherals::PIN_22"
+pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE2"
+pin_tacho_out = "embassy_rp::peripherals::PIN_21"
+pin_dir = "embassy_rp::peripherals::PIN_20"
+
+[flow_meter_peripherals]
+pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE4"
+pin_flow_meter = "embassy_rp::peripherals::PIN_25"
+
+[mechanism_peripherals]
+pin_brew_he = "embassy_rp::peripherals::PIN_37"
+pin_service_he = "embassy_rp::peripherals::PIN_36"
+pin_line_solenoid = "embassy_rp::peripherals::PIN_23"
+pin_service_solenoid = "embassy_rp::peripherals::PIN_24"
+
+[tank_peripherals]
+pin_tank_level = "embassy_rp::peripherals::PIN_35"
+
+[qwiic_i2c_bus_peripherals]
+i2c = "embassy_rp::peripherals::I2C0"
+scl_pin = "embassy_rp::peripherals::PIN_45"
+sda_pin = "embassy_rp::peripherals::PIN_44"
+
+[display_peripherals]
+uart = "embassy_rp::peripherals::UART0"
+tx_pin = "embassy_rp::peripherals::PIN_17"
+rx_pin = "embassy_rp::peripherals::PIN_16"
+twelve_volt_out_pin = "embassy_rp::peripherals::PIN_15"
+three_volt_out_pin = "embassy_rp::peripherals::PIN_14"
+dma_tx = "embassy_rp::peripherals::DMA_CH2"
+dma_rx = "embassy_rp::peripherals::DMA_CH3"
+
+[irq_aliases]
+EspIrq = "UART1_IRQ"
+DisplayIrq = "UART0_IRQ"
+AdcIrq = "ADC_IRQ_FIFO"

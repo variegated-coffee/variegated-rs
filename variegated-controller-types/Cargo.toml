@@ -1,0 +1,16 @@
+[package]
+name = "variegated-controller-types"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+defmt = "0.3"
+serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }
+variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
+
+[features]
+serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive"]
+double_boiler = []
+single_boiler = []
+single_group = []
+default = ["serde", "double_boiler", "single_group"]

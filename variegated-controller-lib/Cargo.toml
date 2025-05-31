@@ -6,6 +6,9 @@ rust-version = "1.75"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lib]
+test = false
+
 [dependencies]
 heapless = "0.8.0"
 async-trait = "0.1.80"
@@ -15,10 +18,17 @@ embedded-hal-async = "1.0.0"
 embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
 embassy-sync = { version = "0.6.2", features = ["defmt"] }
 embassy-futures = { version = "0.1.1" }
-pid-ctrl = "0.1.4"
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
 defmt = "0.3"
 
+serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }
+
 cfg-if = "1.0.0"
 variegated-hal = { version = "0.1.0", path = "../variegated-hal" }
+variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
+
+[features]
+serde = ["dep:serde", "variegated-control-algorithm/serde", "variegated-controller-types/serde", "serde/derive"]
+default = ["serde"]

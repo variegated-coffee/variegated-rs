@@ -1,9 +1,10 @@
 [workspace]
 members = [
-#    "test-bin",
+    "examples",
     "variegated-adc-tools",
     "variegated-controller-lib",
-#    "variegated-control-algorithm",
+    "variegated-controller-types",
+    "variegated-control-algorithm",
     "variegated-embassy-ads124s08",
     "variegated-embassy-dual-c595-shift-register",
     "variegated-embassy-fdc1004",
