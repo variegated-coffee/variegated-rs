@@ -155,7 +155,7 @@ static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 fn main() -> ! {
     {
         use core::mem::MaybeUninit;
-        const HEAP_SIZE: usize = 1024;
+        const HEAP_SIZE: usize = 4096; // 4 KiB heap size
         static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
     }
@@ -353,6 +353,8 @@ async fn main_task(spawner: Spawner) -> ! {
     let esp_p = esp_32_peripherals!(p);
 
     spawner.spawn(esp_transciever_task(esp_p, status_channel.subscriber().unwrap())).unwrap();
+
+    spawner.spawn(heap_stats_task()).unwrap();
 
     join5(
         join5(
@@ -582,5 +584,15 @@ async fn temp_sensor_task(brew: Input<'static>, steam: Input<'static>, water: In
             info!("Water button pressed");
         }
         Timer::after_millis(1000).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn heap_stats_task() {
+    loop {
+        let used = HEAP.used();
+        let free = HEAP.free();
+        info!("Heap used: {} bytes, free: {} bytes", used, free);
+        Timer::after_millis(5000).await;
     }
 }
