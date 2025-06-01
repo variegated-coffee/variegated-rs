@@ -537,8 +537,17 @@ async fn display_task(
                     .draw(&mut disp)
                     .unwrap();
             }
-
         };
+        
+        if status.routine_running {
+            Text::with_baseline(format!("Routine, step {}", status.routine_step.unwrap_or_default()).as_str(), Point::new(0, 49), text_style, Baseline::Top)
+                .draw(&mut disp)
+                .unwrap();
+        } else {
+            Text::with_baseline("No routine running", Point::new(0, 49), text_style, Baseline::Top)
+                .draw(&mut disp)
+                .unwrap();
+        }
 
         disp.flush().await.expect("Failed to flush display");
 

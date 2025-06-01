@@ -102,6 +102,8 @@ pub struct Status {
     pub config_brew_boiler_control_target: BoilerControlTarget,
     pub config_steam_boiler_control_target: BoilerControlTarget,
     pub config_group_brew_control_target: GroupBrewControlTarget,
+    pub routine_running: bool,
+    pub routine_step: Option<usize>,
 }
 
 pub struct Configuration {

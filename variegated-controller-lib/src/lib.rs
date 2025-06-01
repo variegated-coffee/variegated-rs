@@ -236,6 +236,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             config_brew_boiler_control_target: self.configuration.brew_boiler_control_target,
             config_steam_boiler_control_target: self.configuration.steam_boiler_control_target,
             config_group_brew_control_target: self.configuration.group_brew_control_target,
+            routine_running: self.current_routine.is_some(),
+            routine_step: self.current_routine.as_ref().and_then(|r| r.current_step),
         };
 
         if self.status_channel_sender.is_full() {
