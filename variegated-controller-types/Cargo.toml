@@ -3,6 +3,10 @@ name = "variegated-controller-types"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+test = false
+bench = false
+
 [dependencies]
 defmt = "0.3"
 serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }

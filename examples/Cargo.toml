@@ -7,11 +7,15 @@ edition = "2021"
 name = "dual_boiler"
 path = "dual-boiler/src/main.rs"
 required-features = ["dual-boiler"]
+test = false
+bench = false
 
 [[bin]]
 name = "single_boiler"
 path = "single-boiler/src/main.rs"
 required-features = ["single-boiler"]
+test = false
+bench = false
 
 [dependencies]
 embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }

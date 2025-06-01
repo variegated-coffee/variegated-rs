@@ -3,5 +3,9 @@ name = "variegated-adc-tools"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+test = false
+bench = false
+
 [dependencies]
 micromath = "2.0.0"

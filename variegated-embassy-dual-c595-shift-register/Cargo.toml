@@ -3,7 +3,9 @@ name = "variegated-embassy-dual-c595-shift-register"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+test = false
+bench = false
 
 [dependencies]
 embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
