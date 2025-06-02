@@ -47,6 +47,12 @@ If the runner doesn't have `thumbv8m.main-none-eabihf` installed, it should be i
 # For embedded targets (requires ARM target installation):
 cargo check --target thumbv8m.main-none-eabihf
 cargo build --target thumbv8m.main-none-eabihf
+
+# Try building the examples:
+cd examples 
+cargo build --bin single_boiler --features=single-boiler --target thumbv8m.main-none-eabihf
+cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none-eabihf
+
 ```
 
 ### Configuration

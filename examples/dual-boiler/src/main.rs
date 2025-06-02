@@ -149,6 +149,7 @@ type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, S
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
 fn main() -> ! {
+    #[allow(static_mut_refs)]
     {
         use core::mem::MaybeUninit;
         const HEAP_SIZE: usize = 1024;
