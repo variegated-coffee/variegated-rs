@@ -40,6 +40,8 @@ The codebase uses type aliases for real-world measurements to improve readabilit
 - **Primary**: `thumbv8m.main-none-eabihf` (ARM Cortex-M8 embedded, specifically the RP2350)
 - **Secondary**: `riscv32imac-esp-espidf` as some components can run on ESP32-C6 devices
 
+If the runner doesn't have `thumbv8m.main-none-eabihf` installed, it should be installed using rustup.
+
 ### Build Commands
 ```bash
 # For embedded targets (requires ARM target installation):
