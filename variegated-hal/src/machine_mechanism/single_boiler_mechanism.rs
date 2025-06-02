@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use crate::{BrewMechanism, BrewMechanismError, DutyCycleType};
@@ -69,6 +70,7 @@ impl<'a> SingleBoilerBrewMechanism<'a> {
     }
 }
 
+#[async_trait]
 impl<'a> BrewMechanism for SingleBoilerBrewMechanism<'a> {
     async fn set_brew_state(&mut self, state: bool) -> Result<(), BrewMechanismError> {
         let mut mechanism = self.mechanism.lock().await;

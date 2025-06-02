@@ -3,6 +3,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use async_trait::async_trait;
 use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
@@ -183,6 +184,7 @@ pub trait WithTask {
     async fn task(&mut self);
 }
 
+#[async_trait]
 pub trait HeatingElement {
     async fn set_duty_cycle(&mut self, duty_cycle_percent: u8);
     async fn get_duty_cycle(&self) -> u8;
@@ -193,6 +195,7 @@ pub trait BoilerFillMechanism {
     fn get_filling_state(&self) -> Result<bool, BoilerFillMechanismError>;
 }
 
+#[async_trait]
 pub trait BrewMechanism {
     // Typically this controls a three-way solenoid valve, if present
     async fn set_brew_state(&mut self, state: bool) -> Result<(), BrewMechanismError>;
