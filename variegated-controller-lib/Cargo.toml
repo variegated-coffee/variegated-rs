@@ -12,7 +12,6 @@ bench = false
 
 [dependencies]
 heapless = "0.8.0"
-async-trait = "0.1.80"
 embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"

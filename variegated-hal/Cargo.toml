@@ -19,7 +19,6 @@ embassy-rp = { version = "0.4.0",  features = ["defmt", "unstable-pac", "time-dr
 variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 defmt = "0.3"
-async-trait = "0.1.88"
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
 movavg = { version = "2.1.0", default-features = false }
 

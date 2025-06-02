@@ -37,7 +37,6 @@ impl<'a, O: OutputPin> GpioBinaryHeatingElement<'a, O> {
     }
 }
 
-#[async_trait::async_trait]
 impl<'a> HeatingElement for GpioBinaryHeatingElementControl<'a> {
     async fn set_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) {
         self.last_value = duty_cycle_percent;
