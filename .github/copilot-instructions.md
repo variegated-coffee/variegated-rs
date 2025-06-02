@@ -37,21 +37,14 @@ The codebase uses type aliases for real-world measurements to improve readabilit
 ## Build System & Development
 
 ### Target Platforms
-- **Primary**: `thumbv8m.main-none-eabihf` (ARM Cortex-M8 embedded)
-- **Testing**: Some crates support `x86_64-unknown-linux-gnu` for algorithm/type testing
+- **Primary**: `thumbv8m.main-none-eabihf` (ARM Cortex-M8 embedded, specifically the RP2350)
+- **Secondary**: `riscv32imac-esp-espidf` as some components can run on ESP32-C6 devices
 
 ### Build Commands
 ```bash
 # For embedded targets (requires ARM target installation):
-cargo check
-cargo build
-
-# For non-embedded crates (testing on x86_64):
-cargo check --target x86_64-unknown-linux-gnu
-cargo test --target x86_64-unknown-linux-gnu
-
-# Individual crate testing:
-cd variegated-control-algorithm && cargo test --target x86_64-unknown-linux-gnu
+cargo check --target thumbv8m.main-none-eabihf
+cargo build --target thumbv8m.main-none-eabihf
 ```
 
 ### Configuration
@@ -104,7 +97,8 @@ cd variegated-control-algorithm && cargo test --target x86_64-unknown-linux-gnu
 6. Update examples if interface changes affect them
 
 ### Testing Strategy
-- Algorithm and type crates: Use standard `cargo test` on x86_64
+- Because this is an embedded project, testing is primarily done on hardware
+- Always ensure that the project compiles, but make sure to use the correct target - `thumbv8m.main-none-eabihf`
 - Hardware abstraction: Requires embedded testing or mocking
 - Integration: Test with example implementations
 
@@ -119,22 +113,20 @@ cd variegated-control-algorithm && cargo test --target x86_64-unknown-linux-gnu
 ### Espresso Machine Concepts
 - **Boiler**: Heats water for brewing and steam
 - **Group**: Where coffee is brewed (holds portafilter)
-- **Three-way solenoid**: Controls water flow direction
+- **Three-way solenoid**: Diverts water flow after brewing - may be manually controlled or automated
 - **PID Control**: Maintains stable temperature/pressure
-- **Flow rate vs. pressure**: Key brewing parameters
 - **Steam wand**: For milk steaming
 - **Water tap**: For hot water dispensing
 
 ### Control Priorities
-- Single-boiler machines require coordination between brewing and steaming
-- Temperature control typically has higher priority than pressure
-- Flow rate control is critical for consistent extraction
 - Safety interlocks prevent simultaneous conflicting operations
+- Single boiler machines typically only allow one operation at a time (brewing, steaming, dispensing water)
+- Dual boiler machines can operate brewing and steaming simultaneously, but they may not allow water dispensing during these operations
+- Dual boiler machines may not allow the heating elements of both boilers to be on at the same time, as this could exceed power limits - this is an example of a safety interlock
 
 ## Hardware Context
 - Designed for custom PCBs with specific sensor/actuator configurations
 - Supports various ADCs, temperature sensors (PT100), pressure transducers
 - GPIO-controlled heating elements, pumps, and solenoids
-- Display interfaces (OLED) and user input (rotary encoders, buttons)
 
 This project is in active development with unstable APIs (< 1.0.0). Breaking changes occur between minor versions but not patch versions.
