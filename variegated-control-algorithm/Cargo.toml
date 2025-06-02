@@ -2,7 +2,7 @@
 name = "variegated-control-algorithm"
 version = "0.1.0"
 authors = ["magnusnordlander", "Kxie"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "A flexible PID controller"
 readme = "README.md"
