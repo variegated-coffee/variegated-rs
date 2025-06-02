@@ -15,7 +15,7 @@ members = [
     "variegated-soft-pwm",
 ]
 resolver = "2"
-package = { rust-version = "1.75" }
+package = { rust-version = "1.85.0" }
 
 [patch.crates-io]
 embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "rp-0.4.0" }
