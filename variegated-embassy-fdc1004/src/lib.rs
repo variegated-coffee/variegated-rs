@@ -8,18 +8,29 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 use ux::i24;
 
+/// Errors that can occur when communicating with the FDC1004 chip.
 #[derive(Debug, Clone, Copy, Format)]
 pub enum FDC1004Error<E>{
+    /// Failed to find a suitable CAPDAC setting for the measurement range.
     UnableToFindCapdacSetting,
+    /// Measurement has not completed yet.
     MeasurementNotComplete,
+    /// I2C communication error.
     I2CError(E)
 }
 
+/// Output data rate configuration for FDC1004 measurements.
+/// 
+/// The FDC1004 supports configurable sample rates for capacitance measurements.
+/// Higher rates provide faster measurements but may have reduced accuracy.
 #[derive(Default, Copy, Clone, Debug)]
 pub enum OutputRate {
+    /// 100 samples per second (default).
     #[default]
     SPS100,
+    /// 200 samples per second.
     SPS200,
+    /// 400 samples per second.
     SPS400,
 }
 
@@ -35,21 +46,40 @@ impl OutputRate {
 
 static CAPDAC_MAX: u8 = 0x1F;
 
+/// FDC1004 input channel selection.
+/// 
+/// The FDC1004 has 4 capacitive input channels (CIN1-CIN4) that can be 
+/// configured for single-ended or differential measurements.
 #[derive(Copy, Clone, Debug)]
 pub enum Channel {
+    /// Capacitive input channel 1.
     CIN1,
+    /// Capacitive input channel 2.
     CIN2,
+    /// Capacitive input channel 3.
     CIN3,
+    /// Capacitive input channel 4.
     CIN4,
+    /// Internal CAPDAC reference for offset compensation.
     CAPDAC,
+    /// Disabled channel (no connection).
     DISABLED
 }
 
+/// FDC1004 measurement channel identifier.
+/// 
+/// The FDC1004 supports up to 4 simultaneous measurements using different
+/// measurement configurations. Each measurement can be independently configured
+/// with different input channels and CAPDAC settings.
 #[derive(Copy, Clone)]
 pub enum Measurement {
+    /// Measurement channel 1.
     Measurement1,
+    /// Measurement channel 2.
     Measurement2,
+    /// Measurement channel 3.
     Measurement3,
+    /// Measurement channel 4.
     Measurement4,
 }
 
@@ -91,30 +121,58 @@ impl Measurement {
     }
 }
 
+/// FDC1004 register addresses.
+/// 
+/// These addresses correspond to the internal registers of the FDC1004 chip
+/// as specified in the datasheet. Each register serves a specific function
+/// for configuration, measurement data, calibration, or device identification.
 #[derive(Copy, Clone, Debug)]
 pub enum RegisterAddress {
+    /// Measurement 1 most significant byte.
     Measurement1MSB,
+    /// Measurement 1 least significant byte.
     Measurement1LSB,
+    /// Measurement 2 most significant byte.
     Measurement2MSB,
+    /// Measurement 2 least significant byte.
     Measurement2LSB,
+    /// Measurement 3 most significant byte.
     Measurement3MSB,
+    /// Measurement 3 least significant byte.
     Measurement3LSB,
+    /// Measurement 4 most significant byte.
     Measurement4MSB,
+    /// Measurement 4 least significant byte.
     Measurement4LSB,
+    /// Measurement 1 configuration register.
     Measurement1Config,
+    /// Measurement 2 configuration register.
     Measurement2Config,
+    /// Measurement 3 configuration register.
     Measurement3Config,
+    /// Measurement 4 configuration register.
     Measurement4Config,
+    /// FDC configuration register.
     FdcConf,
+    /// Offset calibration for CIN1.
     OffsetCalCIN1,
+    /// Offset calibration for CIN2.
     OffsetCalCIN2,
+    /// Offset calibration for CIN3.
     OffsetCalCIN3,
+    /// Offset calibration for CIN4.
     OffsetCalCIN4,
+    /// Gain calibration for CIN1.
     GainCalCIN1,
+    /// Gain calibration for CIN2.
     GainCalCIN2,
+    /// Gain calibration for CIN3.
     GainCalCIN3,
+    /// Gain calibration for CIN4.
     GainCalCIN4,
+    /// Manufacturer ID register.
     ManufacturerId,
+    /// Device ID register.
     DeviceId,
 }
 
@@ -153,13 +211,25 @@ static FDC_REGISTER: u8 = 0x0C;
 static ATTOFARADS_UPPER_WORD:i32 = 488;
 static PICOFARADS_PER_CAPDAC: f32 = 3.125;
 
+/// Result of a capacitance measurement operation.
+/// 
+/// The FDC1004 can measure capacitances within a certain range. If the measured
+/// capacitance is outside this range, the result will indicate overflow or underflow.
 #[derive(Debug, Clone, Copy, Format)]
 pub enum SuccessfulMeasurement {
+    /// Measurement completed successfully and is within the measurable range.
     MeasurementInRange(MeasuredCapacitance),
+    /// Capacitance is too small to measure accurately (below measurement range).
     Underflow,
+    /// Capacitance is too large to measure accurately (above measurement range).
     Overflow,
 }
 
+/// A capacitance measurement result with associated CAPDAC offset.
+/// 
+/// Contains the raw measurement value from the FDC1004 along with the 
+/// CAPDAC setting used during measurement. The CAPDAC provides offset
+/// compensation to extend the measurement range.
 #[derive(Debug, Clone, Copy)]
 pub struct MeasuredCapacitance {
     pub(crate) value: i24,
@@ -340,6 +410,23 @@ impl FDCConfiguration {
     }
 }
 
+/// FDC1004 Capacitance-to-Digital Converter driver.
+/// 
+/// This driver provides an async interface to the Texas Instruments FDC1004
+/// 4-channel capacitance-to-digital converter. The FDC1004 can measure
+/// capacitances from femtofarads to picofarads with high resolution.
+/// 
+/// # Examples
+/// 
+/// ```no_run
+/// use variegated_embassy_fdc1004::{FDC1004, OutputRate, Channel};
+/// 
+/// // Create a new FDC1004 driver instance
+/// let mut fdc = FDC1004::new(i2c, 0x50, OutputRate::SPS100, delay);
+/// 
+/// // Read capacitance from channel 1
+/// let result = fdc.read_capacitance(Channel::CIN1).await?;
+/// ```
 pub struct FDC1004<I2C: I2c, D: DelayNs> {
     i2c: I2C,
     address: u8,
@@ -351,6 +438,14 @@ impl<I2C: I2c, D: DelayNs> FDC1004<I2C, D>
 where 
     I2C::Error: fmt::Debug,
 {
+    /// Create a new FDC1004 driver instance.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `i2c` - I2C peripheral for communication with the FDC1004
+    /// * `address` - I2C address of the FDC1004 device (typically 0x50)
+    /// * `output_rate` - Desired measurement sample rate
+    /// * `delay` - Delay provider for timing operations
     pub fn new(i2c: I2C, address: u8, output_rate: OutputRate, delay: D) -> Self {
         FDC1004 {
             i2c,
@@ -360,6 +455,22 @@ where
         }
     }
 
+    /// Read capacitance from the specified channel with automatic CAPDAC adjustment.
+    /// 
+    /// This method automatically adjusts the CAPDAC setting to find the optimal
+    /// measurement range for the target capacitor. It will iterate through different
+    /// CAPDAC values until a valid measurement is obtained or the limits are reached.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `channel` - The input channel to measure (CIN1-CIN4)
+    /// 
+    /// # Returns
+    /// 
+    /// * `Ok(SuccessfulMeasurement::MeasurementInRange)` - Valid measurement with capacitance data
+    /// * `Ok(SuccessfulMeasurement::Underflow)` - Capacitance below measurable range
+    /// * `Ok(SuccessfulMeasurement::Overflow)` - Capacitance above measurable range
+    /// * `Err` - Communication or configuration error
     pub async fn read_capacitance(&mut self, channel: Channel) -> Result<SuccessfulMeasurement, FDC1004Error<I2C::Error>> {
         let mut capdac: u8 = 0x00;
 
@@ -384,6 +495,20 @@ where
         Err(FDC1004Error::UnableToFindCapdacSetting)
     }
 
+    /// Measure capacitance on a specific channel with a given CAPDAC setting.
+    /// 
+    /// This is a lower-level method that performs a single measurement with
+    /// a specific CAPDAC value. Use `read_capacitance` for automatic CAPDAC
+    /// adjustment instead.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `channel` - The input channel to measure (CIN1-CIN4)
+    /// * `capdac` - CAPDAC offset value (0-31) for measurement range adjustment
+    /// 
+    /// # Returns
+    /// 
+    /// Raw 24-bit measurement value from the FDC1004.
     pub async fn measure_channel(&mut self, channel: Channel, capdac: u8) -> Result<i24, FDC1004Error<I2C::Error>> {
         // @todo This static mapping is not a great idea
         let measurement = match channel {
@@ -401,12 +526,31 @@ where
         return self.read_measurement(measurement).await;
     }
 
+    /// Configure a measurement channel with specific input and CAPDAC settings.
+    /// 
+    /// Sets up one of the four measurement channels with the specified input
+    /// channel and CAPDAC offset value.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `channel` - Input channel to connect to this measurement
+    /// * `measurement` - Which measurement slot (1-4) to configure
+    /// * `capdac` - CAPDAC offset value for measurement range adjustment
     pub async fn configure_single_measurement(&mut self, channel: Channel, measurement: Measurement, capdac: u8) -> Result<(), FDC1004Error<I2C::Error>> {
         let config = MeasurementConfiguration::new(channel, Channel::CAPDAC, capdac);
 
         self.write_u16(measurement.config_register(), config.to_u16()).await
     }
 
+    /// Trigger a measurement on the specified measurement channel.
+    /// 
+    /// Initiates a capacitance measurement on one of the pre-configured
+    /// measurement channels. The measurement must be configured first using
+    /// `configure_single_measurement`.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `measurement` - Which measurement slot (1-4) to trigger
     pub async fn trigger_single_measurement(&mut self, measurement: Measurement) -> Result<(), FDC1004Error<I2C::Error>> {
         let mut config = FDCConfiguration::default();
         let config = config.rate(self.output_rate);
@@ -420,6 +564,19 @@ where
         self.write_u16(RegisterAddress::FdcConf, config.to_u16()).await
     }
 
+    /// Read the result of a completed measurement.
+    /// 
+    /// Retrieves the measurement data from the specified measurement channel.
+    /// The measurement must be completed before calling this method, otherwise
+    /// a `MeasurementNotComplete` error will be returned.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `measurement` - Which measurement slot (1-4) to read from
+    /// 
+    /// # Returns
+    /// 
+    /// Raw 24-bit measurement value from the FDC1004.
     pub async fn read_measurement(&mut self, measurement: Measurement) -> Result<i24, FDC1004Error<I2C::Error>> {
         let config = FDCConfiguration::from_u16(self.read_u16(RegisterAddress::FdcConf).await?);
 
