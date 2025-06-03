@@ -1,3 +1,16 @@
+//! # NAU7802 Embassy Driver
+//!
+//! Embassy-based driver for the Nuvoton NAU7802 24-bit precision ADC.
+//! This driver provides async support for I2C communication with the NAU7802,
+//! designed specifically for load cell and weight measurement applications.
+//!
+//! The NAU7802 is a precision, 24-bit, analog-to-digital converter (ADC) with
+//! programmable gain amplifier (PGA), voltage reference, and calibration capabilities.
+//! It is particularly well-suited for bridge sensor applications like load cells.
+//!
+//! Based on [amiraeva/nau7802-rs](https://github.com/amiraeva/nau7802-rs).
+//! See the datasheet in `docs/datasheet.pdf` for complete technical specifications.
+
 #![no_std]
 #![warn(missing_docs)]
 
@@ -10,19 +23,27 @@ use embedded_hal_async::delay::DelayNs;
 mod constants;
 pub use constants::*;
 
+/// Result type alias for NAU7802 operations
 pub type Result<T> = core::result::Result<T, Error>;
 
+/// Errors that can occur when communicating with the NAU7802
 #[derive(Debug)]
 pub enum Error {
+    /// I2C communication error
     I2cError,
+    /// Device power-up sequence failed
     PowerupFailed,
 }
 
+/// Strategy for detecting when new ADC data is available
 pub enum Nau7802DataAvailableStrategy<W: Wait>{
+    /// Use polling to check for data ready
     Polling,
+    /// Use the dedicated DRDY pin to detect when data is ready
     DrdyPin(W),
 }
 
+/// NAU7802 ADC driver with Embassy async support
 pub struct Nau7802<W: Wait, D: DelayNs> {
     address: u8,
     wait_strategy: Nau7802DataAvailableStrategy<W>,
@@ -30,6 +51,7 @@ pub struct Nau7802<W: Wait, D: DelayNs> {
 }
 
 impl<W: Wait, D: DelayNs> Nau7802<W, D> {
+    /// Create a new NAU7802 driver instance
     pub fn new(wait_strategy: Nau7802DataAvailableStrategy<W>, delay: D, address: Option<u8>) -> Self {
         let addr = if let Some(a) = address {
             a
@@ -44,6 +66,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         }
     }
 
+    /// Initialize the NAU7802 with the specified configuration
     pub async fn init<I2C, I2CError>(
         &mut self,
         i2c: &mut I2C,
@@ -65,6 +88,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         Ok(())
     }
 
+    /// Wait for new ADC data to become available
     pub async fn wait_for_data_available<I2C, I2CError>(&mut self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         match self.wait_strategy {
             Nau7802DataAvailableStrategy::Polling => self.wait_for_data_available_i2c(i2c).await?,
@@ -83,6 +107,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         }
     }
     
+    /// Read a 24-bit signed conversion result
     pub async fn read<I2C, I2CError>(&mut self, i2c: &mut I2C) -> Result<i32> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         self.wait_for_data_available(i2c).await?;
 
@@ -98,10 +123,12 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         Ok(adc_result)
     }
 
+    /// Begin analog front-end calibration
     pub async fn begin_afe_calibration<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         self.set_bit(i2c, Register::Ctrl2, Ctrl2RegisterBits::Cals).await
     }
 
+    /// Check the status of analog front-end calibration
     pub async fn poll_afe_calibration_status<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<AfeCalibrationStatus> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         if self.get_bit(i2c, Register::Ctrl2, Ctrl2RegisterBits::Cals).await? {
             return Ok(AfeCalibrationStatus::InProgress);
@@ -114,6 +141,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         Ok(AfeCalibrationStatus::Success)
     }
 
+    /// Set the ADC sample rate
     pub async fn set_sample_rate<I2C, I2CError>(&self, i2c: &mut I2C, sps: SamplesPerSecond) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         const SPS_MASK: u8 = 0b10001111;
         const SPS_START_BIT_IDX: u8 = 4;
@@ -121,6 +149,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         self.set_function_helper(i2c, Register::Ctrl2, SPS_MASK, SPS_START_BIT_IDX, sps as _).await
     }
 
+    /// Set the programmable gain amplifier gain
     pub async fn set_gain<I2C, I2CError>(&self, i2c: &mut I2C, gain: Gain) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         const GAIN_MASK: u8 = 0b11111000;
         const GAIN_START_BIT: u8 = 0;
@@ -128,6 +157,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         self.set_function_helper(i2c, Register::Ctrl1, GAIN_MASK, GAIN_START_BIT, gain as _).await
     }
 
+    /// Set the low-dropout regulator voltage
     pub async fn set_ldo<I2C, I2CError>(&self, i2c: &mut I2C, ldo: Ldo) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         const LDO_MASK: u8 = 0b11000111;
         const LDO_START_BIT: u8 = 3;
@@ -137,6 +167,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         self.set_bit(i2c, Register::PuCtrl, PuCtrlBits::AVDDS).await
     }
 
+    /// Power up the analog and digital circuitry
     pub async fn power_up<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         const NUM_ATTEMPTS: usize = 100;
 
@@ -161,15 +192,18 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
         }
     }
 
+    /// Start the device reset sequence
     pub async fn start_reset<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         self.set_bit(i2c, Register::PuCtrl, PuCtrlBits::RR).await
     }
 
+    /// Finish the device reset sequence
     pub async fn finish_reset<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         self.clear_bit(i2c, Register::PuCtrl, PuCtrlBits::RR).await
     }
 
 
+    /// Perform miscellaneous initialization steps
     pub async fn misc_init<I2C, I2CError>(&self, i2c: &mut I2C) -> Result<()> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
         const TURN_OFF_CLK_CHPL: u8 = 0x30;
 

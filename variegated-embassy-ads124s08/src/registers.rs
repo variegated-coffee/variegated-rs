@@ -1,31 +1,55 @@
+//! Register definitions and bit field structures for the ADS124S08 ADC
+
 use defmt::Format;
 
+/// Trait for types that can be converted to/from raw register bits
 pub trait ByteRepresentation {
+    /// Convert to register bit representation
     fn bits(&self) -> u8;
+    /// Create from register bit representation
     fn from_bits(bits: u8) -> Option<Self> where Self: Sized;
 }
 
 
 
+/// ADS124S08 register addresses
 #[derive(Debug, Clone, Copy, Format)]
 pub enum RegisterAddress {
+    /// Device identification register
     ID,
+    /// Status register
     STATUS,
+    /// Input multiplexer register
     INPMUX,
+    /// Programmable gain amplifier register
     PGA,
+    /// Data rate register
     DATARATE,
+    /// Reference control register
     REF,
+    /// IDAC magnitude register
     IDACMAG,
+    /// IDAC multiplexer register
     IDACMUX,
+    /// Sensor biasing register
     VBIAS,
+    /// System control register
     SYS,
+    /// Offset calibration register 0
     OFCAL0,
+    /// Offset calibration register 1
     OFCAL1,
+    /// Offset calibration register 2
     OFCAL2,
+    /// Full-scale calibration register 0
     FSCAL0,
+    /// Full-scale calibration register 1
     FSCAL1,
+    /// Full-scale calibration register 2
     FSCAL2,
+    /// GPIO data register
     GPIODAT,
+    /// GPIO configuration register
     GPIOCON,
 }
 
@@ -79,21 +103,36 @@ impl RegisterAddress {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// ADC data rate settings in samples per second
 pub enum DataRate{
+    /// 2.5 samples per second
     SPS2_5,
+    /// 5 samples per second
     SPS5,
+    /// 10 samples per second
     SPS10,
+    /// 16.6 samples per second
     SPS16_6,
+    /// 20 samples per second (default)
     #[default]
     SPS20,
+    /// 50 samples per second
     SPS50,
+    /// 60 samples per second
     SPS60,
+    /// 100 samples per second
     SPS100,
+    /// 200 samples per second
     SPS200,
+    /// 400 samples per second
     SPS400,
+    /// 800 samples per second
     SPS800,
+    /// 1000 samples per second
     SPS1000,
+    /// 2000 samples per second
     SPS2000,
+    /// 4000 samples per second
     SPS4000,
 }
 
