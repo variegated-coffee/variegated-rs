@@ -17,6 +17,7 @@
 /// Register definitions and configuration structures for the ADS124S08
 pub mod registers;
 
+#[cfg(feature = "defmt")]
 use defmt::Format;
 use embedded_hal_async::delay::DelayNs;
 use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue, RegisterAddress, ByteRepresentation, ConfigurationRegisters};
@@ -36,7 +37,8 @@ pub enum WaitStrategy<INPUT: InputPin + Wait> {
 }
 
 /// ADS124S08 commands as defined in the datasheet
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub enum Command {
     /// No operation
     NOP,
@@ -94,7 +96,8 @@ impl Command {
 }
 
 /// Errors that can occur when communicating with the ADS124S08
-#[derive(Debug, Format, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub enum ADS124S08Error {
     /// SPI communication error
     SPIError,
@@ -115,7 +118,8 @@ pub enum ADS124S08Error {
 }
 
 /// Conversion result from the ADS124S08 ADC
-#[derive(Debug, Format, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub struct Code {
     /// Raw 24-bit conversion data as 3 bytes
     pub data: [u8; 3],
