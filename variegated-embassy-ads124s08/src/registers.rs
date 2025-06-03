@@ -14,46 +14,84 @@ pub trait ByteRepresentation {
 
 /// ADS124S08 register addresses
 #[derive(Debug, Clone, Copy, Format)]
+/// RegisterAddress
 pub enum RegisterAddress {
     /// Device identification register
+    /// ID
+
     ID,
     /// Status register
+    /// STATUS
+
     STATUS,
     /// Input multiplexer register
+    /// INPMUX
+
     INPMUX,
     /// Programmable gain amplifier register
+    /// PGA
+
     PGA,
     /// Data rate register
+    /// DATARATE
+
     DATARATE,
     /// Reference control register
+    /// REF
+
     REF,
     /// IDAC magnitude register
+    /// IDACMAG
+
     IDACMAG,
     /// IDAC multiplexer register
+    /// IDACMUX
+
     IDACMUX,
     /// Sensor biasing register
+    /// VBIAS
+
     VBIAS,
     /// System control register
+    /// SYS
+
     SYS,
     /// Offset calibration register 0
+    /// OFCAL0
+
     OFCAL0,
     /// Offset calibration register 1
+    /// OFCAL1
+
     OFCAL1,
     /// Offset calibration register 2
+    /// OFCAL2
+
     OFCAL2,
     /// Full-scale calibration register 0
+    /// FSCAL0
+
     FSCAL0,
     /// Full-scale calibration register 1
+    /// FSCAL1
+
     FSCAL1,
     /// Full-scale calibration register 2
+    /// FSCAL2
+
     FSCAL2,
     /// GPIO data register
+    /// GPIODAT
+
     GPIODAT,
     /// GPIO configuration register
+    /// GPIOCON
+
     GPIOCON,
 }
 
 impl RegisterAddress {
+    /// Get the register address value
     pub fn addr(&self) -> u8 {
         match self {
             RegisterAddress::ID => 0x00,
@@ -77,6 +115,7 @@ impl RegisterAddress {
         }
     }
 
+    /// Create register address from address value
     pub fn from_addr(bits: u8) -> Option<Self> {
         match bits {
             0x00 => Some(RegisterAddress::ID),
@@ -104,35 +143,64 @@ impl RegisterAddress {
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
 /// ADC data rate settings in samples per second
+/// DataRate
 pub enum DataRate{
     /// 2.5 samples per second
+    /// SPS2_5
+
     SPS2_5,
     /// 5 samples per second
+    /// SPS5
+
     SPS5,
     /// 10 samples per second
+    /// SPS10
+
     SPS10,
     /// 16.6 samples per second
+    /// SPS16_6
+
     SPS16_6,
     /// 20 samples per second (default)
     #[default]
+    /// SPS20
+
     SPS20,
     /// 50 samples per second
+    /// SPS50
+
     SPS50,
     /// 60 samples per second
+    /// SPS60
+
     SPS60,
     /// 100 samples per second
+    /// SPS100
+
     SPS100,
     /// 200 samples per second
+    /// SPS200
+
     SPS200,
     /// 400 samples per second
+    /// SPS400
+
     SPS400,
     /// 800 samples per second
+    /// SPS800
+
     SPS800,
     /// 1000 samples per second
+    /// SPS1000
+
     SPS1000,
     /// 2000 samples per second
+    /// SPS2000
+
     SPS2000,
     /// 4000 samples per second
+    /// SPS4000
+
     SPS4000,
 }
 
@@ -177,20 +245,61 @@ impl ByteRepresentation for DataRate {
     }
 }
 
+/// Input multiplexer pin selection
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// Mux
 pub enum Mux {
+    /// Analog input 0
+    /// AIN0
+
     AIN0,
+    /// Analog input 1
+    /// AIN1
+
     AIN1,
+    /// Analog input 2
+    /// AIN2
+
     AIN2,
+    /// Analog input 3
+    /// AIN3
+
     AIN3,
+    /// Analog input 4
+    /// AIN4
+
     AIN4,
+    /// Analog input 5
+    /// AIN5
+
     AIN5,
+    /// Analog input 6
+    /// AIN6
+
     AIN6,
+    /// Analog input 7
+    /// AIN7
+
     AIN7,
+    /// Analog input 8
+    /// AIN8
+
     AIN8,
+    /// Analog input 9
+    /// AIN9
+
     AIN9,
+    /// Analog input 10
+    /// AIN10
+
     AIN10,
+    /// Analog input 11
+    /// AIN11
+
     AIN11,
+    /// Common analog input
+    /// AINCOM
+
     AINCOM,
 }
 
@@ -233,21 +342,63 @@ impl ByteRepresentation for Mux {
     }
 }
 
+/// IDAC output connection selection
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// IDACMux
 pub enum IDACMux {
+    /// Connect to AIN0
+    /// AIN0
+
     AIN0,
+    /// Connect to AIN1
+    /// AIN1
+
     AIN1,
+    /// Connect to AIN2
+    /// AIN2
+
     AIN2,
+    /// Connect to AIN3
+    /// AIN3
+
     AIN3,
+    /// Connect to AIN4
+    /// AIN4
+
     AIN4,
+    /// Connect to AIN5
+    /// AIN5
+
     AIN5,
+    /// Connect to AIN6
+    /// AIN6
+
     AIN6,
+    /// Connect to AIN7
+    /// AIN7
+
     AIN7,
+    /// Connect to AIN8
+    /// AIN8
+
     AIN8,
+    /// Connect to AIN9
+    /// AIN9
+
     AIN9,
+    /// Connect to AIN10
+    /// AIN10
+
     AIN10,
+    /// Connect to AIN11
+    /// AIN11
+
     AIN11,
+    /// Connect to AINCOM
+    /// AINCOM
+
     AINCOM,
+    /// Disconnected (default)
     #[default]
     Disconnected
 }
@@ -293,6 +444,7 @@ impl ByteRepresentation for IDACMux {
 }
 
 impl IDACMux {
+    /// Create IDACMux from input multiplexer setting
     pub fn from_input_mux(mux: Mux) -> IDACMux {
         match mux {
             Mux::AIN0 => IDACMux::AIN0,
@@ -313,14 +465,29 @@ impl IDACMux {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// PGAConversionDelay
 pub enum PGAConversionDelay {
     #[default]
+    /// TMODx14
+
     TMODx14,
+    /// TMODx25
+
     TMODx25,
+    /// TMODx64
+
     TMODx64,
+    /// TMODx256
+
     TMODx256,
+    /// TMODx1024
+
     TMODx1024,
+    /// TMODx4096
+
     TMODx4096,
+    /// TMODx1
+
     TMODx1,
 }
 
@@ -352,19 +519,46 @@ impl ByteRepresentation for PGAConversionDelay {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// Programmable gain amplifier gain settings
+/// PGAGain
 pub enum PGAGain {
+    /// Gain of 1 (default)
     #[default]
+    /// Gain1
+
     Gain1,
+    /// Gain of 2
+    /// Gain2
+
     Gain2,
+    /// Gain of 4
+    /// Gain4
+
     Gain4,
+    /// Gain of 8
+    /// Gain8
+
     Gain8,
+    /// Gain of 16
+    /// Gain16
+
     Gain16,
+    /// Gain of 32
+    /// Gain32
+
     Gain32,
+    /// Gain of 64
+    /// Gain64
+
     Gain64,
+    /// Gain of 128
+    /// Gain128
+
     Gain128,
 }
 
 impl PGAGain {
+    /// Get the numeric gain value
     pub fn value(&self) -> u8 {
         match self {
             PGAGain::Gain1 => 1,
@@ -409,9 +603,14 @@ impl ByteRepresentation for PGAGain {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// ClockSource
 pub enum ClockSource {
     #[default]
+    /// Internal
+
     Internal,
+    /// External
+
     External,
 }
 
@@ -433,9 +632,14 @@ impl ByteRepresentation for ClockSource {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// Mode
 pub enum Mode {
     #[default]
+    /// Continuous
+
     Continuous,
+    /// SingleShot
+
     SingleShot,
 }
 
@@ -457,9 +661,14 @@ impl ByteRepresentation for Mode {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// Filter
 pub enum Filter {
+    /// SINC3
+
     SINC3,
     #[default]
+    /// LowLatency
+
     LowLatency,
 }
 
@@ -481,11 +690,19 @@ impl ByteRepresentation for Filter {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// ReferenceMonitorConfiguration
 pub enum ReferenceMonitorConfiguration {
     #[default]
+    /// Disabled
+
     Disabled,
+    /// L0MonitorThreshold03V
+
     L0MonitorThreshold03V,
+    /// L0L1MonitorThreshold03V13AvddAvss
+
     L0L1MonitorThreshold03V13AvddAvss,
+    /// L0 monitor 10mohm pull-together threshold 0.3V
     L0Monitor10mohmPullTogetherThreshold03V
 }
 
@@ -511,10 +728,19 @@ impl ByteRepresentation for ReferenceMonitorConfiguration {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// ADC reference input selection
+/// ReferenceInput
 pub enum ReferenceInput {
+    /// External reference using REFP0 and REFN0 pins (default)
     #[default]
+    /// Refp0Refn0
+
     Refp0Refn0,
+    /// External reference using REFP1 and REFN1 pins
+    /// Refp1Refn1
+
     Refp1Refn1,
+    /// Internal 2.5V reference
     Internal
 }
 
@@ -538,10 +764,17 @@ impl ByteRepresentation for ReferenceInput {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// InternalVoltageReferenceConfiguration
 pub enum InternalVoltageReferenceConfiguration {
     #[default]
+    /// Off
+
     Off,
+    /// OnButPowersDown
+
     OnButPowersDown,
+    /// AlwaysOn
+
     AlwaysOn,
 }
 
@@ -565,17 +798,38 @@ impl ByteRepresentation for InternalVoltageReferenceConfiguration {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// IDACMagnitude
 pub enum IDACMagnitude {
     #[default]
+    /// Off
+
     Off,
+    /// Mag10uA
+
     Mag10uA,
+    /// Mag50uA
+
     Mag50uA,
+    /// Mag100uA
+
     Mag100uA,
+    /// Mag250uA
+
     Mag250uA,
+    /// Mag500uA
+
     Mag500uA,
+    /// Mag750uA
+
     Mag750uA,
+    /// Mag1000uA
+
     Mag1000uA,
+    /// Mag1500uA
+
     Mag1500uA,
+    /// Mag2000uA
+
     Mag2000uA,
 }
 
@@ -613,9 +867,14 @@ impl ByteRepresentation for IDACMagnitude {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+/// VBiasLevel
 pub enum VBiasLevel {
     #[default]
+    /// AvddAvssBy2
+
     AvddAvssBy2,
+    /// AvddAvssBy12
+
     AvddAvssBy12,
 }
 
@@ -637,15 +896,32 @@ impl ByteRepresentation for VBiasLevel {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// SystemMonitorConfiguration
 pub enum SystemMonitorConfiguration {
     #[default]
+    /// Disabled
+
     Disabled,
+    /// PgaShortedToAvddAvssBy2AndDisconnected
+
     PgaShortedToAvddAvssBy2AndDisconnected,
+    /// InternalTemperatureSensor
+
     InternalTemperatureSensor,
+    /// AvddMinusAvssBy4Measurement
+
     AvddMinusAvssBy4Measurement,
+    /// DvddBy4Measurement
+
     DvddBy4Measurement,
+    /// BurnOutCurrentSourceEnabled0_2UA
+
     BurnOutCurrentSourceEnabled0_2UA,
+    /// BurnOutCurrentSourceEnabled1UA
+
     BurnOutCurrentSourceEnabled1UA,
+    /// BurnOutCurrentSourceEnabled10UA
+
     BurnOutCurrentSourceEnabled10UA,
 }
 
@@ -679,11 +955,20 @@ impl ByteRepresentation for SystemMonitorConfiguration {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// CalibrationSampleSize
 pub enum CalibrationSampleSize {
+    /// Samples1
+
     Samples1,
+    /// Samples4
+
     Samples4,
     #[default]
+    /// Samples8
+
     Samples8,
+    /// Samples16
+
     Samples16,
 }
 
@@ -709,20 +994,35 @@ impl ByteRepresentation for CalibrationSampleSize {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// GpioDirection
 pub enum GpioDirection {
+    /// INPUT
+
     INPUT,
+    /// OUTPUT
+
     OUTPUT,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// GpioConfiguration
 pub enum GpioConfiguration {
+    /// AnalogInput
+
     AnalogInput,
+    /// GPIO
+
     GPIO,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// DeviceId
 pub enum DeviceId {
+    /// ADS124S08
+
     ADS124S08,
+    /// ADS124S06
+
     ADS124S06,
 }
 
@@ -745,6 +1045,7 @@ impl ByteRepresentation for DeviceId {
 
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// StatusRegisterValue
 pub struct StatusRegisterValue {
     fl_por: bool,
     n_rdy: bool,
@@ -785,17 +1086,29 @@ impl ByteRepresentation for StatusRegisterValue {
 }
 
 impl StatusRegisterValue {
+    /// Check if the ADC is ready for conversion
     pub fn ready(&self) -> bool {
         !self.n_rdy
     }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// SystemControlRegister
 pub struct SystemControlRegister {
+    /// sys_mon
+
     pub sys_mon: SystemMonitorConfiguration,
+    /// cal_samp
+
     pub cal_samp: CalibrationSampleSize,
+    /// timeout
+
     pub timeout: bool,
+    /// crc
+
     pub crc: bool,
+    /// sendstat
+
     pub sendstat: bool,
 }
 
@@ -822,6 +1135,7 @@ impl ByteRepresentation for SystemControlRegister {
 }
 
 impl SystemControlRegister {
+    /// Create a copy with modified system monitor configuration
     pub fn copy_with_configuration(&self, sys_mon: SystemMonitorConfiguration) -> SystemControlRegister {
         SystemControlRegister {
             sys_mon,
@@ -834,8 +1148,13 @@ impl SystemControlRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// InputMultiplexerRegister
 pub struct InputMultiplexerRegister {
+    /// p
+
     pub p: Mux,
+    /// n
+
     pub n: Mux,
 }
 
@@ -865,7 +1184,10 @@ impl ByteRepresentation for InputMultiplexerRegister {
 }
 
 #[derive(Debug, Clone, Copy, Format)]
+/// DeviceIdRegister
 pub struct DeviceIdRegister {
+    /// device_id
+
     pub device_id: DeviceId,
 }
 
@@ -882,9 +1204,16 @@ impl ByteRepresentation for DeviceIdRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// PgaRegister
 pub struct PgaRegister {
+    /// gain
+
     pub gain: PGAGain,
+    /// enable
+
     pub enable: bool,
+    /// delay
+
     pub delay: PGAConversionDelay,
 }
 
@@ -907,11 +1236,22 @@ impl ByteRepresentation for PgaRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// DataRateRegister
 pub struct DataRateRegister {
+    /// g_chop
+
     pub g_chop: bool,
+    /// clock
+
     pub clock: ClockSource,
+    /// mode
+
     pub mode: Mode,
+    /// filter
+
     pub filter: Filter,
+    /// rate
+
     pub rate: DataRate,
 }
 
@@ -938,11 +1278,22 @@ impl ByteRepresentation for DataRateRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+/// ReferenceControlRegister
 pub struct ReferenceControlRegister {
+    /// fl_ref_en
+
     pub fl_ref_en: ReferenceMonitorConfiguration,
+    /// n_refp_buf
+
     pub n_refp_buf: bool,
+    /// n_refn_buf
+
     pub n_refn_buf: bool,
+    /// refsel
+
     pub refsel: ReferenceInput,
+    /// refcon
+
     pub refcon: InternalVoltageReferenceConfiguration,
 }
 
@@ -981,9 +1332,16 @@ impl ByteRepresentation for ReferenceControlRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// IDACMagnitudeRegister
 pub struct IDACMagnitudeRegister {
+    /// fl_rail_en
+
     pub fl_rail_en: bool,
+    /// psw
+
     pub psw: bool,
+    /// imag
+
     pub imag: IDACMagnitude,
 }
 
@@ -1006,8 +1364,13 @@ impl ByteRepresentation for IDACMagnitudeRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// IDACMultiplexerRegister
 pub struct IDACMultiplexerRegister {
+    /// i2mux
+
     pub i2mux: IDACMux,
+    /// i1mux
+
     pub i1mux: IDACMux,
 }
 
@@ -1028,14 +1391,31 @@ impl ByteRepresentation for IDACMultiplexerRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+/// SensorBiasingRegister
 pub struct SensorBiasingRegister {
+    /// vbias
+
     pub vbias: VBiasLevel,
+    /// vb_ainc
+
     pub vb_ainc: bool,
+    /// vb_ain5
+
     pub vb_ain5: bool,
+    /// vb_ain4
+
     pub vb_ain4: bool,
+    /// vb_ain3
+
     pub vb_ain3: bool,
+    /// vb_ain2
+
     pub vb_ain2: bool,
+    /// vb_ain1
+
     pub vb_ain1: bool,
+    /// vb_ain0
+
     pub vb_ain0: bool,
 }
 
@@ -1068,13 +1448,39 @@ impl ByteRepresentation for SensorBiasingRegister {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default, Format)]
+/// Complete set of ADS124S08 configuration registers
+/// ConfigurationRegisters
 pub struct ConfigurationRegisters {
+    /// Input multiplexer register
+    /// inpmux
+
     pub inpmux: InputMultiplexerRegister,
+    /// PGA register
+    /// pga
+
     pub pga: PgaRegister,
+    /// Data rate register
+    /// datarate
+
     pub datarate: DataRateRegister,
+    /// Reference control register
+    /// refctrl
+
     pub refctrl: ReferenceControlRegister,
+    /// IDAC magnitude register
+    /// idacmag
+
     pub idacmag: IDACMagnitudeRegister,
+    /// IDAC multiplexer register
+    /// idacmux
+
     pub idacmux: IDACMultiplexerRegister,
+    /// Sensor biasing register
+    /// vbias
+
     pub vbias: SensorBiasingRegister,
+    /// System control register
+    /// sys
+
     pub sys: SystemControlRegister,
 }

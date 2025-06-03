@@ -203,6 +203,7 @@ macro_rules! define_read_write_register_ops {
         paste::item! {
             // Generate read function name
             #[allow(dead_code)]
+            #[doc = concat!("Read the ", stringify!($base_name), " register")]
             pub async fn [<read_ $base_name _reg>]<'a>(&mut self) -> Result<$reg_type, ADS124S08Error>
              {
                 let bits = self.read_reg(registers::RegisterAddress::$reg).await?;
@@ -218,6 +219,7 @@ macro_rules! define_read_write_register_ops {
 
             // Generate write function name
             #[allow(dead_code)]
+            #[doc = concat!("Write the ", stringify!($base_name), " register")]
             pub async fn [<write_ $base_name _reg>]<'a>(&mut self, value: $reg_type) -> Result<(), ADS124S08Error>
              {
                 self.write_reg(registers::RegisterAddress::$reg, value.bits()).await?;
@@ -228,6 +230,7 @@ macro_rules! define_read_write_register_ops {
 
             // Generate swap function name
             #[allow(dead_code)]
+            #[doc = concat!("Swap the ", stringify!($base_name), " register and return the previous value")]
             pub async fn [<swap_ $base_name _reg>]<'a>(&mut self, value: $reg_type) -> Result<$reg_type, ADS124S08Error>
              {
                 let current = self.[<read_ $base_name _reg>]().await?;
@@ -243,6 +246,7 @@ macro_rules! define_read_only_register_ops {
         paste::item! {
             // Generate read function name
             #[allow(dead_code)]
+            #[doc = concat!("Read the ", stringify!($base_name), " register")]
             async fn [<read_ $base_name _reg>]<'a>(&mut self) -> Result<$reg_type, ADS124S08Error>
              {
                 let bits = self.read_reg(registers::RegisterAddress::$reg).await?;
