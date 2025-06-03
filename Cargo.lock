@@ -1838,8 +1838,6 @@ name = "variegated-embassy-fdc1004"
 version = "0.1.0"
 dependencies = [
  "defmt",
- "defmt-rtt",
- "embassy-futures",
  "embedded-hal-async",
  "ux",
 ]
@@ -1849,13 +1847,7 @@ name = "variegated-embassy-nau7802"
 version = "0.1.0"
 dependencies = [
  "byteorder",
- "defmt",
- "defmt-rtt",
- "embassy-futures",
- "embassy-time",
  "embedded-hal-async",
- "nb 1.1.0",
- "ux",
 ]
 
 [[package]]
