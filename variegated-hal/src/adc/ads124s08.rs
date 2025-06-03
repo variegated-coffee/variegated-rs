@@ -7,9 +7,9 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
 use embedded_hal_async::digital::Wait;
 use variegated_adc_tools::ConversionParameters;
-use variegated_embassy_ads124s08::ADS124S08;
-use variegated_embassy_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
-use variegated_embassy_ads124s08::registers::Mux;
+use variegated_ads124s08::ADS124S08;
+use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
+use variegated_ads124s08::registers::Mux;
 
 use crate::WithTask;
 
