@@ -155,7 +155,7 @@ struct LinearEncoderPeripherals {
 
 type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
-type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>>>;
+type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
@@ -206,7 +206,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let spi_bus = INTERNAL_SPI_BUS.init(Mutex::new(spi));
     let spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
-    let mut ads = ADS124S08::new(spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)));
+    let mut ads = ADS124S08::new(spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)), Delay);
     info!("Resetting ADS124S08");
     let res = ads.reset().await;
     if let Err(e) = res {
@@ -223,9 +223,9 @@ async fn main_task(spawner: Spawner) -> ! {
     let i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(i2c_bus));
     
     let mut fdc1004_dev = I2cDevice::new(i2c_bus);
-    let mut fdc1004 = FDC1004::new(0x50, OutputRate::SPS100);
+    let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100);
     
-    let cap = fdc1004.read_capacitance(&mut fdc1004_dev, variegated_embassy_fdc1004::Channel::CIN1).await;
+    let cap = fdc1004.read_capacitance(variegated_embassy_fdc1004::Channel::CIN1).await;
     
     let linear_encoder_p = linear_encoder_peripherals!(p);
 

@@ -3,6 +3,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
+use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
 use embedded_hal_async::digital::Wait;
 use variegated_adc_tools::ConversionParameters;
@@ -19,17 +20,17 @@ pub enum MeasurementType {
     DvddBy4,
 }
 
-pub struct Ads124S08Sensor<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, const N: usize> {
-    ads124s08: &'a Mutex<M, ADS124S08<SpiDevT, InputPinT>>,
+pub struct Ads124S08Sensor<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize> {
+    ads124s08: &'a Mutex<M, ADS124S08<SpiDevT, InputPinT, D>>,
     signal: Sender<'a, NoopRawMutex, f32, N>,
     measurement_type: MeasurementType,
     conversion_parameters: ConversionParameters,
     offset: f32,
 }
 
-impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, const N: usize> Ads124S08Sensor<'a, M, SpiDevT, InputPinT, N> {
+impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize> Ads124S08Sensor<'a, M, SpiDevT, InputPinT, D, N> {
     pub fn new(
-        ads124s08: &'a Mutex<M, ADS124S08<SpiDevT, InputPinT>>,
+        ads124s08: &'a Mutex<M, ADS124S08<SpiDevT, InputPinT, D>>,
         signal: Sender<'a, NoopRawMutex, f32, N>,
         measurement_type: MeasurementType,
         conversion_parameters: ConversionParameters,
@@ -45,7 +46,7 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, const N: u
     }
 }
 
-impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, const N: usize> WithTask for Ads124S08Sensor<'a, M, SpiDevT, InputPinT, N> {
+impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize> WithTask for Ads124S08Sensor<'a, M, SpiDevT, InputPinT, D, N> {
     async fn task(&mut self) {
         loop {
             {
