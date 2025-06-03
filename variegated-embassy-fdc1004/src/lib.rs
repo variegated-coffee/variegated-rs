@@ -208,9 +208,6 @@ impl RegisterAddress {
     }
 }
 
-static FDC_REGISTER: u8 = 0x0C;
-
-static ATTOFARADS_UPPER_WORD:i32 = 488;
 static PICOFARADS_PER_CAPDAC: f32 = 3.125;
 
 /// Result of a capacitance measurement operation.
@@ -250,16 +247,6 @@ impl MeasuredCapacitance {
             value,
             capdac,
         }
-    }
-
-    pub(crate) fn to_weird(&self) -> f32 {
-        let val: i32 = self.value.into();
-
-        let mut cap = val * ATTOFARADS_UPPER_WORD;
-        cap /= 1000;
-        cap += self.capdac as i32 * 3125i32;
-
-        cap as f32
     }
 
     pub(crate) fn to_pf(&self) -> f32 {
@@ -379,11 +366,13 @@ impl FDCConfiguration {
         self
     }
 
+    #[allow(unused)]
     pub(crate) fn reset(&mut self, reset: bool) -> &mut Self {
         self.reset = reset;
         self
     }
 
+    #[allow(unused)]
     pub(crate) fn repeat(&mut self, repeat: bool) -> &mut Self {
         self.repeat = repeat;
         self
