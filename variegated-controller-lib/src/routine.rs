@@ -175,7 +175,7 @@ impl RoutineExecutionContext {
         }
     }
 
-    pub fn step(&mut self, status: &Status) -> Option<MachineCommand> {
+    pub fn step(&mut self, status: &Status, user_action: Option<UserActionIndex>) -> Option<MachineCommand> {
         if self.finished_executing {
             return None; // Routine has finished executing
         }
@@ -209,8 +209,13 @@ impl RoutineExecutionContext {
                         return self.handle_exit(exit);
                     }
                 }
-                RoutineExitCondition::UserAction(_) => {
-                    // Handle user action logic here
+                RoutineExitCondition::UserAction(action_index) => {
+                    if let Some(user_action_index) = user_action {
+                        if user_action_index == action_index {
+                            info!("User action condition met: {:?}", action_index);
+                            return self.handle_exit(exit);
+                        }
+                    }
                 }
             }
 

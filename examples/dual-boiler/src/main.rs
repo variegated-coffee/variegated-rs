@@ -9,11 +9,12 @@ use alloc::format;
 use alloc::vec::Vec;
 use defmt::{info, unwrap};
 use display_interface_spi::SPIInterface;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{adc, pwm, spi, uart};
+use embassy_rp::{adc, i2c, pwm, spi, uart};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -58,6 +59,7 @@ use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
+use variegated_embassy_fdc1004::{OutputRate, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioDualEdgeCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
@@ -69,6 +71,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
     DisplayIrq => uart::InterruptHandler<DisplayPeripheralsUart>;
     AdcIrq => adc::InterruptHandler;
+    InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
 });
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -90,6 +93,13 @@ struct InternalSpiBusPeripherals {
     miso_pin: (),
     dma_tx: (),
     dma_rx: (),
+}
+
+#[variegated_board_cfg::board_cfg("internal_i2c_bus_peripherals")]
+struct InternalI2cBusPeripherals {
+    i2c: (),
+    sda_pin: (),
+    scl_pin: (),
 }
 
 #[variegated_board_cfg::board_cfg("ads124s08_peripherals")]
@@ -143,8 +153,9 @@ struct LinearEncoderPeripherals {
     pin_linear_encoder_a: (),
 }
 
-type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
-type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>>>;
+type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
+type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
+type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>>>;
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
@@ -163,7 +174,8 @@ fn main() -> ! {
     });
 }
 
-static SPI_BUS: StaticCell<InternalBus> = StaticCell::new();
+static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
+static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
 static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
@@ -191,7 +203,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let ads_p = ads_124s08_peripherals!(p);
 
     let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, spi_config);
-    let spi_bus = SPI_BUS.init(Mutex::new(spi));
+    let spi_bus = INTERNAL_SPI_BUS.init(Mutex::new(spi));
     let spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
     let mut ads = ADS124S08::new(spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)));
@@ -205,7 +217,16 @@ async fn main_task(spawner: Spawner) -> ! {
     let ads = ADS.init(Mutex::new(ads));
 
     info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
-
+    
+    let i2c_p = internal_i_2c_bus_peripherals!(p);
+    let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
+    let i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(i2c_bus));
+    
+    let mut fdc1004_dev = I2cDevice::new(i2c_bus);
+    let mut fdc1004 = FDC1004::new(0x50, OutputRate::SPS100);
+    
+    let cap = fdc1004.read_capacitance(&mut fdc1004_dev, variegated_embassy_fdc1004::Channel::CIN1).await;
+    
     let linear_encoder_p = linear_encoder_peripherals!(p);
 
     let mut adc = Adc::new(linear_encoder_p.adc, Irqs, adc::Config::default());

@@ -9,6 +9,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
+use core::fmt::{Debug, Formatter};
 use defmt::{info, unwrap};
 use display_interface_spi::SPIInterface;
 use embassy_executor::{Executor, Spawner};
@@ -40,7 +41,7 @@ use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
 use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::ConversionParameters;
-use variegated_controller_lib::{SingleBoilerSingleGroupController};
+use variegated_controller_lib::{SingleBoilerSingleGroupConfiguration, SingleBoilerSingleGroupController, SingleBoilerSingleGroupPidParameters};
 use variegated_embassy_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_embassy_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
@@ -54,10 +55,12 @@ use embedded_graphics::{
     prelude::*,
     text::{Baseline, Text},
 };
+use embedded_hal::digital::{Error, ErrorKind, ErrorType, OutputPin};
 use embedded_hal::pwm::SetDutyCycle;
 use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
+use w25q32jv::W25q32jv;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
 use variegated_hal::gpio::gpio_command_sender::GpioDualEdgeCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -92,6 +95,11 @@ struct InternalSpiBusPeripherals {
     miso_pin: (),
     dma_tx: (),
     dma_rx: (),
+}
+
+#[variegated_board_cfg::board_cfg("settings_flash_peripherals")]
+struct SettingsFlashPeripherals {
+    pin_cs: (),
 }
 
 #[variegated_board_cfg::board_cfg("rotary_encoder_peripherals")]
@@ -150,6 +158,34 @@ type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::A
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>>>;
 
+struct NoopOutputPin {
+
+}
+
+#[derive(Debug)]
+struct NoopOutputPinError {
+
+}
+
+impl Error for NoopOutputPinError {
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Other
+    }
+}
+
+impl ErrorType for NoopOutputPin { type Error = NoopOutputPinError; }
+
+impl OutputPin for NoopOutputPin {
+    fn set_low(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn set_high(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -197,9 +233,9 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, spi_config);
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
-    let spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
+    let ads_spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
-    let mut ads = ADS124S08::new(spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)));
+    let mut ads = ADS124S08::new(ads_spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)));
     info!("Resetting ADS124S08");
     let res = ads.reset().await;
     if let Err(e) = res {
@@ -208,6 +244,14 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Done");
     
     let ads = ADS.init(Mutex::new(ads));
+
+    let flash_p = settings_flash_peripherals!(p);
+    let flash_spi_dev = SpiDevice::new(spi_bus, Output::new(flash_p.pin_cs, High));
+
+    let hold = NoopOutputPin {};
+    let wp = NoopOutputPin {};
+
+    let mut flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     
     let temp_sig: &'static Watch<_, _, 3>  = TEMP_SIGNAL.init(Watch::new());
     let mut temp_sensor = Ads124S08Sensor::new(
@@ -295,30 +339,14 @@ async fn main_task(spawner: Spawner) -> ! {
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static PubSubChannel<_, _, 1, 3, 1> = STATUS_CHANNEL.init(PubSubChannel::new());
 
-    // Output is always in percent
-    let group_flow_rate_params = PidParameters {
-        kp: PidTerm { scale: 3.0, limits: PidLimits::default() },
-        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-80.0, 80.0).unwrap() },
-        kd: PidTerm { scale: 30.0, limits: PidLimits::default() }
-    };
-
-    // Output is always in percent
-    let pressure_params = PidParameters {
-        kp: PidTerm { scale: 3.0, limits: PidLimits::default() },
-        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() },
-        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
-    };
+    let configuration = create_default_configuration();
 
     let mut controller = SingleBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
         boiler,
         group,
-        BoilerControlTarget::Off,
-        BoilerControlTarget::Off,
-        GroupBrewControlTarget::FixedDutyCycle(30)
-        //GroupBrewControlTarget::Pressure(3.0, pressure_params),
-        //GroupBrewControlTarget::GroupFlowRate(5.0, group_flow_rate_params)
+        configuration,
     );
 
     let button_p = button_peripherals!(p);
@@ -375,6 +403,33 @@ async fn main_task(spawner: Spawner) -> ! {
         Timer::after_millis(3000).await;
     }
 }
+
+fn create_default_configuration() -> SingleBoilerSingleGroupConfiguration {
+    let mut pid_parameters = SingleBoilerSingleGroupPidParameters::default();
+    pid_parameters.boiler_temperature_params = PidParameters {
+        kp: PidTerm { scale: 3.0, limits: PidLimits::default() },
+        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() },
+        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+    };
+    pid_parameters.pump_flow_rate_params = PidParameters {
+        kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
+        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
+        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+    };
+    pid_parameters.pump_pressure_params = PidParameters {
+        kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
+        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
+        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+    };
+
+    SingleBoilerSingleGroupConfiguration {
+        brew_boiler_control_target: BoilerControlTarget::Off,
+        steam_boiler_control_target: BoilerControlTarget::Off,
+        group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
+        pid_parameters,
+    }
+}
+
 fn launch_button_and_rotary_tasks(spawner: &Spawner, button_p: ButtonPeripherals) {
     let brew_button = Input::new(button_p.pin_brew, Pull::Up);
     let water_button = Input::new(button_p.pin_water, Pull::Up);

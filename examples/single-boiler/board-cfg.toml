@@ -10,6 +10,9 @@ dma_rx = "embassy_rp::peripherals::DMA_CH1"
 pin_drdy = "embassy_rp::peripherals::PIN_29"
 pin_cs = "embassy_rp::peripherals::PIN_32"
 
+[settings_flash_peripherals]
+pin_cs = "embassy_rp::peripherals::PIN_27"
+
 [esp32_peripherals]
 uart = "embassy_rp::peripherals::UART1"
 tx_pin = "embassy_rp::peripherals::PIN_8"
@@ -18,7 +21,6 @@ cts_pin = "embassy_rp::peripherals::PIN_10"
 rts_pin = "embassy_rp::peripherals::PIN_11"
 dma_tx = "embassy_rp::peripherals::DMA_CH4"
 dma_rx = "embassy_rp::peripherals::DMA_CH5"
-
 
 [display_peripherals]
 spi = "embassy_rp::peripherals::SPI0"
