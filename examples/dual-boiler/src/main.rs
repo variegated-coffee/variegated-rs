@@ -223,7 +223,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(i2c_bus));
     
     let mut fdc1004_dev = I2cDevice::new(i2c_bus);
-    let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100);
+    let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
     
     let cap = fdc1004.read_capacitance(variegated_embassy_fdc1004::Channel::CIN1).await;
     
