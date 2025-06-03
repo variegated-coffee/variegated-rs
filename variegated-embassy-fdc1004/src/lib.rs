@@ -4,7 +4,7 @@
 
 use core::fmt;
 use defmt::Format;
-use embassy_time::{Duration, Timer};
+use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 use ux::i24;
 
@@ -24,11 +24,11 @@ pub enum OutputRate {
 }
 
 impl OutputRate {
-    fn delay(&self) -> Duration {
+    fn delay_ns(&self) -> u32 {
         match self {
-            OutputRate::SPS100 => Duration::from_millis(11),
-            OutputRate::SPS200 => Duration::from_millis(6),
-            OutputRate::SPS400 => Duration::from_millis(3),
+            OutputRate::SPS100 => 11_000_000, // 11 milliseconds in nanoseconds
+            OutputRate::SPS200 => 6_000_000,  // 6 milliseconds in nanoseconds
+            OutputRate::SPS400 => 3_000_000,  // 3 milliseconds in nanoseconds
         }
     }
 }
@@ -340,21 +340,23 @@ impl FDCConfiguration {
     }
 }
 
-pub struct FDC1004<I2C: I2c> {
+pub struct FDC1004<I2C: I2c, D: DelayNs> {
     i2c: I2C,
     address: u8,
     output_rate: OutputRate,
+    delay: D,
 }
 
-impl<I2C: I2c> FDC1004<I2C> 
+impl<I2C: I2c, D: DelayNs> FDC1004<I2C, D> 
 where 
     I2C::Error: fmt::Debug,
 {
-    pub fn new(i2c: I2C, address: u8, output_rate: OutputRate) -> Self {
+    pub fn new(i2c: I2C, address: u8, output_rate: OutputRate, delay: D) -> Self {
         FDC1004 {
             i2c,
             address,
             output_rate,
+            delay,
         }
     }
 
@@ -394,7 +396,7 @@ where
 
         self.configure_single_measurement(channel, measurement.clone(), capdac).await?;
         self.trigger_single_measurement(measurement.clone()).await?;
-        Timer::after(self.output_rate.delay()).await;
+        self.delay.delay_ns(self.output_rate.delay_ns()).await;
 
         return self.read_measurement(measurement).await;
     }

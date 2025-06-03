@@ -1840,7 +1840,6 @@ dependencies = [
  "defmt",
  "defmt-rtt",
  "embassy-futures",
- "embassy-time",
  "embedded-hal-async",
  "ux",
 ]
