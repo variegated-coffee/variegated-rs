@@ -20,17 +20,14 @@ Low level espresso machine primitives, like GPIO controlled heating elements, AD
 ### variegated-controller-lib
 Higher level espresso machine controllers.
 
-### variegated-embassy-ads124s08
-This is going to be called variegated-ads124s08, once it no longer depends on Embassy. It's essentially an
-embedded-hal-async device driver for the TI ADS124S08 ADC. Contains both high-level and low-level APIs for the ADC.
+### variegated-ads124s08
+An embedded-hal-async device driver for the TI ADS124S08 ADC. Contains both high-level and low-level APIs for the ADC.
 
-### variegated-embassy-fdc1004
-This is going to be called variegated-fdc1004, once it no longer depends on Embassy. A driver for the TI FDC1004 
-capacitive-to-digital converter.
+### variegated-fdc1004
+A driver for the TI FDC1004 capacitive-to-digital converter.
 
-### variegated-embassy-nau7802
-This is going to be called variegated-nau7802, once it no longer depends on Embassy. A driver for the Nuvoton NAU7802
-load cell ADC.
+### variegated-nau7802
+A driver for the Nuvoton NAU7802 load cell ADC.
 
 ### variegated-adc-tools
 This crate provides a set of tools for working with ADC values – specifically converting ADC values to useful
