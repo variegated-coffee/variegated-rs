@@ -1764,10 +1764,17 @@ dependencies = [
 name = "variegated-ads124s08"
 version = "0.1.0"
 dependencies = [
+ "cortex-m-rt",
  "defmt",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
  "embassy-futures",
+ "embassy-rp",
+ "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "panic-probe",
  "paste",
 ]
 
@@ -1856,8 +1863,15 @@ dependencies = [
 name = "variegated-fdc1004"
 version = "0.1.0"
 dependencies = [
+ "cortex-m-rt",
  "defmt",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-time",
  "embedded-hal-async",
+ "panic-probe",
  "ux",
 ]
 
@@ -1898,7 +1912,15 @@ name = "variegated-nau7802"
 version = "0.1.0"
 dependencies = [
  "byteorder",
+ "cortex-m-rt",
+ "defmt",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-time",
  "embedded-hal-async",
+ "panic-probe",
 ]
 
 [[package]]
