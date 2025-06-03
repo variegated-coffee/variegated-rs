@@ -439,8 +439,11 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
 
         match &mut self.wait_strategy {
             WaitStrategy::UseDrdyPin(drdy_input) => drdy_input.wait_for_low().await.map_err(|_e| ADS124S08Error::SPIError)?,
-            // @todo Change delay to match sample rate
-            WaitStrategy::Delay => self.delay.delay_ms(1000).await,
+            // Use delay based on configured sample rate with some margin
+            WaitStrategy::Delay => {
+                let delay_ms = self.configuration_registers.datarate.rate.sample_period_ms() + 10; // Add 10ms margin
+                self.delay.delay_ms(delay_ms).await
+            },
         }
 
         Ok(())
