@@ -453,7 +453,9 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
             },
             // Use delay based on configured sample rate with some margin
             WaitStrategy::Delay => {
-                let delay_ms = self.configuration_registers.datarate.rate.sample_period_ms() + 10; // Add 10ms margin
+                let base_period = self.configuration_registers.datarate.rate.sample_period_ms();
+                let margin = core::cmp::max(base_period * 5 / 100, 1); // 5% or 1ms, whichever is larger
+                let delay_ms = base_period + margin;
                 self.delay.delay_ms(delay_ms).await;
                 Ok(())
             },
