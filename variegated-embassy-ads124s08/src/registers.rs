@@ -465,23 +465,22 @@ impl IDACMux {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
-/// PGAConversionDelay
+/// PGA conversion delay configuration.
+/// 
+/// This enum configures the delay between PGA settling and the start of conversion
+/// as a multiple of the modulator period (TMOD). Longer delays allow for better
+/// settling at higher PGA gains but reduce conversion speed.
 pub enum PGAConversionDelay {
     #[default]
-    /// TMODx14
-
+    /// 14 × modulator period delay (fastest settling, suitable for low PGA gains)
     TMODx14,
-    /// TMODx25
-
+    /// 25 × modulator period delay (balanced settling time)
     TMODx25,
-    /// TMODx64
-
+    /// 64 × modulator period delay (good settling for medium PGA gains)
     TMODx64,
-    /// TMODx256
-
+    /// 256 × modulator period delay (longer settling for high PGA gains)
     TMODx256,
-    /// TMODx1024
-
+    /// 1024 × modulator period delay (maximum settling time for highest PGA gains)
     TMODx1024,
     /// TMODx4096
 
@@ -661,14 +660,18 @@ impl ByteRepresentation for Mode {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
-/// Filter
+/// Digital filter configuration for the modulator.
+/// 
+/// Controls the type of digital filter applied to the modulator output to 
+/// reduce noise and improve measurement accuracy.
 pub enum Filter {
-    /// SINC3
-
+    /// SINC³ filter - Higher order filter providing excellent noise rejection
+    /// with lower data rates. Optimal for precision measurements where speed
+    /// is less critical.
     SINC3,
     #[default]
-    /// LowLatency
-
+    /// Low-latency filter - Faster response time with moderate noise rejection.
+    /// Suitable for applications requiring higher data throughput.
     LowLatency,
 }
 
@@ -690,19 +693,19 @@ impl ByteRepresentation for Filter {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
-/// ReferenceMonitorConfiguration
+/// Reference voltage monitoring configuration.
+/// 
+/// Configures the monitoring of reference voltages to detect when they fall
+/// outside acceptable thresholds, helping to ensure measurement accuracy.
 pub enum ReferenceMonitorConfiguration {
     #[default]
-    /// Disabled
-
+    /// Reference monitoring disabled - no voltage monitoring performed
     Disabled,
-    /// L0MonitorThreshold03V
-
+    /// Monitor L0 reference with 0.3V threshold - detects low reference voltage
     L0MonitorThreshold03V,
-    /// L0L1MonitorThreshold03V13AvddAvss
-
+    /// Monitor both L0 and L1 references with 0.3V and 1.3×(AVDD-AVSS) thresholds
     L0L1MonitorThreshold03V13AvddAvss,
-    /// L0 monitor 10mohm pull-together threshold 0.3V
+    /// Monitor L0 reference with 10MΩ pull-together resistance and 0.3V threshold
     L0Monitor10mohmPullTogetherThreshold03V
 }
 
@@ -764,17 +767,19 @@ impl ByteRepresentation for ReferenceInput {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
-/// InternalVoltageReferenceConfiguration
+/// Internal voltage reference power management configuration.
+/// 
+/// Controls how the internal 2.5V voltage reference is powered to balance
+/// power consumption with reference stability and settling time.
 pub enum InternalVoltageReferenceConfiguration {
     #[default]
-    /// Off
-
+    /// Internal reference disabled - use external reference only
     Off,
-    /// OnButPowersDown
-
+    /// Internal reference enabled but powers down between conversions to save power.
+    /// Requires additional settling time when waking up.
     OnButPowersDown,
-    /// AlwaysOn
-
+    /// Internal reference always powered on - fastest settling but higher power consumption.
+    /// Recommended for continuous measurements.
     AlwaysOn,
 }
 
@@ -798,38 +803,32 @@ impl ByteRepresentation for InternalVoltageReferenceConfiguration {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
-/// IDACMagnitude
+/// Excitation current source (IDAC) magnitude configuration.
+/// 
+/// Sets the magnitude of the current sources used to excite sensors like RTDs
+/// (Resistance Temperature Detectors) and bridge sensors. Higher currents
+/// provide better signal-to-noise ratio but may cause self-heating in sensors.
 pub enum IDACMagnitude {
     #[default]
-    /// Off
-
+    /// Current sources disabled
     Off,
-    /// Mag10uA
-
+    /// 10 μA excitation current - minimal self-heating, suitable for very sensitive sensors
     Mag10uA,
-    /// Mag50uA
-
+    /// 50 μA excitation current - low self-heating for most RTD applications
     Mag50uA,
-    /// Mag100uA
-
+    /// 100 μA excitation current - common choice for PT100 RTDs
     Mag100uA,
-    /// Mag250uA
-
+    /// 250 μA excitation current - higher sensitivity for low-resistance sensors
     Mag250uA,
-    /// Mag500uA
-
+    /// 500 μA excitation current - good signal level for bridge sensors
     Mag500uA,
-    /// Mag750uA
-
+    /// 750 μA excitation current - high signal for robust measurements
     Mag750uA,
-    /// Mag1000uA
-
+    /// 1000 μA (1 mA) excitation current - maximum sensitivity but consider self-heating
     Mag1000uA,
-    /// Mag1500uA
-
+    /// 1500 μA (1.5 mA) excitation current - very high signal level
     Mag1500uA,
-    /// Mag2000uA
-
+    /// 2000 μA (2 mA) excitation current - maximum available current
     Mag2000uA,
 }
 
@@ -867,14 +866,15 @@ impl ByteRepresentation for IDACMagnitude {
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
-/// VBiasLevel
+/// Sensor bias voltage level configuration.
+/// 
+/// Sets the bias voltage applied to sensor inputs to keep them within the
+/// optimal operating range of the ADC input stage.
 pub enum VBiasLevel {
     #[default]
-    /// AvddAvssBy2
-
+    /// Bias voltage set to (AVDD - AVSS) / 2 - mid-supply bias for bipolar signals
     AvddAvssBy2,
-    /// AvddAvssBy12
-
+    /// Bias voltage set to (AVDD - AVSS) / 12 - lower bias voltage for unipolar signals
     AvddAvssBy12,
 }
 
@@ -896,32 +896,28 @@ impl ByteRepresentation for VBiasLevel {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
-/// SystemMonitorConfiguration
+/// System monitoring and diagnostic configuration.
+/// 
+/// Enables various system monitoring functions for diagnostics and sensor
+/// fault detection including temperature monitoring and burnout detection.
 pub enum SystemMonitorConfiguration {
     #[default]
-    /// Disabled
-
+    /// System monitoring disabled - normal measurement mode
     Disabled,
-    /// PgaShortedToAvddAvssBy2AndDisconnected
-
+    /// PGA inputs shorted to (AVDD-AVSS)/2 and disconnected from external pins
+    /// for offset calibration
     PgaShortedToAvddAvssBy2AndDisconnected,
-    /// InternalTemperatureSensor
-
+    /// Internal temperature sensor monitoring - measures die temperature
     InternalTemperatureSensor,
-    /// AvddMinusAvssBy4Measurement
-
+    /// Supply voltage monitoring - measures (AVDD-AVSS)/4 for power supply diagnostics
     AvddMinusAvssBy4Measurement,
-    /// DvddBy4Measurement
-
+    /// Digital supply monitoring - measures DVDD/4 for digital power diagnostics
     DvddBy4Measurement,
-    /// BurnOutCurrentSourceEnabled0_2UA
-
+    /// Burnout current source 0.2 μA - detects open sensor connections
     BurnOutCurrentSourceEnabled0_2UA,
-    /// BurnOutCurrentSourceEnabled1UA
-
+    /// Burnout current source 1 μA - higher sensitivity burnout detection
     BurnOutCurrentSourceEnabled1UA,
-    /// BurnOutCurrentSourceEnabled10UA
-
+    /// Burnout current source 10 μA - maximum sensitivity burnout detection
     BurnOutCurrentSourceEnabled10UA,
 }
 
@@ -1093,22 +1089,20 @@ impl StatusRegisterValue {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
-/// SystemControlRegister
+/// System control register configuration.
+/// 
+/// Controls system-level features including monitoring functions, calibration,
+/// timeout behavior, CRC checking, and status reporting.
 pub struct SystemControlRegister {
-    /// sys_mon
-
+    /// System monitoring configuration - enables diagnostic measurements
     pub sys_mon: SystemMonitorConfiguration,
-    /// cal_samp
-
+    /// Calibration sample size - number of samples used for calibration
     pub cal_samp: CalibrationSampleSize,
-    /// timeout
-
+    /// SPI timeout enable - enables timeout detection for SPI communication
     pub timeout: bool,
-    /// crc
-
+    /// CRC checksum enable - adds CRC to conversion data for error detection
     pub crc: bool,
-    /// sendstat
-
+    /// Status byte enable - includes status information in conversion results
     pub sendstat: bool,
 }
 
@@ -1148,13 +1142,14 @@ impl SystemControlRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
-/// InputMultiplexerRegister
+/// Input multiplexer register configuration.
+/// 
+/// Selects which analog input pins are connected to the positive and negative
+/// inputs of the programmable gain amplifier for differential measurements.
 pub struct InputMultiplexerRegister {
-    /// p
-
+    /// Positive input multiplexer selection - selects the positive input pin
     pub p: Mux,
-    /// n
-
+    /// Negative input multiplexer selection - selects the negative input pin
     pub n: Mux,
 }
 
@@ -1236,22 +1231,20 @@ impl ByteRepresentation for PgaRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
-/// DataRateRegister
+/// Data rate and conversion configuration register.
+/// 
+/// Controls the ADC conversion parameters including data rate, filter type,
+/// conversion mode, clock source, and global chopping for improved accuracy.
 pub struct DataRateRegister {
-    /// g_chop
-
+    /// Global chopping enable - alternates input polarity to reduce offset and drift
     pub g_chop: bool,
-    /// clock
-
+    /// Clock source selection - internal or external clock reference
     pub clock: ClockSource,
-    /// mode
-
+    /// Conversion mode - continuous or single-shot measurements
     pub mode: Mode,
-    /// filter
-
+    /// Digital filter type - SINC³ or low-latency filter
     pub filter: Filter,
-    /// rate
-
+    /// Data rate selection - conversion speed in samples per second
     pub rate: DataRate,
 }
 
@@ -1278,22 +1271,20 @@ impl ByteRepresentation for DataRateRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
-/// ReferenceControlRegister
+/// Reference voltage control register configuration.
+/// 
+/// Controls the voltage reference system including monitoring, buffer configuration,
+/// reference source selection, and internal reference power management.
 pub struct ReferenceControlRegister {
-    /// fl_ref_en
-
+    /// Reference monitoring configuration - enables voltage monitoring and fault detection
     pub fl_ref_en: ReferenceMonitorConfiguration,
-    /// n_refp_buf
-
+    /// Positive reference buffer disable - when true, disables REFP input buffer
     pub n_refp_buf: bool,
-    /// n_refn_buf
-
+    /// Negative reference buffer disable - when true, disables REFN input buffer  
     pub n_refn_buf: bool,
-    /// refsel
-
+    /// Reference input selection - chooses between internal and external references
     pub refsel: ReferenceInput,
-    /// refcon
-
+    /// Internal voltage reference configuration - controls internal 2.5V reference
     pub refcon: InternalVoltageReferenceConfiguration,
 }
 
@@ -1332,16 +1323,16 @@ impl ByteRepresentation for ReferenceControlRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
-/// IDACMagnitudeRegister
+/// IDAC magnitude and control register configuration.
+/// 
+/// Controls the excitation current sources including magnitude, power switch
+/// control, and rail detection for sensor excitation applications.
 pub struct IDACMagnitudeRegister {
-    /// fl_rail_en
-
+    /// Supply rail detection enable - monitors if IDAC output hits supply rails
     pub fl_rail_en: bool,
-    /// psw
-
+    /// Power switch control - enables/disables external power switch control
     pub psw: bool,
-    /// imag
-
+    /// IDAC magnitude setting - sets the excitation current amplitude
     pub imag: IDACMagnitude,
 }
 
@@ -1364,13 +1355,14 @@ impl ByteRepresentation for IDACMagnitudeRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
-/// IDACMultiplexerRegister
+/// IDAC multiplexer register configuration.
+/// 
+/// Controls the routing of the two excitation current sources (IDAC1 and IDAC2)
+/// to the analog input pins for sensor excitation applications.
 pub struct IDACMultiplexerRegister {
-    /// i2mux
-
+    /// IDAC2 multiplexer selection - routes second current source to selected pin
     pub i2mux: IDACMux,
-    /// i1mux
-
+    /// IDAC1 multiplexer selection - routes first current source to selected pin  
     pub i1mux: IDACMux,
 }
 
@@ -1391,31 +1383,26 @@ impl ByteRepresentation for IDACMultiplexerRegister {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
-/// SensorBiasingRegister
+/// Sensor biasing register configuration.
+/// 
+/// Controls bias voltage application to individual analog input pins to keep
+/// sensor signals within the optimal input range of the ADC front-end.
 pub struct SensorBiasingRegister {
-    /// vbias
-
+    /// Bias voltage level selection - sets the bias voltage magnitude
     pub vbias: VBiasLevel,
-    /// vb_ainc
-
+    /// Bias enable for AINCOM pin - applies bias voltage to common input
     pub vb_ainc: bool,
-    /// vb_ain5
-
+    /// Bias enable for AIN5 pin - applies bias voltage to analog input 5
     pub vb_ain5: bool,
-    /// vb_ain4
-
+    /// Bias enable for AIN4 pin - applies bias voltage to analog input 4
     pub vb_ain4: bool,
-    /// vb_ain3
-
+    /// Bias enable for AIN3 pin - applies bias voltage to analog input 3
     pub vb_ain3: bool,
-    /// vb_ain2
-
+    /// Bias enable for AIN2 pin - applies bias voltage to analog input 2
     pub vb_ain2: bool,
-    /// vb_ain1
-
+    /// Bias enable for AIN1 pin - applies bias voltage to analog input 1
     pub vb_ain1: bool,
-    /// vb_ain0
-
+    /// Bias enable for AIN0 pin - applies bias voltage to analog input 0
     pub vb_ain0: bool,
 }
 
