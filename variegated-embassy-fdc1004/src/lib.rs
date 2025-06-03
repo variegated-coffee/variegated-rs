@@ -340,24 +340,29 @@ impl FDCConfiguration {
     }
 }
 
-pub struct FDC1004 {
+pub struct FDC1004<I2C: I2c> {
+    i2c: I2C,
     address: u8,
     output_rate: OutputRate,
 }
 
-impl FDC1004 {
-    pub fn new(address: u8, output_rate: OutputRate) -> Self {
+impl<I2C: I2c> FDC1004<I2C> 
+where 
+    I2C::Error: fmt::Debug,
+{
+    pub fn new(i2c: I2C, address: u8, output_rate: OutputRate) -> Self {
         FDC1004 {
+            i2c,
             address,
             output_rate,
         }
     }
 
-    pub async fn read_capacitance<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel) -> Result<SuccessfulMeasurement, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn read_capacitance(&mut self, channel: Channel) -> Result<SuccessfulMeasurement, FDC1004Error<I2C::Error>> {
         let mut capdac: u8 = 0x00;
 
         for _ in 0..33 {
-            let m = self.measure_channel(i2c, channel, capdac).await?;
+            let m = self.measure_channel(channel, capdac).await?;
             if m < i24::max_value() && m > i24::min_value() {
                 return Ok(SuccessfulMeasurement::MeasurementInRange(MeasuredCapacitance::new(m, capdac)));
             }
@@ -377,7 +382,7 @@ impl FDC1004 {
         Err(FDC1004Error::UnableToFindCapdacSetting)
     }
 
-    pub async fn measure_channel<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel, capdac: u8) -> Result<i24, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn measure_channel(&mut self, channel: Channel, capdac: u8) -> Result<i24, FDC1004Error<I2C::Error>> {
         // @todo This static mapping is not a great idea
         let measurement = match channel {
             Channel::CIN1 => Measurement::Measurement1,
@@ -387,20 +392,20 @@ impl FDC1004 {
             _ => Measurement::Measurement1,
         };
 
-        self.configure_single_measurement(i2c, channel, measurement.clone(), capdac).await?;
-        self.trigger_single_measurement(i2c, measurement.clone()).await?;
+        self.configure_single_measurement(channel, measurement.clone(), capdac).await?;
+        self.trigger_single_measurement(measurement.clone()).await?;
         Timer::after(self.output_rate.delay()).await;
 
-        return self.read_measurement(i2c, measurement).await;
+        return self.read_measurement(measurement).await;
     }
 
-    pub async fn configure_single_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, channel: Channel, measurement: Measurement, capdac: u8) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn configure_single_measurement(&mut self, channel: Channel, measurement: Measurement, capdac: u8) -> Result<(), FDC1004Error<I2C::Error>> {
         let config = MeasurementConfiguration::new(channel, Channel::CAPDAC, capdac);
 
-        self.write_u16(i2c, measurement.config_register(), config.to_u16()).await
+        self.write_u16(measurement.config_register(), config.to_u16()).await
     }
 
-    pub async fn trigger_single_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, measurement: Measurement) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub async fn trigger_single_measurement(&mut self, measurement: Measurement) -> Result<(), FDC1004Error<I2C::Error>> {
         let mut config = FDCConfiguration::default();
         let config = config.rate(self.output_rate);
         let config = match measurement {
@@ -410,19 +415,19 @@ impl FDC1004 {
             Measurement::Measurement4 => config.initiate_measurement4(true),
         };
 
-        self.write_u16(i2c, RegisterAddress::FdcConf, config.to_u16()).await
+        self.write_u16(RegisterAddress::FdcConf, config.to_u16()).await
     }
 
-    pub async fn read_measurement<I2C, I2CError>(&mut self, i2c: &mut I2C, measurement: Measurement) -> Result<i24, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
-        let config = FDCConfiguration::from_u16(self.read_u16(i2c, RegisterAddress::FdcConf).await?);
+    pub async fn read_measurement(&mut self, measurement: Measurement) -> Result<i24, FDC1004Error<I2C::Error>> {
+        let config = FDCConfiguration::from_u16(self.read_u16(RegisterAddress::FdcConf).await?);
 
         // @todo wait for measurement to complete instead of returning an error
         if !measurement.ready_according_to_config(&config) {
             return Err(FDC1004Error::MeasurementNotComplete);
         }
 
-        let msb = self.read_u16(i2c, measurement.msb_register()).await? as i32;
-        let lsb = self.read_u16(i2c, measurement.lsb_register()).await? as i32;
+        let msb = self.read_u16(measurement.msb_register()).await? as i32;
+        let lsb = self.read_u16(measurement.lsb_register()).await? as i32;
 
         let mut val24 = i24::default();
         val24 |= i24::new(msb) << 8;
@@ -431,15 +436,15 @@ impl FDC1004 {
         Ok(val24)
     }
 
-    pub(crate) async fn write_u16<I2C, I2CError>(&mut self, i2c: &mut I2C, reg: RegisterAddress, data: u16) -> Result<(), FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub(crate) async fn write_u16(&mut self, reg: RegisterAddress, data: u16) -> Result<(), FDC1004Error<I2C::Error>> {
         let data = data.to_be_bytes();
-        i2c.write(self.address, &[reg.to_u8(), data[0], data[1]]).await.map_err(|e| FDC1004Error::I2CError(e))
+        self.i2c.write(self.address, &[reg.to_u8(), data[0], data[1]]).await.map_err(|e| FDC1004Error::I2CError(e))
     }
 
-    pub(crate) async fn read_u16<I2C, I2CError>(&mut self, i2c: &mut I2C, reg: RegisterAddress) -> Result<u16, FDC1004Error<I2CError>> where I2C: I2c<Error =I2CError>, I2CError: fmt::Debug {
+    pub(crate) async fn read_u16(&mut self, reg: RegisterAddress) -> Result<u16, FDC1004Error<I2C::Error>> {
         let mut data: [u8; 2] = [0,0];
         // @todo Pass on the original error
-        i2c.write_read(self.address, &[reg.to_u8()], &mut data).await.map_err(|e| FDC1004Error::I2CError(e))?;
+        self.i2c.write_read(self.address, &[reg.to_u8()], &mut data).await.map_err(|e| FDC1004Error::I2CError(e))?;
 
         let be = u16::from_be_bytes(data);
 
