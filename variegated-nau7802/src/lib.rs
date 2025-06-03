@@ -8,6 +8,36 @@
 //! programmable gain amplifier (PGA), voltage reference, and calibration capabilities.
 //! It is particularly well-suited for bridge sensor applications like load cells.
 //!
+//! ## Usage Example
+//!
+//! ```no_run
+//! use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, Gain, ConversionRate};
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let mut i2c = todo!();
+//! # let delay = todo!();
+//! // Create the driver with I2C bus and delay provider
+//! let data_strategy = Nau7802DataAvailableStrategy::Polling;
+//! let mut nau = Nau7802::new(0x2A, data_strategy, delay); // Default I2C address
+//!
+//! // Initialize and calibrate the device
+//! nau.power_up(&mut i2c).await?;
+//! nau.set_gain(&mut i2c, Gain::X128).await?;
+//! nau.set_sample_rate(&mut i2c, ConversionRate::SPS80).await?;
+//!
+//! // Perform offset calibration (with no load)
+//! nau.calibrate_offset(&mut i2c).await?;
+//!
+//! // Read weight measurement
+//! if nau.data_available(&mut i2c).await? {
+//!     let reading = nau.read_data(&mut i2c).await?;
+//!     // Convert to weight using your calibration factor
+//!     let weight_grams = (reading as f32) * 0.001; // Example calibration
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Based on [amiraeva/nau7802-rs](https://github.com/amiraeva/nau7802-rs).
 //! See the datasheet in `docs/datasheet.pdf` for complete technical specifications.
 
