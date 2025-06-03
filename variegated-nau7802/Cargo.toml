@@ -1,5 +1,5 @@
 [package]
-name = "variegated-embassy-fdc1004"
+name = "variegated-nau7802"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,7 +7,12 @@ edition = "2024"
 test = false
 bench = false
 
+[features]
+default = []
+
 [dependencies]
 embedded-hal-async = "1.0"
-ux = "0.1.0"
-defmt = "0.3"
+
+[dependencies.byteorder]
+version = "1.3.4"
+default-features = false

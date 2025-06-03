@@ -410,7 +410,7 @@ impl FDCConfiguration {
 /// # Examples
 /// 
 /// ```no_run
-/// use variegated_embassy_fdc1004::{FDC1004, OutputRate, Channel};
+/// use variegated_fdc1004::{FDC1004, OutputRate, Channel};
 /// 
 /// // Create a new FDC1004 driver instance
 /// let mut fdc = FDC1004::new(i2c, 0x50, OutputRate::SPS100, delay);
