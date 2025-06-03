@@ -15,6 +15,8 @@ pub enum FDC1004Error<E>{
     UnableToFindCapdacSetting,
     /// Measurement has not completed yet.
     MeasurementNotComplete,
+    /// Invalid channel for single-ended measurement.
+    InvalidMeasurementChannel,
     /// I2C communication error.
     I2CError(E)
 }
@@ -383,7 +385,7 @@ impl FDCConfiguration {
     }
 
     pub(crate) fn repeat(&mut self, repeat: bool) -> &mut Self {
-        self.reset = repeat;
+        self.repeat = repeat;
         self
     }
 
@@ -510,13 +512,14 @@ where
     /// 
     /// Raw 24-bit measurement value from the FDC1004.
     pub async fn measure_channel(&mut self, channel: Channel, capdac: u8) -> Result<i24, FDC1004Error<I2C::Error>> {
-        // @todo This static mapping is not a great idea
+        // Map input channels to measurement slots, with proper error handling for invalid channels
         let measurement = match channel {
             Channel::CIN1 => Measurement::Measurement1,
             Channel::CIN2 => Measurement::Measurement2,
             Channel::CIN3 => Measurement::Measurement3,
             Channel::CIN4 => Measurement::Measurement4,
-            _ => Measurement::Measurement1,
+            // CAPDAC and DISABLED channels cannot be measured directly
+            Channel::CAPDAC | Channel::DISABLED => return Err(FDC1004Error::InvalidMeasurementChannel),
         };
 
         self.configure_single_measurement(channel, measurement.clone(), capdac).await?;
@@ -578,9 +581,23 @@ where
     /// 
     /// Raw 24-bit measurement value from the FDC1004.
     pub async fn read_measurement(&mut self, measurement: Measurement) -> Result<i24, FDC1004Error<I2C::Error>> {
+        // Wait for measurement to complete with timeout
+        const MAX_WAIT_ATTEMPTS: u8 = 10;
+        let wait_delay_ns = self.output_rate.delay_ns();
+        
+        for _ in 0..MAX_WAIT_ATTEMPTS {
+            let config = FDCConfiguration::from_u16(self.read_u16(RegisterAddress::FdcConf).await?);
+            
+            if measurement.ready_according_to_config(&config) {
+                break;
+            }
+            
+            // Wait for one sample period before checking again
+            self.delay.delay_ns(wait_delay_ns).await;
+        }
+        
+        // Final check - if still not ready, return error
         let config = FDCConfiguration::from_u16(self.read_u16(RegisterAddress::FdcConf).await?);
-
-        // @todo wait for measurement to complete instead of returning an error
         if !measurement.ready_according_to_config(&config) {
             return Err(FDC1004Error::MeasurementNotComplete);
         }
@@ -602,7 +619,6 @@ where
 
     pub(crate) async fn read_u16(&mut self, reg: RegisterAddress) -> Result<u16, FDC1004Error<I2C::Error>> {
         let mut data: [u8; 2] = [0,0];
-        // @todo Pass on the original error
         self.i2c.write_read(self.address, &[reg.to_u8()], &mut data).await.map_err(|e| FDC1004Error::I2CError(e))?;
 
         let be = u16::from_be_bytes(data);
