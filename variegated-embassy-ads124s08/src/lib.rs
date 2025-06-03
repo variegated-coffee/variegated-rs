@@ -1,6 +1,20 @@
+//! # ADS124S08 Embassy Driver
+//!
+//! Embassy-based driver for the Texas Instruments ADS124S08 24-bit precision ADC.
+//! This driver provides async support for SPI communication with the ADS124S08,
+//! suitable for high-precision analog-to-digital conversion in espresso machine
+//! temperature and pressure sensing applications.
+//!
+//! The ADS124S08 is a precision, 24-bit, analog-to-digital converter (ADC) with
+//! 12 single-ended or 6 differential inputs, programmable gain amplifier (PGA),
+//! voltage reference, and two excitation current sources (IDACs).
+//!
+//! See the datasheet in `docs/datasheet.pdf` for complete technical specifications.
+
 #![no_std]
 #![warn(missing_docs)]
 
+/// Register definitions and configuration structures for the ADS124S08
 pub mod registers;
 
 use defmt::Format;
@@ -12,25 +26,51 @@ use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiDevice;
 
 
+/// Strategy for waiting for data ready signal from the ADS124S08
 pub enum WaitStrategy<INPUT: InputPin + Wait> {
+    /// Use the dedicated DRDY pin to detect when data is ready
     UseDrdyPin(INPUT),
+    /// Use delay-based polling instead of the DRDY pin
     Delay
 }
 
+/// ADS124S08 commands as defined in the datasheet
 #[derive(Debug, Clone, Copy, Format)]
 pub enum Command {
+    /// No operation
     NOP,
+    /// Wake up from power-down mode
     WAKEUP,
+    /// Enter power-down mode
     POWERDOWN,
+    /// Reset the device
     RESET,
+    /// Start ADC conversions
     START,
+    /// Stop ADC conversions
     STOP,
+    /// System offset calibration
     SYOCAL,
+    /// System gain calibration
     SYGCAL,
+    /// Self offset calibration
     SFOCAL,
+    /// Read conversion data
     RDATA,
-    RREG { address: u8, n: u8 },
-    WREG { address: u8, n: u8 },
+    /// Read register command
+    RREG { 
+        /// Starting register address
+        address: u8, 
+        /// Number of registers to read minus 1
+        n: u8 
+    },
+    /// Write register command
+    WREG { 
+        /// Starting register address
+        address: u8, 
+        /// Number of registers to write minus 1
+        n: u8 
+    },
 }
 
 impl Command {
@@ -52,29 +92,46 @@ impl Command {
     }
 }
 
+/// Errors that can occur when communicating with the ADS124S08
 #[derive(Debug, Format, Clone, Copy)]
 pub enum ADS124S08Error {
+    /// SPI communication error
     SPIError,
+    /// Timeout occurred while reading data
     ReadTimeoutError,
+    /// Timeout occurred while writing data
     WriteTimeoutError,
+    /// Unable to restore previous configuration while handling another error
     UnableToRestorePreviousConfigurationWhileHandlingError,
+    /// Invalid value read from or written to a register
     InvalidRegisterValue(RegisterAddress, u8),
+    /// Invalid command sent to device
     InvalidCommand,
+    /// Operation attempted when not in transaction mode
     NotInTransaction,
+    /// Configuration readback verification failed
     ConfigurationReadBackFailed(RegisterAddress)
 }
 
+/// Conversion result from the ADS124S08 ADC
 #[derive(Debug, Format, Copy, Clone)]
 pub struct Code {
+    /// Raw 24-bit conversion data as 3 bytes
     pub data: [u8; 3],
+    /// Reference input used for this conversion
     pub reference: ReferenceInput,
+    /// Whether the PGA was enabled for this conversion
     pub pga_enabled: bool,
+    /// PGA gain used for this conversion
     pub gain: PGAGain,
+    /// IDAC1 magnitude if enabled, None if disabled
     pub idac1_magnitude: Option<IDACMagnitude>,
+    /// IDAC2 magnitude if enabled, None if disabled
     pub idac2_magnitude: Option<IDACMagnitude>,
 }
 
 impl Code {
+    /// Create a new Code from raw data and conversion parameters
     pub fn new(data: [u8; 3], reference: ReferenceInput, pga_enabled: bool, gain: PGAGain, idac1_magnitude: Option<IDACMagnitude>, idac2_magnitude: Option<IDACMagnitude>) -> Self {
         Code {
             data,
@@ -86,6 +143,7 @@ impl Code {
         }
     }
 
+    /// Create a new Code from a signed 32-bit integer and conversion parameters
     pub fn from_code(code: i32, reference: ReferenceInput, pga_enabled: bool, gain: PGAGain, idac1_magnitude: Option<IDACMagnitude>, idac2_magnitude: Option<IDACMagnitude>) -> Self {
         let original: [u8; 4] = code.to_be_bytes();
         let result: [u8; 3] = original[1..].try_into().unwrap();
@@ -100,24 +158,29 @@ impl Code {
         }
     }
 
+    /// Check if the conversion result indicates over full scale
     pub fn over_fs(&self) -> bool {
         self.data[0] == 0x7f && self.data[1] == 0xff && self.data[2] == 0xff
     }
 
+    /// Check if the conversion result indicates below full scale
     pub fn below_fs(&self) -> bool {
         self.data[0] == 0x80 && self.data[1] == 0x00 && self.data[2] == 0x00
     }
 
+    /// Convert the raw data to a signed 32-bit integer
     pub fn code(&self) -> i32 {
         let fill = if self.data[0] & 0x80 == 0x80 { 0xff } else { 0x00 };
 
         i32::from_be_bytes([fill, self.data[0], self.data[1], self.data[2]])
     }
 
+    /// Convert to voltage using internal 2.5V reference
     pub fn internally_referenced_voltage(&self) -> f32 {
         self.externally_referenced_voltage(0.0, 2.5)
     }
 
+    /// Convert to voltage using external reference voltages
     pub fn externally_referenced_voltage(&self, v_ref_n: f32, v_ref_p: f32) -> f32 {
         let code = self.code();
         let v_ref = v_ref_p - v_ref_n;
@@ -127,6 +190,7 @@ impl Code {
         code as f32 * v_per_lsb
     }
 
+    /// Convert to resistance using ratiometric measurement with reference resistance
     pub fn ratiometric_resistance(&self, r_ref: f32) -> f32 {
         let code = self.code() as f32;
         let gain = if self.pga_enabled { self.gain.value() as f32 } else { 1.0 };
@@ -188,6 +252,7 @@ macro_rules! define_read_only_register_ops {
     };
 }
 
+/// ADS124S08 ADC driver with Embassy async support
 pub struct ADS124S08<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> {
     spi: SpiDevT,
     wait_strategy: WaitStrategy<InputPinT>,
@@ -199,6 +264,7 @@ pub struct ADS124S08<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs>
 
 impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDevT, InputPinT, D> {
     // High level API
+    /// Create a new ADS124S08 driver instance
     pub fn new(spi: SpiDevT, wait_strategy: WaitStrategy<InputPinT>, delay: D) -> ADS124S08<SpiDevT, InputPinT, D> {
         ADS124S08 {
             spi,
@@ -209,6 +275,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         }
     }
 
+    /// Perform a single-ended measurement on the specified input pin
     pub async fn measure_single_ended<'a>(&mut self, input: registers::Mux, reference_input: ReferenceInput) -> Result<Code, ADS124S08Error>  {
         // This assumes that AVss is connected to GND, not to a negative voltage, and that AINCOM is connected to 0V
         let mut config = self.configuration_registers.clone();
@@ -230,6 +297,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         res
     }
 
+    /// Perform a ratiometric low-side measurement with excitation current
     pub async fn measure_ratiometric_low_side<'a>(
         &mut self,
         input_p: registers::Mux,
@@ -270,6 +338,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         res
     }
 
+    /// Perform a differential measurement between two input pins
     pub async fn measure_differential<'a>(
         &mut self,
         input_p: registers::Mux,
@@ -300,6 +369,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         res
     }
 
+    /// Read the digital supply voltage (DVDD) divided by 4
     pub async fn read_dvdd_by_4<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         let mut new_config = self.configuration_registers.sys.clone();
         new_config.sys_mon = registers::SystemMonitorConfiguration::DvddBy4Measurement;
@@ -327,6 +397,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         res
     }
 
+    /// Read the analog supply voltage (AVDD) minus AVSS divided by 4
     pub async fn read_avdd_by_4<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         let mut new_config = self.configuration_registers.sys.clone();
         new_config.sys_mon = registers::SystemMonitorConfiguration::AvddMinusAvssBy4Measurement;
@@ -352,6 +423,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
     }
 
 
+    /// Read the internal temperature sensor
     pub async fn read_temperature<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         let mut new_config = self.configuration_registers.sys.clone();
         new_config.sys_mon = registers::SystemMonitorConfiguration::InternalTemperatureSensor;
@@ -376,35 +448,42 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         res
     }
 
+    /// Read the device identification register
     pub async fn read_device_id<'a>(&mut self) -> Result<registers::DeviceId, ADS124S08Error>  {
         self.read_id_reg().await
     }
 
     // Lower level API
+    /// Configure the ADC measurement parameters
     pub async fn configure_measurement<'a>(&mut self, configuration_registers: ConfigurationRegisters) -> Result<(), ADS124S08Error>  {
         self.configuration_registers = configuration_registers;
         self.write_modified_configuration_registers_to_device().await
     }
 
+    /// Start ADC conversions
     pub async fn start_conversion<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         self.write_command(Command::START).await
     }
 
+    /// Stop ADC conversions
     pub async fn stop_conversion<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         self.write_command(Command::STOP).await
     }
 
+    /// Wait for data ready signal and read the conversion result
     pub async fn wait_for_drdy_and_read<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         self.wait_for_drdy().await?;
         self.read_data().await
     }
 
+    /// Start conversion, wait for data ready, and read the result
     pub async fn start_wait_for_drdy_and_read<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         self.start_conversion().await?;
         self.wait_for_drdy().await?;
         self.read_data().await
     }
 
+    /// Start conversion, wait for data ready, read result, and stop conversion
     pub async fn start_wait_for_drdy_read_and_stop<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         self.start_conversion().await?;
         self.wait_for_drdy().await?;
@@ -416,6 +495,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         Ok(d)
     }
 
+    /// Read and average multiple samples
     pub async fn read_n_sample_average<'a>(&mut self, n: i32) -> Result<Code, ADS124S08Error>  {
         let mut sum = 0;
 
@@ -427,6 +507,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         Ok(Code::from_code(sum / n, ReferenceInput::Internal, false, PGAGain::Gain1, None, None))
     }
 
+    /// Read the current configuration registers from the device
     pub async fn read_configuration_registers<'a>(&mut self) -> Result<ConfigurationRegisters, ADS124S08Error>  {
         self.read_configuration_registers_from_device().await?;
         Ok(self.read_configuration_registers.clone())
@@ -434,6 +515,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
 
     // Why are you even looking at this?
 
+    /// Wait for the data ready signal
     pub async fn wait_for_drdy<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         // @todo Use an either with a timeout
 
@@ -533,6 +615,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
     define_read_write_register_ops!(vbias, VBIAS, registers::SensorBiasingRegister);
     define_read_write_register_ops!(sys, SYS, registers::SystemControlRegister);
 
+    /// Read conversion data from the ADC
     pub async fn read_data<'a>(&mut self) -> Result<Code, ADS124S08Error>  {
         self.write_command(Command::RDATA).await?;
 
@@ -603,6 +686,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         Ok(reg_buf[0])
     }
 
+    /// Reset the ADC to its default configuration
     pub async fn reset<'a>(&mut self) -> Result<(), ADS124S08Error>  {
         self.write_command(Command::RESET).await?;
         self.delay.delay_ms(100).await;
