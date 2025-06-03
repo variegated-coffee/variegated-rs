@@ -1,9 +1,10 @@
 #![no_std]
+#![warn(missing_docs)]
 
 use byteorder::ByteOrder as _;
 use core::{fmt, slice};
 use embedded_hal_async::digital::Wait;
-use embedded_hal_async::i2c::{I2c, SevenBitAddress};
+use embedded_hal_async::i2c::I2c;
 use embedded_hal_async::delay::DelayNs;
 
 mod constants;
