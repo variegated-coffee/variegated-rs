@@ -28,30 +28,27 @@ variegated-nau7802 = "0.1"
 ## Example
 
 ```rust
-use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, Gain, ConversionRate};
+use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, Gain, SamplesPerSecond, Ldo};
 
 // Create the driver with I2C bus and delay provider
 let data_strategy = Nau7802DataAvailableStrategy::Polling;
-let mut nau = Nau7802::new(0x2A, data_strategy, delay); // Default I2C address
+let mut nau = Nau7802::new(data_strategy, delay, Some(0x2A)); // Default I2C address
 
-// Initialize and calibrate the device
-nau.power_up(&mut i2c).await?;
-nau.set_gain(&mut i2c, Gain::X128).await?;
-nau.set_sample_rate(&mut i2c, ConversionRate::SPS80).await?;
-
-// Perform offset calibration (with no load)
-nau.calibrate_offset(&mut i2c).await?;
+// Initialize the device with high-level init function
+nau.init(&mut i2c, Ldo::L3v3, Gain::G128, SamplesPerSecond::SPS80).await?;
 
 // Read weight measurement
 loop {
-    if nau.data_available(&mut i2c).await? {
-        let reading = nau.read_data(&mut i2c).await?;
-        println!("ADC reading: {}", reading);
-        
-        // Convert to weight using your calibration factor
-        let weight_grams = (reading as f32) * calibration_factor;
-        println!("Weight: {:.1} g", weight_grams);
-    }
+    // Wait for data to be available  
+    nau.wait_for_data_available(&mut i2c).await?;
+    
+    // Read the measurement
+    let reading = nau.read(&mut i2c).await?;
+    println!("ADC reading: {}", reading);
+    
+    // Convert to weight using your calibration factor
+    let weight_grams = (reading as f32) * calibration_factor;
+    println!("Weight: {:.1} g", weight_grams);
     
     delay.delay_ms(100).await;
 }
@@ -59,31 +56,32 @@ loop {
 
 ## Calibration
 
-The NAU7802 supports both offset and gain calibration:
+The NAU7802 supports analog front-end calibration:
 
 ```rust
-// Zero calibration (no load on scale)
-nau.calibrate_offset(&mut i2c).await?;
+use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, AfeCalibrationStatus};
 
-// Span calibration (known weight on scale)
-nau.calibrate_gain(&mut i2c).await?;
+// Start AFE calibration (built into the init function)
+nau.begin_afe_calibration(&mut i2c).await?;
 
 // Check calibration status
-let offset_cal_ready = nau.get_calibration_status(&mut i2c, CalibrationStatus::OffsetCalibrationReady).await?;
-let gain_cal_ready = nau.get_calibration_status(&mut i2c, CalibrationStatus::GainCalibrationReady).await?;
+let cal_status = nau.poll_afe_calibration_status(&mut i2c).await?;
+match cal_status {
+    AfeCalibrationStatus::Success => println!("Calibration successful"),
+    AfeCalibrationStatus::InProgress => println!("Calibration in progress..."),
+    AfeCalibrationStatus::Failure => println!("Calibration failed"),
+}
 ```
 
 ## Power Management
 
 ```rust
-// Enter sleep mode to save power
-nau.power_down(&mut i2c).await?;
-
-// Wake up from sleep
+// Power up the device (included in init function)
 nau.power_up(&mut i2c).await?;
 
 // Reset to default state  
-nau.reset(&mut i2c).await?;
+nau.start_reset(&mut i2c).await?;
+nau.finish_reset(&mut i2c).await?;
 ```
 
 ## Hardware Considerations

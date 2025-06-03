@@ -28,20 +28,13 @@ variegated-fdc1004 = { version = "0.1", features = ["defmt"] }
 ## Example
 
 ```rust
-use variegated_fdc1004::{FDC1004, Channel, Measurement, OutputRate};
+use variegated_fdc1004::{FDC1004, Channel, OutputRate, SuccessfulMeasurement};
 
-// Create the driver with your I2C bus and delay provider
-let mut fdc = FDC1004::new(i2c_bus, delay);
+// Create the driver with your I2C bus and delay provider  
+let mut fdc = FDC1004::new(i2c_bus, 0x50, OutputRate::SPS100, delay);
 
-// Initialize the device
-fdc.initialize().await?;
-
-// Perform a single-ended measurement on channel 1
-let result = fdc.single_ended_measurement(
-    Measurement::Measurement1,
-    Channel::CIN1,
-    OutputRate::SPS100
-).await?;
+// Read capacitance from channel 1 with automatic CAPDAC adjustment
+let result = fdc.read_capacitance(Channel::CIN1).await?;
 
 match result {
     SuccessfulMeasurement::MeasurementInRange(capacitance) => {

@@ -31,23 +31,16 @@ variegated-ads124s08 = { version = "0.1", features = ["defmt"] }
 ## Example
 
 ```rust
-use variegated_ads124s08::{ADS124S08, WaitStrategy, PGAGain, ReferenceInput, IDACMagnitude, IDACMux};
+use variegated_ads124s08::{ADS124S08, WaitStrategy, registers::Mux, ReferenceInput};
 
 // Create the driver with SPI device, DRDY pin, and delay provider
 let wait_strategy = WaitStrategy::UseDrdyPin(drdy_pin);
 let mut adc = ADS124S08::new(spi_device, wait_strategy, delay);
 
-// Initialize the device
-adc.initialize().await?;
-
-// Perform a high-level measurement with automatic configuration
-let result = adc.measure_input_with_reference_and_pga(
-    InputP::AIN0,      // Positive input
-    InputN::AIN1,      // Negative input  
-    ReferenceInput::REF0P_REF0N,  // Reference
-    PGAGain::GAIN16,   // 16x gain
-    Some(IDACMagnitude::uA500),   // 500µA excitation current
-    IDACMux::AIN0,     // Current output to AIN0
+// Perform a single-ended measurement on AIN0
+let result = adc.measure_single_ended(
+    Mux::AIN0,                    // Input channel
+    ReferenceInput::REF0P_REF0N   // Reference voltage
 ).await?;
 
 // Convert to voltage
