@@ -21,7 +21,7 @@ use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-use variegated_embassy_ads124s08::{WaitStrategy, ADS124S08};
+use variegated_ads124s08::{WaitStrategy, ADS124S08};
 use variegated_hal::{Boiler, Group, WithTask};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -41,8 +41,8 @@ use embedded_graphics_core::prelude::*;
 use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::{ConversionParameters, ResistorDividerPosition};
 use variegated_controller_lib::{SingleBoilerSingleGroupController};
-use variegated_embassy_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
-use variegated_embassy_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
+use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
+use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
@@ -59,7 +59,7 @@ use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
-use variegated_embassy_fdc1004::{OutputRate, FDC1004};
+use variegated_fdc1004::{OutputRate, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioDualEdgeCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
@@ -225,7 +225,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut fdc1004_dev = I2cDevice::new(i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
     
-    let cap = fdc1004.read_capacitance(variegated_embassy_fdc1004::Channel::CIN1).await;
+    let cap = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN1).await;
     
     let linear_encoder_p = linear_encoder_peripherals!(p);
 

@@ -16,7 +16,7 @@ embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
 embassy-sync = { version = "0.6.2", features = ["defmt"] }
 embassy-futures = { version = "0.1.1" }
 embassy-rp = { version = "0.4.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
-variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
+variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08" }
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 defmt = "0.3"
 async-trait = "0.1.88"
