@@ -97,6 +97,28 @@ pub enum DataRate{
     SPS4000,
 }
 
+impl DataRate {
+    /// Get the sample period in milliseconds for this data rate
+    pub fn sample_period_ms(&self) -> u32 {
+        match self {
+            DataRate::SPS2_5  => 400,   // 1/2.5 = 400ms
+            DataRate::SPS5    => 200,   // 1/5 = 200ms  
+            DataRate::SPS10   => 100,   // 1/10 = 100ms
+            DataRate::SPS16_6 => 60,    // 1/16.6 ≈ 60ms
+            DataRate::SPS20   => 50,    // 1/20 = 50ms
+            DataRate::SPS50   => 20,    // 1/50 = 20ms
+            DataRate::SPS60   => 17,    // 1/60 ≈ 17ms
+            DataRate::SPS100  => 10,    // 1/100 = 10ms
+            DataRate::SPS200  => 5,     // 1/200 = 5ms
+            DataRate::SPS400  => 3,     // 1/400 ≈ 3ms (2.5ms rounded up)
+            DataRate::SPS800  => 2,     // 1/800 ≈ 2ms (1.25ms rounded up)
+            DataRate::SPS1000 => 1,     // 1/1000 = 1ms
+            DataRate::SPS2000 => 1,     // 1/2000 = 0.5ms (rounded up to 1ms)
+            DataRate::SPS4000 => 1,     // 1/4000 = 0.25ms (rounded up to 1ms)
+        }
+    }
+}
+
 impl ByteRepresentation for DataRate {
     fn bits(&self) -> u8{
         match self {
