@@ -2,6 +2,11 @@
 name = "variegated-nau7802"
 version = "0.1.0"
 edition = "2024"
+description = "Async driver for the Nuvoton NAU7802 24-bit precision ADC for load cells"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["embedded", "async", "nau7802", "adc", "load-cell"]
+categories = ["embedded", "hardware-support"]
 
 [lib]
 test = false

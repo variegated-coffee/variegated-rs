@@ -176,7 +176,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
 
         let mut powered_up = false;
         let mut attempts = 0;
-        while !powered_up && attempts < 100 {
+        while !powered_up && attempts < NUM_ATTEMPTS {
             let res = self.get_bit(i2c, Register::PuCtrl, PuCtrlBits::PUR).await;
             if let Ok(rdy) = res {
                 powered_up = rdy;
