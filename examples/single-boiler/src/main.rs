@@ -156,7 +156,7 @@ struct Esp32Peripherals {
 
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
-type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>>>;
+type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 
 struct NoopOutputPin {
 
@@ -235,7 +235,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
     let ads_spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
-    let mut ads = ADS124S08::new(ads_spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)));
+    let mut ads = ADS124S08::new(ads_spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)), Delay);
     info!("Resetting ADS124S08");
     let res = ads.reset().await;
     if let Err(e) = res {
