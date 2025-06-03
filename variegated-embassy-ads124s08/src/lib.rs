@@ -10,6 +10,7 @@ use embedded_hal::digital::InputPin;
 use embedded_hal::spi::Operation;
 use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiDevice;
+use embassy_futures::select::{select, Either};
 
 
 pub enum WaitStrategy<INPUT: InputPin + Wait> {
@@ -435,18 +436,28 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
     // Why are you even looking at this?
 
     pub async fn wait_for_drdy<'a>(&mut self) -> Result<(), ADS124S08Error>  {
-        // @todo Use an either with a timeout
-
         match &mut self.wait_strategy {
-            WaitStrategy::UseDrdyPin(drdy_input) => drdy_input.wait_for_low().await.map_err(|_e| ADS124S08Error::SPIError)?,
+            WaitStrategy::UseDrdyPin(drdy_input) => {
+                // Use timeout for DRDY pin waiting to prevent infinite hang
+                let timeout_ms = self.configuration_registers.datarate.rate.sample_period_ms() * 3; // 3x sample period timeout
+                let wait_future = drdy_input.wait_for_low();
+                let timeout_future = async {
+                    self.delay.delay_ms(timeout_ms).await;
+                    Err(ADS124S08Error::ReadTimeoutError)
+                };
+                
+                match select(wait_future, timeout_future).await {
+                    Either::First(result) => result.map_err(|_e| ADS124S08Error::SPIError),
+                    Either::Second(timeout_err) => timeout_err,
+                }
+            },
             // Use delay based on configured sample rate with some margin
             WaitStrategy::Delay => {
                 let delay_ms = self.configuration_registers.datarate.rate.sample_period_ms() + 10; // Add 10ms margin
-                self.delay.delay_ms(delay_ms).await
+                self.delay.delay_ms(delay_ms).await;
+                Ok(())
             },
         }
-
-        Ok(())
     }
 
     async fn swap_all_configuration_registers<'a>(&mut self, configuration_registers: ConfigurationRegisters) -> Result<ConfigurationRegisters, ADS124S08Error>  {
