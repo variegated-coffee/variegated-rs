@@ -253,7 +253,8 @@ impl MeasuredCapacitance {
         }
     }
 
-    pub(crate) fn to_pf(&self) -> f32 {
+    /// Convert the measured capacitance value to picofarads.
+    pub fn to_pf(&self) -> f32 {
         let vali32 : i32 = self.value.into();
         let val: f32 = vali32 as f32;
 
