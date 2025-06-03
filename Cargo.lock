@@ -735,7 +735,9 @@ dependencies = [
  "variegated-controller-lib",
  "variegated-controller-types",
  "variegated-embassy-ads124s08",
+ "variegated-embassy-fdc1004",
  "variegated-hal",
+ "w25q32jv",
 ]
 
 [[package]]
@@ -1941,6 +1943,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de437e2a6208b014ab52972a27e59b33fa2920d3e00fe05026167a1c509d19cc"
 dependencies = [
  "vcell",
+]
+
+[[package]]
+name = "w25q32jv"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3cf42b38c97c992a9534e53ea39289d7e7f6e5dcc9b0aed4d341fa495e3abf1"
+dependencies = [
+ "cfg-if",
+ "defmt",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-storage",
+ "embedded-storage-async",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
 embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-futures = "0.1.1"
 
+w25q32jv = { version = "0.5.1", features = ["defmt", "async", "megabits64"] }
 
 defmt = "0.3"
 defmt-rtt = "0.4"
@@ -43,6 +44,7 @@ variegated-board-cfg = { version = "0.2.1" }
 variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb"] }
 
 variegated-embassy-ads124s08 = { version = "0.1.0", path = "../variegated-embassy-ads124s08" }
+variegated-embassy-fdc1004 = { version = "0.1.0", path = "../variegated-embassy-fdc1004" }
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }

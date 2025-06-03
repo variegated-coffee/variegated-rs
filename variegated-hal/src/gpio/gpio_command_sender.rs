@@ -29,13 +29,16 @@ impl<'a, M: RawMutex, CommandT: Clone, const N: usize> GpioDualEdgeCommandSender
 
 impl <'a, M: RawMutex, CommandT: Clone, const N: usize> WithTask for GpioDualEdgeCommandSender<'a, M, CommandT, N> {
     async fn task(&mut self) {
+        let mut previous_level = self.input.is_high();
         loop {
             self.input.wait_for_any_edge().await;
             Timer::after_millis(10).await;
             
-            if self.input.is_high() {
+            if self.input.is_high() && !previous_level {
+                previous_level = true;
                 self.sender.send(self.rising_edge_command.clone()).await;
-            } else {
+            } else if !self.input.is_high() && previous_level {
+                previous_level = false;
                 self.sender.send(self.falling_edge_command.clone()).await;
             }
         }

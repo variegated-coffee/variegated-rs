@@ -22,16 +22,16 @@ fn limited_pid() -> PidCtrl<f32> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct SingleBoilerSingleGroupPidParameters {
-    boiler_pressure_params: PidParameters,
-    boiler_temperature_params: PidParameters,
-    pump_flow_rate_params: PidParameters,
-    pump_pressure_params: PidParameters,
-    pump_output_flow_rate_params: PidParameters,
+pub struct SingleBoilerSingleGroupPidParameters {
+    pub boiler_pressure_params: PidParameters,
+    pub boiler_temperature_params: PidParameters,
+    pub pump_flow_rate_params: PidParameters,
+    pub pump_pressure_params: PidParameters,
+    pub pump_output_flow_rate_params: PidParameters,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct SingleBoilerSingleGroupConfiguration {
+pub struct SingleBoilerSingleGroupConfiguration {
     pub brew_boiler_control_target: BoilerControlTarget,
     pub steam_boiler_control_target: BoilerControlTarget,
     pub group_brew_control_target: GroupBrewControlTarget,
@@ -59,27 +59,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
         boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
-        brew_boiler_control_target: BoilerControlTarget,
-        steam_boiler_control_target: BoilerControlTarget,
-        group_brew_control_target: GroupBrewControlTarget,
+        configuration: SingleBoilerSingleGroupConfiguration,
     ) -> Self {
-        let mut pid_parameters = SingleBoilerSingleGroupPidParameters::default();
-        pid_parameters.boiler_temperature_params = PidParameters {
-            kp: PidTerm { scale: 3.0, limits: PidLimits::default() },
-            ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() },
-            kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
-        };
-        pid_parameters.pump_flow_rate_params = PidParameters {
-            kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
-            ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
-            kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
-        };
-        pid_parameters.pump_pressure_params = PidParameters {
-            kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
-            ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
-            kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
-        };
-
         Self {
             command_channel_receiver,
             status_channel_sender,
@@ -88,12 +69,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             state: SingleBoilerSingleGroupControllerState::default(),
             boiler_pid: limited_pid(),
             pump_pid: limited_pid(),
-            configuration: SingleBoilerSingleGroupConfiguration {
-                brew_boiler_control_target,
-                steam_boiler_control_target,
-                group_brew_control_target,
-                pid_parameters,
-            },
+            configuration,
             current_routine: None,
             routine_saved_configuration: None,
             previous_status: None,
@@ -117,7 +93,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                     info!("Routine finished executing");
                     self.handle_routine_exit();
                 } else if let Some(status) = self.previous_status.as_ref() {
-                    if let Some(command) = routine.step(status) {
+                    if let Some(command) = routine.step(status, None) {
                         self.handle_command(command).await;
                     }
                 }
