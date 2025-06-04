@@ -3,13 +3,15 @@
 #![warn(missing_docs)]
 
 use core::fmt;
+#[cfg(feature = "defmt")]
 use defmt::Format;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 use ux::i24;
 
 /// Errors that can occur when communicating with the FDC1004 chip.
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub enum FDC1004Error<E>{
     /// Failed to find a suitable CAPDAC setting for the measurement range.
     UnableToFindCapdacSetting,
@@ -214,7 +216,8 @@ static PICOFARADS_PER_CAPDAC: f32 = 3.125;
 /// 
 /// The FDC1004 can measure capacitances within a certain range. If the measured
 /// capacitance is outside this range, the result will indicate overflow or underflow.
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub enum SuccessfulMeasurement {
     /// Measurement completed successfully and is within the measurable range.
     MeasurementInRange(MeasuredCapacitance),
@@ -235,6 +238,7 @@ pub struct MeasuredCapacitance {
     pub(crate) capdac: u8,
 }
 
+#[cfg(feature = "defmt")]
 impl Format for MeasuredCapacitance {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(f, "MeasuredCapacitance {} pF", self.to_pf());
@@ -249,7 +253,8 @@ impl MeasuredCapacitance {
         }
     }
 
-    pub(crate) fn to_pf(&self) -> f32 {
+    /// Convert the measured capacitance value to picofarads.
+    pub fn to_pf(&self) -> f32 {
         let vali32 : i32 = self.value.into();
         let val: f32 = vali32 as f32;
 

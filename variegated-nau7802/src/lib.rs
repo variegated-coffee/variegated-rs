@@ -8,6 +8,31 @@
 //! programmable gain amplifier (PGA), voltage reference, and calibration capabilities.
 //! It is particularly well-suited for bridge sensor applications like load cells.
 //!
+//! ## Usage Example
+//!
+//! ```no_run
+//! use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, Gain, SamplesPerSecond, Ldo};
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let mut i2c = todo!();
+//! # let delay = todo!();
+//! // Create the driver with I2C bus and delay provider
+//! let data_strategy = Nau7802DataAvailableStrategy::Polling;
+//! let mut nau = Nau7802::new(data_strategy, delay, Some(0x2A)); // Default I2C address
+//!
+//! // Initialize the device with high-level init function
+//! nau.init(&mut i2c, Ldo::L3v3, Gain::G128, SamplesPerSecond::SPS80).await?;
+//!
+//! // Read weight measurement
+//! nau.wait_for_data_available(&mut i2c).await?;
+//! let reading = nau.read(&mut i2c).await?;
+//! // Convert to weight using your calibration factor
+//! let weight_grams = (reading as f32) * 0.001; // Example calibration
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! Based on [amiraeva/nau7802-rs](https://github.com/amiraeva/nau7802-rs).
 //! See the datasheet in `docs/datasheet.pdf` for complete technical specifications.
 
@@ -176,7 +201,7 @@ impl<W: Wait, D: DelayNs> Nau7802<W, D> {
 
         let mut powered_up = false;
         let mut attempts = 0;
-        while !powered_up && attempts < 100 {
+        while !powered_up && attempts < NUM_ATTEMPTS {
             let res = self.get_bit(i2c, Register::PuCtrl, PuCtrlBits::PUR).await;
             if let Ok(rdy) = res {
                 powered_up = rdy;

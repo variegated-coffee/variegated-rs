@@ -1,5 +1,6 @@
 //! Register definitions and bit field structures for the ADS124S08 ADC
 
+#[cfg(feature = "defmt")]
 use defmt::Format;
 
 /// Trait for types that can be converted to/from raw register bits
@@ -13,7 +14,8 @@ pub trait ByteRepresentation {
 
 
 /// ADS124S08 register addresses
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// RegisterAddress
 pub enum RegisterAddress {
     /// Device identification register
@@ -141,7 +143,8 @@ impl RegisterAddress {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// ADC data rate settings in samples per second
 /// DataRate
 pub enum DataRate{
@@ -268,7 +271,8 @@ impl ByteRepresentation for DataRate {
 }
 
 /// Input multiplexer pin selection
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Mux
 pub enum Mux {
     /// Analog input 0
@@ -365,7 +369,8 @@ impl ByteRepresentation for Mux {
 }
 
 /// IDAC output connection selection
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// IDACMux
 pub enum IDACMux {
     /// Connect to AIN0
@@ -486,7 +491,8 @@ impl IDACMux {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// PGA conversion delay configuration.
 /// 
 /// This enum configures the delay between PGA settling and the start of conversion
@@ -539,7 +545,8 @@ impl ByteRepresentation for PGAConversionDelay {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Programmable gain amplifier gain settings
 /// PGAGain
 pub enum PGAGain {
@@ -623,7 +630,8 @@ impl ByteRepresentation for PGAGain {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// ClockSource
 pub enum ClockSource {
     #[default]
@@ -652,7 +660,8 @@ impl ByteRepresentation for ClockSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Mode
 pub enum Mode {
     #[default]
@@ -681,7 +690,8 @@ impl ByteRepresentation for Mode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Digital filter configuration for the modulator.
 /// 
 /// Controls the type of digital filter applied to the modulator output to 
@@ -714,7 +724,8 @@ impl ByteRepresentation for Filter {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Reference voltage monitoring configuration.
 /// 
 /// Configures the monitoring of reference voltages to detect when they fall
@@ -752,7 +763,8 @@ impl ByteRepresentation for ReferenceMonitorConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// ADC reference input selection
 /// ReferenceInput
 pub enum ReferenceInput {
@@ -788,7 +800,8 @@ impl ByteRepresentation for ReferenceInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Internal voltage reference power management configuration.
 /// 
 /// Controls how the internal 2.5V voltage reference is powered to balance
@@ -824,7 +837,8 @@ impl ByteRepresentation for InternalVoltageReferenceConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Excitation current source (IDAC) magnitude configuration.
 /// 
 /// Sets the magnitude of the current sources used to excite sensors like RTDs
@@ -887,7 +901,8 @@ impl ByteRepresentation for IDACMagnitude {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Sensor bias voltage level configuration.
 /// 
 /// Sets the bias voltage applied to sensor inputs to keep them within the
@@ -917,7 +932,8 @@ impl ByteRepresentation for VBiasLevel {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// System monitoring and diagnostic configuration.
 /// 
 /// Enables various system monitoring functions for diagnostics and sensor
@@ -972,7 +988,8 @@ impl ByteRepresentation for SystemMonitorConfiguration {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// CalibrationSampleSize
 pub enum CalibrationSampleSize {
     /// Samples1
@@ -1011,7 +1028,8 @@ impl ByteRepresentation for CalibrationSampleSize {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// GpioDirection
 pub enum GpioDirection {
     /// INPUT
@@ -1022,7 +1040,8 @@ pub enum GpioDirection {
     OUTPUT,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// GpioConfiguration
 pub enum GpioConfiguration {
     /// AnalogInput
@@ -1033,7 +1052,8 @@ pub enum GpioConfiguration {
     GPIO,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// DeviceId
 pub enum DeviceId {
     /// ADS124S08
@@ -1062,7 +1082,8 @@ impl ByteRepresentation for DeviceId {
 }
 
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// StatusRegisterValue
 pub struct StatusRegisterValue {
     fl_por: bool,
@@ -1110,7 +1131,8 @@ impl StatusRegisterValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// System control register configuration.
 /// 
 /// Controls system-level features including monitoring functions, calibration,
@@ -1163,7 +1185,8 @@ impl SystemControlRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Input multiplexer register configuration.
 /// 
 /// Selects which analog input pins are connected to the positive and negative
@@ -1200,7 +1223,8 @@ impl ByteRepresentation for InputMultiplexerRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// DeviceIdRegister
 pub struct DeviceIdRegister {
     /// device_id
@@ -1220,7 +1244,8 @@ impl ByteRepresentation for DeviceIdRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// PgaRegister
 pub struct PgaRegister {
     /// gain
@@ -1252,7 +1277,8 @@ impl ByteRepresentation for PgaRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Data rate and conversion configuration register.
 /// 
 /// Controls the ADC conversion parameters including data rate, filter type,
@@ -1292,7 +1318,8 @@ impl ByteRepresentation for DataRateRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Reference voltage control register configuration.
 /// 
 /// Controls the voltage reference system including monitoring, buffer configuration,
@@ -1344,7 +1371,8 @@ impl ByteRepresentation for ReferenceControlRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// IDAC magnitude and control register configuration.
 /// 
 /// Controls the excitation current sources including magnitude, power switch
@@ -1376,7 +1404,8 @@ impl ByteRepresentation for IDACMagnitudeRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// IDAC multiplexer register configuration.
 /// 
 /// Controls the routing of the two excitation current sources (IDAC1 and IDAC2)
@@ -1404,7 +1433,8 @@ impl ByteRepresentation for IDACMultiplexerRegister {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Sensor biasing register configuration.
 /// 
 /// Controls bias voltage application to individual analog input pins to keep
@@ -1456,7 +1486,8 @@ impl ByteRepresentation for SensorBiasingRegister {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Default, Format)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 /// Complete set of ADS124S08 configuration registers
 /// ConfigurationRegisters
 pub struct ConfigurationRegisters {

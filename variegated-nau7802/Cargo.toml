@@ -2,6 +2,11 @@
 name = "variegated-nau7802"
 version = "0.1.0"
 edition = "2024"
+description = "Async driver for the Nuvoton NAU7802 24-bit precision ADC for load cells"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["embedded", "async", "nau7802", "adc", "load-cell"]
+categories = ["embedded", "hardware-support"]
 
 [lib]
 test = false
@@ -16,3 +21,13 @@ embedded-hal-async = "1.0"
 [dependencies.byteorder]
 version = "1.3.4"
 default-features = false
+
+[dev-dependencies]
+embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.4.0", features = ["defmt"] }
+embassy-rp = { version = "0.4.0", features = ["defmt", "time-driver", "rp235xb"] }
+embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
+cortex-m-rt = "0.7.0"
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
