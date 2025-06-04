@@ -9,6 +9,38 @@
 //! 12 single-ended or 6 differential inputs, programmable gain amplifier (PGA),
 //! voltage reference, and two excitation current sources (IDACs).
 //!
+//! ## Usage Example
+//!
+//! ```no_run
+//! use variegated_ads124s08::{ADS124S08, WaitStrategy, PGAGain, ReferenceInput, IDACMagnitude, IDACMux};
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let spi_device = todo!();
+//! # let drdy_pin = todo!();
+//! # let delay = todo!();
+//! // Create the driver with SPI device, DRDY pin, and delay provider
+//! let wait_strategy = WaitStrategy::UseDrdyPin(drdy_pin);
+//! let mut adc = ADS124S08::new(spi_device, wait_strategy, delay);
+//!
+//! // Initialize the device
+//! adc.initialize().await?;
+//!
+//! // Perform a high-level measurement 
+//! let result = adc.measure_input_with_reference_and_pga(
+//!     InputP::AIN0,      // Positive input
+//!     InputN::AIN1,      // Negative input  
+//!     ReferenceInput::REF0P_REF0N,  // Reference
+//!     PGAGain::GAIN16,   // 16x gain
+//!     Some(IDACMagnitude::uA500),   // 500µA excitation current
+//!     IDACMux::AIN0,     // Current output to AIN0
+//! ).await?;
+//!
+//! // Convert to voltage
+//! let voltage = result.to_voltage();
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! See the datasheet in `docs/datasheet.pdf` for complete technical specifications.
 
 #![no_std]
@@ -17,6 +49,7 @@
 /// Register definitions and configuration structures for the ADS124S08
 pub mod registers;
 
+#[cfg(feature = "defmt")]
 use defmt::Format;
 use embedded_hal_async::delay::DelayNs;
 use crate::registers::{Filter, IDACMagnitude, IDACMux, Mode, PGAGain, ReferenceInput, StatusRegisterValue, RegisterAddress, ByteRepresentation, ConfigurationRegisters};
@@ -36,7 +69,8 @@ pub enum WaitStrategy<INPUT: InputPin + Wait> {
 }
 
 /// ADS124S08 commands as defined in the datasheet
-#[derive(Debug, Clone, Copy, Format)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub enum Command {
     /// No operation
     NOP,
@@ -94,7 +128,8 @@ impl Command {
 }
 
 /// Errors that can occur when communicating with the ADS124S08
-#[derive(Debug, Format, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub enum ADS124S08Error {
     /// SPI communication error
     SPIError,
@@ -115,7 +150,8 @@ pub enum ADS124S08Error {
 }
 
 /// Conversion result from the ADS124S08 ADC
-#[derive(Debug, Format, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(Format))]
 pub struct Code {
     /// Raw 24-bit conversion data as 3 bytes
     pub data: [u8; 3],
