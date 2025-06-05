@@ -32,18 +32,18 @@ use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, Gain, SamplesPer
 
 // Create the driver with I2C bus and delay provider
 let data_strategy = Nau7802DataAvailableStrategy::Polling;
-let mut nau = Nau7802::new(data_strategy, delay, Some(0x2A)); // Default I2C address
+let mut nau = Nau7802::new(i2c, data_strategy, delay, Some(0x2A)); // Default I2C address
 
 // Initialize the device with high-level init function
-nau.init(&mut i2c, Ldo::L3v3, Gain::G128, SamplesPerSecond::SPS80).await?;
+nau.init(Ldo::L3v3, Gain::G128, SamplesPerSecond::SPS80).await?;
 
 // Read weight measurement
 loop {
     // Wait for data to be available  
-    nau.wait_for_data_available(&mut i2c).await?;
+    nau.wait_for_data_available().await?;
     
     // Read the measurement
-    let reading = nau.read(&mut i2c).await?;
+    let reading = nau.read().await?;
     println!("ADC reading: {}", reading);
     
     // Convert to weight using your calibration factor
@@ -62,10 +62,10 @@ The NAU7802 supports analog front-end calibration:
 use variegated_nau7802::{Nau7802, Nau7802DataAvailableStrategy, AfeCalibrationStatus};
 
 // Start AFE calibration (built into the init function)
-nau.begin_afe_calibration(&mut i2c).await?;
+nau.begin_afe_calibration().await?;
 
 // Check calibration status
-let cal_status = nau.poll_afe_calibration_status(&mut i2c).await?;
+let cal_status = nau.poll_afe_calibration_status().await?;
 match cal_status {
     AfeCalibrationStatus::Success => println!("Calibration successful"),
     AfeCalibrationStatus::InProgress => println!("Calibration in progress..."),
@@ -77,11 +77,11 @@ match cal_status {
 
 ```rust
 // Power up the device (included in init function)
-nau.power_up(&mut i2c).await?;
+nau.power_up().await?;
 
 // Reset to default state  
-nau.start_reset(&mut i2c).await?;
-nau.finish_reset(&mut i2c).await?;
+nau.start_reset().await?;
+nau.finish_reset().await?;
 ```
 
 ## Hardware Considerations
