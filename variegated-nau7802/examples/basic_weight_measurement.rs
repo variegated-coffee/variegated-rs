@@ -26,21 +26,21 @@ async fn main(_spawner: Spawner) {
     // Configure I2C
     let sda = p.PIN_4;
     let scl = p.PIN_5;
-    let mut i2c = i2c::I2c::new_async(p.I2C0, scl, sda, Irqs, Config::default());
+    let i2c = i2c::I2c::new_async(p.I2C0, scl, sda, Irqs, Config::default());
     
     // Create delay provider
     let delay = Delay;
     
     // Create NAU7802 driver with polling strategy and default I2C address
     // Note: We need to specify a concrete type for the Wait trait even though we use Polling
-    let dummy_pin = embassy_rp::gpio::Input::new(p.PIN_6, embassy_rp::gpio::Pull::Up);
+    let _dummy_pin = embassy_rp::gpio::Input::new(p.PIN_6, embassy_rp::gpio::Pull::Up);
     let data_strategy: Nau7802DataAvailableStrategy<Input> = Nau7802DataAvailableStrategy::Polling;
-    let mut nau = Nau7802::new(data_strategy, delay, Some(0x2A));
+    let mut nau = Nau7802::new(i2c, data_strategy, delay, Some(0x2A));
     
     defmt::info!("Starting NAU7802 weight measurement example");
     
     // Initialize the device with high-level init function
-    match nau.init(&mut i2c, Ldo::L3v3, Gain::G128, SamplesPerSecond::SPS80).await {
+    match nau.init(Ldo::L3v3, Gain::G128, SamplesPerSecond::SPS80).await {
         Ok(()) => defmt::info!("NAU7802 initialized successfully"),
         Err(_e) => {
             defmt::error!("Failed to initialize NAU7802");
@@ -55,10 +55,10 @@ async fn main(_spawner: Spawner) {
     
     loop {
         // Wait for data to be available  
-        match nau.wait_for_data_available(&mut i2c).await {
+        match nau.wait_for_data_available().await {
             Ok(()) => {
                 // Read the measurement
-                match nau.read(&mut i2c).await {
+                match nau.read().await {
                     Ok(reading) => {
                         defmt::info!("ADC reading: {}", reading);
                         
