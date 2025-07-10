@@ -37,6 +37,7 @@ rst_pin = "embassy_rp::peripherals::PIN_7"
 pin_clk = "embassy_rp::peripherals::PIN_21"
 pin_dt = "embassy_rp::peripherals::PIN_22"
 pin_sw = "embassy_rp::peripherals::PIN_1"
+pio = "embassy_rp::peripherals::PIO0"
 
 [button_peripherals]
 pin_brew = "embassy_rp::peripherals::PIN_15"
@@ -60,3 +61,4 @@ pin_solenoid = "embassy_rp::peripherals::PIN_36"
 
 [irq_aliases]
 EspIrq = "UART1_IRQ"
+RotaryEncoderPioIrq = "PIO0_IRQ_0"

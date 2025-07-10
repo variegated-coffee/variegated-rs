@@ -15,8 +15,8 @@ use display_interface_spi::SPIInterface;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{pwm, spi, uart};
+use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
+use embassy_rp::{pio, pwm, spi, uart};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -48,6 +48,8 @@ use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use embassy_rp::bind_interrupts;
+use embassy_rp::pio::Pio;
+use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embedded_graphics::{
     mono_font::{ascii::FONT_5X7, MonoTextStyleBuilder},
@@ -72,6 +74,7 @@ static HEAP: Heap = Heap::empty();
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
+    RotaryEncoderPioIrq => pio::InterruptHandler<RotaryEncoderPeripheralsPio>;
 });
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -107,6 +110,7 @@ struct RotaryEncoderPeripherals {
     pin_clk: (),
     pin_dt: (),
     pin_sw: (),
+    pio: (),
 }
 
 #[variegated_board_cfg::board_cfg("ads124s08_peripherals")]
@@ -368,8 +372,16 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
 
+    let Pio {
+        mut common, sm0, sm1, ..
+    } = Pio::new(rotary_p.pio, Irqs);
+
+    let prg = PioEncoderProgram::new(&mut common);
+    let rotary = PioEncoder::new(&mut common, sm0, rotary_p.pin_clk, rotary_p.pin_dt, &prg);
+//    let rotary = Rotary::new(Input::new(rotary_p.pin_dt, Pull::Up), Input::new(rotary_p.pin_clk, Pull::Up));
+
     let mut rotary_action = rotary::RotaryController::new(
-        Rotary::new(Input::new(rotary_p.pin_dt, Pull::Up), Input::new(rotary_p.pin_clk, Pull::Up)),
+        rotary,
         Input::new(rotary_p.pin_sw, Pull::Up),
         command_channel.sender(),
         ui_status_channel.sender(),
@@ -586,12 +598,12 @@ async fn display_task(
                     .unwrap();
             },
             UIEditMode::PumpFlowRate => {
-                Text::with_baseline(format!("Edit: Flow ({:.0})", ui_status.current_flow_rate).as_str(), Point::new(0, 42), text_style, Baseline::Top)
+                Text::with_baseline(format!("Edit: Flow ({:.2})", ui_status.current_flow_rate).as_str(), Point::new(0, 42), text_style, Baseline::Top)
                     .draw(&mut disp)
                     .unwrap();
             },
             UIEditMode::PumpPressure => {
-                Text::with_baseline(format!("Edit: Prs ({:.0})", ui_status.current_pressure).as_str(), Point::new(0, 42), text_style, Baseline::Top)
+                Text::with_baseline(format!("Edit: Prs ({:.1})", ui_status.current_pressure).as_str(), Point::new(0, 42), text_style, Baseline::Top)
                     .draw(&mut disp)
                     .unwrap();
             }
