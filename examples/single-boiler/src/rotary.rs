@@ -2,12 +2,13 @@ use core::cmp::{max, min};
 use defmt::{info, Format};
 use embassy_futures::select::Either::First;
 use embassy_futures::select::select;
+use embassy_rp::peripherals::PIO0;
+use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use rotary_encoder_hal::{DefaultPhase, Rotary};
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, TemperatureType};
 
 #[derive(Debug, Format, Default, Copy, Clone)]
@@ -29,30 +30,30 @@ impl UIEditMode {
         }
     }
 
-    pub fn min_value(&self) -> i32 {
+    pub fn min_value(&self) -> f32 {
         match self {
-            UIEditMode::PumpDutyCycle => 0,
-            UIEditMode::BoilerTemperature => 10,
-            UIEditMode::PumpFlowRate => 0,
-            UIEditMode::PumpPressure => 0,
+            UIEditMode::PumpDutyCycle => 0.0,
+            UIEditMode::BoilerTemperature => 10.0,
+            UIEditMode::PumpFlowRate => 0.0,
+            UIEditMode::PumpPressure => 0.0,
         }
     }
 
-    pub fn max_value(&self) -> i32 {
+    pub fn max_value(&self) -> f32 {
         match self {
-            UIEditMode::PumpDutyCycle => 100,
-            UIEditMode::BoilerTemperature => 120,
-            UIEditMode::PumpFlowRate => 10,
-            UIEditMode::PumpPressure => 10,
+            UIEditMode::PumpDutyCycle => 100.0,
+            UIEditMode::BoilerTemperature => 120.0,
+            UIEditMode::PumpFlowRate => 10.0,
+            UIEditMode::PumpPressure => 10.0,
         }
     }
 
-    pub fn step(&self) -> i32 {
+    pub fn step(&self) -> f32 {
         match self {
-            UIEditMode::PumpDutyCycle => 5,
-            UIEditMode::BoilerTemperature => 5,
-            UIEditMode::PumpFlowRate => 1,
-            UIEditMode::PumpPressure => 1,
+            UIEditMode::PumpDutyCycle => 5.0,
+            UIEditMode::BoilerTemperature => 5.0,
+            UIEditMode::PumpFlowRate => 0.25,
+            UIEditMode::PumpPressure => 0.5,
         }
     }
 }
@@ -60,32 +61,28 @@ impl UIEditMode {
 #[derive(Debug, Format, Default, Copy, Clone)]
 pub(crate) struct UIStatus {
     pub(crate) edit_mode: UIEditMode,
-    pub(crate) current_duty_cycle: i32,
-    pub(crate) current_boiler_temp: i32,
-    pub(crate) current_flow_rate: i32,
-    pub(crate) current_pressure: i32,
+    pub(crate) current_duty_cycle: f32,
+    pub(crate) current_boiler_temp: f32,
+    pub(crate) current_flow_rate: f32,
+    pub(crate) current_pressure: f32,
 }
 
-pub(crate) struct RotaryController<'a, A, B, C, const N: usize> where
-    A: InputPin + Wait,
-    B: InputPin + Wait,
+pub(crate) struct RotaryController<'a, C, const N: usize> where
     C: InputPin + Wait,
 {
-    rotary: Rotary<A, B, DefaultPhase>,
+    rotary: PioEncoder<'a, PIO0, 0>,
     button: C,
     command_sender: Sender<'a, CriticalSectionRawMutex, MachineCommand, N>,
     ui_status_sender: Sender<'a, CriticalSectionRawMutex, UIStatus, N>,
     status: UIStatus,
 }
 
-impl<'a, A, B, C, const N: usize> RotaryController<'a, A, B, C, N>
+impl<'a, C, const N: usize> RotaryController<'a, C, N>
 where
-    A: InputPin + Wait,
-    B: InputPin + Wait,
     C: InputPin + Wait,
 {
     pub fn new(
-        rotary: Rotary<A, B, DefaultPhase>,
+        rotary: PioEncoder<'a, PIO0, 0>,
         button: C,
         command_sender: Sender<'a, CriticalSectionRawMutex, MachineCommand, N>,
         ui_status_sender: Sender<'a, CriticalSectionRawMutex, UIStatus, N>,
@@ -103,21 +100,18 @@ where
         self.ui_status_sender.send(self.status).await;
 
         loop {
-            let (pin_a,pin_b) = self.rotary.pins();
-            let either = select(select(pin_a.wait_for_any_edge(),pin_b.wait_for_any_edge()), self.button.wait_for_falling_edge()).await;
-            if let First(_) = either {
+            let either = select(self.rotary.read(), self.button.wait_for_falling_edge()).await;
+            if let First(direction) = either {
                 let current_value = match self.status.edit_mode {
                     UIEditMode::PumpDutyCycle => self.status.current_duty_cycle,
                     UIEditMode::BoilerTemperature => self.status.current_boiler_temp,
                     UIEditMode::PumpFlowRate => self.status.current_flow_rate,
                     UIEditMode::PumpPressure => self.status.current_pressure,
                 };
-
-                let direction = self.rotary.update().unwrap();
+                
                 let new_value = match direction {
-                    rotary_encoder_hal::Direction::Clockwise => min(self.status.edit_mode.max_value(), current_value + self.status.edit_mode.step()),
-                    rotary_encoder_hal::Direction::CounterClockwise => max(self.status.edit_mode.min_value(), current_value - self.status.edit_mode.step()),
-                    rotary_encoder_hal::Direction::None => current_value,
+                    Direction::CounterClockwise => self.status.edit_mode.max_value().min(current_value + self.status.edit_mode.step()),
+                    Direction::Clockwise => self.status.edit_mode.min_value().max(current_value - self.status.edit_mode.step()),
                 };
 
                 if new_value == current_value {
