@@ -132,9 +132,9 @@ where
                     },
                     UIEditMode::BoilerTemperature => {
                         let _boiler_params = PidParameters {
-                            kp: PidTerm { scale: 3.0, limits: PidLimits::default() },
-                            ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() },
-                            kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+                            kp: PidTerm::new(3.0, PidLimits::default()),
+                            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
+                            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
                         };
 
                         info!("Boiler temperature: {}", new_value);
@@ -143,9 +143,9 @@ where
                     },
                     UIEditMode::PumpFlowRate => {
                         let _flow_params = PidParameters {
-                            kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
-                            ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
-                            kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+                            kp: PidTerm::new(10.0, PidLimits::default()),
+                            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
+                            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
                         };
 
 
@@ -155,9 +155,9 @@ where
                     },
                     UIEditMode::PumpPressure => {
                         let _pressure_params = PidParameters {
-                            kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
-                            ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
-                            kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+                            kp: PidTerm::new(10.0, PidLimits::default()),
+                            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
+                            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
                         };
 
                         info!("Pump pressure: {}", new_value);
