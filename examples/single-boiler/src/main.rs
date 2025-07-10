@@ -446,7 +446,7 @@ fn create_default_configuration() -> SingleBoilerSingleGroupConfiguration {
     };
 
     SingleBoilerSingleGroupConfiguration {
-        brew_boiler_control_target: BoilerControlTarget::Off,
+        brew_boiler_control_target: BoilerControlTarget::Temperature(110.0),
         steam_boiler_control_target: BoilerControlTarget::Off,
         group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
         pid_parameters,
@@ -544,12 +544,16 @@ async fn display_task(
     let mut ui_status = UIStatus::default();
 
     loop {
-        if let Some(status_update) = status_receiver.try_next_message_pure() {
-            status = status_update;
+        while !status_receiver.is_empty() {
+            if let Some(status_update) = status_receiver.try_next_message_pure() {
+                status = status_update;
+            }
         }
 
-        if let Ok(ui_status_update) = ui_status_receiver.try_receive() {
-            ui_status = ui_status_update;
+        while !ui_status_receiver.is_empty() {
+            if let Ok(ui_status_update) = ui_status_receiver.try_receive() {
+                ui_status = ui_status_update;
+            }
         }
 
         disp.clear();
