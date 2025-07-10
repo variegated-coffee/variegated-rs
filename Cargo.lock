@@ -876,7 +876,9 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
 dependencies = [
+ "defmt",
  "hash32 0.3.1",
+ "serde",
  "stable_deref_trait",
 ]
 
@@ -1816,6 +1818,7 @@ dependencies = [
  "embedded-hal 1.0.0",
  "embedded-hal-async",
  "heapless 0.8.0",
+ "movavg",
  "num-traits",
  "serde",
  "variegated-control-algorithm",
@@ -1828,6 +1831,7 @@ name = "variegated-controller-types"
 version = "0.1.0"
 dependencies = [
  "defmt",
+ "heapless 0.8.0",
  "serde",
  "variegated-control-algorithm",
 ]

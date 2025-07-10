@@ -8,13 +8,15 @@ test = false
 bench = false
 
 [dependencies]
-defmt = "0.3"
+defmt = { version = "0.3", optional = true }
+heapless = "0.8.0"
 serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
 
 [features]
-serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive"]
+serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "heapless/serde"]
+defmt = ["dep:defmt", "heapless/defmt-03"]
 double_boiler = []
 single_boiler = []
 single_group = []
-default = ["serde", "double_boiler", "single_group"]
+default = ["serde", "defmt", "double_boiler", "single_group"]

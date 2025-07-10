@@ -1,9 +1,13 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::vec::Vec;
-use defmt::Format;
+use core::time::Duration;
+use heapless::FnvIndexMap;
 use variegated_control_algorithm::pid::PidOut;
+
+const MAX_BOILERS: usize = 8;
+const MAX_GROUPS: usize = 4;
+const MAX_WATER_TAPS: usize = 4;
 
 pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
@@ -20,12 +24,50 @@ pub type BoilerIndex = u8;
 pub type GroupIndex = u8;
 pub type WaterTapIndex = u8;
 
+pub type RoutineIndex = usize;
+
 pub type PidParameters = variegated_control_algorithm::pid::PidParameters<f32>;
 pub type PidTerm = variegated_control_algorithm::pid::PidTerm<f32>;
 pub type PidLimits = variegated_control_algorithm::pid::Limits<f32>;
 
+pub type ExternalSensorId = u8; // Unique identifier for external sensors
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, Debug, Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
+pub struct ProtocolVersion {
+    /// Major version of the protocol. Incremented for breaking changes.
+    pub major: u8,
+    /// Minor version of the protocol. Incremented for non-breaking changes.
+    pub minor: u8,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
+pub struct ProtocolConfig {
+    /// The protocol version used by the machine.
+    pub protocol_version: ProtocolVersion,
+    /// The maximum number of boilers supported by the machine.
+    pub max_boilers: usize,
+    /// The maximum number of groups supported by the machine.
+    pub max_groups: usize,
+    /// The maximum number of water taps supported by the machine.
+    pub max_water_taps: usize,
+}
+
+const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+
+const PROTOCOL_CONFIG: ProtocolConfig = ProtocolConfig {
+    protocol_version: PROTOCOL_VERSION,
+    max_boilers: MAX_BOILERS,
+    max_groups: MAX_GROUPS,
+    max_water_taps: MAX_WATER_TAPS,
+};
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
 pub enum PidParameterTarget {
     BoilerTemperature(BoilerIndex),
     BoilerPressure(BoilerIndex),
@@ -35,7 +77,8 @@ pub enum PidParameterTarget {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, Debug, Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
 pub enum MachineCommand {
     StartBrewing(GroupIndex),
     StopBrewing(GroupIndex),
@@ -44,12 +87,15 @@ pub enum MachineCommand {
     SetBoilerControlTarget(BoilerIndex, BoilerControlTarget),
     SetGroupBrewControlTarget(GroupIndex, GroupBrewControlTarget),
     SetPidParameters(PidParameterTarget, PidParameters),
-    RunRoutine,
+    RunRoutine(RoutineIndex),
     CancelRoutine,
+    EnableBoiler(BoilerIndex),
+    DisableBoiler(BoilerIndex),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, Debug, Format, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum BoilerControlTarget {
     Temperature(TemperatureType),
     Pressure(PressureType),
@@ -58,7 +104,8 @@ pub enum BoilerControlTarget {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, Debug, Format, Default)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default)]
 pub enum GroupBrewControlTarget {
     GroupFlowRate(FlowRateType),
     Pressure(PressureType),
@@ -70,7 +117,8 @@ pub enum GroupBrewControlTarget {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, Default, Debug, Format, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub enum SingleBoilerSingleGroupControllerState {
     #[default]
     BrewModeIdle,
@@ -81,7 +129,8 @@ pub enum SingleBoilerSingleGroupControllerState {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Copy, Debug, Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum SingleBoilerSingleGroupControllerBoilers {
     BrewBoiler = 0,
@@ -89,6 +138,7 @@ pub enum SingleBoilerSingleGroupControllerBoilers {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Status {
     pub boiler_temp: TemperatureType,
@@ -106,23 +156,127 @@ pub struct Status {
     pub routine_step: Option<usize>,
 }
 
-pub struct Configuration {
-    boiler_configuration: Vec<BoilerConfiguration>,
-    group_configuration: Vec<GroupConfiguration>,
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub enum MachineMode {
+    On,
+    #[default]
+    Off,
+    PowerSaveStandby,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default)]
+pub struct NewStatus {
+    pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
+    pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
+    pub mode: MachineMode,
+    pub current_routine: Option<RoutineIndex>,
+    pub routine_step: Option<usize>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for NewStatus {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "NewStatus {{ mode: {:#?}, current_routine: {:#?}, routine_step: {:#?} }}",
+            /*self.boiler_statuses, self.group_statuses, */self.mode, self.current_routine, self.routine_step);
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Output {
+    #[default]
+    Off,
+    FixedDutyCycle(DutyCycleType),
+    PidOutput(PidOut<f32>),
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct BoilerStatus {
+    pub temperature: Option<TemperatureType>,
+    pub pressure: Option<PressureType>,
+    pub output: Output,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct GroupStatus {
+    pub is_brewing: bool,
+    pub three_way_valve_open: Option<bool>,
+    pub brew_time: Option<Duration>,
+    pub input_flow_rate: Option<FlowRateType>,
+    pub output_flow_rate: Option<FlowRateType>,
+    pub output_weight: Option<WeightType>,
+    pub pressure: Option<PressureType>,
+    pub temperature: Option<TemperatureType>,
+    pub pump_output: Output,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default)]
+pub struct Configuration {
+    boiler_configuration: FnvIndexMap<BoilerIndex, BoilerConfiguration, MAX_BOILERS>,
+    group_configuration: FnvIndexMap<GroupIndex, GroupConfiguration, MAX_GROUPS>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for Configuration {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "Configuration {{ }}",
+            /*self.boiler_configuration, self.group_configuration*/);
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
 pub struct BoilerConfiguration {
-    pub index: BoilerIndex,
     pub temperature_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
     pub control_target: BoilerControlTarget,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
 pub struct GroupConfiguration {
-    pub index: GroupIndex,
     pub flow_rate_pid_parameters: PidParameters,
     pub output_flow_rate_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
     pub brew_control_target: GroupBrewControlTarget,
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone,  Debug)]
+pub struct ExternalSensorData {
+    pub id: ExternalSensorId,
+    pub value: f32,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone,  Debug)]
+enum WorldToMachineMessage {
+    Command(MachineCommand),
+    RequestStatus,
+    RequestMachineDefinition,
+    RequestConfiguration,
+    ExternalSensorUpdate(ExternalSensorData),
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+enum MachineToWorldMessage {
+    Hello(ProtocolConfig),
+    Status(NewStatus),
+    MachineDefinition,
+    Configuration(Configuration),
+}
