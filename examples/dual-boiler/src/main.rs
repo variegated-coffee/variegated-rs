@@ -60,7 +60,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
 use variegated_fdc1004::{OutputRate, FDC1004};
-use variegated_hal::gpio::gpio_command_sender::GpioDualEdgeCommandSender;
+use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
 

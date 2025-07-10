@@ -62,7 +62,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use w25q32jv::W25q32jv;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
-use variegated_hal::gpio::gpio_command_sender::GpioDualEdgeCommandSender;
+use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
 use crate::rotary::{UIEditMode, UIStatus};
@@ -352,18 +352,18 @@ async fn main_task(spawner: Spawner) -> ! {
     let button_p = button_peripherals!(p);
     let rotary_p = rotary_encoder_peripherals!(p);
 
-    let mut brew_action = GpioDualEdgeCommandSender::new(
+    let mut brew_action = GpioCommandSender::new(
         Input::new(button_p.pin_brew, Pull::Up),
         command_channel.sender(),
-        MachineCommand::StopBrewing(1),
-        MachineCommand::StartBrewing(1),
+        Some(MachineCommand::StopBrewing(1)),
+        Some(MachineCommand::StartBrewing(1)),
     );
 
-    let mut steam_action = GpioDualEdgeCommandSender::new(
+    let mut steam_action = GpioCommandSender::new(
         Input::new(button_p.pin_steam, Pull::Up),
         command_channel.sender(),
-        MachineCommand::CancelRoutine,
-        MachineCommand::RunRoutine,
+        Some(MachineCommand::CancelRoutine),
+        Some(MachineCommand::RunRoutine(0)),
     );
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
