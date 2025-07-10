@@ -10,6 +10,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
+use core::ops::Deref;
 use defmt::{info, unwrap};
 use display_interface_spi::SPIInterface;
 use embassy_executor::{Executor, Spawner};
@@ -63,6 +64,7 @@ use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use w25q32jv::W25q32jv;
+use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, InMemoryRoutineRepository};
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -160,6 +162,7 @@ struct Esp32Peripherals {
 
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
+type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 
 struct NoopOutputPin {
@@ -209,6 +212,7 @@ fn main() -> ! {
 
 static SPI_BUS: StaticCell<InternalBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
+static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
 static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
 static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
 static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
@@ -345,12 +349,19 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let configuration = create_default_configuration();
 
+    let mut routine_repository = InMemoryRoutineRepository::new();
+    routine_repository.add_routine(create_heatup_routine(0));
+    routine_repository.add_routine(create_shot_routine(0));
+
+    let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
+
     let mut controller = SingleBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
         boiler,
         group,
         configuration,
+        routine_repository_ref
     );
 
     let button_p = button_peripherals!(p);

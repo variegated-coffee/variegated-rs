@@ -1,3 +1,4 @@
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use defmt::{info, Format};
@@ -59,14 +60,17 @@ enum RoutineType {
     UserDefined,
 }
 
-pub(crate) struct Routine {
+#[derive(Clone)]
+pub struct Routine {
     routine_type: RoutineType,
+    name: String,
     steps: Vec<RoutineStep>,
 }
 
-pub(crate) fn create_shot_routine(group: GroupIndex) -> Routine {
+pub fn create_shot_routine(group: GroupIndex) -> Routine {
     Routine {
         routine_type: RoutineType::UserDefined,
+        name: "Smart shot".into(),
         steps: vec![
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::FullOn)),
@@ -125,9 +129,10 @@ pub(crate) fn create_shot_routine(group: GroupIndex) -> Routine {
     }
 }
 
-fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
+pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
     Routine {
         routine_type: RoutineType::HeatUp,
+        name: "Heat-up".into(),
         steps: vec![
             RoutineStep {
                 entry_command: Some(MachineCommand::SetBoilerControlTarget(0, BoilerControlTarget::Temperature(120.0))),
@@ -154,17 +159,20 @@ fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
     }
 }
 
-pub struct RoutineExecutionContext {
+pub struct RoutineExecutionContext<StateT, ConfigurationT> {
     pub(crate) routine: Routine,
     pub(crate) currently_executing: bool,
     pub(crate) finished_executing: bool,
     pub(crate) current_step: Option<usize>,
     pub(crate) execution_start_time: Option<Instant>,
     pub(crate) step_start_time: Option<Instant>,
+    
+    pub(crate) saved_state: StateT,
+    pub(crate) saved_configuration: ConfigurationT,
 }
 
-impl RoutineExecutionContext {
-    pub fn new(routine: Routine) -> Self {
+impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
+    pub fn new(routine: Routine, saved_state: StateT, saved_configuration: ConfigurationT) -> Self {
         Self {
             routine,
             currently_executing: false,
@@ -172,6 +180,8 @@ impl RoutineExecutionContext {
             current_step: None,
             execution_start_time: None,
             step_start_time: None,
+            saved_state,
+            saved_configuration,
         }
     }
 
@@ -270,5 +280,37 @@ impl RoutineExecutionContext {
             StateCondition::OutputWeightAbove(_, _) => false,
             StateCondition::OutputWeightBelow(_, _) => false
         }
+    }
+}
+
+pub struct InMemoryRoutineRepository {
+    routines: Vec<Routine>,
+}
+
+impl InMemoryRoutineRepository {
+    pub fn new() -> Self {
+        Self {
+            routines: Vec::new(),
+        }
+    }
+
+    pub fn get_routine(&self, index: usize) -> Option<&Routine> {
+        self.routines.get(index)
+    }
+
+    pub fn add_routine(&mut self, routine: Routine) {
+        self.routines.push(routine);
+    }
+    
+    pub fn remove_routine(&mut self, index: usize) -> Option<Routine> {
+        if index < self.routines.len() {
+            Some(self.routines.remove(index))
+        } else {
+            None
+        }
+    }
+    
+    pub fn iterate_routines(&self) -> impl Iterator<Item = &Routine> {
+        self.routines.iter()
     }
 }
