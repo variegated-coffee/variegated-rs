@@ -13,9 +13,28 @@ pub enum PidError {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub struct PidTerm<T: FloatCore + core::default::Default> {
-    pub scale: T,
+pub struct PidTerm<T: FloatCore + Default> {
+    pub positive_scale: T,
+    pub negative_scale: T,
     pub limits: Limits<T>,
+}
+
+impl <T: FloatCore + Default> PidTerm<T> {
+    pub fn new(scale: T, limits: Limits<T>) -> Self {
+        PidTerm {
+            positive_scale: scale,
+            negative_scale: scale,
+            limits,
+        }
+    }
+
+    pub fn new_asymmetric(positive_scale: T, negative_scale: T, limits: Limits<T>) -> Self {
+        PidTerm {
+            positive_scale,
+            negative_scale,
+            limits,
+        }
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -91,7 +110,8 @@ impl<T: FloatCore + core::default::Default> Default for Limits<T> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct KPTerm<T: FloatCore + core::default::Default> {
     pub limits: Limits<T>,
-    scale: T,
+    positive_scale: T,
+    negative_scale: T,
 }
 
 impl<T:FloatCore + core::default::Default> KPTerm<T> {
@@ -99,11 +119,23 @@ impl<T:FloatCore + core::default::Default> KPTerm<T> {
         KPTerm::default()
     }
     pub fn set_scale(&mut self, val: T) -> &mut Self {
-        self.scale = val;
+        self.positive_scale = val;
+        self.negative_scale = val;
+        self
+    }
+    pub fn set_asymmetric_scale(&mut self, positive: T, negative: T) -> &mut Self {
+        self.positive_scale = positive;
+        self.negative_scale = negative;
         self
     }
     pub fn step(&self, offset: T) -> T {
-        self.limits.clamp(self.scale * offset)
+        let scale = if offset >= T::zero() {
+            self.positive_scale
+        } else {
+            self.negative_scale
+        };
+
+        self.limits.clamp(scale * offset)
     }
 }
 
@@ -112,7 +144,8 @@ impl<T:FloatCore + core::default::Default> KPTerm<T> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct KITerm<T: FloatCore + core::default::Default> {
     pub limits: Limits<T>,
-    scale: T,
+    positive_scale: T,
+    negative_scale: T,
     pub accumulate: T
 }
 
@@ -121,11 +154,25 @@ impl<T:FloatCore + core::default::Default> KITerm<T> {
         KITerm::default()
     }
     pub fn set_scale(&mut self, val: T) -> &mut Self {
-        self.scale = val;
+        self.positive_scale = val;
+        self.negative_scale = val;
         self
     }
+
+    pub fn set_asymmetric_scale(&mut self, positive: T, negative: T) -> &mut Self {
+        self.positive_scale = positive;
+        self.negative_scale = negative;
+        self
+    }
+
     pub fn step(&mut self, offset: T, tdelta: T) -> T {
-        let i = self.limits.clamp(self.scale * offset * tdelta + self.accumulate);
+        let scale = if offset >= T::zero() {
+            self.positive_scale
+        } else {
+            self.negative_scale
+        };
+
+        let i = self.limits.clamp(scale * offset * tdelta + self.accumulate);
         self.accumulate = i;
         i
     }
@@ -136,7 +183,8 @@ impl<T:FloatCore + core::default::Default> KITerm<T> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct KDTerm<T: FloatCore + core::default::Default> {
     pub limits: Limits<T>,
-    scale: T,
+    positive_scale: T,
+    negative_scale: T,
     pub prev_measurement: T
 }
 
@@ -145,11 +193,23 @@ impl<T:FloatCore + core::default::Default> KDTerm<T> {
         KDTerm::default()
     }
     pub fn set_scale(&mut self, val: T) -> &mut Self {
-        self.scale = val;
+        self.positive_scale = val;
+        self.negative_scale = val;
         self
     }
-    pub fn step(&mut self, measurement: T, tdelta: T) -> T {
-        let d = self.limits.clamp(self.scale * (self.prev_measurement - measurement) / tdelta);
+    pub fn set_asymmetric_scale(&mut self, positive: T, negative: T) -> &mut Self {
+        self.positive_scale = positive;
+        self.negative_scale = negative;
+        self
+    }
+    pub fn step(&mut self, offset: T, measurement: T, tdelta: T) -> T {
+        let scale = if offset >= T::zero() {
+            self.positive_scale
+        } else {
+            self.negative_scale
+        };
+
+        let d = self.limits.clamp(scale * (self.prev_measurement - measurement) / tdelta);
         self.prev_measurement = measurement;
         d
     }
@@ -175,9 +235,9 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
 
     pub fn new_with_pid(p: T, i: T, d: T) -> Self {
         Self{
-            kp: KPTerm{limits:Limits::new(), scale: p},
-            ki: KITerm{limits:Limits::new(), scale: i, accumulate:T::zero()},
-            kd: KDTerm{limits:Limits::new(), scale: d, prev_measurement:T::zero()},
+            kp: KPTerm{limits:Limits::new(), positive_scale: p, negative_scale: p},
+            ki: KITerm{limits:Limits::new(), positive_scale: i, negative_scale: i, accumulate:T::zero()},
+            kd: KDTerm{limits:Limits::new(), positive_scale: d, negative_scale: d, prev_measurement:T::zero()},
             limits: Limits::new(), setpoint: T::zero(),
         }
     }
@@ -192,7 +252,7 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
         let offset = self.setpoint - input.measurement;
         let p = self.kp.step(offset);
         let i = self.ki.step(offset, input.tdelta);
-        let d = self.kd.step(input.measurement, input.tdelta);
+        let d = self.kd.step(offset, input.measurement, input.tdelta);
         PidOut::new(p, i, d, self.limits.clamp(p + i + d))
     }
     
@@ -201,11 +261,11 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
         self.kd.prev_measurement = T::zero();
     }
     pub fn set_parameters(&mut self, parameters: PidParameters<T>) -> &mut Self {
-        self.kp.set_scale(parameters.kp.scale);
+        self.kp.set_asymmetric_scale(parameters.kp.positive_scale, parameters.kp.negative_scale);
         self.kp.limits = parameters.kp.limits;
-        self.ki.set_scale(parameters.ki.scale);
+        self.ki.set_asymmetric_scale(parameters.ki.positive_scale, parameters.ki.negative_scale);
         self.ki.limits = parameters.ki.limits;
-        self.kd.set_scale(parameters.kd.scale);
+        self.kd.set_asymmetric_scale(parameters.kd.positive_scale, parameters.kd.negative_scale);
         self.kd.limits = parameters.kd.limits;
         self
     }

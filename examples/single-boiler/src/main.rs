@@ -407,19 +407,19 @@ async fn main_task(spawner: Spawner) -> ! {
 fn create_default_configuration() -> SingleBoilerSingleGroupConfiguration {
     let mut pid_parameters = SingleBoilerSingleGroupPidParameters::default();
     pid_parameters.boiler_temperature_params = PidParameters {
-        kp: PidTerm { scale: 3.0, limits: PidLimits::default() },
-        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() },
-        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+        kp: PidTerm::new(3.0, PidLimits::default()),
+        ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
+        kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
     };
     pid_parameters.pump_flow_rate_params = PidParameters {
-        kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
-        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
-        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+        kp: PidTerm::new(10.0, PidLimits::default() ),
+        ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
+        kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
     };
     pid_parameters.pump_pressure_params = PidParameters {
-        kp: PidTerm { scale: 10.0, limits: PidLimits::default() },
-        ki: PidTerm { scale: 0.01, limits: PidLimits::new_with_limits(-50.0, 80.0).unwrap() },
-        kd: PidTerm { scale: 30.0, limits: PidLimits::new_with_limits(-10.0, 10.0).unwrap() }
+        kp: PidTerm::new( 10.0, PidLimits::default() ),
+        ki: PidTerm::new( 0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
+        kd: PidTerm::new( 30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
     };
 
     SingleBoilerSingleGroupConfiguration {
