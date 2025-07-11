@@ -34,7 +34,7 @@ embedded-alloc = { version = "0.5.1" }
 
 static_cell = "2"
 
-cortex-m-rt = "0.7.0"
+cortex-m-rt = { version = "0.7.5", features = ["paint-stack"] }
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
@@ -68,3 +68,12 @@ rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb"]
 dual-boiler = []
 single-boiler = []
+
+[profile.dev]
+debug = true              # Enable debug info
+opt-level = 1            # Light optimization for better debugging
+lto = false              # Disable link-time optimization
+codegen-units = 1        # Better debug info
+
+[profile.release]
+debug = true             # Keep debug info in release builds too
