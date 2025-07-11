@@ -66,13 +66,10 @@ use serde::Serialize;
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, InMemoryRoutineRepository};
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
-use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
+use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
 use crate::rotary::{UIEditMode, UIStatus};
-
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
@@ -165,6 +162,10 @@ type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi
 type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 
+const STATUS_RECEIVERS: usize = 4;
+type StatusChannel = PubSubChannel<NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
+type StatusSubscriber = Subscriber<'static, NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
+
 struct NoopOutputPin {
 
 }
@@ -193,15 +194,19 @@ impl OutputPin for NoopOutputPin {
 }
 
 
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
 fn main() -> ! {
     #[allow(static_mut_refs)]
-    {
+    unsafe {
         use core::mem::MaybeUninit;
         const HEAP_SIZE: usize = 4096; // 4 KiB heap size
-        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+
+        info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
     }
 
     let executor0 = EXECUTOR0.init(Executor::new());
@@ -219,9 +224,37 @@ static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = S
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
-static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
-static STATUS_CHANNEL: StaticCell<PubSubChannel<CriticalSectionRawMutex, Status, 1, 3, 1>> = StaticCell::new();
-static UI_STATUS_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, UIStatus, 10>> = StaticCell::new();
+static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = StaticCell::new();
+static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
+static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
+
+fn check_stack_usage() -> (usize, usize) {
+    unsafe extern "C" {
+        static _stack_end: u8;
+        static _stack_start: u8;
+    }
+
+    const STACK_PAINT_VALUE: u32 = 0xCCCC_CCCC;
+
+    unsafe {
+        let stack_end = &_stack_end as *const u8 as usize;
+        let stack_start = &_stack_start as *const u8 as usize;
+
+        let mut ptr = stack_end as *const u32;
+        let mut unused_bytes = 0;
+
+        // Count consecutive painted words
+        while (ptr as usize) < stack_start && ptr.read_volatile() == STACK_PAINT_VALUE {
+            unused_bytes += 4;
+            ptr = ptr.add(1);
+        }
+
+        let total_stack = stack_start - stack_end;
+        let used_stack = total_stack - unused_bytes;
+
+        (used_stack, total_stack)
+    }
+}
 
 #[embassy_executor::task]
 async fn main_task(spawner: Spawner) -> ! {
@@ -345,7 +378,7 @@ async fn main_task(spawner: Spawner) -> ! {
     );
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
-    let status_channel: &'static PubSubChannel<_, _, 1, 3, 1> = STATUS_CHANNEL.init(PubSubChannel::new());
+    let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
 
     let configuration = create_default_configuration();
 
@@ -367,11 +400,20 @@ async fn main_task(spawner: Spawner) -> ! {
     let button_p = button_peripherals!(p);
     let rotary_p = rotary_encoder_peripherals!(p);
 
-    let mut brew_action = GpioCommandSender::new(
+    info!("Creating first sub");
+
+    let mut brew_action = GpioStatusLambdaCommandSender::new(
         Input::new(button_p.pin_brew, Pull::Up),
         command_channel.sender(),
-        Some(MachineCommand::StopBrewing(1)),
-        Some(MachineCommand::StartBrewing(1)),
+        status_channel.subscriber().unwrap(),
+        None,
+        Some(Box::new(|status: &Status| {
+            if status.is_brewing {
+                Some(MachineCommand::StopBrewing(1))
+            } else {
+                Some(MachineCommand::StartBrewing(1))
+            }
+        })),
     );
 
     let mut steam_action = GpioCommandSender::new(
@@ -387,6 +429,8 @@ async fn main_task(spawner: Spawner) -> ! {
         mut common, sm0, sm1, ..
     } = Pio::new(rotary_p.pio, Irqs);
 
+    info!("Creating PIO encoder program");
+
     let prg = PioEncoderProgram::new(&mut common);
     let rotary = PioEncoder::new(&mut common, sm0, rotary_p.pin_clk, rotary_p.pin_dt, &prg);
 //    let rotary = Rotary::new(Input::new(rotary_p.pin_dt, Pull::Up), Input::new(rotary_p.pin_clk, Pull::Up));
@@ -398,15 +442,20 @@ async fn main_task(spawner: Spawner) -> ! {
         ui_status_channel.sender(),
     );
 
+    info!("Creating display task");
     let disp_p = display_peripherals!(p);
 
     spawner.spawn(display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver())).unwrap();
 
+    info!("Creating esp transciever task");
     let esp_p = esp_32_peripherals!(p);
 
     spawner.spawn(esp_transciever_task(esp_p, status_channel.subscriber().unwrap())).unwrap();
 
+    info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task()).unwrap();
+
+    info!("Creating huge future join task");
 
     join5(
         join5(
@@ -421,7 +470,9 @@ async fn main_task(spawner: Spawner) -> ! {
         pump_frequency_counter.task(),
         controller.task()
     ).await;
-    
+
+    info!("For some reason we got here");
+
     loop {
         Timer::after_millis(3000).await;
     }
@@ -471,7 +522,7 @@ struct EspStatus {
 #[embassy_executor::task]
 async fn esp_transciever_task(
     esp_p: Esp32Peripherals,
-    mut status_receiver: Subscriber<'static, CriticalSectionRawMutex, Status, 1, 3, 1>
+    mut status_receiver: StatusSubscriber
 ) {
     let mut config = uart::Config::default();
     config.baudrate = 115200;
@@ -497,8 +548,8 @@ async fn esp_transciever_task(
 #[embassy_executor::task]
 async fn display_task(
     disp_p: DisplayPeripherals,
-    mut status_receiver: Subscriber<'static, CriticalSectionRawMutex, Status, 1, 3, 1>,
-    ui_status_receiver: Receiver<'static, CriticalSectionRawMutex, UIStatus, 10>
+    mut status_receiver: StatusSubscriber,
+    ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>
 ) {
     let spi_config = spi::Config::default();
     let mut spi = Spi::new(
@@ -544,11 +595,11 @@ async fn display_task(
     let mut ui_status = UIStatus::default();
 
     loop {
-        while !status_receiver.is_empty() {
+//        while !status_receiver.is_empty() {
             if let Some(status_update) = status_receiver.try_next_message_pure() {
                 status = status_update;
             }
-        }
+//        }
 
         while !ui_status_receiver.is_empty() {
             if let Ok(ui_status_update) = ui_status_receiver.try_receive() {
@@ -675,7 +726,10 @@ async fn heap_stats_task() {
     loop {
         let used = HEAP.used();
         let free = HEAP.free();
-        info!("Heap used: {} bytes, free: {} bytes", used, free);
+
+        let (stack_usage, total_stack) = check_stack_usage();
+
+        info!("Heap used: {} bytes, free: {} bytes, stack used: {} / {}", used, free, stack_usage, total_stack);
         Timer::after_millis(5000).await;
     }
 }

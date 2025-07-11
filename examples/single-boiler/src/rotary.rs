@@ -4,7 +4,7 @@ use embassy_futures::select::Either::First;
 use embassy_futures::select::select;
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
@@ -72,8 +72,8 @@ pub(crate) struct RotaryController<'a, C, const N: usize> where
 {
     rotary: PioEncoder<'a, PIO0, 0>,
     button: C,
-    command_sender: Sender<'a, CriticalSectionRawMutex, MachineCommand, N>,
-    ui_status_sender: Sender<'a, CriticalSectionRawMutex, UIStatus, N>,
+    command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
+    ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
     status: UIStatus,
 }
 
@@ -84,8 +84,8 @@ where
     pub fn new(
         rotary: PioEncoder<'a, PIO0, 0>,
         button: C,
-        command_sender: Sender<'a, CriticalSectionRawMutex, MachineCommand, N>,
-        ui_status_sender: Sender<'a, CriticalSectionRawMutex, UIStatus, N>,
+        command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
+        ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
     ) -> Self {
         Self {
             rotary,
