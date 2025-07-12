@@ -98,4 +98,24 @@ impl<'a> BrewMechanism for SingleBoilerBrewMechanism<'a> {
             None
         }
     }
+    
+    fn get_brew_state(&self) -> bool {
+        let mechanism = self.mechanism.try_lock();
+        
+        if let Ok(mechanism) = mechanism {
+            matches!(mechanism.state, SingleBoilerMechanismState::Brewing)
+        } else {
+            false
+        }
+    }
+    
+    fn get_three_way_valve_open(&self) -> Option<bool> {
+        let mechanism = self.mechanism.try_lock();
+        
+        if let Ok(mechanism) = mechanism {
+            Some(mechanism.solenoid.get_state())
+        } else {
+            None
+        }
+    }
 }

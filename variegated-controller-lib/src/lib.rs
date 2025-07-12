@@ -10,10 +10,11 @@ use embassy_sync::channel::{Receiver};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_time::{Instant, Timer};
+use heapless::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group};
-use variegated_controller_types::{BoilerControlTarget, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, SingleBoilerSingleGroupControllerState, Status};
+use variegated_controller_types::{BoilerControlTarget, BoilerStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, NewStatus, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use crate::routine::{InMemoryRoutineRepository, RoutineExecutionContext};
 
@@ -95,7 +96,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
                     info!("Routine finished executing");
-                    self.handle_routine_exit();
+                    self.handle_routine_exit().await;
                 } else if let Some(status) = self.previous_status.as_ref() {
                     if let Some(command) = routine.step(status, None) {
                         self.handle_command(command).await;
@@ -118,13 +119,13 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         }
     }
 
-    async fn update_pump(&mut self, actual_pump_control_target: GroupBrewControlTarget, delta_t: f32) -> PidOut<f32> {
+    async fn update_pump(&mut self, actual_pump_control_target: GroupBrewControlTarget, delta_t: f32) -> Output {
         let pump_pv = match actual_pump_control_target {
             GroupBrewControlTarget::GroupFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
                 self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_flow_rate_params);
 
-                self.group.get_flow_rate().unwrap_or(0.0) as f32
+                self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::Pressure(target) => {
                 self.pump_pid.setpoint = target as f32;
@@ -144,17 +145,26 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         let pump_pid_out = self.pump_pid.step(PidIn::new(pump_pv, delta_t));
 
         match actual_pump_control_target {
-            GroupBrewControlTarget::Off => self.group.set_pump_duty_cycle(0).await,
-            GroupBrewControlTarget::FullOn => self.group.set_pump_duty_cycle(100).await,
+            GroupBrewControlTarget::Off => {
+                self.group.set_pump_duty_cycle(0).await;
+                Output::Off
+            },
+            GroupBrewControlTarget::FullOn => {
+                self.group.set_pump_duty_cycle(100).await;
+                Output::FixedDutyCycle(100)
+            },
             GroupBrewControlTarget::FixedDutyCycle(duty_cycle) => {
-                self.group.set_pump_duty_cycle(duty_cycle).await
+                self.group.set_pump_duty_cycle(duty_cycle).await;
+                Output::FixedDutyCycle(duty_cycle)
             }
-            _ => self.group.set_pump_duty_cycle(pump_pid_out.out as u8).await,
+            _ => {
+                self.group.set_pump_duty_cycle(pump_pid_out.out as u8).await;
+                Output::PidOutput(pump_pid_out)
+            },
         }
-        pump_pid_out
     }
 
-    async fn update_boiler(&mut self, actual_boiler_control_target: BoilerControlTarget, delta_t: f32) -> PidOut<f32> {
+    async fn update_boiler(&mut self, actual_boiler_control_target: BoilerControlTarget, delta_t: f32) -> Output {
         let mut boiler_pv = match actual_boiler_control_target {
             BoilerControlTarget::Temperature(target) => {
                 self.boiler_pid.setpoint = target as f32;
@@ -178,10 +188,15 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         let boiler_pid_out = self.boiler_pid.step(PidIn::new(boiler_pv, delta_t));
 
         match actual_boiler_control_target {
-            BoilerControlTarget::Off => self.boiler.set_heating_element_duty_cycle(0).await,
-            _ => self.boiler.set_heating_element_duty_cycle(boiler_pid_out.out as u8).await,
+            BoilerControlTarget::Off => {
+                self.boiler.set_heating_element_duty_cycle(0).await;
+                Output::Off
+            },
+            _ => {
+                self.boiler.set_heating_element_duty_cycle(boiler_pid_out.out as u8).await;
+                Output::PidOutput(boiler_pid_out)
+            },
         }
-        boiler_pid_out
     }
 
     fn get_control_targets(&mut self) -> (BoilerControlTarget, GroupBrewControlTarget) {
@@ -205,8 +220,48 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         (actual_boiler_control_target, actual_pump_control_target)
     }
 
-    async fn send_status(&mut self, boiler_pid_out: PidOut<f32>, pump_pid_out: PidOut<f32>) {
-        //info!("Pump PID out: {:?}", pump_pid_out);
+    async fn send_status(&mut self, boiler_output: Output, pump_output: Output) {
+        let (brew_boiler_output, steam_boiler_output) = match self.state {
+            SingleBoilerSingleGroupControllerState::SteamModeIdle => (Output::Off, boiler_output.clone()),
+            _ => (boiler_output.clone(), Output::Off),
+        };
+        
+        let brew_boiler_status = BoilerStatus {
+            temperature: self.boiler.get_temperature(),
+            pressure: self.boiler.get_pressure(),
+            output: brew_boiler_output,
+            control_target: self.configuration.brew_boiler_control_target,
+        };
+        
+        let virtual_steam_boiler_status = BoilerStatus {
+            temperature: self.boiler.get_temperature(),
+            pressure: self.boiler.get_pressure(),
+            output: steam_boiler_output,
+            control_target: self.configuration.steam_boiler_control_target,
+        };
+
+        let group_status = GroupStatus {
+            is_brewing: self.state == SingleBoilerSingleGroupControllerState::Brewing,
+            three_way_valve_open: self.group.get_three_way_valve_open(),
+            brew_time: None,
+            input_flow_rate: self.group.get_input_flow_rate(),
+            output_flow_rate: self.group.get_output_flow_rate(),
+            output_weight: self.group.get_output_weight(),
+            pressure: self.group.get_pressure(),
+            temperature: self.group.get_temperature(),
+            pump_output: pump_output.clone(),
+            control_target: self.configuration.group_brew_control_target,
+        };
+
+        let _new_status = NewStatus {
+            boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (VirtualSteamBoiler.as_index(), virtual_steam_boiler_status)]),
+            group_statuses: FnvIndexMap::from_iter([(0, group_status)]),
+            mode: Default::default(),
+            current_routine: self.current_routine.as_ref().and_then(|rxc| Some(rxc.routine_index)),
+            routine_step: self.current_routine.as_ref().and_then(|rxc| rxc.current_step),
+        };
+
+        //info!("New status: {:?}", new_status);
 
         let status = Status {
             boiler_temp: self.boiler.get_temperature().unwrap_or(0.0) as f32,
@@ -214,9 +269,15 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             brew_boiler_duty_cycle: self.boiler.get_heating_element_duty_cycle().await,
             pump_duty_cycle: self.group.get_pump_duty_cycle().unwrap_or(0),
             is_brewing: self.state == SingleBoilerSingleGroupControllerState::Brewing,
-            group_flow_rate: self.group.get_flow_rate(),
-            boiler_pid_output: Some(boiler_pid_out),
-            pump_pid_output: Some(pump_pid_out),
+            group_flow_rate: self.group.get_input_flow_rate(),
+            boiler_pid_output: match boiler_output {
+                Output::PidOutput(pid_out) => Some(pid_out),
+                _ => None,
+            },
+            pump_pid_output: match pump_output {
+                Output::PidOutput(pid_out) => Some(pid_out),
+                _ => None,
+            },
             config_brew_boiler_control_target: self.configuration.brew_boiler_control_target,
             config_steam_boiler_control_target: self.configuration.steam_boiler_control_target,
             config_group_brew_control_target: self.configuration.group_brew_control_target,
@@ -282,24 +343,11 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             }
             MachineCommand::RunRoutine(usize) => {
                 info!("Received command to run routine with index: {}", usize);
-                if self.current_routine.is_some() {
-                    //warn!("Cannot run routine, already executing a routine");
-                    return;
-                }
-                let repo = self.routine_repository.lock().await;
-                let routine = repo.get_routine(usize);
-                
-                if let Some(routine) = routine {
-                    info!("Running routine");
-                    self.current_routine = Some(RoutineExecutionContext::new(routine.clone(), self.state, self.configuration));
-                    info!("Routine started");
-                } else {
-                    error!("Routine not found: {}", usize);
-                }
+                self.handle_routine_start(usize).await;
             }
             MachineCommand::CancelRoutine => {
                 info!("Cancelling routine");
-                self.handle_routine_exit();
+                self.handle_routine_exit().await;
             }
             MachineCommand::EnableBoiler(boiler_index) => {
                 if boiler_index == 0 && self.state == SingleBoilerSingleGroupControllerState::SteamModeIdle {
@@ -354,12 +402,29 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     
     async fn stopped_brewing(&mut self) {
     }
-    
-    fn handle_routine_exit(&mut self) {
+
+    async fn handle_routine_start(&mut self, routine_index: RoutineIndex) {
+        if self.current_routine.is_some() {
+            //warn!("Cannot run routine, already executing a routine");
+            return;
+        }
+        let repo = self.routine_repository.lock().await;
+        let routine = repo.get_routine(routine_index);
+
+        if let Some(routine) = routine {
+            info!("Running routine");
+            self.current_routine = Some(RoutineExecutionContext::new(routine_index, routine.clone(), self.state, self.configuration));
+            info!("Routine started");
+        } else {
+            error!("Routine not found: {}", routine_index);
+        }
+    }
+
+    async fn handle_routine_exit(&mut self) {
         if let Some(routine) = self.current_routine.take() {
             info!("Routine execution finished, saving state and configuration");
             self.configuration = routine.saved_configuration;
-            self.state = routine.saved_state;
+            self.transition_to_state(routine.saved_state).await;
         } else {
             warn!("No routine to exit");
         }
