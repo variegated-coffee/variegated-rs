@@ -11,7 +11,6 @@ impl<'a> GpioThreeWaySolenoid<'a> {
             output
         }
     }
-
     pub fn set_state(&mut self, state: bool) {
         if state {
             info!("Opening solenoid");
@@ -20,5 +19,9 @@ impl<'a> GpioThreeWaySolenoid<'a> {
             info!("Closing solenoid");
             self.output.set_low();
         }
+    }
+    
+    pub fn get_state(&self) -> bool {
+        self.output.is_set_high()
     }
 }

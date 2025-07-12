@@ -3,12 +3,14 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use core::matches;
 use async_trait::async_trait;
 use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
+use variegated_controller_types::WeightType;
 
 pub mod gpio;
 pub mod adc;
@@ -113,7 +115,9 @@ pub struct Group<'a, M: RawMutex, const N: usize> {
     pub heating_element: Option<Box<dyn HeatingElement>>,
     pub temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
     pub pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
-    pub flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+    pub input_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+    pub output_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+    pub output_weight_sensor: Option<Receiver<'a, M, WeightType, N>>,
 }
 
 impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
@@ -122,14 +126,18 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         heating_element: Option<Box<dyn HeatingElement>>,
         temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
         pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
-        flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+        input_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+        output_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+        output_weight_sensor: Option<Receiver<'a, M, WeightType, N>>,
     ) -> Self {
         Self {
             brew_mechanism,
             heating_element,
             temperature_sensor,
             pressure_sensor,
-            flow_sensor,
+            input_flow_sensor,
+            output_flow_sensor,
+            output_weight_sensor,
         }
     }
 
@@ -137,6 +145,14 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         if let Some(brew_mechanism) = &mut self.brew_mechanism {
             //info!("Setting pump duty cycle to {}%", duty_cycle_percent);
             brew_mechanism.set_brew_state(brew_state).await.expect("TODO: panic message");
+        }
+    }
+    
+    pub fn get_brew_state(&self) -> bool {
+        if let Some(brew_mechanism) = &self.brew_mechanism {
+            brew_mechanism.get_brew_state()
+        } else {
+            false
         }
     }
 
@@ -155,6 +171,14 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         }
     }
 
+    pub fn get_three_way_valve_open(&self) -> Option<bool> {
+        if let Some(brew_mechanism) = &self.brew_mechanism {
+            brew_mechanism.get_three_way_valve_open()
+        } else {
+            None
+        }
+    }
+    
     pub fn get_temperature(&mut self) -> Option<TemperatureType> {
         self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
@@ -163,8 +187,16 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         self.pressure_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
-    pub fn get_flow_rate(&mut self) -> Option<FlowRateType> {
-        self.flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    pub fn get_input_flow_rate(&mut self) -> Option<FlowRateType> {
+        self.input_flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
+    pub fn get_output_flow_rate(&mut self) -> Option<FlowRateType> {
+        self.output_flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
+    pub fn get_output_weight(&mut self) -> Option<WeightType> {
+        self.output_weight_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 }
 
@@ -202,6 +234,8 @@ pub trait BrewMechanism {
     async fn set_pump_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError>;
     
     fn get_pump_duty_cycle(&self) -> Option<DutyCycleType>;
+    fn get_brew_state(&self) -> bool;
+    fn get_three_way_valve_open(&self) -> Option<bool>;
 }
 
 pub trait ValveMechanism {

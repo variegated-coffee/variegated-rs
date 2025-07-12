@@ -18,7 +18,7 @@ test = false
 bench = false
 
 [dependencies]
-embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "task-arena-size-65536"] }
 embassy-rp = { version = "0.4.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
 embassy-sync = { version = "0.6.2", features = ["defmt"] }
 embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }

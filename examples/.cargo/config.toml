@@ -31,4 +31,4 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "debug"
-EMBASSY_EXECUTOR_TASK_ARENA_SIZE="8192"
+EMBASSY_EXECUTOR_TASK_ARENA_SIZE="65536"

@@ -2,6 +2,7 @@
 #![no_main]
 
 mod rotary;
+mod esp_transceiver;
 
 use num_traits::float::FloatCore;
 extern crate alloc;
@@ -36,7 +37,7 @@ use embassy_rp::uart::Uart;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
-use embassy_time::{Delay, Timer};
+use embassy_time::{Delay, Duration, Timer};
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, StyledDrawable};
 use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
@@ -62,7 +63,6 @@ use embedded_hal::digital::{Error, ErrorKind, ErrorType, OutputPin};
 use embedded_hal::pwm::SetDutyCycle;
 use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
-use serde::Serialize;
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, InMemoryRoutineRepository};
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
@@ -375,6 +375,8 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(prs_sig.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
+        None,
+        None,
     );
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
@@ -384,7 +386,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let mut routine_repository = InMemoryRoutineRepository::new();
     routine_repository.add_routine(create_heatup_routine(0));
-    routine_repository.add_routine(create_shot_routine(0));
+    routine_repository.add_routine(create_shot_routine(0, Duration::from_secs(5), Duration::from_secs(40), 8.0, 4.0, 1.5));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
@@ -420,7 +422,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(button_p.pin_steam, Pull::Up),
         command_channel.sender(),
         Some(MachineCommand::CancelRoutine),
-        Some(MachineCommand::RunRoutine(0)),
+        Some(MachineCommand::RunRoutine(1)),
     );
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
@@ -447,10 +449,10 @@ async fn main_task(spawner: Spawner) -> ! {
 
     spawner.spawn(display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver())).unwrap();
 
-    info!("Creating esp transciever task");
+    info!("Creating esp transceiver task");
     let esp_p = esp_32_peripherals!(p);
 
-    spawner.spawn(esp_transciever_task(esp_p, status_channel.subscriber().unwrap())).unwrap();
+    spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap())).unwrap();
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task()).unwrap();
@@ -501,47 +503,6 @@ fn create_default_configuration() -> SingleBoilerSingleGroupConfiguration {
         steam_boiler_control_target: BoilerControlTarget::Off,
         group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
         pid_parameters,
-    }
-}
-
-fn launch_button_and_rotary_tasks(spawner: &Spawner, button_p: ButtonPeripherals) {
-    let brew_button = Input::new(button_p.pin_brew, Pull::Up);
-    let water_button = Input::new(button_p.pin_water, Pull::Up);
-    let steam_button = Input::new(button_p.pin_steam, Pull::Up);
-
-    spawner.spawn(button_task(brew_button, "Brew button")).unwrap();
-    spawner.spawn(button_task(water_button, "Water button")).unwrap();
-    spawner.spawn(button_task(steam_button, "Steam button")).unwrap();
-}
-
-#[derive(Serialize, Debug, PartialEq)]
-struct EspStatus {
-    pub temperature: f32,
-}
-
-#[embassy_executor::task]
-async fn esp_transciever_task(
-    esp_p: Esp32Peripherals,
-    mut status_receiver: StatusSubscriber
-) {
-    let mut config = uart::Config::default();
-    config.baudrate = 115200;
-
-    let mut uart = Uart::new(
-        esp_p.uart,
-        esp_p.tx_pin,
-        esp_p.rx_pin,
-        Irqs,
-        esp_p.dma_rx,
-        esp_p.dma_tx,
-        config
-    );
-
-    loop {
-        let s = status_receiver.next_message_pure().await;
-        let output: Vec<u8> = to_allocvec_cobs(&s).unwrap();
-
-        uart.write(output.as_slice()).await.unwrap();
     }
 }
 
@@ -688,36 +649,6 @@ async fn display_task(
         disp.flush().await.expect("Failed to flush display");
 
         Timer::after_millis(15).await;
-    }
-}
-
-#[embassy_executor::task(pool_size = 4)]
-async fn button_task(mut button: Input<'static>, button_name: &'static str) {
-    loop {
-        button.wait_for_any_edge().await;
-        Timer::after_millis(3).await; // Debounce delay
-
-        if button.is_low() {
-            info!("{} pressed", button_name);
-        } else {
-            info!("{} released", button_name);
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn temp_sensor_task(brew: Input<'static>, steam: Input<'static>, water: Input<'static>) {
-    loop {
-        if brew.is_low() {
-            info!("Brew button pressed");
-        }
-        if steam.is_low() {
-            info!("Steam button pressed");
-        }
-        if water.is_low() {
-            info!("Water button pressed");
-        }
-        Timer::after_millis(1000).await;
     }
 }
 

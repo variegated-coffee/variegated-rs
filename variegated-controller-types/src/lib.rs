@@ -137,6 +137,23 @@ pub enum SingleBoilerSingleGroupControllerBoilers {
     VirtualSteamBoiler = 1,
 }
 
+impl SingleBoilerSingleGroupControllerBoilers {
+    pub fn is_brew_boiler(self) -> bool {
+        matches!(self, SingleBoilerSingleGroupControllerBoilers::BrewBoiler)
+    }
+
+    pub fn is_virtual_steam_boiler(self) -> bool {
+        matches!(self, SingleBoilerSingleGroupControllerBoilers::VirtualSteamBoiler)
+    }
+
+    pub fn as_index(self) -> BoilerIndex {
+        match self {
+            SingleBoilerSingleGroupControllerBoilers::BrewBoiler => 0,
+            SingleBoilerSingleGroupControllerBoilers::VirtualSteamBoiler => 1,
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default)]
@@ -201,6 +218,7 @@ pub struct BoilerStatus {
     pub temperature: Option<TemperatureType>,
     pub pressure: Option<PressureType>,
     pub output: Output,
+    pub control_target: BoilerControlTarget,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -216,6 +234,7 @@ pub struct GroupStatus {
     pub pressure: Option<PressureType>,
     pub temperature: Option<TemperatureType>,
     pub pump_output: Output,
+    pub control_target: GroupBrewControlTarget,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -263,8 +282,17 @@ pub struct ExternalSensorData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone,  Debug)]
-enum WorldToMachineMessage {
+pub struct CommsStatus {
+    pub timestamp: Option<u64>, // Unix timestamp in seconds
+    pub wifi_connected: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone,  Debug)]
+pub enum CommsProcessorToApplicationProcessorMessage {
     Command(MachineCommand),
+    CommsStatus(CommsStatus),
     RequestStatus,
     RequestMachineDefinition,
     RequestConfiguration,
@@ -274,7 +302,7 @@ enum WorldToMachineMessage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug)]
-enum MachineToWorldMessage {
+pub enum ApplicationProcessorToCommsProcessorMessage {
     Hello(ProtocolConfig),
     Status(NewStatus),
     MachineDefinition,
