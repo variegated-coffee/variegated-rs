@@ -65,7 +65,9 @@ use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, InMemoryRoutineRepository};
-use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
+use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput};
+use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
+use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
@@ -385,8 +387,8 @@ async fn main_task(spawner: Spawner) -> ! {
     let configuration = create_default_configuration();
 
     let mut routine_repository = InMemoryRoutineRepository::new();
-    routine_repository.add_routine(create_heatup_routine(0));
-    routine_repository.add_routine(create_shot_routine(0, Duration::from_secs(5), Duration::from_secs(40), 8.0, 4.0, 1.5));
+    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
@@ -402,18 +404,18 @@ async fn main_task(spawner: Spawner) -> ! {
     let button_p = button_peripherals!(p);
     let rotary_p = rotary_encoder_peripherals!(p);
 
-    info!("Creating first sub");
-
     let mut brew_action = GpioStatusLambdaCommandSender::new(
         Input::new(button_p.pin_brew, Pull::Up),
         command_channel.sender(),
         status_channel.subscriber().unwrap(),
         None,
         Some(Box::new(|status: &Status| {
-            if status.is_brewing {
-                Some(MachineCommand::StopBrewing(1))
+            let group = SingleGroup.as_index();
+
+            if status.get_group_status(group).map_or(false, |s| s.is_brewing){
+                Some(MachineCommand::StopBrewing(group))
             } else {
-                Some(MachineCommand::StartBrewing(1))
+                Some(MachineCommand::StartBrewing(group))
             }
         })),
     );
@@ -569,48 +571,59 @@ async fn display_task(
         }
 
         disp.clear();
+        
+        let boiler_status = status.get_boiler_status(BrewBoiler.as_index()).unwrap();
+        let group_status = status.get_group_status(SingleGroup.as_index()).unwrap();
 
-        let target_temp = match status.config_brew_boiler_control_target {
+        let target_temp = match boiler_status.control_target {
             BoilerControlTarget::Off => 0.0,
             BoilerControlTarget::Temperature(temp, ..) => temp,
             BoilerControlTarget::Pressure(_, ..) => 0.0,
         };
 
-        Text::with_baseline(format!("T: {:.2} C (Tgt {:.0})", status.boiler_temp, target_temp).as_str(), Point::zero(), text_style, Baseline::Top)
-            .draw(&mut disp)
-            .unwrap();
+        if let Some(temp) = boiler_status.temperature {
+            Text::with_baseline(format!("T: {:.2} C (Tgt {:.0})", temp, target_temp).as_str(), Point::zero(), text_style, Baseline::Top)
+                .draw(&mut disp)
+                .unwrap();
+        }
 
-        let pump_dc = match status.config_group_brew_control_target {
+        let pump_dc = match group_status.control_target {
             GroupBrewControlTarget::FixedDutyCycle(dc) => dc,
             _ => 0
         };
 
-        if let Some(pressure) = status.boiler_pressure {
+        if let Some(pressure) = boiler_status.pressure {
             Text::with_baseline(format!("P: {:.2} bar (PT {:.0}%)", pressure, pump_dc).as_str(), Point::new(0, 7), text_style, Baseline::Top)
                 .draw(&mut disp)
                 .unwrap();
         }
 
-        if let Some(flow_rate) = status.group_flow_rate {
+        if let Some(flow_rate) = group_status.input_flow_rate {
             Text::with_baseline(format!("Flow: {:.1} ml/s", flow_rate).as_str(), Point::new(0, 14), text_style, Baseline::Top)
                 .draw(&mut disp)
                 .unwrap();
         }
 
-        Text::with_baseline(format!("Pump: {:.0} % Boil: {:.0}%", status.pump_duty_cycle, status.brew_boiler_duty_cycle).as_str(), Point::new(0, 21), text_style, Baseline::Top)
+        Text::with_baseline(format!("Pump: {:.0} % Boil: {:.0}%", group_status.pump_output.duty_cycle(), boiler_status.output.duty_cycle()).as_str(), Point::new(0, 21), text_style, Baseline::Top)
             .draw(&mut disp)
             .unwrap();
 
-        if let Some(boiler_pid) = status.boiler_pid_output {
-            Text::with_baseline(format!("Boil P: {:.0} I: {:.0} D: {:.0}", boiler_pid.p, boiler_pid.i, boiler_pid.d).as_str(), Point::new(0, 28), text_style, Baseline::Top)
-                .draw(&mut disp)
-                .unwrap();
+        match boiler_status.output {
+            ControllerOutput::PidOutput(boiler_pid) => {
+                Text::with_baseline(format!("Boil P: {:.0} I: {:.0} D: {:.0}", boiler_pid.p, boiler_pid.i, boiler_pid.d).as_str(), Point::new(0, 28), text_style, Baseline::Top)
+                    .draw(&mut disp)
+                    .unwrap();
+            },
+            _ => {}
         }
 
-        if let Some(pump_pid) = status.pump_pid_output {
-            Text::with_baseline(format!("Pump P: {:.0} I: {:.0} D: {:.0}", pump_pid.p, pump_pid.i, pump_pid.d).as_str(), Point::new(0, 35), text_style, Baseline::Top)
-                .draw(&mut disp)
-                .unwrap();
+        match group_status.pump_output {
+            ControllerOutput::PidOutput(pump_pid) => {
+                Text::with_baseline(format!("Pump P: {:.0} I: {:.0} D: {:.0}", pump_pid.p, pump_pid.i, pump_pid.d).as_str(), Point::new(0, 21), text_style, Baseline::Top)
+                    .draw(&mut disp)
+                    .unwrap();
+            }
+            _ => {}
         }
 
         match ui_status.edit_mode {
@@ -636,8 +649,8 @@ async fn display_task(
             }
         };
         
-        if status.routine_running {
-            Text::with_baseline(format!("Routine, step {}", status.routine_step.unwrap_or_default()).as_str(), Point::new(0, 49), text_style, Baseline::Top)
+        if status.current_routine.is_some() {
+            Text::with_baseline(format!("Routine {}, step {}", status.current_routine.unwrap_or_default(), status.routine_step.unwrap_or_default()).as_str(), Point::new(0, 49), text_style, Baseline::Top)
                 .draw(&mut disp)
                 .unwrap();
         } else {
