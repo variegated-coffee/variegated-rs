@@ -14,11 +14,12 @@ use core::fmt::{Debug, Formatter};
 use core::ops::Deref;
 use defmt::{info, unwrap};
 use display_interface_spi::SPIInterface;
+use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
-use embassy_rp::{pio, pwm, spi, uart};
+use embassy_rp::{i2c, pio, pwm, spi, uart};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -68,14 +69,17 @@ use variegated_controller_lib::routine::{create_heatup_routine, create_shot_rout
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
+use variegated_fdc1004::{OutputRate, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
+use variegated_mcp9600::{DeviceAddr, MCP9600};
 use crate::rotary::{UIEditMode, UIStatus};
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
     RotaryEncoderPioIrq => pio::InterruptHandler<RotaryEncoderPeripheralsPio>;
+    QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
 });
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -159,8 +163,16 @@ struct Esp32Peripherals {
     dma_rx: (),
 }
 
+#[variegated_board_cfg::board_cfg("qwiic_i2c_bus_peripherals")]
+struct QwiicI2cBusPeripherals {
+    i2c: (),
+    sda_pin: (),
+    scl_pin: (),
+}
+
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
+type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
 type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 
@@ -218,9 +230,11 @@ fn main() -> ! {
 }
 
 static SPI_BUS: StaticCell<InternalBus> = StaticCell::new();
+static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
 static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
+static EXTERNAL_TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
 static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
 static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
@@ -264,7 +278,17 @@ async fn main_task(spawner: Spawner) -> ! {
 
     Timer::after_millis(2000).await;
     defmt::info!("Starting!");
+
+    let i2c_p = qwiic_i_2c_bus_peripherals!(p);
+    let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
+    let i2c_bus = QWIIC_I2C_BUS.init(Mutex::new(i2c_bus));
+
+    let mut mcp9600_dev = I2cDevice::new(i2c_bus);
+    let mut mcp9600 = MCP9600::new(mcp9600_dev, DeviceAddr::AD0);
     
+    let id = mcp9600.read_device_id_register().await;
+    info!("MCP9600 Device ID: {:?}", id);
+
     // Shared SPI bus
     let mut spi_config = spi::Config::default();
     spi_config.frequency = 281_000;
@@ -571,7 +595,7 @@ async fn display_task(
         }
 
         disp.clear();
-        
+
         let boiler_status = status.get_boiler_status(BrewBoiler.as_index()).unwrap();
         let group_status = status.get_group_status(SingleGroup.as_index()).unwrap();
 

@@ -6,6 +6,11 @@ miso_pin = "embassy_rp::peripherals::PIN_28"
 dma_tx = "embassy_rp::peripherals::DMA_CH0"
 dma_rx = "embassy_rp::peripherals::DMA_CH1"
 
+[qwiic_i2c_bus_peripherals]
+i2c = "embassy_rp::peripherals::I2C0"
+scl_pin = "embassy_rp::peripherals::PIN_17"
+sda_pin = "embassy_rp::peripherals::PIN_16"
+
 [ads124s08_peripherals]
 pin_drdy = "embassy_rp::peripherals::PIN_29"
 pin_cs = "embassy_rp::peripherals::PIN_32"
@@ -62,3 +67,4 @@ pin_solenoid = "embassy_rp::peripherals::PIN_36"
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 RotaryEncoderPioIrq = "PIO0_IRQ_0"
+QwiicI2cIrq = "I2C0_IRQ"

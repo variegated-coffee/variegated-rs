@@ -8,6 +8,7 @@ members = [
     "variegated-ads124s08",
     "variegated-embassy-dual-c595-shift-register",
     "variegated-fdc1004",
+    "variegated-mcp9600",
     "variegated-nau7802",
     "variegated-embassy-rp-frequency-counter",
     "variegated-hal",

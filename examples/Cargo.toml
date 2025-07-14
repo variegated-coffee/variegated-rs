@@ -45,6 +45,7 @@ variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["r
 
 variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08", features = ["defmt"] }
 variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
+variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", features = ["defmt"] }
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
