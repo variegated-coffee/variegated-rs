@@ -1,0 +1,22 @@
+[package]
+name = "variegated-mcp9600"
+version = "0.1.0"
+edition = "2024"
+description = "Basic embedded-hal-async based I2C driver for the MCP9600 and MCP9601 thermocouple amplifier ICs"
+repository = "https://github.com/besselfunct/mcp9600"
+license = "MIT"
+keywords = ["thermocouple","I2C","embedded"]
+categories = ["embedded"]
+
+[dependencies]
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+embassy-futures = { version = "0.1.0" }
+
+defmt = { version = "0.3", optional = true }
+
+bitvec = { version = "1", default-features = false }
+
+[features]
+default = []
+defmt = ["dep:defmt"]
