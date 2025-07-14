@@ -146,7 +146,7 @@ impl SingleBoilerSingleGroupControllerBoilers {
         matches!(self, SingleBoilerSingleGroupControllerBoilers::VirtualSteamBoiler)
     }
 
-    pub fn as_index(self) -> BoilerIndex {
+    pub fn as_index(&self) -> BoilerIndex {
         match self {
             SingleBoilerSingleGroupControllerBoilers::BrewBoiler => 0,
             SingleBoilerSingleGroupControllerBoilers::VirtualSteamBoiler => 1,
@@ -154,10 +154,22 @@ impl SingleBoilerSingleGroupControllerBoilers {
     }
 }
 
+pub enum SingleGroupControllerGroups {
+    SingleGroup = 0,
+}
+
+impl SingleGroupControllerGroups {
+    pub fn as_index(&self) -> GroupIndex {
+        match self {
+            SingleGroupControllerGroups::SingleGroup => 0,
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Status {
+pub struct OldStatus {
     pub boiler_temp: TemperatureType,
     pub boiler_pressure: Option<PressureType>,
     pub brew_boiler_duty_cycle: u8,
@@ -185,7 +197,7 @@ pub enum MachineMode {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Default)]
-pub struct NewStatus {
+pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
     pub mode: MachineMode,
@@ -193,8 +205,28 @@ pub struct NewStatus {
     pub routine_step: Option<usize>,
 }
 
+impl Status {
+    pub fn new() -> Self {
+        Status {
+            boiler_statuses: FnvIndexMap::new(),
+            group_statuses: FnvIndexMap::new(),
+            mode: MachineMode::Off,
+            current_routine: None,
+            routine_step: None,
+        }
+    }
+
+    pub fn get_boiler_status(&self, boiler_index: BoilerIndex) -> Option<&BoilerStatus> {
+        self.boiler_statuses.get(&boiler_index)
+    }
+    
+    pub fn get_group_status(&self, group_index: GroupIndex) -> Option<&GroupStatus> {
+        self.group_statuses.get(&group_index)
+    }
+}
+
 #[cfg(feature = "defmt")]
-impl defmt::Format for NewStatus {
+impl defmt::Format for Status {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(f, "NewStatus {{ mode: {:#?}, current_routine: {:#?}, routine_step: {:#?} }}",
             /*self.boiler_statuses, self.group_statuses, */self.mode, self.current_routine, self.routine_step);
@@ -209,6 +241,16 @@ pub enum Output {
     Off,
     FixedDutyCycle(DutyCycleType),
     PidOutput(PidOut<f32>),
+}
+
+impl Output {
+    pub fn duty_cycle(&self) -> DutyCycleType {
+        match self {
+            Output::Off => 0,
+            Output::FixedDutyCycle(duty_cycle) => *duty_cycle as DutyCycleType,
+            Output::PidOutput(pid_out) => pid_out.out as DutyCycleType,
+        }
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -304,7 +346,7 @@ pub enum CommsProcessorToApplicationProcessorMessage {
 #[derive(Clone, Debug)]
 pub enum ApplicationProcessorToCommsProcessorMessage {
     Hello(ProtocolConfig),
-    Status(NewStatus),
+    Status(Status),
     MachineDefinition,
     Configuration(Configuration),
 }

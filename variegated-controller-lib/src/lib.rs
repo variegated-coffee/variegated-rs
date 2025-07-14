@@ -14,8 +14,9 @@ use heapless::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group};
-use variegated_controller_types::{BoilerControlTarget, BoilerStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, NewStatus, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
+use variegated_controller_types::{BoilerControlTarget, BoilerStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
+use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use crate::routine::{InMemoryRoutineRepository, RoutineExecutionContext};
 
 fn limited_pid() -> PidCtrl<f32> {
@@ -225,14 +226,14 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             SingleBoilerSingleGroupControllerState::SteamModeIdle => (Output::Off, boiler_output.clone()),
             _ => (boiler_output.clone(), Output::Off),
         };
-        
+
         let brew_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
             output: brew_boiler_output,
             control_target: self.configuration.brew_boiler_control_target,
         };
-        
+
         let virtual_steam_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
@@ -253,39 +254,15 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             control_target: self.configuration.group_brew_control_target,
         };
 
-        let _new_status = NewStatus {
+        let status = Status {
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (VirtualSteamBoiler.as_index(), virtual_steam_boiler_status)]),
-            group_statuses: FnvIndexMap::from_iter([(0, group_status)]),
+            group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
             mode: Default::default(),
             current_routine: self.current_routine.as_ref().and_then(|rxc| Some(rxc.routine_index)),
             routine_step: self.current_routine.as_ref().and_then(|rxc| rxc.current_step),
         };
 
-        //info!("New status: {:?}", new_status);
-
-        let status = Status {
-            boiler_temp: self.boiler.get_temperature().unwrap_or(0.0) as f32,
-            boiler_pressure: self.boiler.get_pressure(),
-            brew_boiler_duty_cycle: self.boiler.get_heating_element_duty_cycle().await,
-            pump_duty_cycle: self.group.get_pump_duty_cycle().unwrap_or(0),
-            is_brewing: self.state == SingleBoilerSingleGroupControllerState::Brewing,
-            group_flow_rate: self.group.get_input_flow_rate(),
-            boiler_pid_output: match boiler_output {
-                Output::PidOutput(pid_out) => Some(pid_out),
-                _ => None,
-            },
-            pump_pid_output: match pump_output {
-                Output::PidOutput(pid_out) => Some(pid_out),
-                _ => None,
-            },
-            config_brew_boiler_control_target: self.configuration.brew_boiler_control_target,
-            config_steam_boiler_control_target: self.configuration.steam_boiler_control_target,
-            config_group_brew_control_target: self.configuration.group_brew_control_target,
-            routine_running: self.current_routine.is_some(),
-            routine_step: self.current_routine.as_ref().and_then(|r| r.current_step),
-        };
-
-        self.status_channel_sender.publish_immediate(status);
+        self.status_channel_sender.publish_immediate(status.clone());
 
         self.previous_status = Some(status);
     }

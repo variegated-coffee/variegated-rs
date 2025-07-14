@@ -15,8 +15,8 @@ enum StateCondition {
     BoilerTemperatureBelow(BoilerIndex,TemperatureType),
     BoilerPressureAbove(BoilerIndex, PressureType),
     BoilerPressureBelow(BoilerIndex, PressureType),
-    GroupFlowRateAbove(GroupIndex, FlowRateType),
-    GroupFlowRateBelow(GroupIndex, FlowRateType),
+    GroupInputFlowRateAbove(GroupIndex, FlowRateType),
+    GroupInputFlowRateBelow(GroupIndex, FlowRateType),
     GroupPressureAbove(GroupIndex, PressureType),
     GroupPressureBelow(GroupIndex, PressureType),
     WaterTapFlowRateAbove(WaterTapIndex, FlowRateType),
@@ -79,15 +79,22 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 2: Start brewing at FullOn until pressure is above 2.0 bar (where the grouphead is filled)
+            // Step 2/3: Start filling at FullOn for 2 seconds (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
             RoutineStep {
                 entry_command: Some(MachineCommand::StartBrewing(0)),
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::After(Duration::from_secs(2)),
+                    then: RoutineStepExitType::NextStep
+                }],
+            },
+            RoutineStep {
+                entry_command: None,
                 exits: vec![RoutineExit {
                     condition: RoutineExitCondition::StateConditionMet(StateCondition::BoilerPressureAbove(group, 2.0)),
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 3: Set pump to Off, then wait for preinfusion time
+            // Step 4: Set pump to Off, then wait for preinfusion time
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::Off)),
                 exits: vec![RoutineExit {
@@ -95,7 +102,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 4: Set pressure target to target_pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
+            // Step 5: Set pressure target to target_pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::Pressure(target_pressure))),
                 exits: vec![
@@ -105,16 +112,16 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     }
                 ],
             },
-            // Step 5 / 6: Keep going at target_pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
+            // Step 6/7: Keep going at target_pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
             RoutineStep {
                 entry_command: None,
                 exits: vec![
                     RoutineExit {
                         condition: RoutineExitCondition::AfterDurationRelativeToStart(total_brew_time),
-                        then: RoutineStepExitType::JumpToStep(6)
+                        then: RoutineStepExitType::JumpToStep(8)
                     },
                     RoutineExit {
-                        condition: RoutineExitCondition::StateConditionMet(StateCondition::GroupFlowRateAbove(group, rescue_trigger)),
+                        condition: RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, rescue_trigger)),
                         then: RoutineStepExitType::NextStep
                     }
                 ],
@@ -128,7 +135,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     },
                 ],
             },
-            // Step 6: Stop brewing, then finish the routine
+            // Step 8: Stop brewing, then finish the routine
             RoutineStep {
                 entry_command: Some(MachineCommand::StopBrewing(0)),
                 exits: vec![RoutineExit {
@@ -276,23 +283,22 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
     }
 
     fn state_condition_met(&self, state_condition: StateCondition, status: &Status) -> bool {
-        // @todo The code here is indicative of the status being inadequate for the state condition checks.
-
         match state_condition {
-            StateCondition::Brewing(_) => status.is_brewing,
-            StateCondition::NotBrewing(_) => !status.is_brewing,
-            StateCondition::BoilerTemperatureAbove(_, temperature) => status.boiler_temp > temperature,
-            StateCondition::BoilerTemperatureBelow(_, temperature) => status.boiler_temp < temperature,
-            StateCondition::BoilerPressureAbove(_, pressure) => status.boiler_pressure.map_or(false, |p| p > pressure),
-            StateCondition::BoilerPressureBelow(_, pressure) => status.boiler_pressure.map_or(false, |p| p < pressure),
-            StateCondition::GroupFlowRateAbove(_, flow) => status.group_flow_rate.map_or(false, |f| f > flow),
-            StateCondition::GroupFlowRateBelow(_, flow) => status.group_flow_rate.map_or(false, |f| f < flow),
-            StateCondition::GroupPressureAbove(_, pressure) => status.boiler_pressure.map_or(false, |p| p > pressure),
-            StateCondition::GroupPressureBelow(_, pressure) => status.boiler_pressure.map_or(false, |p| p < pressure),
+            StateCondition::Brewing(idx) => status.get_group_status(idx).map_or(false, |s| s.is_brewing),
+            StateCondition::NotBrewing(idx) => status.get_group_status(idx).map_or(false, |s| !s.is_brewing),
+            StateCondition::BoilerTemperatureAbove(idx, temperature) => status.get_boiler_status(idx).map_or(false, |s| s.temperature.unwrap_or(0.0) > temperature),
+            StateCondition::BoilerTemperatureBelow(idx, temperature) => status.get_boiler_status(idx).map_or(false, |s| s.temperature.unwrap_or(0.0) > temperature),
+            StateCondition::BoilerPressureAbove(idx, pressure) => status.get_boiler_status(idx).map_or(false, |s| s.pressure.unwrap_or(0.0) > pressure),
+            StateCondition::BoilerPressureBelow(idx, pressure) => status.get_boiler_status(idx).map_or(false, |s| s.pressure.unwrap_or(0.0) < pressure),
+            StateCondition::GroupInputFlowRateAbove(idx, flow) => status.get_group_status(idx).map_or(false, |s| s.input_flow_rate.unwrap_or(0.0) > flow),
+            StateCondition::GroupInputFlowRateBelow(idx, flow) => status.get_group_status(idx).map_or(false, |s| s.input_flow_rate.unwrap_or(0.0) < flow),
+            StateCondition::GroupPressureAbove(idx, pressure) => status.get_group_status(idx).map_or(false, |s| s.pressure.unwrap_or(0.0) > pressure),
+            StateCondition::GroupPressureBelow(idx, pressure) => status.get_group_status(idx).map_or(false, |s| s.pressure.unwrap_or(0.0) < pressure),
+            // @todo Fix water tap flow code
             StateCondition::WaterTapFlowRateAbove(_, _) => false,
             StateCondition::WaterTapFlowRateBelow(_, _) => false,
-            StateCondition::OutputWeightAbove(_, _) => false,
-            StateCondition::OutputWeightBelow(_, _) => false
+            StateCondition::OutputWeightAbove(idx, weight) => status.get_group_status(idx).map_or(false, |s| s.output_weight.unwrap_or(0.0) > weight),
+            StateCondition::OutputWeightBelow(idx, weight) => status.get_group_status(idx).map_or(false, |s| s.output_weight.unwrap_or(0.0) < weight),
         }
     }
 }
