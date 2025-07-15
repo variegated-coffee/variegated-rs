@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
 use core::ops::Deref;
-use defmt::{info, unwrap};
+use defmt::{info, unwrap, warn};
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
@@ -70,10 +70,12 @@ use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateTy
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
+use variegated_hal::adc::mcp9600::Mcp9600Sensor;
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
-use variegated_mcp9600::{DeviceAddr, MCP9600};
+use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
+use variegated_mcp9600::Register::SensorConfiguration;
 use crate::rotary::{UIEditMode, UIStatus};
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
@@ -285,9 +287,25 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let mut mcp9600_dev = I2cDevice::new(i2c_bus);
     let mut mcp9600 = MCP9600::new(mcp9600_dev, DeviceAddr::AD0);
-    
+
     let id = mcp9600.read_device_id_register().await;
-    info!("MCP9600 Device ID: {:?}", id);
+
+/*    let external_temp_sensor = if let Ok(_) = id {
+        info!("MCP9600 present");
+
+        let res = mcp9600.set_sensor_configuration(ThermocoupleType::TypeK, FilterCoefficient::Filter3).await;
+
+        if let Err(e) = res {
+            warn!("Failed to set MCP9600 sensor configuration: {:?}", e);
+            return None;
+        }
+
+        Some(Mcp9600Sensor::new())
+    } else {
+        warn!("Failed to read MCP9600 Device, assumed not present");
+
+        None
+    };*/
 
     // Shared SPI bus
     let mut spi_config = spi::Config::default();
@@ -643,7 +661,7 @@ async fn display_task(
 
         match group_status.pump_output {
             ControllerOutput::PidOutput(pump_pid) => {
-                Text::with_baseline(format!("Pump P: {:.0} I: {:.0} D: {:.0}", pump_pid.p, pump_pid.i, pump_pid.d).as_str(), Point::new(0, 21), text_style, Baseline::Top)
+                Text::with_baseline(format!("Pump P: {:.0} I: {:.0} D: {:.0}", pump_pid.p, pump_pid.i, pump_pid.d).as_str(), Point::new(0, 35), text_style, Baseline::Top)
                     .draw(&mut disp)
                     .unwrap();
             }

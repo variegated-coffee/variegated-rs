@@ -79,11 +79,11 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 2/3: Start filling at FullOn for 2 seconds (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
+            // Step 2/3: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
             RoutineStep {
                 entry_command: Some(MachineCommand::StartBrewing(0)),
                 exits: vec![RoutineExit {
-                    condition: RoutineExitCondition::After(Duration::from_secs(2)),
+                    condition: RoutineExitCondition::After(Duration::from_secs(1)),
                     then: RoutineStepExitType::NextStep
                 }],
             },
@@ -107,7 +107,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::Pressure(target_pressure))),
                 exits: vec![
                     RoutineExit {
-                        condition: RoutineExitCondition::After(Duration::from_secs(4)),
+                        condition: RoutineExitCondition::After(Duration::from_secs(2)),
                         then: RoutineStepExitType::NextStep
                     }
                 ],
