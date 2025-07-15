@@ -34,7 +34,7 @@ pub async fn esp_transceiver_task(
     );
 
     let (mut tx, mut rx) = uart.split();
-    
+
     join(
         async {
             loop {
@@ -53,18 +53,18 @@ pub async fn esp_transceiver_task(
                         let received_data = &mut buf[..len];
                         if let Ok(message) = from_bytes_cobs::<CommsProcessorToApplicationProcessorMessage>(received_data) {
                             info!("Received message: {:?}", message);
-                            
+
                             match message {
                                 CommsProcessorToApplicationProcessorMessage::CommsStatus(status) => {
                                     if let Some(timestamp) = status.timestamp {
                                         // Calculate system boot time
                                         let now_unix = timestamp;
                                         let seconds_since_boot = Instant::now().as_secs();
-                                        
+
                                         let boot_time = now_unix - seconds_since_boot;
-                                        
+
                                         info!("System boot UNIX time: {}", boot_time);
-                                    }                                
+                                    }
                                 }
                                 _ => {
                                     info!("Received unknown message type");
