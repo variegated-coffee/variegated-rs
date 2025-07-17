@@ -1,7 +1,7 @@
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Sender;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
@@ -10,7 +10,7 @@ use variegated_adc_tools::ConversionParameters;
 use variegated_ads124s08::ADS124S08;
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::Mux;
-
+use variegated_instrumentation::async_task_loop;
 use crate::WithTask;
 
 pub enum MeasurementType {
@@ -48,8 +48,7 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
 
 impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize> WithTask for Ads124S08Sensor<'a, M, SpiDevT, InputPinT, D, N> {
     async fn task(&mut self) {
-        loop {
-            {
+        async_task_loop!("ADS124S08 Sensor", Some(Duration::from_millis(50)), {
                 let mut dev = self.ads124s08.lock().await;
                 
                 let res = match self.measurement_type {
@@ -87,9 +86,6 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                 } else {
                     panic!("Failed to read value: {:?}", res);
                 }
-            }
-
-            Timer::after_millis(50).await;
-        }
+        })
     }
 }

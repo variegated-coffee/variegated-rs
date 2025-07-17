@@ -329,6 +329,8 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         config.idacmux.i2mux = registers::IDACMux::Disconnected;
         config.idacmux.i1mux = registers::IDACMux::Disconnected;
         config.refctrl.refsel = reference_input;
+        config.datarate.rate = registers::DataRate::SPS200;
+
 
         config = self.swap_all_configuration_registers(config).await?;
 
@@ -365,7 +367,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         config.pga.enable = true;
         config.pga.gain = gain;
         config.datarate.mode = Mode::Continuous;
-        config.datarate.rate = registers::DataRate::SPS20;
+        config.datarate.rate = registers::DataRate::SPS200;
         config.datarate.filter = Filter::SINC3;
 
         config = self.swap_all_configuration_registers(config).await?;

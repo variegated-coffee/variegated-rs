@@ -15,8 +15,8 @@ use variegated_controller_types::WeightType;
 pub mod gpio;
 pub mod adc;
 pub mod machine_mechanism;
-
-
+pub mod gravity;
+mod scale;
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {

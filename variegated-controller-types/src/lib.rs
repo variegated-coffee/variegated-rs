@@ -8,12 +8,16 @@ use variegated_control_algorithm::pid::PidOut;
 const MAX_BOILERS: usize = 8;
 const MAX_GROUPS: usize = 4;
 const MAX_WATER_TAPS: usize = 4;
+const MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS: usize = 2;
+const MAX_TANKS: usize = 1;
+
 
 pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
 pub type WaterLevelType = u8; // Percent
 pub type FlowRateType = f32; // ml/s
 pub type WeightType = f32; // g
+pub type WeightChangeType  = f32; // g/s
 pub type FrequencyType = f32; // Hz
 pub type RPMType = f32; // RPM
 pub type DutyCycleType = u8; // Percent
@@ -23,6 +27,7 @@ pub type MixingProportionType = u8; // Percent
 pub type BoilerIndex = u8;
 pub type GroupIndex = u8;
 pub type WaterTapIndex = u8;
+pub type TankIndex = u8;
 
 pub type RoutineIndex = usize;
 
@@ -31,6 +36,8 @@ pub type PidTerm = variegated_control_algorithm::pid::PidTerm<f32>;
 pub type PidLimits = variegated_control_algorithm::pid::Limits<f32>;
 
 pub type ExternalSensorId = u8; // Unique identifier for external sensors
+
+pub type EnvironmentalSensorId = u8; // Unique identifier for environmental sensors
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -54,6 +61,10 @@ pub struct ProtocolConfig {
     pub max_groups: usize,
     /// The maximum number of water taps supported by the machine.
     pub max_water_taps: usize,
+    /// The maximum number of tanks supported by the machine.
+    pub max_tanks: usize,
+    /// The maximum number of environmental temperature sensors supported by the machine.
+    pub max_environmental_temperature_sensors: usize,
 }
 
 const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
@@ -63,6 +74,8 @@ const PROTOCOL_CONFIG: ProtocolConfig = ProtocolConfig {
     max_boilers: MAX_BOILERS,
     max_groups: MAX_GROUPS,
     max_water_taps: MAX_WATER_TAPS,
+    max_tanks: MAX_TANKS,
+    max_environmental_temperature_sensors: MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS,
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -168,25 +181,6 @@ impl SingleGroupControllerGroups {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct OldStatus {
-    pub boiler_temp: TemperatureType,
-    pub boiler_pressure: Option<PressureType>,
-    pub brew_boiler_duty_cycle: u8,
-    pub pump_duty_cycle: u8,
-    pub is_brewing: bool,
-    pub group_flow_rate: Option<FlowRateType>,
-    pub boiler_pid_output: Option<PidOut<f32>>,
-    pub pump_pid_output: Option<PidOut<f32>>,
-    pub config_brew_boiler_control_target: BoilerControlTarget,
-    pub config_steam_boiler_control_target: BoilerControlTarget,
-    pub config_group_brew_control_target: GroupBrewControlTarget,
-    pub routine_running: bool,
-    pub routine_step: Option<usize>,
-}
-
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub enum MachineMode {
     On,
@@ -203,6 +197,7 @@ pub struct Status {
     pub mode: MachineMode,
     pub current_routine: Option<RoutineIndex>,
     pub routine_step: Option<usize>,
+//    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
 
 impl Status {
@@ -213,13 +208,14 @@ impl Status {
             mode: MachineMode::Off,
             current_routine: None,
             routine_step: None,
+//            environmental_temperature_sensors: FnvIndexMap::new(),
         }
     }
 
     pub fn get_boiler_status(&self, boiler_index: BoilerIndex) -> Option<&BoilerStatus> {
         self.boiler_statuses.get(&boiler_index)
     }
-    
+
     pub fn get_group_status(&self, group_index: GroupIndex) -> Option<&GroupStatus> {
         self.group_statuses.get(&group_index)
     }
@@ -317,7 +313,7 @@ pub struct GroupConfiguration {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone,  Debug)]
 pub struct ExternalSensorData {
-    pub id: ExternalSensorId,
+    pub id: EnvironmentalSensorId,
     pub value: f32,
 }
 
