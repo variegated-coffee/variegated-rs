@@ -4,6 +4,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::OutputPin;
+use variegated_instrumentation::async_task_loop;
 use variegated_soft_pwm::SoftPwm;
 use crate::{DutyCycleType, HeatingElement, WithTask};
 
@@ -51,7 +52,7 @@ impl<'a> HeatingElement for GpioBinaryHeatingElementControl<'a> {
 
 impl<'a, O: OutputPin> WithTask for GpioBinaryHeatingElement<'a, O> {
     async fn task(&mut self) {
-        loop {
+        async_task_loop!("GpioBinaryHeatingElement", None, {
             let new_duty_cycle = self.signal.try_take();
             if let Some(duty_cycle) = new_duty_cycle {
                 if duty_cycle != self.soft_pwm.get_duty_cycle() {
@@ -72,6 +73,6 @@ impl<'a, O: OutputPin> WithTask for GpioBinaryHeatingElement<'a, O> {
                 self.output.set_low().expect("Failed to set pin low");
                 Timer::after(cycle.off_duration).await;
             }
-        }
+        })
     }
 }

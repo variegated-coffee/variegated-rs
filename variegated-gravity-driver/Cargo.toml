@@ -1,0 +1,21 @@
+[package]
+name = "variegated-gravity-driver"
+version = "0.1.0"
+edition = "2024"
+description = "Async driver for Gravity I2C weight sensor"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["embedded", "async", "gravity", "weight", "sensor"]
+categories = ["embedded", "hardware-support"]
+
+[lib]
+test = false
+bench = false
+
+[features]
+default = []
+defmt = ["dep:defmt"]
+
+[dependencies]
+embedded-hal-async = "1.0"
+defmt = { version = "0.3", optional = true }

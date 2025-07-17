@@ -72,6 +72,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
         routine_type: RoutineType::UserDefined,
         name: "Smart shot".into(),
         steps: vec![
+            // Step 0
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::FullOn)),
                 exits: vec![RoutineExit {
@@ -79,9 +80,9 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 2/3: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
+            // Step 1/2: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
             RoutineStep {
-                entry_command: Some(MachineCommand::StartBrewing(0)),
+                entry_command: Some(MachineCommand::StartBrewing(group)),
                 exits: vec![RoutineExit {
                     condition: RoutineExitCondition::After(Duration::from_secs(1)),
                     then: RoutineStepExitType::NextStep
@@ -94,7 +95,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 4: Set pump to Off, then wait for preinfusion time
+            // Step 3: Set pump to Off, then wait for preinfusion time
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::Off)),
                 exits: vec![RoutineExit {
@@ -102,7 +103,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     then: RoutineStepExitType::NextStep
                 }],
             },
-            // Step 5: Set pressure target to target_pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
+            // Step 4: Set pressure target to target_pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::Pressure(target_pressure))),
                 exits: vec![
@@ -112,13 +113,13 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     }
                 ],
             },
-            // Step 6/7: Keep going at target_pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
+            // Step 5/6: Keep going at target_pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
             RoutineStep {
                 entry_command: None,
                 exits: vec![
                     RoutineExit {
                         condition: RoutineExitCondition::AfterDurationRelativeToStart(total_brew_time),
-                        then: RoutineStepExitType::JumpToStep(8)
+                        then: RoutineStepExitType::JumpToStep(7)
                     },
                     RoutineExit {
                         condition: RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, rescue_trigger)),
@@ -135,9 +136,9 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     },
                 ],
             },
-            // Step 8: Stop brewing, then finish the routine
+            // Step 7: Stop brewing, then finish the routine
             RoutineStep {
-                entry_command: Some(MachineCommand::StopBrewing(0)),
+                entry_command: Some(MachineCommand::StopBrewing(group)),
                 exits: vec![RoutineExit {
                     condition: RoutineExitCondition::Never,
                     then: RoutineStepExitType::Finished

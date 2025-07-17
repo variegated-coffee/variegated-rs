@@ -8,12 +8,13 @@ members = [
     "variegated-ads124s08",
     "variegated-embassy-dual-c595-shift-register",
     "variegated-fdc1004",
+    "variegated-gravity-driver",
     "variegated-mcp9600",
     "variegated-nau7802",
     "variegated-embassy-rp-frequency-counter",
     "variegated-hal",
     "variegated-log",
-    "variegated-soft-pwm",
+    "variegated-soft-pwm", "variegated-instrumentation",
 ]
 resolver = "2"
 package = { rust-version = "1.85.0" }

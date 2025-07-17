@@ -10,6 +10,7 @@ use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, TemperatureType};
+use variegated_hal::gravity::GravityCommand;
 
 #[derive(Debug, Format, Default, Copy, Clone)]
 pub(crate) enum UIEditMode {
@@ -18,6 +19,7 @@ pub(crate) enum UIEditMode {
     BoilerTemperature,
     PumpFlowRate,
     PumpPressure,
+    ScaleTare,
 }
 
 impl UIEditMode {
@@ -26,7 +28,8 @@ impl UIEditMode {
             UIEditMode::PumpDutyCycle => UIEditMode::BoilerTemperature,
             UIEditMode::BoilerTemperature => UIEditMode::PumpFlowRate,
             UIEditMode::PumpFlowRate => UIEditMode::PumpPressure,
-            UIEditMode::PumpPressure => UIEditMode::PumpDutyCycle,
+            UIEditMode::PumpPressure => UIEditMode::ScaleTare,
+            UIEditMode::ScaleTare => UIEditMode::PumpDutyCycle,
         }
     }
 
@@ -36,6 +39,7 @@ impl UIEditMode {
             UIEditMode::BoilerTemperature => 10.0,
             UIEditMode::PumpFlowRate => 0.0,
             UIEditMode::PumpPressure => 0.0,
+            UIEditMode::ScaleTare => 0.0, //Value doesn't matter for tare
         }
     }
 
@@ -45,6 +49,7 @@ impl UIEditMode {
             UIEditMode::BoilerTemperature => 120.0,
             UIEditMode::PumpFlowRate => 10.0,
             UIEditMode::PumpPressure => 10.0,
+            UIEditMode::ScaleTare => 10.0, //Value doesn't matter for tare
         }
     }
 
@@ -54,6 +59,7 @@ impl UIEditMode {
             UIEditMode::BoilerTemperature => 5.0,
             UIEditMode::PumpFlowRate => 0.25,
             UIEditMode::PumpPressure => 0.5,
+            UIEditMode::ScaleTare => 1.0, //Value doesn't matter for tare
         }
     }
 }
@@ -74,6 +80,7 @@ pub(crate) struct RotaryController<'a, C, const N: usize> where
     button: C,
     command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
     ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
+    gravity_sender: Sender<'a, NoopRawMutex, GravityCommand, 3>,
     status: UIStatus,
 }
 
@@ -86,12 +93,14 @@ where
         button: C,
         command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
         ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
+        gravity_sender: Sender<'a, NoopRawMutex, GravityCommand, 3>,
     ) -> Self {
         Self {
             rotary,
             button,
             command_sender,
             ui_status_sender,
+            gravity_sender,
             status: UIStatus::default(),
         }
     }
@@ -107,6 +116,7 @@ where
                     UIEditMode::BoilerTemperature => self.status.current_boiler_temp,
                     UIEditMode::PumpFlowRate => self.status.current_flow_rate,
                     UIEditMode::PumpPressure => self.status.current_pressure,
+                    UIEditMode::ScaleTare => 0.0, // Tare doesn't have a value
                 };
                 
                 let new_value = match direction {
@@ -157,6 +167,10 @@ where
                         info!("Pump pressure: {}", new_value);
                         self.status.current_pressure = new_value;
                         self.command_sender.send(MachineCommand::SetGroupBrewControlTarget(0, GroupBrewControlTarget::Pressure(self.status.current_pressure as f32))).await;
+                    },
+                    UIEditMode::ScaleTare => {
+                        info!("Scale tare");
+                        self.gravity_sender.send(GravityCommand::Tare).await;
                     },
                 }
 

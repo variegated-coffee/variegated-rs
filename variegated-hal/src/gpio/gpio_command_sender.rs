@@ -5,6 +5,7 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Sender;
 use embassy_sync::pubsub::Subscriber;
 use embassy_time::Timer;
+use variegated_instrumentation::async_task_loop;
 use crate::WithTask;
 
 pub struct GpioCommandSender<'a, M: RawMutex, CommandT: Clone, const N: usize> {
@@ -83,10 +84,10 @@ impl<'a, M: RawMutex, CommandT: Clone, StatusT: Clone, const N: usize, const SUB
         let mut previous_level = self.input.is_high();
         let mut prev_state = self.status_subscriber.next_message_pure().await;
         
-        loop {
+        async_task_loop!("GpioStatusLambdaCommandSender", None, {
             self.input.wait_for_any_edge().await;
             info!("Edge detected");
-            
+
             Timer::after_millis(10).await;
             
             if let Some(s) = self.status_subscriber.try_next_message_pure() {
@@ -108,6 +109,6 @@ impl<'a, M: RawMutex, CommandT: Clone, StatusT: Clone, const N: usize, const SUB
                     }
                 }
             }
-        }
+        })
     }
 }

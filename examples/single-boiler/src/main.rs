@@ -8,10 +8,11 @@ use num_traits::float::FloatCore;
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::format;
+use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
 use core::ops::Deref;
+use core::pin::Pin;
 use defmt::{info, unwrap, warn};
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -27,7 +28,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
-use variegated_hal::{Boiler, Group, WithTask};
+use variegated_hal::{gravity, Boiler, Group, WithTask};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
@@ -51,6 +52,8 @@ use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use embassy_rp::bind_interrupts;
+use embassy_rp::i2c::I2c;
+use embassy_rp::pac::otp_data_raw::vals::Cs0size::NONE;
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
@@ -62,18 +65,22 @@ use embedded_graphics::{
 };
 use embedded_hal::digital::{Error, ErrorKind, ErrorType, OutputPin};
 use embedded_hal::pwm::SetDutyCycle;
+use futures::future::join_all;
 use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, InMemoryRoutineRepository};
-use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput};
+use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
+use variegated_gravity_driver::{Gravity, Channel as GravityChannel};
 use variegated_hal::adc::mcp9600::Mcp9600Sensor;
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
+use variegated_hal::gravity::GravitySensor;
+use variegated_instrumentation::async_task_loop;
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
 use crate::rotary::{UIEditMode, UIStatus};
@@ -177,6 +184,7 @@ type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi
 type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
 type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
+type GravityMutex = Mutex<NoopRawMutex, Gravity<I2cDevice<'static, NoopRawMutex, I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>>>;
 
 const STATUS_RECEIVERS: usize = 4;
 type StatusChannel = PubSubChannel<NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
@@ -218,7 +226,7 @@ fn main() -> ! {
     #[allow(static_mut_refs)]
     unsafe {
         use core::mem::MaybeUninit;
-        const HEAP_SIZE: usize = 4096; // 4 KiB heap size
+        const HEAP_SIZE: usize = 65535; // 64 KiB heap size
         static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
 
@@ -234,10 +242,13 @@ fn main() -> ! {
 static SPI_BUS: StaticCell<InternalBus> = StaticCell::new();
 static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
+static GRAVITY: StaticCell<GravityMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
 static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
 static EXTERNAL_TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
 static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
+static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, WeightType, 3>> = StaticCell::new();
+static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
 static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
@@ -245,6 +256,7 @@ static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMe
 static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
+static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
 
 fn check_stack_usage() -> (usize, usize) {
     unsafe extern "C" {
@@ -277,35 +289,61 @@ fn check_stack_usage() -> (usize, usize) {
 #[embassy_executor::task]
 async fn main_task(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
-
-    Timer::after_millis(2000).await;
     defmt::info!("Starting!");
 
     let i2c_p = qwiic_i_2c_bus_peripherals!(p);
     let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
     let i2c_bus = QWIIC_I2C_BUS.init(Mutex::new(i2c_bus));
 
-    let mut mcp9600_dev = I2cDevice::new(i2c_bus);
-    let mut mcp9600 = MCP9600::new(mcp9600_dev, DeviceAddr::AD0);
+    let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
+    let output_flow_sig: &'static Watch<_, _, 3> = OUTPUT_FLOW_SIGNAL.init(Watch::new());
+    let gravity_command_channel: &'static Channel<_, _, 3> = GRAVITY_COMMAND_CHANNEL.init(Channel::new());
 
-    let id = mcp9600.read_device_id_register().await;
+    let mut i2c_dev = I2cDevice::new(i2c_bus);
+    let mut gravity = Gravity::new(i2c_dev, None);
 
-/*    let external_temp_sensor = if let Ok(_) = id {
-        info!("MCP9600 present");
+    let status = gravity.check_compatibility().await;
 
-        let res = mcp9600.set_sensor_configuration(ThermocoupleType::TypeK, FilterCoefficient::Filter3).await;
+    let mut gravity_sensor = if let Ok(_) = status {
+            info!("Gravity sensor detected and compatible");
+            let gravity_mutex = GRAVITY.init(Mutex::new(gravity));
+            let sensor = GravitySensor::new(
+                gravity_mutex,
+                GravityChannel::Ch1,
+                Some(output_weight_sig.sender()),
+                Some(output_flow_sig.sender()),
+                ConversionParameters::linear_conversion(0.001, 0.0),
+                ConversionParameters::linear_conversion(0.001, 0.0),
+                gravity_command_channel.receiver(),
+                Duration::from_millis(100),
+            );
 
-        if let Err(e) = res {
-            warn!("Failed to set MCP9600 sensor configuration: {:?}", e);
-            return None;
-        }
-
-        Some(Mcp9600Sensor::new())
+            Some(sensor)
     } else {
-        warn!("Failed to read MCP9600 Device, assumed not present");
-
+        warn!("Gravity sensor not detected or incompatible, proceeding without it");
         None
-    };*/
+    };
+
+    /*let mut mcp9600 = MCP9600::new(i2c_dev, DeviceAddr::AD0);
+
+        let id = mcp9600.read_device_id_register().await;
+
+        let external_temp_sensor = if let Ok(_) = id {
+            info!("MCP9600 present");
+
+            let res = mcp9600.set_sensor_configuration(ThermocoupleType::TypeK, FilterCoefficient::Filter3).await;
+
+            if let Err(e) = res {
+                warn!("Failed to set MCP9600 sensor configuration: {:?}", e);
+                return None;
+            }
+
+            Some(Mcp9600Sensor::new())
+        } else {
+            warn!("Failed to read MCP9600 Device, assumed not present");
+
+            None
+        };*/
 
     // Shared SPI bus
     let mut spi_config = spi::Config::default();
@@ -419,8 +457,8 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(prs_sig.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
-        None,
-        None,
+        Some(output_flow_sig.receiver().unwrap()),
+        Some(output_weight_sig.receiver().unwrap()),
     );
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
@@ -486,6 +524,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(rotary_p.pin_sw, Pull::Up),
         command_channel.sender(),
         ui_status_channel.sender(),
+        gravity_command_channel.sender(),
     );
 
     info!("Creating display task");
@@ -503,19 +542,24 @@ async fn main_task(spawner: Spawner) -> ! {
 
     info!("Creating huge future join task");
 
-    join5(
-        join5(
-            temp_sensor.task(),
-            brew_action.task(),
-            steam_action.task(),
-            flow_meter.task(),
-            rotary_action.task(),
-        ),
-        pressure_sensor.task(),
-        he.task(),
-        pump_frequency_counter.task(),
-        controller.task()
-    ).await;
+    let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
+        vec![
+            Box::pin(temp_sensor.task()),
+            Box::pin(brew_action.task()),
+            Box::pin(steam_action.task()),
+            Box::pin(flow_meter.task()),
+            Box::pin(rotary_action.task()),
+            Box::pin(pressure_sensor.task()),
+            Box::pin(he.task()),
+            Box::pin(pump_frequency_counter.task()),
+            Box::pin(controller.task()),
+        ];
+
+    if let Some(ref mut g) = gravity_sensor {
+        futures.push(Box::pin(g.task()));
+    }
+
+    join_all(futures).await;
 
     info!("For some reason we got here");
 
@@ -599,7 +643,10 @@ async fn display_task(
     let mut status = Status::default();
     let mut ui_status = UIStatus::default();
 
-    loop {
+    let mut s = false;
+
+    // Use a short delay to allow for an additional await-point
+    async_task_loop!("Display update loop", Some(Duration::from_micros(1)), {
 //        while !status_receiver.is_empty() {
             if let Some(status_update) = status_receiver.try_next_message_pure() {
                 status = status_update;
@@ -613,6 +660,24 @@ async fn display_task(
         }
 
         disp.clear();
+
+        if s {
+            Rectangle::new(Point::new(125, 61), Size::new(3, 3))
+                .into_styled(PrimitiveStyleBuilder::new()
+                    .fill_color(BinaryColor::On)
+                    .build())
+                .draw(&mut disp)
+                .unwrap();
+            s = false;
+        } else {
+            Rectangle::new(Point::new(122, 61), Size::new(3, 3))
+                .into_styled(PrimitiveStyleBuilder::new()
+                    .fill_color(BinaryColor::On)
+                    .build())
+                .draw(&mut disp)
+                .unwrap();
+            s = true;
+        }
 
         let boiler_status = status.get_boiler_status(BrewBoiler.as_index()).unwrap();
         let group_status = status.get_group_status(SingleGroup.as_index()).unwrap();
@@ -688,6 +753,11 @@ async fn display_task(
                 Text::with_baseline(format!("Edit: Prs ({:.1})", ui_status.current_pressure).as_str(), Point::new(0, 42), text_style, Baseline::Top)
                     .draw(&mut disp)
                     .unwrap();
+            },
+            UIEditMode::ScaleTare => {
+                Text::with_baseline("Tare scale", Point::new(0, 42), text_style, Baseline::Top)
+                    .draw(&mut disp)
+                    .unwrap();
             }
         };
         
@@ -701,10 +771,20 @@ async fn display_task(
                 .unwrap();
         }
 
-        disp.flush().await.expect("Failed to flush display");
+        if let Some(weight) = group_status.output_weight {
+            Text::with_baseline(format!("Wgt: {:.1}g", weight).as_str(), Point::new(0, 56), text_style, Baseline::Top)
+                .draw(&mut disp)
+                .unwrap();
+        }
 
-        Timer::after_millis(15).await;
-    }
+        if let Some(flow_rate) = group_status.output_flow_rate {
+            Text::with_baseline(format!("Flw: {:.1} ml/s", flow_rate).as_str(), Point::new(64, 56), text_style, Baseline::Top)
+                .draw(&mut disp)
+                .unwrap();
+        }
+
+        disp.flush().await.expect("Failed to flush display");
+    });
 }
 
 #[embassy_executor::task]
