@@ -122,7 +122,8 @@ This 32-bit register contains configuration bits for weighing parameters. Settin
 | Bit  | Name | Description                                                    |
 |------|------|----------------------------------------------------------------|
 | 0    | ZERO_TRACKING | Zero tracking: 0: Off, 1: On                                   |
-| 0-31 | RESERVED | Reserved for future use                                        |
+| 1    | SMOOTHING | Smoothing: 0: Off, 1: On (applies a moving average filter) |
+| 2-31 | RESERVED | Reserved for future use                                        |
 
 Note: The scale always reports weight in milligrams (mg) for all channels.
 
@@ -219,11 +220,11 @@ The following guarantees are made for version 1.x of the protocol:
 Before attempting any other operations, clients must verify compatibility:
 
 1. **Check Protocol Version**
-    - Read register 0xFE (Protocol Major Version)
-    - Read register 0xFF (Protocol Minor Version)
-    - If the major version does not match the client's supported major version, stop and report incompatibility
-    - If the minor version is higher than the client's supported minor version, the client may proceed but some features may not be supported
+   - Read register 0xFE (Protocol Major Version)
+   - Read register 0xFF (Protocol Minor Version)
+   - If the major version does not match the client's supported major version, stop and report incompatibility
+   - If the minor version is higher than the client's supported minor version, the client may proceed but some features may not be supported
 
 2. **Verify Device ID**
-    - Read register 0xF0 (Device ID)
-    - If the value is not 0x5C, this is not a compatible device - stop and report error
+   - Read register 0xF0 (Device ID)
+   - If the value is not 0x5C, this is not a compatible device - stop and report error

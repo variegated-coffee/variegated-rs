@@ -17,6 +17,7 @@ use variegated_hal::{Boiler, Group};
 use variegated_controller_types::{BoilerControlTarget, BoilerStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
+use variegated_hal::scale::ScaleConfiguration;
 use crate::routine::{InMemoryRoutineRepository, RoutineExecutionContext};
 
 fn limited_pid() -> PidCtrl<f32> {
@@ -138,7 +139,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                 self.pump_pid.setpoint = target as f32;
                 self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_output_flow_rate_params);
 
-                0.0
+                self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
             _ => 0.0,
         };
@@ -347,6 +348,14 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                 } else {
                     warn!("Invalid boiler index or state for disabling boiler: {} Current state: {:?}", boiler_index, self.state);
                 }
+            },
+            MachineCommand::TareGroupScale(group_index) => {
+                if group_index == 0 {
+                    info!("Taring group scale");
+                    let _ = self.group.scale_tare().await;
+                } else {
+                    error!("Invalid group index for taring scale: {}", group_index);
+                }
             }
         }
     }
@@ -375,9 +384,18 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     
     async fn started_brewing(&mut self) {
         self.boiler_pid.ki.accumulate += 50.0; // Initial accumulation to compensate for initial temperature drop
+        let _ = self.group.scale_set_configuration(ScaleConfiguration {
+            zero_tracking: Some(false),
+            smoothing: Some(true)
+        }).await;
+        let _ = self.group.scale_tare().await;
     }
     
     async fn stopped_brewing(&mut self) {
+        let _ = self.group.scale_set_configuration(ScaleConfiguration {
+            zero_tracking: Some(true),
+            smoothing: Some(false)
+        }).await;
     }
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex) {

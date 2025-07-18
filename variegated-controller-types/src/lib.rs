@@ -104,6 +104,7 @@ pub enum MachineCommand {
     CancelRoutine,
     EnableBoiler(BoilerIndex),
     DisableBoiler(BoilerIndex),
+    TareGroupScale(GroupIndex),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

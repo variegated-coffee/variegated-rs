@@ -67,6 +67,47 @@ pub struct Routine {
     steps: Vec<RoutineStep>,
 }
 
+pub fn create_water_dispersal_routine(group: GroupIndex, target_flow: FlowRateType, amount: WeightType) -> Routine {
+    Routine {
+        routine_type: RoutineType::UserDefined,
+        name: "Water dispersal".into(),
+        steps: vec![
+            // Step 0: Tare group scale
+            RoutineStep {
+                entry_command: Some(MachineCommand::TareGroupScale(group)),
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightBelow(group, 0.1)), // Wait for tare to complete
+                    then: RoutineStepExitType::NextStep
+                }],
+            },
+            // Step 1: Set target to flow rate
+            RoutineStep {
+                entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::OutputFlowRate(target_flow))),
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::Always,
+                    then: RoutineStepExitType::NextStep
+                }],
+            },
+            // Step 2: Start brewing, wait for the group to reach output weight above the specified amount
+            RoutineStep {
+                entry_command: Some(MachineCommand::StartBrewing(group)),
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, amount)),
+                    then: RoutineStepExitType::NextStep
+                }],
+            },
+            // Step 3: Stop brewing, then finish the routine
+            RoutineStep {
+                entry_command: Some(MachineCommand::StopBrewing(group)),
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::Always,
+                    then: RoutineStepExitType::Finished
+                }],
+            },
+        ],
+    }
+}
+
 pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_brew_time: Duration, target_pressure: PressureType, rescue_trigger: FlowRateType, rescue_flow_rate: FlowRateType) -> Routine {
     Routine {
         routine_type: RoutineType::UserDefined,
