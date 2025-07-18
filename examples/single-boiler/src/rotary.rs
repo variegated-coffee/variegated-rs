@@ -80,9 +80,26 @@ pub(crate) enum IdleSubState {
     SettingsMenuSelected,
 }
 
-#[derive(Debug, Format, Default, Copy, Clone)]
+impl IdleSubState {
+    pub fn rotate_clockwise(&self) -> IdleSubState {
+        match self {
+            IdleSubState::NoMenuItemSelected => IdleSubState::SettingsMenuSelected,
+            IdleSubState::RoutineMenuSelected => IdleSubState::NoMenuItemSelected,
+            IdleSubState::SettingsMenuSelected => IdleSubState::SettingsMenuSelected,
+        }
+    }
+    
+    pub fn rotate_counterclockwise(&self) -> IdleSubState {
+        match self {
+            IdleSubState::NoMenuItemSelected => IdleSubState::RoutineMenuSelected,
+            IdleSubState::RoutineMenuSelected => IdleSubState::RoutineMenuSelected,
+            IdleSubState::SettingsMenuSelected => IdleSubState::NoMenuItemSelected,
+        }
+    }
+}
+
+#[derive(Debug, Format, Copy, Clone)]
 pub(crate) enum UIState {
-    #[default]
     Idle(IdleSubState),
     Steaming,
     ManualBrew(ControlMode),
@@ -90,6 +107,12 @@ pub(crate) enum UIState {
     RoutineExecution,
     RoutineSelection,
     Settings,
+}
+
+impl Default for UIState {
+    fn default() -> Self {
+        UIState::Idle(IdleSubState::NoMenuItemSelected)
+    }
 }
 
 #[derive(Debug, Format, Default, Copy, Clone)]
@@ -137,73 +160,34 @@ where
         loop {
             let either = select(self.rotary.read(), self.button.wait_for_falling_edge()).await;
             if let First(direction) = either {
-                let current_value = match self.status.edit_mode {
-                    UIEditMode::PumpDutyCycle => self.status.current_duty_cycle,
-                    UIEditMode::BoilerTemperature => self.status.current_boiler_temp,
-                    UIEditMode::PumpFlowRate => self.status.current_flow_rate,
-                    UIEditMode::PumpPressure => self.status.current_pressure,
-                    UIEditMode::ScaleTare => 0.0, // Tare doesn't have a value
-                };
+                match self.status.state {
+                    UIState::Idle(substate) => {
+                        self.status.state = UIState::Idle(match direction {
+                            Direction::Clockwise => substate.rotate_counterclockwise(),
+                            Direction::CounterClockwise => substate.rotate_clockwise(),
+                        });
+                    }
+                    _ => {}
+                }
                 
-                let new_value = match direction {
-                    Direction::CounterClockwise => self.status.edit_mode.max_value().min(current_value + self.status.edit_mode.step()),
-                    Direction::Clockwise => self.status.edit_mode.min_value().max(current_value - self.status.edit_mode.step()),
-                };
-
-                if new_value == current_value {
-                    continue;
-                }
-
-                match self.status.edit_mode {
-                    UIEditMode::PumpDutyCycle => {
-                        info!("Pump duty cycle: {}", new_value);
-                        self.status.current_duty_cycle = new_value;
-                        self.command_sender.send(MachineCommand::SetGroupBrewControlTarget(0, GroupBrewControlTarget::FixedDutyCycle(self.status.current_duty_cycle as DutyCycleType))).await;
-                    },
-                    UIEditMode::BoilerTemperature => {
-                        let _boiler_params = PidParameters {
-                            kp: PidTerm::new(3.0, PidLimits::default()),
-                            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-                            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-                        };
-
-                        info!("Boiler temperature: {}", new_value);
-                        self.status.current_boiler_temp = new_value;
-                        self.command_sender.send(MachineCommand::SetBoilerControlTarget(0, BoilerControlTarget::Temperature(self.status.current_boiler_temp as TemperatureType))).await;
-                    },
-                    UIEditMode::PumpFlowRate => {
-                        let _flow_params = PidParameters {
-                            kp: PidTerm::new(10.0, PidLimits::default()),
-                            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
-                            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-                        };
-
-
-                        info!("Pump flow rate: {}", new_value);
-                        self.status.current_flow_rate = new_value;
-                        self.command_sender.send(MachineCommand::SetGroupBrewControlTarget(0, GroupBrewControlTarget::GroupFlowRate(self.status.current_flow_rate as f32))).await;
-                    },
-                    UIEditMode::PumpPressure => {
-                        let _pressure_params = PidParameters {
-                            kp: PidTerm::new(10.0, PidLimits::default()),
-                            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
-                            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-                        };
-
-                        info!("Pump pressure: {}", new_value);
-                        self.status.current_pressure = new_value;
-                        self.command_sender.send(MachineCommand::SetGroupBrewControlTarget(0, GroupBrewControlTarget::Pressure(self.status.current_pressure as f32))).await;
-                    },
-                    UIEditMode::ScaleTare => {
-                        info!("Scale tare");
-                        self.command_sender.send(MachineCommand::TareGroupScale(0)).await;
-                    },
-                }
-
                 self.ui_status_sender.send(self.status).await;
             } else {
-                self.status.edit_mode = self.status.edit_mode.next();
-                info!("Edit mode: {:?}", self.status.edit_mode);
+                match self.status.state {
+                    UIState::Idle(substate) => {
+                        match substate {
+                            IdleSubState::RoutineMenuSelected => {
+                                self.status.state = UIState::RoutineSelection;
+                            }
+                            IdleSubState::SettingsMenuSelected => {
+                                self.status.state = UIState::Settings;
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {
+                        self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);
+                    }
+                }
                 self.ui_status_sender.send(self.status).await;
 
                 Timer::after_millis(300).await;
