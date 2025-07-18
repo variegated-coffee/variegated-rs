@@ -106,11 +106,13 @@ pub struct ChannelConfig {
 }
 
 /// Weighing configuration structure
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct WeighingConfig {
     /// Zero tracking enabled
     pub zero_tracking: bool,
+    /// Smoothing enabled (Moving average filter)
+    pub smoothing: bool,
 }
 
 /// Channel status structure
@@ -254,6 +256,19 @@ where
         Ok(i32::from_be_bytes(buffer))
     }
 
+    /// Read a 32-bit unsigned integer from a register (MSB first)
+    async fn read_u32(&mut self, register: u8) -> Result<u32, Error<I2C::Error>> {
+        let mut buffer = [0u8; 4];
+
+        self.i2c
+            .write_read(self.address, &[register], &mut buffer)
+            .await
+            .map_err(Error::I2c)?;
+
+        // Convert 4 bytes to i32 (MSB first as per protocol)
+        Ok(u32::from_be_bytes(buffer))
+    }
+    
     /// Write a 32-bit signed integer to a register (MSB first)
     async fn write_i32(&mut self, register: u8, value: i32) -> Result<(), Error<I2C::Error>> {
         let bytes = value.to_be_bytes();
@@ -264,6 +279,15 @@ where
             .map_err(Error::I2c)
     }
 
+    async fn write_u32(&mut self, register: u8, value: u32) -> Result<(), Error<I2C::Error>> {
+        let bytes = value.to_be_bytes();
+
+        self.i2c
+            .write(self.address, &[register, bytes[0], bytes[1], bytes[2], bytes[3]])
+            .await
+            .map_err(Error::I2c)
+    }
+    
     /// Read a single byte from a register
     async fn read_u8(&mut self, register: u8) -> Result<u8, Error<I2C::Error>> {
         let mut buffer = [0u8; 1];
@@ -400,21 +424,23 @@ where
     /// Read weighing configuration
     pub async fn read_weighing_config(&mut self, channel: Channel) -> Result<WeighingConfig, Error<I2C::Error>> {
         let register = Self::weighing_config_register(channel);
-        let value = self.read_i32(register).await?;
+        let value = self.read_u32(register).await?;
         
         Ok(WeighingConfig {
             zero_tracking: (value & 0x01) != 0,
+            smoothing: (value & 0x02) != 0,
         })
     }
 
     /// Write weighing configuration
     pub async fn write_weighing_config(&mut self, channel: Channel, config: WeighingConfig) -> Result<(), Error<I2C::Error>> {
         let register = Self::weighing_config_register(channel);
-        let mut value = 0i32;
+        let mut value = 0u32;
         
         if config.zero_tracking { value |= 0x01; }
+        if config.smoothing { value |= 0x02; }
         
-        self.write_i32(register, value).await
+        self.write_u32(register, value).await
     }
     
     /// Read channel status

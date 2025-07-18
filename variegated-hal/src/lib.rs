@@ -11,12 +11,12 @@ use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
 use variegated_controller_types::WeightType;
+use crate::scale::ScaleConfiguration;
 
 pub mod gpio;
 pub mod adc;
 pub mod machine_mechanism;
-pub mod gravity;
-mod scale;
+pub mod scale;
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {
@@ -113,6 +113,7 @@ impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
 pub struct Group<'a, M: RawMutex, const N: usize> {
     pub brew_mechanism: Option<Box<dyn BrewMechanism>>,
     pub heating_element: Option<Box<dyn HeatingElement>>,
+    pub scale_controller: Option<Box<dyn scale::ScaleController>>,
     pub temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
     pub pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
     pub input_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
@@ -124,6 +125,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
     pub fn new(
         brew_mechanism: Option<Box<dyn BrewMechanism>>,
         heating_element: Option<Box<dyn HeatingElement>>,
+        scale_controller: Option<Box<dyn scale::ScaleController>>,
         temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
         pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
         input_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
@@ -133,6 +135,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         Self {
             brew_mechanism,
             heating_element,
+            scale_controller,
             temperature_sensor,
             pressure_sensor,
             input_flow_sensor,
@@ -147,7 +150,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             brew_mechanism.set_brew_state(brew_state).await.expect("TODO: panic message");
         }
     }
-    
+
     pub fn get_brew_state(&self) -> bool {
         if let Some(brew_mechanism) = &self.brew_mechanism {
             brew_mechanism.get_brew_state()
@@ -178,7 +181,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             None
         }
     }
-    
+
     pub fn get_temperature(&mut self) -> Option<TemperatureType> {
         self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
@@ -197,6 +200,22 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
 
     pub fn get_output_weight(&mut self) -> Option<WeightType> {
         self.output_weight_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+    
+    pub async fn scale_tare(&mut self) -> Result<(), scale::ScaleError> {
+        if let Some(scale_controller) = &mut self.scale_controller {
+            scale_controller.tare().await
+        } else {
+            Ok(())
+        }
+    }
+    
+    pub async fn scale_set_configuration(&mut self, config: ScaleConfiguration) -> Result<(), scale::ScaleError> {
+        if let Some(scale_controller) = &mut self.scale_controller {
+            scale_controller.set_configuration(&config).await
+        } else {
+            Ok(())
+        }
     }
 }
 

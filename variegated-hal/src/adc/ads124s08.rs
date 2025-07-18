@@ -1,3 +1,4 @@
+use defmt::warn;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Sender;
@@ -84,7 +85,7 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                     self.signal.send(val);
                     //defmt::info!("Read value: {}", val);
                 } else {
-                    panic!("Failed to read value: {:?}", res);
+                    warn!("Failed to read value: {:?}", res);
                 }
         })
     }

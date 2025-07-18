@@ -10,7 +10,7 @@ use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, TemperatureType};
-use variegated_hal::gravity::GravityCommand;
+use variegated_hal::scale::gravity::GravityCommand;
 
 #[derive(Debug, Format, Default, Copy, Clone)]
 pub(crate) enum UIEditMode {
@@ -80,7 +80,6 @@ pub(crate) struct RotaryController<'a, C, const N: usize> where
     button: C,
     command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
     ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
-    gravity_sender: Sender<'a, NoopRawMutex, GravityCommand, 3>,
     status: UIStatus,
 }
 
@@ -93,14 +92,12 @@ where
         button: C,
         command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
         ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
-        gravity_sender: Sender<'a, NoopRawMutex, GravityCommand, 3>,
     ) -> Self {
         Self {
             rotary,
             button,
             command_sender,
             ui_status_sender,
-            gravity_sender,
             status: UIStatus::default(),
         }
     }
@@ -170,7 +167,7 @@ where
                     },
                     UIEditMode::ScaleTare => {
                         info!("Scale tare");
-                        self.gravity_sender.send(GravityCommand::Tare).await;
+                        self.command_sender.send(MachineCommand::TareGroupScale(0)).await;
                     },
                 }
 

@@ -28,7 +28,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
-use variegated_hal::{gravity, Boiler, Group, WithTask};
+use variegated_hal::{Boiler, Group, WithTask};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
@@ -69,7 +69,7 @@ use futures::future::join_all;
 use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
-use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, InMemoryRoutineRepository};
+use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -79,7 +79,8 @@ use variegated_hal::adc::mcp9600::Mcp9600Sensor;
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
-use variegated_hal::gravity::GravitySensor;
+use variegated_hal::scale::{gravity, ScaleController};
+use variegated_hal::scale::gravity::{GravityController, GravityDevice};
 use variegated_instrumentation::async_task_loop;
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
@@ -256,7 +257,7 @@ static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMe
 static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
-static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
 
 fn check_stack_usage() -> (usize, usize) {
     unsafe extern "C" {
@@ -304,10 +305,10 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let status = gravity.check_compatibility().await;
 
-    let mut gravity_sensor = if let Ok(_) = status {
+    let mut gravity_device = if let Ok(_) = status {
             info!("Gravity sensor detected and compatible");
             let gravity_mutex = GRAVITY.init(Mutex::new(gravity));
-            let sensor = GravitySensor::new(
+            let device = GravityDevice::new(
                 gravity_mutex,
                 GravityChannel::Ch1,
                 Some(output_weight_sig.sender()),
@@ -318,11 +319,17 @@ async fn main_task(spawner: Spawner) -> ! {
                 Duration::from_millis(100),
             );
 
-            Some(sensor)
+            Some(device)
     } else {
         warn!("Gravity sensor not detected or incompatible, proceeding without it");
         None
     };
+
+    let scale_controller: Option<Box<dyn ScaleController>> = if gravity_device.is_some() {
+        Some(Box::new(GravityController::new(
+            gravity_command_channel.sender()
+        )))
+    } else { None };
 
     /*let mut mcp9600 = MCP9600::new(i2c_dev, DeviceAddr::AD0);
 
@@ -454,6 +461,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
         None,
+        scale_controller,
         None,
         Some(prs_sig.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
@@ -469,6 +477,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut routine_repository = InMemoryRoutineRepository::new();
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
     routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
@@ -504,7 +513,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(button_p.pin_steam, Pull::Up),
         command_channel.sender(),
         Some(MachineCommand::CancelRoutine),
-        Some(MachineCommand::RunRoutine(1)),
+        Some(MachineCommand::RunRoutine(2)),
     );
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
@@ -524,7 +533,6 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(rotary_p.pin_sw, Pull::Up),
         command_channel.sender(),
         ui_status_channel.sender(),
-        gravity_command_channel.sender(),
     );
 
     info!("Creating display task");
@@ -555,7 +563,7 @@ async fn main_task(spawner: Spawner) -> ! {
             Box::pin(controller.task()),
         ];
 
-    if let Some(ref mut g) = gravity_sensor {
+    if let Some(ref mut g) = gravity_device {
         futures.push(Box::pin(g.task()));
     }
 
@@ -576,6 +584,11 @@ fn create_default_configuration() -> SingleBoilerSingleGroupConfiguration {
         kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
     };
     pid_parameters.pump_flow_rate_params = PidParameters {
+        kp: PidTerm::new(10.0, PidLimits::default() ),
+        ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
+        kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+    };
+    pid_parameters.pump_output_flow_rate_params = PidParameters {
         kp: PidTerm::new(10.0, PidLimits::default() ),
         ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
         kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )

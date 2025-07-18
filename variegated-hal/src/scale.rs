@@ -1,5 +1,16 @@
+use alloc::boxed::Box;
 use async_trait::async_trait;
-use variegated_controller_types::{WeightChangeType, WeightType};
+use defmt::Format;
+
+pub mod gravity;
+
+#[derive(Debug, Format)]
+pub enum ScaleError {
+    TareFailed,
+    ConfigurationFailed,
+    UnsupportedConfiguration,
+    CommunicationError,
+}
 
 pub struct ScaleConfiguration {
     pub zero_tracking: Option<bool>,
@@ -12,14 +23,9 @@ pub struct SupportedConfigurationOptions {
 }
 
 #[async_trait]
-pub trait Scale<E: core::fmt::Debug> {
-    async fn get_weight(&self) -> Result<WeightType, E>;
-    async fn get_rate_of_change(&self) -> Result<WeightChangeType, E>;
-    async fn is_stable(&self) -> Result<bool, E>;
-    async fn is_zero(&self) -> Result<bool, E>;
+pub trait ScaleController {
+    async fn tare(&mut self) -> Result<(), ScaleError>;
+    async fn set_configuration(&mut self, configuration: &ScaleConfiguration) -> Result<(), ScaleError>;
 
-    async fn tare(&mut self) -> Result<(), E>;
-    async fn set_configuration(&mut self, configuration: &ScaleConfiguration) -> Result<(), E>;
-    
-    fn get_supported_configuration() -> SupportedConfigurationOptions;
+    fn get_supported_configuration(&mut self) -> SupportedConfigurationOptions;
 }
