@@ -67,6 +67,28 @@ pub struct Routine {
     steps: Vec<RoutineStep>,
 }
 
+impl Routine {
+    pub fn new(routine_type: RoutineType, name: String, steps: Vec<RoutineStep>) -> Self {
+        Self {
+            routine_type,
+            name,
+            steps,
+        }
+    }
+
+    pub fn routine_type(&self) -> RoutineType {
+        self.routine_type
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn steps(&self) -> &[RoutineStep] {
+        &self.steps
+    }
+}
+
 pub fn create_water_dispersal_routine(group: GroupIndex, target_flow: FlowRateType, amount: WeightType) -> Routine {
     Routine {
         routine_type: RoutineType::UserDefined,
@@ -374,5 +396,9 @@ impl InMemoryRoutineRepository {
     
     pub fn iterate_routines(&self) -> impl Iterator<Item = &Routine> {
         self.routines.iter()
+    }
+    
+    pub fn get_routine_count(&self) -> usize {
+        self.routines.len()
     }
 }

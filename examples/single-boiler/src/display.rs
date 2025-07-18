@@ -22,14 +22,14 @@ use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_7X13};
 use embedded_graphics::text::{Alignment, TextStyle, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
-use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, Status, Output as ControllerOutput};
+use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, Status, Output as ControllerOutput, RoutineIndex};
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_instrumentation::async_task_loop;
 
-use crate::{DisplayPeripherals, StatusSubscriber};
-use crate::rotary::{IdleSubState, UIEditMode, UIState, UIStatus};
+use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber};
+use crate::rotary::{IdleSubState, RoutineSelectionSubState, UIEditMode, UIState, UIStatus};
 
 pub type DisplayBus = Mutex<NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>>;
 pub type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>, Output<'static>>, Output<'static>>;
@@ -46,6 +46,7 @@ pub struct DisplayController {
     ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>,
     status: Status,
     ui_status: UIStatus,
+    routine_repository: &'static RoutineRepository,
 }
 
 impl DisplayController {
@@ -56,7 +57,8 @@ impl DisplayController {
         text_style_medium: embedded_graphics::mono_font::MonoTextStyle<'static, BinaryColor>,
         text_style_large: embedded_graphics::mono_font::MonoTextStyle<'static, BinaryColor>,
         status_receiver: StatusSubscriber,
-        ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>
+        ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>,
+        routine_repository: &'static RoutineRepository
     ) -> Self {
         Self {
             display,
@@ -69,7 +71,66 @@ impl DisplayController {
             ui_status_receiver,
             status: Status::default(),
             ui_status: UIStatus::default(),
+            routine_repository
         }
+    }
+    
+    /// Renders a vertical scroll bar on the right side of the display
+    /// 
+    /// # Arguments
+    /// * `total_items` - Total number of items in the list
+    /// * `visible_items` - Number of items visible at once
+    /// * `selected_index` - Currently selected item index (None if nothing selected)
+    /// * `y_start` - Starting Y coordinate for the scroll area
+    /// * `y_end` - Ending Y coordinate for the scroll area
+    fn render_scroll_bar(&mut self, total_items: usize, visible_items: usize, selected_index: Option<usize>, y_start: i32, y_end: i32) {
+        if total_items <= visible_items {
+            return; // No scroll bar needed
+        }
+        
+        let scrollable_area_height = y_end - y_start;
+        let min_bar_height = 4; // Minimum height for visibility
+        
+        // Calculate scroll bar height based on visible/total ratio
+        let bar_height = ((visible_items as f32 / total_items as f32) * scrollable_area_height as f32).max(min_bar_height as f32) as i32;
+        
+        // Calculate the first visible item index based on selection
+        let first_visible_index = if let Some(selected) = selected_index {
+            if selected >= visible_items - 1 {
+                // When scrolling, keep selected item visible
+                (selected as i32 - (visible_items as i32 - 2)).max(0) as usize
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        
+        // Calculate scroll position
+        let max_scroll_items = total_items - visible_items;
+        let scroll_ratio = if max_scroll_items > 0 {
+            first_visible_index as f32 / max_scroll_items as f32
+        } else {
+            0.0
+        };
+        let scroll_position = ((scrollable_area_height - bar_height) as f32 * scroll_ratio) as i32;
+        
+        // Draw scroll track
+        Line::new(Point::new(126, y_start), Point::new(126, y_end))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+        
+        // Draw scroll bar
+        Rectangle::new(Point::new(125, y_start + scroll_position), Size::new(3, bar_height as u32))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .fill_color(BinaryColor::On)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
     }
 
     pub async fn render_loop(&mut self) -> ! {
@@ -88,8 +149,8 @@ impl DisplayController {
             UIState::Idle(substate) => {
                 self.render_idle_state(substate).await;
             }
-            UIState::RoutineSelection => {
-                self.render_routine_selection().await;
+            UIState::RoutineSelection(substate) => {
+                self.render_routine_selection(substate).await;
             }
             _ => {
                 self.render_old().await;
@@ -99,14 +160,14 @@ impl DisplayController {
         self.display.flush().await.expect("Failed to flush display");
     }
 
-    async fn render_routine_selection(&mut self) {
+    async fn render_routine_selection(&mut self, substate: RoutineSelectionSubState) {
         Text::with_text_style("Routines", Point::new(64, 0), self.text_style_medium_small, TextStyleBuilder::new()
             .alignment(Alignment::Center)
             .baseline(Baseline::Top)
             .build())
             .draw(&mut self.display)
             .unwrap();
-        
+
         Line::new(Point::new(0, 10), Point::new(128, 10))
             .into_styled(PrimitiveStyleBuilder::new()
                 .stroke_color(BinaryColor::On)
@@ -114,6 +175,94 @@ impl DisplayController {
                 .build())
             .draw(&mut self.display)
             .unwrap();
+
+        // Draw back button with highlighting if selected
+        let back_color = if matches!(substate, RoutineSelectionSubState::BackSelected) {
+            Rectangle::new(Point::new(0, 0), Size::new(20, 10))
+                .into_styled(PrimitiveStyleBuilder::new()
+                    .fill_color(BinaryColor::On)
+                    .build())
+                .draw(&mut self.display)
+                .unwrap();
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        };
+
+        self.text_style_medium_small.set_text_color(Some(back_color));
+        Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small, TextStyleBuilder::new()
+            .alignment(Alignment::Left)
+            .baseline(Baseline::Top)
+            .build())
+            .draw(&mut self.display)
+            .unwrap();
+        self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+        
+        let selected_routine = match substate {
+            RoutineSelectionSubState::RoutineSelected(routine_index) => Some(routine_index),
+            _ => None,
+        };
+
+        let rr = self.routine_repository.lock().await;
+        
+        // Count total routines for scroll bar calculation
+        let total_routines = rr.iterate_routines().count();
+        
+        // Render the routines
+        let mut slot: u8 = 0;
+        for (i, routine) in rr.iterate_routines().into_iter().enumerate() {
+            if !Self::is_routine_shown(i, selected_routine) {
+                continue;
+            }
+            
+            let y = 12 + slot as i32 * 10;
+            
+            // Check if this routine is selected and draw highlight
+            let text_color = if Some(i) == selected_routine {
+                Rectangle::new(Point::new(0, y), Size::new(128, 10))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                BinaryColor::Off
+            } else {
+                BinaryColor::On
+            };
+            
+            self.text_style_medium_small.set_text_color(Some(text_color));
+            let text = format!("{}", routine.name());
+            Text::with_text_style(text.as_str(), Point::new(2, y), self.text_style_medium_small, TextStyleBuilder::new()
+                .alignment(Alignment::Left)
+                .baseline(Baseline::Top)
+                .build())
+                .draw(&mut self.display)
+                .unwrap();
+            self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+            
+            slot += 1;
+        }
+        
+        // Draw scroll bar for the routine list
+        self.render_scroll_bar(
+            total_routines,
+            5, // visible items
+            selected_routine.map(|idx| idx as usize),
+            12, // y_start
+            64  // y_end
+        );
+    }
+
+    fn is_routine_shown(routine: RoutineIndex, current_selected: Option<RoutineIndex>) -> bool {
+        if let Some(selected) = current_selected {
+            if selected >= 4 {
+                routine > selected - 4 && routine <= selected + 1
+            } else {
+                routine < 5
+            }
+        } else {
+            routine < 5
+        }
     }
 
     async fn render_idle_state(&mut self, substate: IdleSubState) {
@@ -389,7 +538,8 @@ impl DisplayController {
 pub async fn display_task(
     disp_p: DisplayPeripherals,
     status_receiver: StatusSubscriber,
-    ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>
+    ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>,
+    routine_repository: &'static RoutineRepository
 ) {
     let spi_config = embassy_rp::spi::Config::default();
     let mut spi = Spi::new(
@@ -453,7 +603,8 @@ pub async fn display_task(
         text_style_medium,
         text_style_large,
         status_receiver,
-        ui_status_receiver
+        ui_status_receiver,
+        routine_repository
     );
 
     controller.render_loop().await;
