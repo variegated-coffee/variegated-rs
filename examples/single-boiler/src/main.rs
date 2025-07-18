@@ -467,6 +467,9 @@ async fn main_task(spawner: Spawner) -> ! {
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
     routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
     routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
@@ -522,12 +525,13 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(rotary_p.pin_sw, Pull::Up),
         command_channel.sender(),
         ui_status_channel.sender(),
+        routine_repository_ref,
     );
 
     info!("Creating display task");
     let disp_p = display_peripherals!(p);
 
-    spawner.spawn(display::display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver())).unwrap();
+    spawner.spawn(display::display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver(), routine_repository_ref)).unwrap();
 
     info!("Creating esp transceiver task");
     let esp_p = esp_32_peripherals!(p);

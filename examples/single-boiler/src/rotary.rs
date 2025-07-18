@@ -9,8 +9,8 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, TemperatureType};
-use variegated_hal::scale::gravity::GravityCommand;
+use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, RoutineIndex, TemperatureType};
+use crate::RoutineRepository;
 
 #[derive(Debug, Format, Default, Copy, Clone)]
 pub(crate) enum UIEditMode {
@@ -88,12 +88,48 @@ impl IdleSubState {
             IdleSubState::SettingsMenuSelected => IdleSubState::SettingsMenuSelected,
         }
     }
-    
+
     pub fn rotate_counterclockwise(&self) -> IdleSubState {
         match self {
             IdleSubState::NoMenuItemSelected => IdleSubState::RoutineMenuSelected,
             IdleSubState::RoutineMenuSelected => IdleSubState::RoutineMenuSelected,
             IdleSubState::SettingsMenuSelected => IdleSubState::NoMenuItemSelected,
+        }
+    }
+}
+
+#[derive(Debug, Format, Copy, Clone)]
+pub(crate) enum RoutineSelectionSubState {
+    NoRoutineSelected,
+    BackSelected,
+    RoutineSelected(RoutineIndex),
+}
+
+impl RoutineSelectionSubState {
+    pub fn rotate_clockwise(&self, routine_count: usize) -> RoutineSelectionSubState {
+        match self {
+            RoutineSelectionSubState::NoRoutineSelected => RoutineSelectionSubState::RoutineSelected(0),
+            RoutineSelectionSubState::BackSelected => RoutineSelectionSubState::RoutineSelected(0),
+            RoutineSelectionSubState::RoutineSelected(i) => {
+                let next_index = *i as usize + 1;
+                RoutineSelectionSubState::RoutineSelected(if next_index >= routine_count {
+                    routine_count - 1 // Stay at the last routine if we exceed the count
+                } else {
+                    next_index
+                })
+            }
+        }
+    }
+
+    pub fn rotate_counterclockwise(&self, routine_count: usize) -> RoutineSelectionSubState {
+        match self {
+            RoutineSelectionSubState::NoRoutineSelected => RoutineSelectionSubState::BackSelected,
+            RoutineSelectionSubState::BackSelected => RoutineSelectionSubState::BackSelected,
+            RoutineSelectionSubState::RoutineSelected(i) => if *i == 0 {
+                RoutineSelectionSubState::BackSelected
+            } else {
+                RoutineSelectionSubState::RoutineSelected(RoutineIndex::from(*i as u8 - 1))
+            }
         }
     }
 }
@@ -105,7 +141,7 @@ pub(crate) enum UIState {
     ManualBrew(ControlMode),
     DispensingWater,
     RoutineExecution,
-    RoutineSelection,
+    RoutineSelection(RoutineSelectionSubState),
     Settings,
 }
 
@@ -133,6 +169,7 @@ pub(crate) struct RotaryController<'a, C, const N: usize> where
     command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
     ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
     status: UIStatus,
+    routine_repository: &'static RoutineRepository
 }
 
 impl<'a, C, const N: usize> RotaryController<'a, C, N>
@@ -144,6 +181,7 @@ where
         button: C,
         command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
         ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
+        routine_repository: &'static RoutineRepository,
     ) -> Self {
         Self {
             rotary,
@@ -151,6 +189,7 @@ where
             command_sender,
             ui_status_sender,
             status: UIStatus::default(),
+            routine_repository,
         }
     }
 
@@ -167,16 +206,26 @@ where
                             Direction::CounterClockwise => substate.rotate_clockwise(),
                         });
                     }
+                    UIState::RoutineSelection(substate) => {
+                        let rr = self.routine_repository.lock().await;
+                        let routine_count = rr.get_routine_count();
+                        
+                        self.status.state = UIState::RoutineSelection(match direction {
+                            Direction::Clockwise => substate.rotate_counterclockwise(routine_count),
+                            Direction::CounterClockwise => substate.rotate_clockwise(routine_count),
+                        });
+                    }
+
                     _ => {}
                 }
-                
+
                 self.ui_status_sender.send(self.status).await;
             } else {
                 match self.status.state {
                     UIState::Idle(substate) => {
                         match substate {
                             IdleSubState::RoutineMenuSelected => {
-                                self.status.state = UIState::RoutineSelection;
+                                self.status.state = UIState::RoutineSelection(RoutineSelectionSubState::NoRoutineSelected);
                             }
                             IdleSubState::SettingsMenuSelected => {
                                 self.status.state = UIState::Settings;
