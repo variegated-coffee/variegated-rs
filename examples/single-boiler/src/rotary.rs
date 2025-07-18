@@ -65,7 +65,36 @@ impl UIEditMode {
 }
 
 #[derive(Debug, Format, Default, Copy, Clone)]
+pub(crate) enum ControlMode {
+    #[default]
+    PumpDutyCycle,
+    PumpFlowRate,
+    PumpPressure,
+}
+
+#[derive(Debug, Format, Default, Copy, Clone)]
+pub(crate) enum IdleSubState {
+    #[default]
+    NoMenuItemSelected,
+    RoutineMenuSelected,
+    SettingsMenuSelected,
+}
+
+#[derive(Debug, Format, Default, Copy, Clone)]
+pub(crate) enum UIState {
+    #[default]
+    Idle(IdleSubState),
+    Steaming,
+    ManualBrew(ControlMode),
+    DispensingWater,
+    RoutineExecution,
+    RoutineSelection,
+    Settings,
+}
+
+#[derive(Debug, Format, Default, Copy, Clone)]
 pub(crate) struct UIStatus {
+    pub(crate) state: UIState,
     pub(crate) edit_mode: UIEditMode,
     pub(crate) current_duty_cycle: f32,
     pub(crate) current_boiler_temp: f32,
