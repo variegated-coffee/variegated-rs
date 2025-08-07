@@ -14,7 +14,7 @@ use heapless::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group};
-use variegated_controller_types::{BoilerControlTarget, BoilerStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
+use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
@@ -57,6 +57,8 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     current_routine: Option<RoutineExecutionContext<SingleBoilerSingleGroupControllerState, SingleBoilerSingleGroupConfiguration>>,
     previous_status: Option<Status>,
     temperature_movavg: MovAvg<f32, f32, 10>,
+    comms_status: Option<CommsStatus>,
+    comms_status_received_instant: Option<Instant>,
 }
 
 impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, N_CHANNEL, N_WATCH, N_SUBS> {
@@ -81,6 +83,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             current_routine: None,
             previous_status: None,
             temperature_movavg: MovAvg::default(),
+            comms_status: None,
+            comms_status_received_instant: None,
         }
     }
 
@@ -255,12 +259,29 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             control_target: self.configuration.group_brew_control_target,
         };
 
+        // Calculate current timestamp if we have comms_status
+        let comms_status = if let (Some(status), Some(received_instant)) = 
+            (&self.comms_status, self.comms_status_received_instant) {
+            
+            // Calculate elapsed time since reception
+            let elapsed = Instant::now().saturating_duration_since(received_instant);
+            let current_timestamp = status.timestamp.map(|ts| ts + elapsed.as_secs());
+            
+            Some(CommsStatus {
+                timestamp: current_timestamp,
+                wifi_connected: status.wifi_connected,
+            })
+        } else {
+            self.comms_status.clone()
+        };
+
         let status = Status {
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (VirtualSteamBoiler.as_index(), virtual_steam_boiler_status)]),
             group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
             mode: Default::default(),
             current_routine: self.current_routine.as_ref().and_then(|rxc| Some(rxc.routine_index)),
             routine_step: self.current_routine.as_ref().and_then(|rxc| rxc.current_step),
+            comms_status,
         };
 
         self.status_channel_sender.publish_immediate(status.clone());
@@ -372,6 +393,11 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                 } else {
                     error!("Invalid group index for 100g calibrating scale: {}", group_index);
                 }
+            }
+            MachineCommand::UpdateCommsStatus(status) => {
+                info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
+                self.comms_status = Some(status);
+                self.comms_status_received_instant = Some(Instant::now());
             }
         }
     }
