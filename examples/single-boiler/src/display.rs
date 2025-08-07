@@ -1,5 +1,7 @@
+use alloc::vec;
 use alloc::{format, vec::Vec};
 use alloc::string::ToString;
+use core::cmp::PartialEq;
 use defmt::info;
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -9,7 +11,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Receiver;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Duration};
-use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, StyledDrawable};
+use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, RoundedRectangle, StyledDrawable};
 use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
 use embedded_graphics::{
@@ -29,7 +31,8 @@ use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber};
-use crate::rotary::{IdleSubState, RoutineSelectionSubState, UIEditMode, UIState, UIStatus};
+use crate::rotary::{IdleSubState, ScaleSettingsSubState, UIState, UIStatus};
+use crate::list_menu::{ListMenuType, ListMenuState};
 
 pub type DisplayBus = Mutex<NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>>;
 pub type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>, Output<'static>>, Output<'static>>;
@@ -80,10 +83,10 @@ impl DisplayController {
     /// # Arguments
     /// * `total_items` - Total number of items in the list
     /// * `visible_items` - Number of items visible at once
-    /// * `selected_index` - Currently selected item index (None if nothing selected)
+    /// * `scroll_offset` - Index of the first visible item (None if no scrolling)
     /// * `y_start` - Starting Y coordinate for the scroll area
     /// * `y_end` - Ending Y coordinate for the scroll area
-    fn render_scroll_bar(&mut self, total_items: usize, visible_items: usize, selected_index: Option<usize>, y_start: i32, y_end: i32) {
+    fn render_scroll_bar(&mut self, total_items: usize, visible_items: usize, scroll_offset: Option<usize>, y_start: i32, y_end: i32) {
         if total_items <= visible_items {
             return; // No scroll bar needed
         }
@@ -94,17 +97,8 @@ impl DisplayController {
         // Calculate scroll bar height based on visible/total ratio
         let bar_height = ((visible_items as f32 / total_items as f32) * scrollable_area_height as f32).max(min_bar_height as f32) as i32;
         
-        // Calculate the first visible item index based on selection
-        let first_visible_index = if let Some(selected) = selected_index {
-            if selected >= visible_items - 1 {
-                // When scrolling, keep selected item visible
-                (selected as i32 - (visible_items as i32 - 2)).max(0) as usize
-            } else {
-                0
-            }
-        } else {
-            0
-        };
+        // Use the scroll offset directly
+        let first_visible_index = scroll_offset.unwrap_or(0);
         
         // Calculate scroll position
         let max_scroll_items = total_items - visible_items;
@@ -125,7 +119,10 @@ impl DisplayController {
             .unwrap();
         
         // Draw scroll bar
-        Rectangle::new(Point::new(125, y_start + scroll_position), Size::new(3, bar_height as u32))
+        RoundedRectangle::with_equal_corners(
+            Rectangle::new(Point::new(125, y_start + scroll_position), Size::new(3, bar_height as u32)),
+            Size::new(1, 1) // Corner radius of 1px
+        )
             .into_styled(PrimitiveStyleBuilder::new()
                 .fill_color(BinaryColor::On)
                 .build())
@@ -145,12 +142,21 @@ impl DisplayController {
         self.display.clear();
         self.render_status_animation();
 
-        match self.ui_status.state {
+        match &self.ui_status.state {
             UIState::Idle(substate) => {
-                self.render_idle_state(substate).await;
+                self.render_idle_state(*substate).await;
             }
-            UIState::RoutineSelection(substate) => {
-                self.render_routine_selection(substate).await;
+            UIState::ListMenu(menu_type, menu_state) => {
+                self.render_list_menu(*menu_type, *menu_state).await;
+            }
+            UIState::SettingsInformation => {
+                self.render_settings_information().await;
+            }
+            UIState::SettingsDebugInfo => {
+                self.render_old().await;
+            }
+            UIState::ScaleSettings(substate) => {
+                self.render_scale_settings(*substate).await;
             }
             _ => {
                 self.render_old().await;
@@ -160,8 +166,107 @@ impl DisplayController {
         self.display.flush().await.expect("Failed to flush display");
     }
 
-    async fn render_routine_selection(&mut self, substate: RoutineSelectionSubState) {
-        Text::with_text_style("Routines", Point::new(64, 0), self.text_style_medium_small, TextStyleBuilder::new()
+    async fn render_list_menu(&mut self, menu_type: ListMenuType, menu_state: ListMenuState) {
+        // Render title from menu type
+        Text::with_text_style(menu_type.get_title(), Point::new(64, 0), self.text_style_medium_small, 
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Draw separator line
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        let has_back_button = menu_type.has_back_button();
+        
+        // Draw back button if enabled
+        if has_back_button {
+            let back_selected = menu_state.is_back_button_selected();
+            let back_color = if back_selected {
+                Rectangle::new(Point::new(0, 0), Size::new(20, 10))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                BinaryColor::Off
+            } else {
+                BinaryColor::On
+            };
+
+            self.text_style_medium_small.set_text_color(Some(back_color));
+            Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small, 
+                TextStyleBuilder::new()
+                    .alignment(Alignment::Left)
+                    .baseline(Baseline::Top)
+                    .build())
+                .draw(&mut self.display)
+                .unwrap();
+            self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+        }
+
+        // Get menu items from centralized location
+        let items = menu_type.get_items(Some(self.routine_repository)).await;
+
+        // Render menu items
+        let visible_items = ListMenuState::VISIBLE_ITEMS;
+        let first_item_index = if has_back_button { 1 } else { 0 };
+        
+        for i in 0..visible_items {
+            let item_index = menu_state.scroll_offset + i;
+            if item_index >= items.len() {
+                break;
+            }
+            
+            let y = 12 + i as i32 * 10;
+            let is_selected = menu_state.selected_index == item_index + first_item_index;
+            
+            let text_color = if is_selected {
+                Rectangle::new(Point::new(0, y), Size::new(123, 10))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                BinaryColor::Off
+            } else {
+                BinaryColor::On
+            };
+            
+            self.text_style_medium_small.set_text_color(Some(text_color));
+            Text::with_text_style(&items[item_index].label, Point::new(2, y), 
+                self.text_style_medium_small, 
+                TextStyleBuilder::new()
+                    .alignment(Alignment::Left)
+                    .baseline(Baseline::Top)
+                    .build())
+                .draw(&mut self.display)
+                .unwrap();
+            self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+        }
+
+        // Draw scroll bar
+        if items.len() > visible_items {
+            self.render_scroll_bar(
+                items.len(),
+                visible_items,
+                Some(menu_state.scroll_offset),
+                12,
+                64
+            );
+        }
+    }
+
+    async fn render_settings_information(&mut self) {
+        Text::with_text_style("Information", Point::new(64, 0), self.text_style_medium_small, TextStyleBuilder::new()
             .alignment(Alignment::Center)
             .baseline(Baseline::Top)
             .build())
@@ -176,93 +281,34 @@ impl DisplayController {
             .draw(&mut self.display)
             .unwrap();
 
-        // Draw back button with highlighting if selected
-        let back_color = if matches!(substate, RoutineSelectionSubState::BackSelected) {
-            Rectangle::new(Point::new(0, 0), Size::new(20, 10))
-                .into_styled(PrimitiveStyleBuilder::new()
-                    .fill_color(BinaryColor::On)
-                    .build())
-                .draw(&mut self.display)
-                .unwrap();
-            BinaryColor::Off
-        } else {
-            BinaryColor::On
-        };
+        // Display basic machine information
+        Text::with_baseline("Machine Type:", Point::new(0, 14), self.text_style_small, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
+        
+        Text::with_baseline("Single Boiler", Point::new(0, 21), self.text_style_small, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
 
-        self.text_style_medium_small.set_text_color(Some(back_color));
-        Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small, TextStyleBuilder::new()
-            .alignment(Alignment::Left)
+        Text::with_baseline("Firmware:", Point::new(0, 32), self.text_style_small, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
+        
+        Text::with_baseline("Variegated v0.1.0", Point::new(0, 39), self.text_style_small, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
+
+        Text::with_text_style("Press button to go back", Point::new(64, 56), self.text_style_small, TextStyleBuilder::new()
+            .alignment(Alignment::Center)
             .baseline(Baseline::Top)
             .build())
             .draw(&mut self.display)
             .unwrap();
-        self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
-        
-        let selected_routine = match substate {
-            RoutineSelectionSubState::RoutineSelected(routine_index) => Some(routine_index),
-            _ => None,
-        };
-
-        let rr = self.routine_repository.lock().await;
-        
-        // Count total routines for scroll bar calculation
-        let total_routines = rr.iterate_routines().count();
-        
-        // Render the routines
-        let mut slot: u8 = 0;
-        for (i, routine) in rr.iterate_routines().into_iter().enumerate() {
-            if !Self::is_routine_shown(i, selected_routine) {
-                continue;
-            }
-            
-            let y = 12 + slot as i32 * 10;
-            
-            // Check if this routine is selected and draw highlight
-            let text_color = if Some(i) == selected_routine {
-                Rectangle::new(Point::new(0, y), Size::new(128, 10))
-                    .into_styled(PrimitiveStyleBuilder::new()
-                        .fill_color(BinaryColor::On)
-                        .build())
-                    .draw(&mut self.display)
-                    .unwrap();
-                BinaryColor::Off
-            } else {
-                BinaryColor::On
-            };
-            
-            self.text_style_medium_small.set_text_color(Some(text_color));
-            let text = format!("{}", routine.name());
-            Text::with_text_style(text.as_str(), Point::new(2, y), self.text_style_medium_small, TextStyleBuilder::new()
-                .alignment(Alignment::Left)
-                .baseline(Baseline::Top)
-                .build())
-                .draw(&mut self.display)
-                .unwrap();
-            self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
-            
-            slot += 1;
-        }
-        
-        // Draw scroll bar for the routine list
-        self.render_scroll_bar(
-            total_routines,
-            5, // visible items
-            selected_routine.map(|idx| idx as usize),
-            12, // y_start
-            64  // y_end
-        );
     }
 
-    fn is_routine_shown(routine: RoutineIndex, current_selected: Option<RoutineIndex>) -> bool {
-        if let Some(selected) = current_selected {
-            if selected >= 4 {
-                routine > selected - 4 && routine <= selected + 1
-            } else {
-                routine < 5
-            }
-        } else {
-            routine < 5
-        }
+    fn is_routine_shown(routine: RoutineIndex, scroll_offset: usize) -> bool {
+        let routine_idx = routine as usize;
+        routine_idx >= scroll_offset && routine_idx < scroll_offset + 5
     }
 
     async fn render_idle_state(&mut self, substate: IdleSubState) {
@@ -393,6 +439,155 @@ impl DisplayController {
         ()
     }
 
+    async fn render_scale_settings(&mut self, substate: ScaleSettingsSubState) {
+        let group = self.status.get_group_status(SingleGroup.as_index()).unwrap();
+
+        // Render title from menu type
+        Text::with_text_style("Scale Settings", Point::new(64, 0), self.text_style_medium_small,
+                              TextStyleBuilder::new()
+                                  .alignment(Alignment::Center)
+                                  .baseline(Baseline::Top)
+                                  .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Draw separator line
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+           let back_selected = substate.eq(&ScaleSettingsSubState::BackSelected);
+            let back_color = if back_selected {
+                Rectangle::new(Point::new(0, 0), Size::new(20, 10))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                BinaryColor::Off
+            } else {
+                BinaryColor::On
+            };
+
+            self.text_style_medium_small.set_text_color(Some(back_color));
+            Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small,
+                                  TextStyleBuilder::new()
+                                      .alignment(Alignment::Left)
+                                      .baseline(Baseline::Top)
+                                      .build())
+                .draw(&mut self.display)
+                .unwrap();
+            self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+        
+        
+        Text::with_text_style(group.output_weight.map_or("-".to_string(), |t| format!("{:.1} g", t)).as_str(), Point::new(64, 14), self.text_style_large, TextStyleBuilder::new()
+            .alignment(Alignment::Center)
+            .baseline(Baseline::Top)
+            .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+
+        let (tare_color, cal_zero_color, cal_hundered_color) = match substate {
+            ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
+                (BinaryColor::On, BinaryColor::On, BinaryColor::On)
+            }
+            ScaleSettingsSubState::TareSelected => {
+                Rectangle::new(Point::new(20, 32), Size::new(88, 12))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+
+                (BinaryColor::Off, BinaryColor::On, BinaryColor::On)
+            }
+            ScaleSettingsSubState::CalibrateZeroSelected => {
+                Rectangle::new(Point::new(0, 52), Size::new(55, 12))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+
+                (BinaryColor::On, BinaryColor::Off, BinaryColor::On)
+            }
+            ScaleSettingsSubState::Calibrate100gSelected => {
+                Rectangle::new(Point::new(73, 52), Size::new(55, 12))
+                    .into_styled(PrimitiveStyleBuilder::new()
+                        .fill_color(BinaryColor::On)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+
+                (BinaryColor::On, BinaryColor::On, BinaryColor::Off)
+            }
+        };
+
+        Text::with_text_style(
+            "Calibrate",
+            Point::new(64, 54),
+            self.text_style_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Bottom)
+                .build()
+        )
+            .draw(&mut self.display)
+            .unwrap();
+
+        self.text_style_medium_small.set_text_color(Some(tare_color));
+
+        Text::with_text_style(
+            "Tare",
+            Point::new(64, 42),
+            self.text_style_medium_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Bottom)
+                .build()
+        )
+            .draw(&mut self.display)
+            .unwrap();
+
+        self.text_style_medium_small.set_text_color(Some(cal_zero_color));
+
+        Text::with_text_style(
+            "Zero",
+            Point::new(16, 62),
+            self.text_style_medium_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Left)
+                .baseline(Baseline::Bottom)
+                .build()
+        )
+            .draw(&mut self.display)
+            .unwrap();
+
+        self.text_style_medium_small.set_text_color(Some(cal_hundered_color));
+
+        Text::with_text_style(
+            "100 g",
+            Point::new(112, 62),
+            self.text_style_medium_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Right)
+                .baseline(Baseline::Bottom)
+                .build()
+        )
+            .draw(&mut self.display)
+            .unwrap();
+
+
+        self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+    }
+
+
+
     async fn render_old(&mut self) {
         let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index()).unwrap();
         let group_status = self.status.get_group_status(SingleGroup.as_index()).unwrap();
@@ -447,34 +642,6 @@ impl DisplayController {
             }
             _ => {}
         }
-
-        match self.ui_status.edit_mode {
-            UIEditMode::PumpDutyCycle => {
-                Text::with_baseline(format!("Edit: Pump DC ({:.0})", self.ui_status.current_duty_cycle).as_str(), Point::new(0, 42), self.text_style_small, Baseline::Top)
-                    .draw(&mut self.display)
-                    .unwrap();
-            }
-            UIEditMode::BoilerTemperature => {
-                Text::with_baseline(format!("Edit: Boil T ({:.0})", self.ui_status.current_boiler_temp).as_str(), Point::new(0, 42), self.text_style_small, Baseline::Top)
-                    .draw(&mut self.display)
-                    .unwrap();
-            },
-            UIEditMode::PumpFlowRate => {
-                Text::with_baseline(format!("Edit: Flow ({:.2})", self.ui_status.current_flow_rate).as_str(), Point::new(0, 42), self.text_style_small, Baseline::Top)
-                    .draw(&mut self.display)
-                    .unwrap();
-            },
-            UIEditMode::PumpPressure => {
-                Text::with_baseline(format!("Edit: Prs ({:.1})", self.ui_status.current_pressure).as_str(), Point::new(0, 42), self.text_style_small, Baseline::Top)
-                    .draw(&mut self.display)
-                    .unwrap();
-            },
-            UIEditMode::ScaleTare => {
-                Text::with_baseline("Tare scale", Point::new(0, 42), self.text_style_small, Baseline::Top)
-                    .draw(&mut self.display)
-                    .unwrap();
-            }
-        };
 
         if self.status.current_routine.is_some() {
             Text::with_baseline(format!("Routine {}, step {}", self.status.current_routine.unwrap_or_default(), self.status.routine_step.unwrap_or_default()).as_str(), Point::new(0, 49), self.text_style_small, Baseline::Top)

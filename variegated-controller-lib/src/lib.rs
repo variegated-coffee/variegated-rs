@@ -357,6 +357,22 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                     error!("Invalid group index for taring scale: {}", group_index);
                 }
             }
+            MachineCommand::ZeroCalibrateGroupScale(group_index) => {
+                if group_index == 0 {
+                    info!("Zero calibrating group scale");
+                    let _ = self.group.scale_zero_calibration().await;
+                } else {
+                    error!("Invalid group index for zero calibrating scale: {}", group_index);
+                }
+            }
+            MachineCommand::CalibrateGroupScale100g(group_index) => {
+                if group_index == 0 {
+                    info!("Calibrating group scale with 100g");
+                    let _ = self.group.scale_reference_weight_calibration(100).await;
+                } else {
+                    error!("Invalid group index for 100g calibrating scale: {}", group_index);
+                }
+            }
         }
     }
 

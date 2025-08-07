@@ -105,6 +105,8 @@ pub enum MachineCommand {
     EnableBoiler(BoilerIndex),
     DisableBoiler(BoilerIndex),
     TareGroupScale(GroupIndex),
+    ZeroCalibrateGroupScale(GroupIndex),
+    CalibrateGroupScale100g(GroupIndex),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

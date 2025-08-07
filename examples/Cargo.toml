@@ -2,6 +2,7 @@
 name = "examples"
 version = "0.1.0"
 edition = "2024"
+default-run = "dual_boiler"
 
 [[bin]]
 name = "dual_boiler"
@@ -19,8 +20,8 @@ bench = false
 
 [dependencies]
 embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "task-arena-size-65536"] }
-embassy-rp = { version = "0.4.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
-embassy-sync = { version = "0.6.2", features = ["defmt"] }
+embassy-rp = { version = "0.6.0", path = "../../../embassy/embassy-rp", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
+embassy-sync = { version = "0.7.0", features = ["defmt"] }
 embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
 embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-futures = "0.1.1"
@@ -39,9 +40,10 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
-variegated-board-cfg = { version = "0.2.1" }
+variegated-board-cfg = { version = "0.2.1", path = "../../variegated-board/variegated-board-cfg" }
 
 variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb"] }
+variegated-rp235x-bootloader-tools = { version = "0.1.0", path = "../variegated-rp235x-bootloader-tools", features = ["defmt"] }
 
 variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08", features = ["defmt"] }
 variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
@@ -76,7 +78,7 @@ single-boiler = []
 
 [profile.dev]
 debug = true              # Enable debug info
-opt-level = 1            # Light optimization for better debugging
+opt-level = 2            # Light optimization for better debugging
 lto = false              # Disable link-time optimization
 codegen-units = 1        # Better debug info
 

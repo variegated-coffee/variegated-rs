@@ -4,6 +4,7 @@
 mod rotary;
 mod esp_transceiver;
 mod display;
+mod list_menu;
 
 use num_traits::float::FloatCore;
 extern crate alloc;
@@ -20,7 +21,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
-use embassy_rp::{i2c, pio, pwm, spi, uart};
+use embassy_rp::{i2c, pio, pwm, spi, uart, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -53,6 +54,7 @@ use embassy_rp::i2c::I2c;
 use embassy_rp::pac::otp_data_raw::vals::Cs0size::NONE;
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
+use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embedded_hal::digital::{Error, ErrorKind, ErrorType, OutputPin};
 use embedded_hal::pwm::SetDutyCycle;
@@ -74,7 +76,7 @@ use variegated_hal::scale::gravity::{GravityController, GravityDevice};
 use variegated_instrumentation::async_task_loop;
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
-use crate::rotary::{UIEditMode, UIStatus};
+use crate::rotary::{UIStatus};
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
@@ -84,90 +86,90 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
 struct DisplayPeripherals {
-    spi: (),
-    sclk_pin: (),
-    mosi_pin: (),
-    miso_pin: (),
-    cs_pin: (),
-    dc_pin: (),
-    rst_pin: (),
-    dma_tx: (),
-    dma_rx: (),
+    spi: Peri<'static, ()>,
+    sclk_pin: Peri<'static, ()>,
+    mosi_pin: Peri<'static, ()>,
+    miso_pin: Peri<'static, ()>,
+    cs_pin: Peri<'static, ()>,
+    dc_pin: Peri<'static, ()>,
+    rst_pin: Peri<'static, ()>,
+    dma_tx: Peri<'static, ()>,
+    dma_rx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("internal_spi_bus_peripherals")]
 struct InternalSpiBusPeripherals {
-    spi: (),
-    sclk_pin: (),
-    mosi_pin: (),
-    miso_pin: (),
-    dma_tx: (),
-    dma_rx: (),
+    spi: Peri<'static, ()>,
+    sclk_pin: Peri<'static, ()>,
+    mosi_pin: Peri<'static, ()>,
+    miso_pin: Peri<'static, ()>,
+    dma_tx: Peri<'static, ()>,
+    dma_rx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("settings_flash_peripherals")]
 struct SettingsFlashPeripherals {
-    pin_cs: (),
+    pin_cs: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("rotary_encoder_peripherals")]
 struct RotaryEncoderPeripherals {
-    pin_clk: (),
-    pin_dt: (),
-    pin_sw: (),
-    pio: (),
+    pin_clk: Peri<'static, ()>,
+    pin_dt: Peri<'static, ()>,
+    pin_sw: Peri<'static, ()>,
+    pio: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("ads124s08_peripherals")]
 struct Ads124S08Peripherals {
-    pin_drdy: (),
-    pin_cs: (),
+    pin_drdy: Peri<'static, ()>,
+    pin_cs: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("button_peripherals")]
 struct ButtonPeripherals {
-    pin_brew: (),
-    pin_water: (),
-    pin_steam: (),
+    pin_brew: Peri<'static, ()>,
+    pin_water: Peri<'static, ()>,
+    pin_steam: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("pump_peripherals")]
 struct PumpPeripherals {
-    pwm_speed: (),
-    pin_speed: (),
-    pwm_tacho_out: (),
-    pin_tacho_out: (),
-    pin_dir: (),
+    pwm_speed: Peri<'static, ()>,
+    pin_speed: Peri<'static, ()>,
+    pwm_tacho_out: Peri<'static, ()>,
+    pin_tacho_out: Peri<'static, ()>,
+    pin_dir: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("flow_meter_peripherals")]
 struct FlowMeterPeripherals {
-    pwm_flow_meter: (),
-    pin_flow_meter: (),
+    pwm_flow_meter: Peri<'static, ()>,
+    pin_flow_meter: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("mechanism_peripherals")]
 struct MechanismPeripherals {
-    pin_he: (),
-    pin_solenoid: (),
+    pin_he: Peri<'static, ()>,
+    pin_solenoid: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("esp32_peripherals")]
 struct Esp32Peripherals {
-    uart: (),
-    tx_pin: (),
-    rx_pin: (),
-    cts_pin: (),
-    rts_pin: (),
-    dma_tx: (),
-    dma_rx: (),
+    uart: Peri<'static, ()>,
+    tx_pin: Peri<'static, ()>,
+    rx_pin: Peri<'static, ()>,
+    cts_pin: Peri<'static, ()>,
+    rts_pin: Peri<'static, ()>,
+    dma_tx: Peri<'static, ()>,
+    dma_rx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("qwiic_i2c_bus_peripherals")]
 struct QwiicI2cBusPeripherals {
-    i2c: (),
-    sda_pin: (),
-    scl_pin: (),
+    i2c: Peri<'static, ()>,
+    sda_pin: Peri<'static, ()>,
+    scl_pin: Peri<'static, ()>,
 }
 
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
@@ -213,16 +215,6 @@ static HEAP: Heap = Heap::empty();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    #[allow(static_mut_refs)]
-    unsafe {
-        use core::mem::MaybeUninit;
-        const HEAP_SIZE: usize = 65535; // 64 KiB heap size
-        static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
-        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
-
-        info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
-    }
-
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
         unwrap!(spawner.spawn(main_task(spawner)))
@@ -281,7 +273,43 @@ async fn main_task(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
     defmt::info!("Starting!");
 
-    let i2c_p = qwiic_i_2c_bus_peripherals!(p);
+    let psram_config = embassy_rp::psram::Config::aps6404l();
+    defmt::info!("Initing!");
+
+    let psram = embassy_rp::psram::Psram::new(QmiCs1::new(p.QMI_CS1, p.PIN_0), psram_config);
+
+    if let Ok(psram) = psram {
+        info!("PSRAM initialized successfully, using PSRAM for heap");
+
+        #[allow(static_mut_refs)]
+        {
+            use core::mem::MaybeUninit;
+            const HEAP_SIZE: usize = 1024;
+            static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+            unsafe {
+                const PSRAM_ADDRESS: usize = 0x11000000;
+                let ptr = PSRAM_ADDRESS as *mut u8; // Using u8 for byte array
+                HEAP.init(PSRAM_ADDRESS, psram.size() as usize);
+
+                info!("Heap initialized in PSRAM");
+            }
+        }
+    } else {
+        info!("Failed to initialize PSRAM, using internal RAM for heap");
+
+        #[allow(static_mut_refs)]
+        unsafe {
+            use core::mem::MaybeUninit;
+            const HEAP_SIZE: usize = 65535; // 64 KiB heap size
+            static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
+            unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+
+            info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
+        }
+    }
+
+
+    let i2c_p = qwiic_i2c_bus_peripherals!(p);
     let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
     let i2c_bus = QWIIC_I2C_BUS.init(Mutex::new(i2c_bus));
 
@@ -348,7 +376,7 @@ async fn main_task(spawner: Spawner) -> ! {
     spi_config.polarity = Polarity::IdleLow;
 
     let spi_p = internal_spi_bus_peripherals!(p);
-    let ads_p = ads_124s08_peripherals!(p);
+    let ads_p = ads124s08_peripherals!(p);
 
     let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, spi_config);
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
@@ -467,8 +495,13 @@ async fn main_task(spawner: Spawner) -> ! {
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
     routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
     routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
     routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
     routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
     routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
@@ -534,7 +567,7 @@ async fn main_task(spawner: Spawner) -> ! {
     spawner.spawn(display::display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver(), routine_repository_ref)).unwrap();
 
     info!("Creating esp transceiver task");
-    let esp_p = esp_32_peripherals!(p);
+    let esp_p = esp32_peripherals!(p);
 
     spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap())).unwrap();
 

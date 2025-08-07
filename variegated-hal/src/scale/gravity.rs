@@ -17,6 +17,8 @@ use crate::WithTask;
 pub enum GravityCommand {
     Tare,
     SetWeighingConfig(WeighingConfig),
+    ZeroCalibration,
+    ReferenceWeightCalibration(u32),
 }
 
 pub struct GravityDevice<'a, M: RawMutex, I2cDevT: I2c, const N: usize> {
@@ -72,6 +74,30 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'
                         let res = dev.write_weighing_config(self.channel, config).await;
                         if let Err(e) = res {
                             error!("Failed to set weighing config for channel {}: {:?}", self.channel, e);
+                        }
+                    },
+                    GravityCommand::ZeroCalibration => {
+                        info!("Starting zero calibration on channel {}", self.channel);
+                        let mut channels = [false; 4];
+                        channels[self.channel as usize - 1] = true;
+                        let res = dev.execute_zero_calibration(channels).await;
+                        if let Err(e) = res {
+                            error!("Zero calibration failed on channel {}: {:?}", self.channel, e);
+                        }
+                    },
+                    GravityCommand::ReferenceWeightCalibration(weight_grams) => {
+                        info!("Starting {}g calibration on channel {}", weight_grams, self.channel);
+                        let mut channels = [false; 4];
+                        channels[self.channel as usize - 1] = true;
+                        let res = match weight_grams {
+                            100 => dev.execute_100g_calibration(channels).await,
+                            _ => {
+                                error!("Unsupported calibration weight: {}g", weight_grams);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = res {
+                            error!("{}g calibration failed on channel {}: {:?}", weight_grams, self.channel, e);
                         }
                     },
                 }
@@ -152,6 +178,30 @@ impl <'a, const N: usize> ScaleController for GravityController<'a, N> {
         crate::scale::SupportedConfigurationOptions {
             zero_tracking: true,
             smoothing: true,
+        }
+    }
+
+    async fn zero_calibration(&mut self) -> Result<(), crate::scale::ScaleError> {
+        self.command_sender.send(GravityCommand::ZeroCalibration).await;
+        Ok(())
+    }
+
+    async fn reference_weight_calibration(&mut self, weight_grams: u32) -> Result<(), crate::scale::ScaleError> {
+        // Check if the weight is supported
+        let capabilities = self.get_capabilities();
+        if !capabilities.supported_reference_weights.contains(&weight_grams) {
+            return Err(crate::scale::ScaleError::CalibrationNotSupported);
+        }
+
+        self.command_sender.send(GravityCommand::ReferenceWeightCalibration(weight_grams)).await;
+        Ok(())
+    }
+
+    fn get_capabilities(&self) -> crate::scale::ScaleCapabilities {
+        crate::scale::ScaleCapabilities {
+            zero_calibration: true,
+            reference_weight_calibration: true,
+            supported_reference_weights: &[100], // Only 100g supported by hardware
         }
     }
 }

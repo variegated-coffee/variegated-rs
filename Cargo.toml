@@ -19,5 +19,15 @@ members = [
 resolver = "2"
 package = { rust-version = "1.85.0" }
 
+[profile.dev]
+debug = true              # Enable debug info
+opt-level = 1           # Light optimization for better debugging
+lto = true              # Disable link-time optimization
+
+[profile.release]
+debug = true             # Keep debug info in release builds too
+
 [patch.crates-io]
-embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "rp-0.4.0" }
+embassy-rp = { path = "../../embassy/embassy-rp", version = "0.6.0" }
+#embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "rp-0.4.0" }
+#variegate-board-cfg = { path = "../variegated-board/variegated-board-cfg", version = "0.2.1" }
