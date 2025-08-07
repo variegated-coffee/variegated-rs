@@ -6,7 +6,8 @@ use embassy_sync::pubsub::Subscriber;
 use embassy_time::{Instant, Timer};
 use postcard::{from_bytes_cobs, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{CommsProcessorToApplicationProcessorMessage, Status};
+use variegated_controller_types::{CommsProcessorToApplicationProcessorMessage, MachineCommand, Status};
+use embassy_sync::channel::Sender;
 
 use crate::{Esp32Peripherals, Irqs, StatusSubscriber};
 
@@ -18,7 +19,8 @@ struct EspStatus {
 #[embassy_executor::task]
 pub async fn esp_transceiver_task(
     esp_p: Esp32Peripherals,
-    mut status_receiver: StatusSubscriber
+    mut status_receiver: StatusSubscriber,
+    command_sender: Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, MachineCommand, 10>
 ) {
     let mut config = uart::Config::default();
     config.baudrate = 115200;
@@ -65,6 +67,9 @@ pub async fn esp_transceiver_task(
 
                                         info!("System boot UNIX time: {}", boot_time);
                                     }
+                                    
+                                    // Forward CommsStatus to controller
+                                    let _ = command_sender.try_send(MachineCommand::UpdateCommsStatus(status));
                                 }
                                 _ => {
                                     info!("Received unknown message type");

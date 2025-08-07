@@ -281,20 +281,49 @@ impl DisplayController {
             .draw(&mut self.display)
             .unwrap();
 
+        // Display WiFi status and time
+        let mut y_pos = 14;
+        if let Some(comms) = &self.status.comms_status {
+            let wifi_status = if comms.wifi_connected { "WiFi: Connected" } else { "WiFi: No" };
+            Text::with_baseline(wifi_status, Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+                .draw(&mut self.display)
+                .unwrap();
+            y_pos += 7;
+            
+            // Display current time if available
+            if let Some(timestamp) = comms.timestamp {
+                // Simple time display - shows hours and minutes in UTC
+                let total_seconds = timestamp;
+                let hours = (total_seconds / 3600) % 24;
+                let minutes = (total_seconds / 60) % 60;
+                let seconds = total_seconds % 60;
+                let time_str = format!("Time: {:02}:{:02}:{:02} UTC", hours, minutes, seconds);
+                Text::with_baseline(&time_str, Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+                    .draw(&mut self.display)
+                    .unwrap();
+                y_pos += 7;
+            }
+        } else {
+            Text::with_baseline("WiFi: Unknown", Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+                .draw(&mut self.display)
+                .unwrap();
+            y_pos += 7;
+        }
+        
+        y_pos += 3; // Add spacing
+        
         // Display basic machine information
-        Text::with_baseline("Machine Type:", Point::new(0, 14), self.text_style_small, Baseline::Top)
+        Text::with_baseline("Machine:", Point::new(0, y_pos), self.text_style_small, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
+        y_pos += 7;
         
-        Text::with_baseline("Single Boiler", Point::new(0, 21), self.text_style_small, Baseline::Top)
+        Text::with_baseline("Single Boiler", Point::new(0, y_pos), self.text_style_small, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
-
-        Text::with_baseline("Firmware:", Point::new(0, 32), self.text_style_small, Baseline::Top)
-            .draw(&mut self.display)
-            .unwrap();
+        y_pos += 7;
         
-        Text::with_baseline("Variegated v0.1.0", Point::new(0, 39), self.text_style_small, Baseline::Top)
+        Text::with_baseline("FW: v0.1.0", Point::new(0, y_pos), self.text_style_small, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
 

@@ -784,7 +784,6 @@ dependencies = [
  "variegated-hal",
  "variegated-instrumentation",
  "variegated-mcp9600",
- "variegated-rp235x-bootloader-tools",
  "w25q32jv",
 ]
 
@@ -2030,25 +2029,6 @@ dependencies = [
  "embassy-time",
  "embedded-hal-async",
  "panic-probe",
-]
-
-[[package]]
-name = "variegated-rp235x-bootloader-tools"
-version = "0.1.0"
-dependencies = [
- "defmt 0.3.100",
- "embassy-rp",
- "heapless 0.8.0",
- "num_enum",
- "variegated-rp235x-bootrom-block",
-]
-
-[[package]]
-name = "variegated-rp235x-bootrom-block"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.6.0",
- "heapless 0.8.0",
 ]
 
 [[package]]

@@ -107,6 +107,7 @@ pub enum MachineCommand {
     TareGroupScale(GroupIndex),
     ZeroCalibrateGroupScale(GroupIndex),
     CalibrateGroupScale100g(GroupIndex),
+    UpdateCommsStatus(CommsStatus),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -200,6 +201,7 @@ pub struct Status {
     pub mode: MachineMode,
     pub current_routine: Option<RoutineIndex>,
     pub routine_step: Option<usize>,
+    pub comms_status: Option<CommsStatus>,
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
 
@@ -211,6 +213,7 @@ impl Status {
             mode: MachineMode::Off,
             current_routine: None,
             routine_step: None,
+            comms_status: None,
 //            environmental_temperature_sensors: FnvIndexMap::new(),
         }
     }
@@ -322,7 +325,7 @@ pub struct ExternalSensorData {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone,  Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct CommsStatus {
     pub timestamp: Option<u64>, // Unix timestamp in seconds
     pub wifi_connected: bool,

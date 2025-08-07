@@ -569,7 +569,7 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
-    spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap())).unwrap();
+    spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), command_channel.sender())).unwrap();
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task()).unwrap();
