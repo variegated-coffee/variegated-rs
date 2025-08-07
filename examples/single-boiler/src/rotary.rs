@@ -11,60 +11,11 @@ use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, RoutineIndex, TemperatureType};
 use crate::RoutineRepository;
+use crate::list_menu::{ListMenuType, ListMenuState, MenuItemId};
+use alloc::string::ToString;
+use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 
-#[derive(Debug, Format, Default, Copy, Clone)]
-pub(crate) enum UIEditMode {
-    #[default]
-    PumpDutyCycle,
-    BoilerTemperature,
-    PumpFlowRate,
-    PumpPressure,
-    ScaleTare,
-}
-
-impl UIEditMode {
-    pub fn next(&mut self) -> UIEditMode {
-        match self {
-            UIEditMode::PumpDutyCycle => UIEditMode::BoilerTemperature,
-            UIEditMode::BoilerTemperature => UIEditMode::PumpFlowRate,
-            UIEditMode::PumpFlowRate => UIEditMode::PumpPressure,
-            UIEditMode::PumpPressure => UIEditMode::ScaleTare,
-            UIEditMode::ScaleTare => UIEditMode::PumpDutyCycle,
-        }
-    }
-
-    pub fn min_value(&self) -> f32 {
-        match self {
-            UIEditMode::PumpDutyCycle => 0.0,
-            UIEditMode::BoilerTemperature => 10.0,
-            UIEditMode::PumpFlowRate => 0.0,
-            UIEditMode::PumpPressure => 0.0,
-            UIEditMode::ScaleTare => 0.0, //Value doesn't matter for tare
-        }
-    }
-
-    pub fn max_value(&self) -> f32 {
-        match self {
-            UIEditMode::PumpDutyCycle => 100.0,
-            UIEditMode::BoilerTemperature => 120.0,
-            UIEditMode::PumpFlowRate => 10.0,
-            UIEditMode::PumpPressure => 10.0,
-            UIEditMode::ScaleTare => 10.0, //Value doesn't matter for tare
-        }
-    }
-
-    pub fn step(&self) -> f32 {
-        match self {
-            UIEditMode::PumpDutyCycle => 5.0,
-            UIEditMode::BoilerTemperature => 5.0,
-            UIEditMode::PumpFlowRate => 0.25,
-            UIEditMode::PumpPressure => 0.5,
-            UIEditMode::ScaleTare => 1.0, //Value doesn't matter for tare
-        }
-    }
-}
-
-#[derive(Debug, Format, Default, Copy, Clone)]
+#[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
 pub(crate) enum ControlMode {
     #[default]
     PumpDutyCycle,
@@ -72,7 +23,7 @@ pub(crate) enum ControlMode {
     PumpPressure,
 }
 
-#[derive(Debug, Format, Default, Copy, Clone)]
+#[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
 pub(crate) enum IdleSubState {
     #[default]
     NoMenuItemSelected,
@@ -98,51 +49,49 @@ impl IdleSubState {
     }
 }
 
-#[derive(Debug, Format, Copy, Clone)]
-pub(crate) enum RoutineSelectionSubState {
-    NoRoutineSelected,
+#[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
+pub(crate) enum ScaleSettingsSubState {
+    #[default]
+    NoneSelected,
     BackSelected,
-    RoutineSelected(RoutineIndex),
+    TareSelected,
+    CalibrateZeroSelected,
+    Calibrate100gSelected,
 }
 
-impl RoutineSelectionSubState {
-    pub fn rotate_clockwise(&self, routine_count: usize) -> RoutineSelectionSubState {
+impl ScaleSettingsSubState {
+    pub fn rotate_clockwise(&self) -> ScaleSettingsSubState {
         match self {
-            RoutineSelectionSubState::NoRoutineSelected => RoutineSelectionSubState::RoutineSelected(0),
-            RoutineSelectionSubState::BackSelected => RoutineSelectionSubState::RoutineSelected(0),
-            RoutineSelectionSubState::RoutineSelected(i) => {
-                let next_index = *i as usize + 1;
-                RoutineSelectionSubState::RoutineSelected(if next_index >= routine_count {
-                    routine_count - 1 // Stay at the last routine if we exceed the count
-                } else {
-                    next_index
-                })
-            }
+            ScaleSettingsSubState::NoneSelected => ScaleSettingsSubState::BackSelected,
+            ScaleSettingsSubState::TareSelected => ScaleSettingsSubState::BackSelected,
+            ScaleSettingsSubState::CalibrateZeroSelected => ScaleSettingsSubState::TareSelected,
+            ScaleSettingsSubState::Calibrate100gSelected => ScaleSettingsSubState::CalibrateZeroSelected,
+            ScaleSettingsSubState::BackSelected => ScaleSettingsSubState::BackSelected,
         }
     }
 
-    pub fn rotate_counterclockwise(&self, routine_count: usize) -> RoutineSelectionSubState {
+    pub fn rotate_counterclockwise(&self) -> ScaleSettingsSubState {
         match self {
-            RoutineSelectionSubState::NoRoutineSelected => RoutineSelectionSubState::BackSelected,
-            RoutineSelectionSubState::BackSelected => RoutineSelectionSubState::BackSelected,
-            RoutineSelectionSubState::RoutineSelected(i) => if *i == 0 {
-                RoutineSelectionSubState::BackSelected
-            } else {
-                RoutineSelectionSubState::RoutineSelected(RoutineIndex::from(*i as u8 - 1))
-            }
+            ScaleSettingsSubState::NoneSelected => ScaleSettingsSubState::TareSelected,
+            ScaleSettingsSubState::TareSelected => ScaleSettingsSubState::CalibrateZeroSelected,
+            ScaleSettingsSubState::CalibrateZeroSelected => ScaleSettingsSubState::Calibrate100gSelected,
+            ScaleSettingsSubState::Calibrate100gSelected => ScaleSettingsSubState::TareSelected,
+            ScaleSettingsSubState::BackSelected => ScaleSettingsSubState::TareSelected,
         }
     }
 }
 
-#[derive(Debug, Format, Copy, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Format)]
 pub(crate) enum UIState {
     Idle(IdleSubState),
     Steaming,
     ManualBrew(ControlMode),
     DispensingWater,
     RoutineExecution,
-    RoutineSelection(RoutineSelectionSubState),
-    Settings,
+    ListMenu(ListMenuType, ListMenuState),
+    SettingsInformation,
+    SettingsDebugInfo,
+    ScaleSettings(ScaleSettingsSubState),
 }
 
 impl Default for UIState {
@@ -151,14 +100,30 @@ impl Default for UIState {
     }
 }
 
-#[derive(Debug, Format, Default, Copy, Clone)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct UIStatus {
     pub(crate) state: UIState,
-    pub(crate) edit_mode: UIEditMode,
-    pub(crate) current_duty_cycle: f32,
-    pub(crate) current_boiler_temp: f32,
-    pub(crate) current_flow_rate: f32,
-    pub(crate) current_pressure: f32,
+}
+
+// Menu item activation handler
+pub async fn handle_menu_item_activation<const N: usize>(
+    item_id: MenuItemId,
+    command_sender: &Sender<'_, NoopRawMutex, MachineCommand, N>,
+) -> Option<UIState> {
+    info!("Menu item activated: {:?}", item_id);
+    let new_state = match item_id {
+        MenuItemId::Routine(index) => {
+            command_sender.send(MachineCommand::RunRoutine(index as RoutineIndex)).await;
+            Some(UIState::RoutineExecution)
+        }
+        MenuItemId::SettingsInformation => Some(UIState::SettingsInformation),
+        MenuItemId::SettingsDebugInfo => Some(UIState::SettingsDebugInfo),
+        MenuItemId::SettingsScaleSettings => Some(UIState::ScaleSettings(ScaleSettingsSubState::default())),
+    };
+    
+    info!("New state: {:?}", new_state);
+    
+    new_state
 }
 
 pub(crate) struct RotaryController<'a, C, const N: usize> where
@@ -194,50 +159,103 @@ where
     }
 
     pub async fn task(&mut self) {
-        self.ui_status_sender.send(self.status).await;
+        self.ui_status_sender.send(self.status.clone()).await;
 
         loop {
             let either = select(self.rotary.read(), self.button.wait_for_falling_edge()).await;
             if let First(direction) = either {
-                match self.status.state {
+                match &mut self.status.state {
                     UIState::Idle(substate) => {
-                        self.status.state = UIState::Idle(match direction {
+                        *substate = match direction {
                             Direction::Clockwise => substate.rotate_counterclockwise(),
                             Direction::CounterClockwise => substate.rotate_clockwise(),
-                        });
+                        };
                     }
-                    UIState::RoutineSelection(substate) => {
-                        let rr = self.routine_repository.lock().await;
-                        let routine_count = rr.get_routine_count();
+                    UIState::ListMenu(menu_type, menu_state) => {
+                        // Get total items count from centralized location
+                        let item_count = menu_type.get_item_count(Some(self.routine_repository)).await;
+                        let total_items = item_count + (if menu_type.has_back_button() { 1 } else { 0 });
                         
-                        self.status.state = UIState::RoutineSelection(match direction {
-                            Direction::Clockwise => substate.rotate_counterclockwise(routine_count),
-                            Direction::CounterClockwise => substate.rotate_clockwise(routine_count),
-                        });
+                        match direction {
+                            Direction::Clockwise => menu_state.navigate_up(),
+                            Direction::CounterClockwise => menu_state.navigate_down(total_items),
+                        }
                     }
-
+                    UIState::ScaleSettings(substate) => {
+                        *substate = match direction {
+                            Direction::Clockwise => substate.rotate_clockwise(),
+                            Direction::CounterClockwise => substate.rotate_counterclockwise(),
+                        };
+                    }
                     _ => {}
                 }
 
-                self.ui_status_sender.send(self.status).await;
+                self.ui_status_sender.send(self.status.clone()).await;
             } else {
-                match self.status.state {
+                // Button was pressed
+                match &self.status.state {
                     UIState::Idle(substate) => {
                         match substate {
                             IdleSubState::RoutineMenuSelected => {
-                                self.status.state = UIState::RoutineSelection(RoutineSelectionSubState::NoRoutineSelected);
+                                let menu_state = ListMenuState::new();
+                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state);
                             }
                             IdleSubState::SettingsMenuSelected => {
-                                self.status.state = UIState::Settings;
+                                let menu_state = ListMenuState::new();
+                                self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state);
                             }
                             _ => {}
                         }
+                    }
+                    UIState::ListMenu(menu_type, menu_state) => {
+                        let menu_type = *menu_type;
+                        let has_back_button = menu_type.has_back_button();
+                        
+                        // Check if back button is selected
+                        if has_back_button && menu_state.is_back_button_selected() {
+                            self.status.state = UIState::Idle(menu_type.get_back_state());
+                        } else if let Some(item_index) = menu_state.get_selected_item_index(has_back_button) {
+                            // Get MenuItemId from centralized location
+                            let Some(menu_item_id) = menu_type.get_menu_item_id(item_index) else {
+                                return; // Invalid index
+                            };
+                            
+                            // Handle menu item activation
+                            if let Some(new_state) = handle_menu_item_activation(
+                                menu_item_id,
+                                &self.command_sender
+                            ).await {
+                                self.status.state = new_state;
+                            }
+                        }
+                    }
+                    UIState::ScaleSettings(substate) => {
+                        match substate {
+                            ScaleSettingsSubState::TareSelected => {
+                                self.command_sender.send(MachineCommand::TareGroupScale(SingleGroup.as_index())).await;
+                            }
+                            ScaleSettingsSubState::CalibrateZeroSelected => {
+                                self.command_sender.send(MachineCommand::ZeroCalibrateGroupScale(SingleGroup.as_index())).await;
+                            }
+                            ScaleSettingsSubState::Calibrate100gSelected => {
+                                self.command_sender.send(MachineCommand::CalibrateGroupScale100g(SingleGroup.as_index())).await;
+                            }
+                            ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
+                                // Go back to Settings menu
+                                self.status.state = UIState::ListMenu(ListMenuType::Settings, ListMenuState::default());
+                            }
+                        }
+                    }
+                    UIState::SettingsInformation | UIState::SettingsDebugInfo => {
+                        // Go back to settings menu
+                        let menu_state = ListMenuState::new();
+                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state);
                     }
                     _ => {
                         self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);
                     }
                 }
-                self.ui_status_sender.send(self.status).await;
+                self.ui_status_sender.send(self.status.clone()).await;
 
                 Timer::after_millis(300).await;
             }

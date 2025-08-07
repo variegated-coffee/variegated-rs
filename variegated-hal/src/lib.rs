@@ -217,6 +217,22 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             Ok(())
         }
     }
+    
+    pub async fn scale_zero_calibration(&mut self) -> Result<(), scale::ScaleError> {
+        if let Some(scale_controller) = &mut self.scale_controller {
+            scale_controller.zero_calibration().await
+        } else {
+            Ok(())
+        }
+    }
+    
+    pub async fn scale_reference_weight_calibration(&mut self, weight_grams: u32) -> Result<(), scale::ScaleError> {
+        if let Some(scale_controller) = &mut self.scale_controller {
+            scale_controller.reference_weight_calibration(weight_grams).await
+        } else {
+            Ok(())
+        }
+    }
 }
 
 pub struct SteamWand {

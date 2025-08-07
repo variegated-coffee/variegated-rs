@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(picotool partition create:*)",
+      "Bash(cargo test:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(sed:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": false
+}
