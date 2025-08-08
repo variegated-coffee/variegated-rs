@@ -675,7 +675,7 @@ impl DisplayController {
                     let visible_exits = step.exits().iter().take(3);
                     
                     for (i, exit) in visible_exits.enumerate() {
-                        let status_text = self.format_exit_condition_status(&exit.condition);
+                        let status_text = self.format_exit_status(exit);
                         if !status_text.is_empty() {
                             Text::with_baseline(
                                 &status_text,
@@ -722,6 +722,18 @@ impl DisplayController {
             Text::with_baseline("No routine running", Point::new(0, 0), self.text_style_small, Baseline::Top)
                 .draw(&mut self.display)
                 .unwrap();
+        }
+    }
+
+    fn format_exit_status(&self, exit: &variegated_controller_lib::routine::RoutineExit) -> alloc::string::String {
+        // Prioritize custom description if available
+        if let Some(description) = exit.description() {
+            // For custom descriptions, we might want to show both description and current status
+            // For now, just use the custom description
+            description.to_string()
+        } else {
+            // Fall back to automatic formatting
+            self.format_exit_condition_status(&exit.condition)
         }
     }
 
