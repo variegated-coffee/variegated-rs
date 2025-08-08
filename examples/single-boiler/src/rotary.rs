@@ -251,6 +251,11 @@ where
                         let menu_state = ListMenuState::new();
                         self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state);
                     }
+                    UIState::RoutineExecution => {
+                        // Cancel the currently running routine
+                        self.command_sender.send(MachineCommand::CancelRoutine).await;
+                        self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);
+                    }
                     _ => {
                         self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);
                     }
