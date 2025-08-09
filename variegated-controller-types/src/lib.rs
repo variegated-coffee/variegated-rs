@@ -5,11 +5,12 @@ use core::time::Duration;
 use heapless::FnvIndexMap;
 use variegated_control_algorithm::pid::PidOut;
 
-const MAX_BOILERS: usize = 8;
-const MAX_GROUPS: usize = 4;
-const MAX_WATER_TAPS: usize = 4;
-const MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS: usize = 2;
-const MAX_TANKS: usize = 1;
+pub const MAX_BOILERS: usize = 8;
+pub const MAX_GROUPS: usize = 4;
+pub const MAX_WATER_TAPS: usize = 4;
+pub const MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS: usize = 2;
+pub const MAX_TANKS: usize = 1;
+pub const MAX_PERIPHERALS: usize = 16;
 
 
 pub type TemperatureType = f32; // Celsius
@@ -38,6 +39,8 @@ pub type PidLimits = variegated_control_algorithm::pid::Limits<f32>;
 pub type ExternalSensorId = u8; // Unique identifier for external sensors
 
 pub type EnvironmentalSensorId = u8; // Unique identifier for environmental sensors
+
+pub type PeripheralId = u16; // Unique identifier for peripherals
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -194,6 +197,46 @@ pub enum MachineMode {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PeripheralInfo {
+    pub peripheral_type: PeripheralType,
+    pub is_available: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default)]
+pub struct PeripheralStatus {
+    pub peripherals: FnvIndexMap<PeripheralId, PeripheralInfo, MAX_PERIPHERALS>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for PeripheralStatus {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "PeripheralStatus {{ peripherals: [");
+        for (id, info) in &self.peripherals {
+            defmt::write!(f, "({}, {:?}, {}), ", id, info.peripheral_type, info.is_available);
+        }
+        defmt::write!(f, "] }}");
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum PeripheralType {
+    #[default]
+    Scale,
+    PressureSensor,
+}
+
+pub trait PeripheralStatusProvider {
+    fn get_peripheral_id(&self) -> PeripheralId;
+    fn get_peripheral_type(&self) -> PeripheralType;
+    fn is_available(&self) -> bool;
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
@@ -202,6 +245,7 @@ pub struct Status {
     pub current_routine: Option<RoutineIndex>,
     pub routine_step: Option<usize>,
     pub comms_status: Option<CommsStatus>,
+    pub peripheral_status: PeripheralStatus,
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
 
@@ -214,6 +258,7 @@ impl Status {
             current_routine: None,
             routine_step: None,
             comms_status: None,
+            peripheral_status: PeripheralStatus::default(),
 //            environmental_temperature_sensors: FnvIndexMap::new(),
         }
     }

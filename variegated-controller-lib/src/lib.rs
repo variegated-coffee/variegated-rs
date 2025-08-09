@@ -9,12 +9,13 @@ use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
+use embassy_sync::watch;
 use embassy_time::{Instant, Timer};
 use heapless::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
-use variegated_hal::{Boiler, Group};
-use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
+use variegated_hal::{Boiler, Group, PeripheralRegistry};
+use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
@@ -59,6 +60,7 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     temperature_movavg: MovAvg<f32, f32, 10>,
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
+    peripheral_registry: &'a PeripheralRegistry<'a>,
 }
 
 impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, N_CHANNEL, N_WATCH, N_SUBS> {
@@ -69,6 +71,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         group: Group<'a, M, N_WATCH>,
         configuration: SingleBoilerSingleGroupConfiguration,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
+        peripheral_registry: &'a PeripheralRegistry<'a>,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -85,6 +88,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             temperature_movavg: MovAvg::default(),
             comms_status: None,
             comms_status_received_instant: None,
+            peripheral_registry,
         }
     }
 
@@ -231,7 +235,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             SingleBoilerSingleGroupControllerState::SteamModeIdle => (Output::Off, boiler_output.clone()),
             _ => (boiler_output.clone(), Output::Off),
         };
-
+        
         let brew_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
@@ -282,6 +286,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             current_routine: self.current_routine.as_ref().and_then(|rxc| Some(rxc.routine_index)),
             routine_step: self.current_routine.as_ref().and_then(|rxc| rxc.current_step),
             comms_status,
+            peripheral_status: self.peripheral_registry.get_peripheral_status(),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());

@@ -3,14 +3,14 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use core::matches;
 use async_trait::async_trait;
 use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
-use variegated_controller_types::WeightType;
+use heapless::FnvIndexMap;
+use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS};
 use crate::scale::ScaleConfiguration;
 
 pub mod gpio;
@@ -279,4 +279,37 @@ pub trait ValveMechanism {
 
 pub trait WaterMixerMechanism {
     fn set_mixing_proportions(&mut self, hot_percent: MixingProportionType) -> Result<(), WaterMixerMechanismError>;
+}
+
+pub struct PeripheralRegistry<'a> {
+    providers: FnvIndexMap<PeripheralId, &'a dyn PeripheralStatusProvider, MAX_PERIPHERALS>,
+}
+
+impl<'a> PeripheralRegistry<'a> {
+    pub fn new() -> Self {
+        Self {
+            providers: FnvIndexMap::new(),
+        }
+    }
+
+    pub fn register(&mut self, provider: &'a dyn PeripheralStatusProvider) {
+        let id = provider.get_peripheral_id();
+        let _ = self.providers.insert(id, provider);
+    }
+
+    pub fn get_peripheral_status(&self) -> PeripheralStatus {
+        let mut status = PeripheralStatus::default();
+        
+        for (id, provider) in &self.providers {
+            let _ = status.peripherals.insert(
+                *id,
+                PeripheralInfo {
+                    peripheral_type: provider.get_peripheral_type(),
+                    is_available: provider.is_available(),
+                },
+            );
+        }
+        
+        status
+    }
 }

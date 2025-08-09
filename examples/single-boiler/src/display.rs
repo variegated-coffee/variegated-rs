@@ -24,14 +24,14 @@ use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_7X13};
 use embedded_graphics::text::{Alignment, TextStyle, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
-use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, Status, Output as ControllerOutput, RoutineIndex};
+use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition};
 use variegated_instrumentation::async_task_loop;
 
-use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber};
+use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
 use crate::rotary::{IdleSubState, ScaleSettingsSubState, UIState, UIStatus};
 use crate::list_menu::{ListMenuType, ListMenuState};
 
@@ -328,6 +328,34 @@ impl DisplayController {
         y_pos += 7;
         
         Text::with_baseline("FW: v0.1.0", Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
+        y_pos += 7;
+        
+        y_pos += 3; // Add spacing
+        
+        // Display peripheral status
+        Text::with_baseline("Peripherals:", Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+            .draw(&mut self.display)
+            .unwrap();
+        y_pos += 7;
+        
+        // Check for Gravity scale
+        let scale_status = if let Some(scale_info) = self.status.peripheral_status.peripherals.get(&GRAVITY_PERIPHERAL_ID) {
+            if scale_info.peripheral_type == PeripheralType::Scale {
+                if scale_info.is_available {
+                    "Scale: Connected"
+                } else {
+                    "Scale: Disconnected"
+                }
+            } else {
+                "Scale: Unknown"
+            }
+        } else {
+            "Scale: Not found"
+        };
+        
+        Text::with_baseline(scale_status, Point::new(0, y_pos), self.text_style_small, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
 
