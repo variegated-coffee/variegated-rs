@@ -29,7 +29,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
-use variegated_hal::{Boiler, Group, WithTask};
+use variegated_hal::{Boiler, Group, WithTask, PeripheralRegistry};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
@@ -72,11 +72,13 @@ use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLam
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
 use variegated_hal::scale::{gravity, ScaleController};
-use variegated_hal::scale::gravity::{GravityController, GravityDevice};
+use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
 use variegated_instrumentation::async_task_loop;
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
 use crate::rotary::{UIStatus};
+
+pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
@@ -234,6 +236,8 @@ static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = St
 static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
+static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
+static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
@@ -315,38 +319,30 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
     let output_flow_sig: &'static Watch<_, _, 3> = OUTPUT_FLOW_SIGNAL.init(Watch::new());
+    let gravity_connected_sig: &'static Signal<NoopRawMutex, bool> = GRAVITY_CONNECTED_SIGNAL.init(Signal::new());
     let gravity_command_channel: &'static Channel<_, _, 3> = GRAVITY_COMMAND_CHANNEL.init(Channel::new());
 
-    let mut i2c_dev = I2cDevice::new(i2c_bus);
-    let mut gravity = Gravity::new(i2c_dev, None);
+    // Always create the gravity device - it will handle connection retries internally
+    let i2c_dev = I2cDevice::new(i2c_bus);
+    let gravity = Gravity::new(i2c_dev, None);
+    let gravity_mutex = GRAVITY.init(Mutex::new(gravity));
+    
+    let mut gravity_device = Some(GravityDevice::new(
+        gravity_mutex,
+        GravityChannel::Ch1,
+        Some(output_weight_sig.sender()),
+        Some(output_flow_sig.sender()),
+        ConversionParameters::linear_conversion(0.001, 0.0),
+        ConversionParameters::linear_conversion(0.001, 0.0),
+        gravity_command_channel.receiver(),
+        Duration::from_millis(100),
+    ).with_connected_signal(gravity_connected_sig));
+    
+    info!("Gravity sensor initialized - will attempt connection with retry");
 
-    let status = gravity.check_compatibility().await;
-
-    let mut gravity_device = if let Ok(_) = status {
-            info!("Gravity sensor detected and compatible");
-            let gravity_mutex = GRAVITY.init(Mutex::new(gravity));
-            let device = GravityDevice::new(
-                gravity_mutex,
-                GravityChannel::Ch1,
-                Some(output_weight_sig.sender()),
-                Some(output_flow_sig.sender()),
-                ConversionParameters::linear_conversion(0.001, 0.0),
-                ConversionParameters::linear_conversion(0.001, 0.0),
-                gravity_command_channel.receiver(),
-                Duration::from_millis(100),
-            );
-
-            Some(device)
-    } else {
-        warn!("Gravity sensor not detected or incompatible, proceeding without it");
-        None
-    };
-
-    let scale_controller: Option<Box<dyn ScaleController>> = if gravity_device.is_some() {
-        Some(Box::new(GravityController::new(
-            gravity_command_channel.sender()
-        )))
-    } else { None };
+    let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(GravityController::new(
+        gravity_command_channel.sender()
+    )));
 
     /*let mut mcp9600 = MCP9600::new(i2c_dev, DeviceAddr::AD0);
 
@@ -486,6 +482,11 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(output_weight_sig.receiver().unwrap()),
     );
 
+    // Create peripheral registry and register peripherals
+    let mut peripheral_registry = PeripheralRegistry::new();
+    let gravity_status_provider = GRAVITY_STATUS_PROVIDER.init(GravityStatusProvider::new(GRAVITY_PERIPHERAL_ID, gravity_connected_sig));
+    peripheral_registry.register(gravity_status_provider);
+
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
 
@@ -512,7 +513,8 @@ async fn main_task(spawner: Spawner) -> ! {
         boiler,
         group,
         configuration,
-        routine_repository_ref
+        routine_repository_ref,
+        &peripheral_registry,
     );
 
     let button_p = button_peripherals!(p);

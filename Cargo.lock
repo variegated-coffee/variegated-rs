@@ -1977,6 +1977,7 @@ dependencies = [
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "heapless 0.8.0",
  "log",
  "movavg",
  "variegated-adc-tools",
