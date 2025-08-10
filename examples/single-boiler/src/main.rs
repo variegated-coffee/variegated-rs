@@ -401,7 +401,7 @@ async fn main_task(spawner: Spawner) -> ! {
         ads,
         temp_sig.sender(),
         RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::AIN3, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain4, 1620.0),
-        ConversionParameters::pt100(),
+        ConversionParameters::pt100().with_kalman_filter(0.001, 0.05, 1.0),
         -2.95
     );
 
@@ -414,7 +414,9 @@ async fn main_task(spawner: Spawner) -> ! {
             ReferenceInput::Refp1Refn1,
             5.0
         ),
-        ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 15.0),
+        ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 15.0)
+            .with_median_filter(5)
+            .with_kalman_filter(0.05, 0.1, 0.5),
         0.0
     );
 

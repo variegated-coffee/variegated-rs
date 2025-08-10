@@ -70,9 +70,9 @@ pub struct ProtocolConfig {
     pub max_environmental_temperature_sensors: usize,
 }
 
-const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 
-const PROTOCOL_CONFIG: ProtocolConfig = ProtocolConfig {
+pub const PROTOCOL_CONFIG: ProtocolConfig = ProtocolConfig {
     protocol_version: PROTOCOL_VERSION,
     max_boilers: MAX_BOILERS,
     max_groups: MAX_GROUPS,

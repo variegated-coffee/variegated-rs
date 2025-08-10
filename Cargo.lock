@@ -1838,6 +1838,7 @@ checksum = "3b59fc5417e036e53226bbebd90196825d358624fd5577432c4e486c95b1b096"
 name = "variegated-adc-tools"
 version = "0.1.0"
 dependencies = [
+ "heapless 0.8.0",
  "micromath",
 ]
 

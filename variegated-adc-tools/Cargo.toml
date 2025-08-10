@@ -9,3 +9,4 @@ bench = false
 
 [dependencies]
 micromath = "2.0.0"
+heapless = "0.8.0"
