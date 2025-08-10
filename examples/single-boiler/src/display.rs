@@ -648,7 +648,9 @@ impl DisplayController {
     }
 
     async fn render_routine_execution(&mut self) {
-        if let (Some(routine_index), Some(current_step)) = (self.status.current_routine, self.status.routine_step) {
+        if let Some(routine_execution) = &self.status.routine_execution {
+            let routine_index = routine_execution.routine_index;
+            if let Some(current_step) = routine_execution.current_step {
             // Get routine from repository
             let routine_repo = self.routine_repository.lock().await;
             if let Some(routine) = routine_repo.get_routine(routine_index as usize) {
@@ -760,6 +762,30 @@ impl DisplayController {
                                 .draw(&mut self.display)
                                 .unwrap();
                             }
+
+                            if let Some(pressure) = group_status.pressure {
+                                // Group pressure
+                                Text::with_baseline(
+                                    &format!("{:.1}bar", pressure),
+                                    Point::new(24, 48),
+                                    self.text_style_small,
+                                    Baseline::Top
+                                )
+                                .draw(&mut self.display)
+                                .unwrap();
+                            }
+
+                            if let Some(flow) = group_status.input_flow_rate {
+                                // Group input flow rate
+                                Text::with_baseline(
+                                    &format!("{:.1}ml/s", flow),
+                                    Point::new(24, 56),
+                                    self.text_style_small,
+                                    Baseline::Top
+                                )
+                                .draw(&mut self.display)
+                                .unwrap();
+                            }
                         }
                         else {
                             // If not brewing, show "Not brewing" message
@@ -811,6 +837,7 @@ impl DisplayController {
                 Text::with_baseline("Unknown routine", Point::new(0, 0), self.text_style_small, Baseline::Top)
                     .draw(&mut self.display)
                     .unwrap();
+            }
             }
         } else {
             // Fallback if no routine is running
@@ -870,7 +897,17 @@ impl DisplayController {
                 }
             }
             RoutineExitCondition::After(duration) => {
-                Some(format!("{}s", duration.as_secs()))
+                if let Some(routine_execution) = &self.status.routine_execution {
+                    if let Some(step_elapsed) = routine_execution.step_elapsed_time {
+                        let elapsed = step_elapsed.as_secs();
+                        let target = duration.as_secs();
+                        Some(format!("{}>{}s", elapsed, target))
+                    } else {
+                        Some(format!("{}s", duration.as_secs()))
+                    }
+                } else {
+                    Some(format!("{}s", duration.as_secs()))
+                }
             }
             RoutineExitCondition::AfterDurationRelativeToStart(duration) => {
                 if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
@@ -1000,8 +1037,8 @@ impl DisplayController {
             _ => {}
         }
 
-        if self.status.current_routine.is_some() {
-            Text::with_baseline(format!("Routine {}, step {}", self.status.current_routine.unwrap_or_default(), self.status.routine_step.unwrap_or_default()).as_str(), Point::new(0, 49), self.text_style_small, Baseline::Top)
+        if let Some(routine_execution) = &self.status.routine_execution {
+            Text::with_baseline(format!("Routine {}, step {}", routine_execution.routine_index, routine_execution.current_step.unwrap_or_default()).as_str(), Point::new(0, 49), self.text_style_small, Baseline::Top)
                 .draw(&mut self.display)
                 .unwrap();
         } else {

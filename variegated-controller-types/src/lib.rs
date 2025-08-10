@@ -237,13 +237,22 @@ pub trait PeripheralStatusProvider {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct RoutineExecutionStatus {
+    pub routine_index: RoutineIndex,
+    pub current_step: Option<usize>,
+    pub step_elapsed_time: Option<Duration>,
+    pub total_elapsed_time: Option<Duration>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
     pub mode: MachineMode,
-    pub current_routine: Option<RoutineIndex>,
-    pub routine_step: Option<usize>,
+    pub routine_execution: Option<RoutineExecutionStatus>,
     pub comms_status: Option<CommsStatus>,
     pub peripheral_status: PeripheralStatus,
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
@@ -255,8 +264,7 @@ impl Status {
             boiler_statuses: FnvIndexMap::new(),
             group_statuses: FnvIndexMap::new(),
             mode: MachineMode::Off,
-            current_routine: None,
-            routine_step: None,
+            routine_execution: None,
             comms_status: None,
             peripheral_status: PeripheralStatus::default(),
 //            environmental_temperature_sensors: FnvIndexMap::new(),
@@ -275,8 +283,8 @@ impl Status {
 #[cfg(feature = "defmt")]
 impl defmt::Format for Status {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "NewStatus {{ mode: {:#?}, current_routine: {:#?}, routine_step: {:#?} }}",
-            /*self.boiler_statuses, self.group_statuses, */self.mode, self.current_routine, self.routine_step);
+        defmt::write!(f, "NewStatus {{ mode: {:#?}, routine_execution: {:#?} }}",
+            /*self.boiler_statuses, self.group_statuses, */self.mode, self.routine_execution);
     }
 }
 
