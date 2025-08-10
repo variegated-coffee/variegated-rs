@@ -28,7 +28,7 @@ use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, S
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
-use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition};
+use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
@@ -966,6 +966,20 @@ impl DisplayController {
         }
     }
     
+    /// Helper method to resolve a ParameterValue using resolved parameters from routine execution
+    fn resolve_parameter_value(&self, param_value: &ParameterValue) -> f32 {
+        match param_value {
+            ParameterValue::Static(value) => *value,
+            ParameterValue::Parameter(index) => {
+                if let Some(routine_execution) = &self.status.routine_execution {
+                    routine_execution.resolved_parameters.get(index).copied().unwrap_or(0.0)
+                } else {
+                    0.0 // No routine execution, use fallback
+                }
+            }
+        }
+    }
+
     fn format_exit_condition_process_value(&self, condition: &RoutineExitCondition) -> Option<alloc::string::String> {
         use variegated_controller_types::{SingleBoilerSingleGroupControllerBoilers::BrewBoiler, SingleGroupControllerGroups::SingleGroup};
         
@@ -976,59 +990,64 @@ impl DisplayController {
                     StateCondition::BoilerTemperatureBelow(_, target) => {
                         let current = self.status.get_boiler_status(BrewBoiler.as_index())
                             .and_then(|s| s.temperature);
-                        current.map(|temp| format!("{:.0}>{:.0}C", temp, target))
+                        let target_value = self.resolve_parameter_value(target);
+                        current.map(|temp| format!("{:.0}>{:.0}C", temp, target_value))
                     }
                     StateCondition::BoilerPressureAbove(_, target) |
                     StateCondition::BoilerPressureBelow(_, target) => {
                         let current = self.status.get_boiler_status(BrewBoiler.as_index())
                             .and_then(|s| s.pressure);
-                        current.map(|press| format!("{:.0}>{:.0}bar", press, target))
+                        let target_value = self.resolve_parameter_value(target);
+                        current.map(|press| format!("{:.0}>{:.0}bar", press, target_value))
                     }
                     StateCondition::GroupInputFlowRateAbove(_, target) |
                     StateCondition::GroupInputFlowRateBelow(_, target) => {
                         let current = self.status.get_group_status(SingleGroup.as_index())
                             .and_then(|s| s.input_flow_rate);
-                        current.map(|flow| format!("{:.0}>{:.0}ml/s", flow, target))
+                        let target_value = self.resolve_parameter_value(target);
+                        current.map(|flow| format!("{:.0}>{:.0}ml/s", flow, target_value))
                     }
                     StateCondition::GroupPressureAbove(_, target) |
                     StateCondition::GroupPressureBelow(_, target) => {
                         let current = self.status.get_group_status(SingleGroup.as_index())
                             .and_then(|s| s.pressure);
-                        current.map(|press| format!("{:.0}>{:.0}bar", press, target))
+                        let target_value = self.resolve_parameter_value(target);
+                        current.map(|press| format!("{:.0}>{:.0}bar", press, target_value))
                     }
                     StateCondition::OutputWeightAbove(_, target) |
                     StateCondition::OutputWeightBelow(_, target) => {
                         let current = self.status.get_group_status(SingleGroup.as_index())
                             .and_then(|s| s.output_weight);
-                        current.map(|weight| format!("{:.0}>{:.0}g", weight, target))
+                        let target_value = self.resolve_parameter_value(target);
+                        current.map(|weight| format!("{:.0}>{:.0}g", weight, target_value))
                     }
                     _ => None
                 }
             }
-            RoutineExitCondition::After(duration) => {
+            RoutineExitCondition::After(param_value) => {
+                let target_secs = self.resolve_parameter_value(param_value) as u64;
                 if let Some(routine_execution) = &self.status.routine_execution {
                     if let Some(step_elapsed) = routine_execution.step_elapsed_time {
                         let elapsed = step_elapsed.as_secs();
-                        let target = duration.as_secs();
-                        Some(format!("{}>{}s", elapsed, target))
+                        Some(format!("{}>{}s", elapsed, target_secs))
                     } else {
-                        Some(format!("{}s", duration.as_secs()))
+                        Some(format!("{}s", target_secs))
                     }
                 } else {
-                    Some(format!("{}s", duration.as_secs()))
+                    Some(format!("{}s", target_secs))
                 }
             }
-            RoutineExitCondition::AfterDurationRelativeToStart(duration) => {
+            RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
+                let target_secs = self.resolve_parameter_value(param_value) as u64;
                 if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
                     if let Some(brew_time) = group_status.brew_time {
                         let elapsed = brew_time.as_secs();
-                        let target = duration.as_secs();
-                        Some(format!("{}>{}s", elapsed, target))
+                        Some(format!("{}>{}s", elapsed, target_secs))
                     } else {
-                        Some(format!(">{}s", duration.as_secs()))
+                        Some(format!(">{}s", target_secs))
                     }
                 } else {
-                    Some(format!(">{}s", duration.as_secs()))
+                    Some(format!(">{}s", target_secs))
                 }
             }
             _ => None
@@ -1039,11 +1058,13 @@ impl DisplayController {
         match condition {
             RoutineExitCondition::Always => "Ready to proceed".into(),
             RoutineExitCondition::Never => "Manual intervention needed".into(),
-            RoutineExitCondition::After(duration) => {
-                format!("Wait: {}s", duration.as_secs())
+            RoutineExitCondition::After(param_value) => {
+                let target_secs = self.resolve_parameter_value(param_value) as u64;
+                format!("Wait: {}s", target_secs)
             }
-            RoutineExitCondition::AfterDurationRelativeToStart(duration) => {
-                format!("Total: {}s", duration.as_secs())
+            RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
+                let target_secs = self.resolve_parameter_value(param_value) as u64;
+                format!("Total: {}s", target_secs)
             }
             RoutineExitCondition::StateConditionMet(state_condition) => {
                 self.format_state_condition_status(state_condition)

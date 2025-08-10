@@ -496,16 +496,16 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let mut routine_repository = InMemoryRoutineRepository::new();
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index(), Duration::from_secs(5), Duration::from_secs(50), 8.0, 2.5, 1.5));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index(), 2.0, 30.0));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
+    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
+    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
@@ -542,7 +542,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(button_p.pin_steam, Pull::Up),
         command_channel.sender(),
         Some(MachineCommand::CancelRoutine),
-        Some(MachineCommand::RunRoutine(2)),
+        Some(MachineCommand::RunRoutine(2, None)),
     );
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());

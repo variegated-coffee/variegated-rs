@@ -238,7 +238,7 @@ pub async fn handle_menu_item_activation<const N: usize>(
     info!("Menu item activated: {:?}", item_id);
     let new_state = match item_id {
         MenuItemId::Routine(index) => {
-            command_sender.send(MachineCommand::RunRoutine(index as RoutineIndex)).await;
+            command_sender.send(MachineCommand::RunRoutine(index as RoutineIndex, None)).await;
             Some(UIState::RoutineExecution)
         }
         MenuItemId::SettingsInformation => Some(UIState::SettingsInformation),
