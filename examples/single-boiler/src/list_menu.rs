@@ -15,6 +15,7 @@ pub enum MenuItemId {
     Routine(usize),
     SettingsInformation,
     SettingsScaleSettings,
+    SettingsManualBrew,
     SettingsDebugInfo,
 }
 
@@ -31,6 +32,10 @@ const SETTINGS_MENU_ITEMS: &[SettingsMenuDefinition] = &[
     SettingsMenuDefinition {
         label: "Scale Settings", 
         id: MenuItemId::SettingsScaleSettings,
+    },
+    SettingsMenuDefinition {
+        label: "Manual Brew",
+        id: MenuItemId::SettingsManualBrew,
     },
     SettingsMenuDefinition {
         label: "Debug info",

@@ -32,7 +32,7 @@ use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
-use crate::rotary::{IdleSubState, ScaleSettingsSubState, UIState, UIStatus};
+use crate::rotary::{ControlMode, IdleSubState, ScaleSettingsSubState, UIState, UIStatus};
 use crate::list_menu::{ListMenuType, ListMenuState};
 
 pub type DisplayBus = Mutex<NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>>;
@@ -161,6 +161,9 @@ impl DisplayController {
             }
             UIState::RoutineExecution => {
                 self.render_routine_execution().await;
+            }
+            UIState::ManualBrew(control_mode) => {
+                self.render_manual_brew(*control_mode).await;
             }
             _ => {
                 self.render_old().await;
@@ -645,6 +648,112 @@ impl DisplayController {
 
 
         self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+    }
+
+    async fn render_manual_brew(&mut self, control_mode: ControlMode) {
+        // Title
+        Text::with_text_style("Manual Brew", Point::new(64, 0), self.text_style_medium_small, 
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Draw separator line
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Current control mode and parameter value (large text)
+        let current_value = self.ui_status.manual_brew_parameters.get_value(control_mode);
+        let value_text = match control_mode {
+            ControlMode::PumpDutyCycle => format!("{:.0}{}", current_value, control_mode.unit()),
+            ControlMode::PumpFlowRate => format!("{:.1}{}", current_value, control_mode.unit()),
+            ControlMode::PumpPressure => format!("{:.1}{}", current_value, control_mode.unit()),
+        };
+
+        Text::with_text_style(&value_text, Point::new(64, 12), self.text_style_large,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Control mode name below the value
+        Text::with_text_style(control_mode.display_name(), Point::new(64, 32), self.text_style_medium,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Real-time brewing data in small text at the bottom
+        if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
+            let mut y_pos = 46;
+
+            // Current brew time and pressure on first line
+            let mut line1_parts = Vec::new();
+            if let Some(brew_time) = group_status.brew_time {
+                line1_parts.push(format!("{}s", brew_time.as_secs()));
+            } else {
+                line1_parts.push("0s".to_string());
+            }
+
+            if let Some(pressure) = group_status.pressure {
+                line1_parts.push(format!("{:.1}bar", pressure));
+            }
+
+            if !line1_parts.is_empty() {
+                let line1_text = line1_parts.join("  ");
+                Text::with_baseline(&line1_text, Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+                    .draw(&mut self.display)
+                    .unwrap();
+            }
+
+            y_pos += 7;
+
+            // Flow rates on second line  
+            let mut line2_parts = Vec::new();
+            if let Some(input_flow) = group_status.input_flow_rate {
+                line2_parts.push(format!("In:{:.1}", input_flow));
+            }
+            if let Some(output_flow) = group_status.output_flow_rate {
+                line2_parts.push(format!("Out:{:.1}", output_flow));
+            }
+
+            if !line2_parts.is_empty() {
+                let line2_text = line2_parts.join("  ");
+                Text::with_baseline(&line2_text, Point::new(0, y_pos), self.text_style_small, Baseline::Top)
+                    .draw(&mut self.display)
+                    .unwrap();
+            }
+
+            // Output weight and pump duty cycle on the right side
+            if let Some(weight) = group_status.output_weight {
+                Text::with_text_style(&format!("{:.1}g", weight), Point::new(128, 46), self.text_style_small,
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Right)
+                        .baseline(Baseline::Top)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+            }
+
+            Text::with_text_style(&format!("Pump:{:.0}%", group_status.pump_output.duty_cycle()), Point::new(128, 53), self.text_style_small,
+                TextStyleBuilder::new()
+                    .alignment(Alignment::Right)
+                    .baseline(Baseline::Top)
+                    .build())
+                .draw(&mut self.display)
+                .unwrap();
+        }
     }
 
     async fn render_routine_execution(&mut self) {
