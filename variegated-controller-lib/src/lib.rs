@@ -15,7 +15,7 @@ use heapless::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, PeripheralRegistry};
-use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
+use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
@@ -281,12 +281,28 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             self.comms_status.clone()
         };
 
+        let routine_execution = self.current_routine.as_ref().map(|rxc| {
+            let step_elapsed_time = rxc.step_start_time.map(|start| {
+                let elapsed = start.elapsed();
+                core::time::Duration::from_secs(elapsed.as_secs())
+            });
+            let total_elapsed_time = rxc.execution_start_time.map(|start| {
+                let elapsed = start.elapsed();
+                core::time::Duration::from_secs(elapsed.as_secs())
+            });
+            RoutineExecutionStatus {
+                routine_index: rxc.routine_index,
+                current_step: rxc.current_step,
+                step_elapsed_time,
+                total_elapsed_time,
+            }
+        });
+
         let status = Status {
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (VirtualSteamBoiler.as_index(), virtual_steam_boiler_status)]),
             group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
             mode: Default::default(),
-            current_routine: self.current_routine.as_ref().and_then(|rxc| Some(rxc.routine_index)),
-            routine_step: self.current_routine.as_ref().and_then(|rxc| rxc.current_step),
+            routine_execution,
             comms_status,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
         };
