@@ -1,6 +1,6 @@
 use alloc::vec;
 use alloc::{format, vec::Vec};
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use core::cmp::PartialEq;
 use defmt::info;
 use display_interface_spi::SPIInterface;
@@ -28,7 +28,8 @@ use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, S
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
-use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue};
+use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit};
+use crate::rotary::{RoutineParameterEditState};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
@@ -143,12 +144,14 @@ impl DisplayController {
         self.display.clear();
         self.render_status_animation();
 
-        match &self.ui_status.state {
+        // Clone the necessary data to avoid borrowing issues
+        let state = self.ui_status.state.clone();
+        match state {
             UIState::Idle(substate) => {
-                self.render_idle_state(*substate).await;
+                self.render_idle_state(substate).await;
             }
             UIState::ListMenu(menu_type, menu_state) => {
-                self.render_list_menu(*menu_type, *menu_state).await;
+                self.render_list_menu(menu_type, menu_state).await;
             }
             UIState::SettingsInformation => {
                 self.render_settings_information().await;
@@ -157,13 +160,19 @@ impl DisplayController {
                 self.render_old().await;
             }
             UIState::ScaleSettings(substate) => {
-                self.render_scale_settings(*substate).await;
+                self.render_scale_settings(substate).await;
             }
             UIState::RoutineExecution => {
                 self.render_routine_execution().await;
             }
             UIState::ManualBrew(control_mode) => {
-                self.render_manual_brew(*control_mode).await;
+                self.render_manual_brew(control_mode).await;
+            }
+            UIState::RoutineParameters(routine_index, edit_state) => {
+                self.render_routine_parameters(routine_index, &edit_state).await;
+            }
+            UIState::ParameterManipulation { param_name, current_value, param_unit, .. } => {
+                self.render_parameter_manipulation(&param_name, current_value, param_unit).await;
             }
             _ => {
                 self.render_old().await;
@@ -1222,6 +1231,203 @@ impl DisplayController {
                 self.ui_status = ui_status_update;
             }
         }
+    }
+    
+    /// Format parameter value with appropriate unit
+    fn format_parameter_value(&self, value: f32, unit: Option<ParameterUnit>) -> String {
+        match unit {
+            Some(ParameterUnit::Seconds) => format!("{:.1}s", value),
+            Some(ParameterUnit::Celsius) => format!("{:.1}°C", value),
+            Some(ParameterUnit::Bar) => format!("{:.1}bar", value),
+            Some(ParameterUnit::MillilitersPerSecond) => format!("{:.1}ml/s", value),
+            Some(ParameterUnit::Grams) => format!("{:.1}g", value),
+            Some(ParameterUnit::Percent) => format!("{:.1}%", value),
+            None => format!("{:.1}", value),
+        }
+    }
+    
+    /// Render routine parameters view (follows ListMenu pattern exactly)
+    async fn render_routine_parameters(&mut self, routine_index: RoutineIndex, edit_state: &RoutineParameterEditState) {
+        // Title (same as list menu)
+        Text::with_text_style(&edit_state.routine_name, Point::new(64, 0), self.text_style_medium_small, 
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Separator line (same as list menu)
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Back button in upper left (EXACT same code as list menu)
+        let back_selected = edit_state.is_back_button_selected();
+        let back_color = if back_selected {
+            Rectangle::new(Point::new(0, 0), Size::new(20, 10))
+                .into_styled(PrimitiveStyleBuilder::new()
+                    .fill_color(BinaryColor::On)
+                    .build())
+                .draw(&mut self.display)
+                .unwrap();
+            BinaryColor::Off
+        } else {
+            BinaryColor::On
+        };
+
+        self.text_style_medium_small.set_text_color(Some(back_color));
+        Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small, 
+            TextStyleBuilder::new()
+                .alignment(Alignment::Left)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+        self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+
+        // Get routine to display parameters
+        let repo = self.routine_repository.lock().await;
+        if let Some(routine) = repo.get_routine(routine_index) {
+            // Main content area starts at y=12 (same as list menu)
+            let visible_items = RoutineParameterEditState::VISIBLE_ITEMS;
+            
+            // Display parameters with current values
+            for i in 0..visible_items {
+                let param_index = edit_state.scroll_offset + i;
+                if param_index >= routine.parameters().len() {
+                    break; // No more parameters
+                }
+                
+                let y = 12 + i as i32 * 10;
+                let item_index = param_index + 1; // +1 for back button
+                let is_selected = edit_state.selected_index == item_index;
+                
+                let text_color = if is_selected {
+                    Rectangle::new(Point::new(0, y), Size::new(123, 10))
+                        .into_styled(PrimitiveStyleBuilder::new()
+                            .fill_color(BinaryColor::On)
+                            .build())
+                        .draw(&mut self.display)
+                        .unwrap();
+                    BinaryColor::Off
+                } else {
+                    BinaryColor::On
+                };
+                
+                // Format parameter with current value in parentheses
+                let param = &routine.parameters()[param_index];
+                let current_value = edit_state.parameter_values.get(&param.index).copied().unwrap_or(param.default);
+                let value_str = self.format_parameter_value(current_value, param.unit);
+                let param_text = format!("{} ({})", param.name, value_str);
+                
+                self.text_style_medium_small.set_text_color(Some(text_color));
+                Text::with_text_style(&param_text, Point::new(2, y), 
+                    self.text_style_medium_small, 
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Left)
+                        .baseline(Baseline::Top)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+            }
+            
+            // Show "Execute Routine" at bottom if visible
+            let execute_index = routine.parameters().len() + 1; // After back + parameters
+            let visible_end = edit_state.scroll_offset + visible_items;
+            if execute_index >= edit_state.scroll_offset && execute_index < visible_end {
+                let y = 12 + (execute_index - edit_state.scroll_offset) as i32 * 10;
+                let is_selected = edit_state.selected_index == execute_index;
+                
+                let text_color = if is_selected {
+                    Rectangle::new(Point::new(0, y), Size::new(123, 10))
+                        .into_styled(PrimitiveStyleBuilder::new()
+                            .fill_color(BinaryColor::On)
+                            .build())
+                        .draw(&mut self.display)
+                        .unwrap();
+                    BinaryColor::Off
+                } else {
+                    BinaryColor::On
+                };
+                
+                self.text_style_medium_small.set_text_color(Some(text_color));
+                Text::with_text_style("Execute Routine", Point::new(2, y), 
+                    self.text_style_medium_small, 
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Left)
+                        .baseline(Baseline::Top)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
+            }
+            
+            // Draw scroll bar if needed (same logic as list menu)
+            let total_items = edit_state.get_total_items(routine);
+            if total_items > visible_items {
+                self.render_scroll_bar(
+                    total_items,
+                    visible_items,
+                    Some(edit_state.scroll_offset),
+                    12,
+                    64
+                );
+            }
+        }
+    }
+    
+    /// Render parameter manipulation view
+    async fn render_parameter_manipulation(&mut self, param_name: &str, current_value: f32, param_unit: Option<ParameterUnit>) {
+        // Parameter name as title
+        Text::with_text_style(param_name, Point::new(64, 0), self.text_style_medium_small, 
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Separator line
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Current value prominently displayed with unit
+        let value_text = self.format_parameter_value(current_value, param_unit);
+        Text::with_text_style(&value_text, Point::new(64, 20), self.text_style_large,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Adjustment instructions
+        Text::with_text_style("Rotate to adjust", Point::new(64, 45), self.text_style_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+        
+        Text::with_text_style("Press to confirm", Point::new(64, 55), self.text_style_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
     }
 }
 

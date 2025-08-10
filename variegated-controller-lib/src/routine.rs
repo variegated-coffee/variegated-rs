@@ -36,7 +36,7 @@ impl ParameterValue {
     }
 }
 
-#[derive(Clone, Copy, Debug, Format)]
+#[derive(Clone, Copy, Debug, Format, PartialEq)]
 pub enum ParameterUnit {
     Seconds,
     Celsius,
