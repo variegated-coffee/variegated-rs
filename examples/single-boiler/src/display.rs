@@ -674,36 +674,38 @@ impl DisplayController {
                     .draw(&mut self.display)
                     .unwrap();
 
-                // Step number and description
-                let step_text = format!("Step {}", current_step + 1);
-                Text::with_baseline(
-                    &step_text,
-                    Point::new(0, 12),
-                    self.text_style_medium_small,
-                    Baseline::Top
-                )
-                .draw(&mut self.display)
-                .unwrap();
-
                 // Get current step and show description
                 if let Some(step) = routine.steps().get(current_step as usize) {
                     if let Some(description) = step.description() {
                         Text::with_baseline(
                             description,
-                            Point::new(0, 23),
-                            self.text_style_small,
+                            Point::new(0, 12),
+                            self.text_style_medium_small,
                             Baseline::Top
                         )
                         .draw(&mut self.display)
                         .unwrap();
+                    } else {
+                        // Step number and description
+                        let step_text = format!("Step {}", current_step + 1);
+                        Text::with_baseline(
+                            &step_text,
+                            Point::new(0, 12),
+                            self.text_style_medium_small,
+                            Baseline::Top
+                        )
+                            .draw(&mut self.display)
+                            .unwrap();
                     }
 
                     // Show up to 3 exit conditions with status
-                    let mut y_pos = 32;
+                    let mut y_pos = 23;
                     let visible_exits = step.exits().iter().take(3);
                     
-                    for (i, exit) in visible_exits.enumerate() {
+                    for (_, exit) in visible_exits.enumerate() {
                         let status_text = self.format_exit_status(exit);
+                        let process_value = self.format_exit_condition_process_value(&exit.condition);
+
                         if !status_text.is_empty() {
                             Text::with_baseline(
                                 &status_text,
@@ -713,13 +715,78 @@ impl DisplayController {
                             )
                             .draw(&mut self.display)
                             .unwrap();
-                            y_pos += 7;
                         }
+
+                        if let Some(value) = process_value {
+                            Text::with_text_style(
+                                value.as_str(),
+                                Point::new(128, y_pos),
+                                self.text_style_small,
+                                TextStyleBuilder::new()
+                                    .alignment(Alignment::Right)
+                                    .baseline(Baseline::Top)
+                                    .build())
+                                .draw(&mut self.display)
+                                .unwrap();
+                        }
+
+                        y_pos += 7;
+                    }
+                    
+                    // Show brewing information if routine is active and machine is brewing
+                    if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
+                        if group_status.is_brewing {
+                            // Total brew time
+                            if let Some(brew_time) = group_status.brew_time {
+                                let brew_secs = brew_time.as_secs();
+                                Text::with_baseline(
+                                    &format!("{}s", brew_secs),
+                                    Point::new(0, 48),
+                                    self.text_style_small,
+                                    Baseline::Top
+                                )
+                                .draw(&mut self.display)
+                                .unwrap();
+                            }
+                            
+                            // Group output weight
+                            if let Some(weight) = group_status.output_weight {
+                                Text::with_baseline(
+                                    &format!("{:.1}g", weight),
+                                    Point::new(0, 56),
+                                    self.text_style_small,
+                                    Baseline::Top
+                                )
+                                .draw(&mut self.display)
+                                .unwrap();
+                            }
+                        }
+                        else {
+                            // If not brewing, show "Not brewing" message
+                            Text::with_baseline(
+                                "Not brewing",
+                                Point::new(0, 55),
+                                self.text_style_small,
+                                Baseline::Top
+                            )
+                            .draw(&mut self.display)
+                            .unwrap();
+                        }
+                    } else {
+                        // If no group status available, show "No group status" message
+                        Text::with_baseline(
+                            "No group status",
+                            Point::new(0, 55),
+                            self.text_style_small,
+                            Baseline::Top
+                        )
+                        .draw(&mut self.display)
+                        .unwrap();
                     }
                 }
 
                 // Cancel button at bottom - always selected
-                Rectangle::new(Point::new(20, 52), Size::new(88, 12))
+                Rectangle::new(Point::new(128-50, 52), Size::new(50, 12))
                     .into_styled(PrimitiveStyleBuilder::new()
                         .fill_color(BinaryColor::On)
                         .build())
@@ -728,8 +795,8 @@ impl DisplayController {
 
                 self.text_style_medium_small.set_text_color(Some(BinaryColor::Off));
                 Text::with_text_style(
-                    "Cancel Routine",
-                    Point::new(64, 58),
+                    "Cancel",
+                    Point::new(128-25, 63),
                     self.text_style_medium_small,
                     TextStyleBuilder::new()
                         .alignment(Alignment::Center)
@@ -747,27 +814,82 @@ impl DisplayController {
             }
         } else {
             // Fallback if no routine is running
-            Text::with_baseline("No routine running", Point::new(0, 0), self.text_style_small, Baseline::Top)
+            Text::with_baseline("No routine running", Point::new(0, 0), self.text_style_medium_small, Baseline::Top)
                 .draw(&mut self.display)
                 .unwrap();
         }
     }
 
     fn format_exit_status(&self, exit: &variegated_controller_lib::routine::RoutineExit) -> alloc::string::String {
-        // Prioritize custom description if available
         if let Some(description) = exit.description() {
-            // For custom descriptions, we might want to show both description and current status
-            // For now, just use the custom description
+            // No process value available, just use description
             description.to_string()
         } else {
-            // Fall back to automatic formatting
+            // No description, use automatic formatting
             self.format_exit_condition_status(&exit.condition)
+        }
+    }
+    
+    fn format_exit_condition_process_value(&self, condition: &RoutineExitCondition) -> Option<alloc::string::String> {
+        use variegated_controller_types::{SingleBoilerSingleGroupControllerBoilers::BrewBoiler, SingleGroupControllerGroups::SingleGroup};
+        
+        match condition {
+            RoutineExitCondition::StateConditionMet(state_condition) => {
+                match state_condition {
+                    StateCondition::BoilerTemperatureAbove(_, target) | 
+                    StateCondition::BoilerTemperatureBelow(_, target) => {
+                        let current = self.status.get_boiler_status(BrewBoiler.as_index())
+                            .and_then(|s| s.temperature);
+                        current.map(|temp| format!("{:.0}>{:.0}C", temp, target))
+                    }
+                    StateCondition::BoilerPressureAbove(_, target) |
+                    StateCondition::BoilerPressureBelow(_, target) => {
+                        let current = self.status.get_boiler_status(BrewBoiler.as_index())
+                            .and_then(|s| s.pressure);
+                        current.map(|press| format!("{:.0}>{:.0}bar", press, target))
+                    }
+                    StateCondition::GroupInputFlowRateAbove(_, target) |
+                    StateCondition::GroupInputFlowRateBelow(_, target) => {
+                        let current = self.status.get_group_status(SingleGroup.as_index())
+                            .and_then(|s| s.input_flow_rate);
+                        current.map(|flow| format!("{:.0}>{:.0}ml/s", flow, target))
+                    }
+                    StateCondition::GroupPressureAbove(_, target) |
+                    StateCondition::GroupPressureBelow(_, target) => {
+                        let current = self.status.get_group_status(SingleGroup.as_index())
+                            .and_then(|s| s.pressure);
+                        current.map(|press| format!("{:.0}>{:.0}bar", press, target))
+                    }
+                    StateCondition::OutputWeightAbove(_, target) |
+                    StateCondition::OutputWeightBelow(_, target) => {
+                        let current = self.status.get_group_status(SingleGroup.as_index())
+                            .and_then(|s| s.output_weight);
+                        current.map(|weight| format!("{:.0}>{:.0}g", weight, target))
+                    }
+                    _ => None
+                }
+            }
+            RoutineExitCondition::After(duration) => {
+                Some(format!("{}s", duration.as_secs()))
+            }
+            RoutineExitCondition::AfterDurationRelativeToStart(duration) => {
+                if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
+                    if let Some(brew_time) = group_status.brew_time {
+                        let elapsed = brew_time.as_secs();
+                        let target = duration.as_secs();
+                        Some(format!("{}>{}s", elapsed, target))
+                    } else {
+                        Some(format!(">{}s", duration.as_secs()))
+                    }
+                } else {
+                    Some(format!(">{}s", duration.as_secs()))
+                }
+            }
+            _ => None
         }
     }
 
     fn format_exit_condition_status(&self, condition: &RoutineExitCondition) -> alloc::string::String {
-        use embassy_time::Instant;
-        
         match condition {
             RoutineExitCondition::Always => "Ready to proceed".into(),
             RoutineExitCondition::Never => "Manual intervention needed".into(),
@@ -785,102 +907,40 @@ impl DisplayController {
     }
 
     fn format_state_condition_status(&self, condition: &StateCondition) -> alloc::string::String {
-        use variegated_controller_types::{SingleBoilerSingleGroupControllerBoilers::BrewBoiler, SingleGroupControllerGroups::SingleGroup};
-        
         match condition {
             StateCondition::Brewing(_) => "Start brewing".into(),
             StateCondition::NotBrewing(_) => "Stop brewing".into(),
-            StateCondition::BoilerTemperatureAbove(_, target) => {
-                let current = self.status.get_boiler_status(BrewBoiler.as_index())
-                    .and_then(|s| s.temperature);
-                if let Some(temp) = current {
-                    format!("Temp: {:.1}C -> {:.1}C", temp, target)
-                } else {
-                    format!("Temp target: {:.1}C", target)
-                }
+            StateCondition::BoilerTemperatureAbove(_, _) => {
+                "Waiting for temperature".into()
             }
-            StateCondition::BoilerTemperatureBelow(_, target) => {
-                let current = self.status.get_boiler_status(BrewBoiler.as_index())
-                    .and_then(|s| s.temperature);
-                if let Some(temp) = current {
-                    format!("Temp: {:.1}C -> <{:.1}C", temp, target)
-                } else {
-                    format!("Temp below: {:.1}C", target)
-                }
+            StateCondition::BoilerTemperatureBelow(_, _) => {
+                "Waiting for temperature".into()
             }
-            StateCondition::BoilerPressureAbove(_, target) => {
-                let current = self.status.get_boiler_status(BrewBoiler.as_index())
-                    .and_then(|s| s.pressure);
-                if let Some(press) = current {
-                    format!("Press: {:.1} -> {:.1}bar", press, target)
-                } else {
-                    format!("Press target: {:.1}bar", target)
-                }
+            StateCondition::BoilerPressureAbove(_, _) => {
+                "Waiting for pressure".into()
             }
-            StateCondition::BoilerPressureBelow(_, target) => {
-                let current = self.status.get_boiler_status(BrewBoiler.as_index())
-                    .and_then(|s| s.pressure);
-                if let Some(press) = current {
-                    format!("Press: {:.1} -> <{:.1}bar", press, target)
-                } else {
-                    format!("Press below: {:.1}bar", target)
-                }
+            StateCondition::BoilerPressureBelow(_, _) => {
+                "Waiting for pressure".into()
             }
-            StateCondition::GroupInputFlowRateAbove(_, target) => {
-                let current = self.status.get_group_status(SingleGroup.as_index())
-                    .and_then(|s| s.input_flow_rate);
-                if let Some(flow) = current {
-                    format!("Flow: {:.1} -> {:.1}ml/s", flow, target)
-                } else {
-                    format!("Flow target: {:.1}ml/s", target)
-                }
+            StateCondition::GroupInputFlowRateAbove(_, _) => {
+                "Waiting for flow".into()
             }
-            StateCondition::GroupInputFlowRateBelow(_, target) => {
-                let current = self.status.get_group_status(SingleGroup.as_index())
-                    .and_then(|s| s.input_flow_rate);
-                if let Some(flow) = current {
-                    format!("Flow: {:.1} -> <{:.1}ml/s", flow, target)
-                } else {
-                    format!("Flow below: {:.1}ml/s", target)
-                }
+            StateCondition::GroupInputFlowRateBelow(_, _) => {
+                "Waiting for flow".into()
             }
-            StateCondition::GroupPressureAbove(_, target) => {
-                let current = self.status.get_group_status(SingleGroup.as_index())
-                    .and_then(|s| s.pressure);
-                if let Some(press) = current {
-                    format!("Grp Press: {:.1} -> {:.1}bar", press, target)
-                } else {
-                    format!("Grp Press: {:.1}bar", target)
-                }
+            StateCondition::GroupPressureAbove(_, _) => {
+                "Waiting for pressure".into()
             }
-            StateCondition::GroupPressureBelow(_, target) => {
-                let current = self.status.get_group_status(SingleGroup.as_index())
-                    .and_then(|s| s.pressure);
-                if let Some(press) = current {
-                    format!("Grp Press: {:.1} -> <{:.1}bar", press, target)
-                } else {
-                    format!("Grp Press below: {:.1}bar", target)
-                }
+            StateCondition::GroupPressureBelow(_, _) => {
+                "Waiting for pressure".into()
             }
-            StateCondition::WaterTapFlowRateAbove(_, target) => format!("Water flow: {:.1}ml/s", target),
-            StateCondition::WaterTapFlowRateBelow(_, target) => format!("Water flow: <{:.1}ml/s", target),
-            StateCondition::OutputWeightAbove(_, target) => {
-                let current = self.status.get_group_status(SingleGroup.as_index())
-                    .and_then(|s| s.output_weight);
-                if let Some(weight) = current {
-                    format!("Weight: {:.1} -> {:.1}g", weight, target)
-                } else {
-                    format!("Weight target: {:.1}g", target)
-                }
+            StateCondition::WaterTapFlowRateAbove(_, _) => "Waiting for flow".into(),
+            StateCondition::WaterTapFlowRateBelow(_, _) => "Waiting for flow".into(),
+            StateCondition::OutputWeightAbove(_, _) => {
+                "Waiting for output".into()
             }
-            StateCondition::OutputWeightBelow(_, target) => {
-                let current = self.status.get_group_status(SingleGroup.as_index())
-                    .and_then(|s| s.output_weight);
-                if let Some(weight) = current {
-                    format!("Weight: {:.1} -> <{:.1}g", weight, target)
-                } else {
-                    format!("Weight below: {:.1}g", target)
-                }
+            StateCondition::OutputWeightBelow(_, _) => {
+                "Waiting for output".into()
             }
         }
     }

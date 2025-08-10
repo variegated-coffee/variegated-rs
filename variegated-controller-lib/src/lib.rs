@@ -58,6 +58,7 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     current_routine: Option<RoutineExecutionContext<SingleBoilerSingleGroupControllerState, SingleBoilerSingleGroupConfiguration>>,
     previous_status: Option<Status>,
     temperature_movavg: MovAvg<f32, f32, 10>,
+    brew_start_time: Option<Instant>,
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -86,6 +87,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             current_routine: None,
             previous_status: None,
             temperature_movavg: MovAvg::default(),
+            brew_start_time: None,
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
@@ -253,7 +255,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         let group_status = GroupStatus {
             is_brewing: self.state == SingleBoilerSingleGroupControllerState::Brewing,
             three_way_valve_open: self.group.get_three_way_valve_open(),
-            brew_time: None,
+            brew_time: self.brew_start_time.map(|start| start.elapsed().into()),
             input_flow_rate: self.group.get_input_flow_rate(),
             output_flow_rate: self.group.get_output_flow_rate(),
             output_weight: self.group.get_output_weight(),
@@ -430,6 +432,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     }
     
     async fn started_brewing(&mut self) {
+        self.brew_start_time = Some(Instant::now());
         self.boiler_pid.ki.accumulate += 50.0; // Initial accumulation to compensate for initial temperature drop
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(false),
@@ -439,6 +442,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     }
     
     async fn stopped_brewing(&mut self) {
+        self.brew_start_time = None;
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(true),
             smoothing: Some(false)

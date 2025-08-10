@@ -132,40 +132,36 @@ pub fn create_water_dispersal_routine(group: GroupIndex, target_flow: FlowRateTy
             // Step 0: Tare group scale
             RoutineStep {
                 entry_command: Some(MachineCommand::TareGroupScale(group)),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightBelow(group, 0.1)),
-                    RoutineStepExitType::NextStep,
-                    "Waiting for scale to zero".into()
+                    RoutineStepExitType::NextStep
                 )],
-                description: Some("Taring group scale".into()),
+                description: Some("Taring".into()),
             },
             // Step 1: Set target to flow rate
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::OutputFlowRate(target_flow))),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
                     RoutineStepExitType::NextStep,
-                    "Flow rate ready".into()
                 )],
                 description: Some("Setting target flow rate".into()),
             },
             // Step 2: Start brewing, wait for the group to reach output weight above the specified amount
             RoutineStep {
                 entry_command: Some(MachineCommand::StartBrewing(group)),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, amount)),
-                    RoutineStepExitType::NextStep,
-                    format!("Waiting for {:.1}g", amount)
+                    RoutineStepExitType::NextStep
                 )],
                 description: Some("Dispensing water".into()),
             },
             // Step 3: Stop brewing, then finish the routine
             RoutineStep {
                 entry_command: Some(MachineCommand::StopBrewing(group)),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
-                    RoutineStepExitType::Finished,
-                    "Ready to finish".into()
+                    RoutineStepExitType::Finished
                 )],
                 description: Some("Stopping water flow".into()),
             },
@@ -181,31 +177,29 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
             // Step 0
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::FullOn)),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
-                    RoutineStepExitType::NextStep,
-                    "Pump configured".into()
+                    RoutineStepExitType::NextStep
                 )],
-                description: Some("Setting full pump power".into()),
+                description: None,
             },
             // Step 1/2: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
             RoutineStep {
                 entry_command: Some(MachineCommand::StartBrewing(group)),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::After(Duration::from_secs(1)),
-                    RoutineStepExitType::NextStep,
-                    "Filling for 1 second".into()
+                    RoutineStepExitType::NextStep
                 )],
-                description: Some("Initial filling".into()),
+                description: Some("Fast fill".into()),
             },
             RoutineStep {
                 entry_command: None,
                 exits: vec![RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerPressureAbove(group, 2.0)),
                     RoutineStepExitType::NextStep,
-                    "Waiting for 2.0+ bar".into()
+                    "Group filled?".into()
                 )],
-                description: Some("Filling grouphead".into()),
+                description: Some("Fast fill".into()),
             },
             // Step 3: Set pump to Off, then wait for preinfusion time
             RoutineStep {
@@ -213,7 +207,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                 exits: vec![RoutineExit::with_description(
                     RoutineExitCondition::After(preinfusion_time),
                     RoutineStepExitType::NextStep,
-                    format!("Pre-infusing for {}s", preinfusion_time.as_secs())
+                    "Pre-infusing".into()
                 )],
                 description: Some("Pre-infusion".into()),
             },
@@ -224,7 +218,7 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     RoutineExit::with_description(
                         RoutineExitCondition::After(Duration::from_secs(2)),
                         RoutineStepExitType::NextStep,
-                        "Stabilizing pressure (2s)".into()
+                        "Stabilizing".into()
                     )
                 ],
                 description: Some("Ramping to pressure".into()),
@@ -236,15 +230,15 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     RoutineExit::with_description(
                         RoutineExitCondition::AfterDurationRelativeToStart(total_brew_time),
                         RoutineStepExitType::JumpToStep(7),
-                        format!("Brewing for {}s total", total_brew_time.as_secs())
+                        "Brew to time".into()
                     ),
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, rescue_trigger)),
                         RoutineStepExitType::NextStep,
-                        format!("Monitoring flow <{:.1}ml/s", rescue_trigger)
+                        "Shot rescue".into()
                     )
                 ],
-                description: Some("Brewing at pressure".into()),
+                description: Some("Brewing".into()),
             },
             RoutineStep {
                 entry_command: Some(MachineCommand::SetGroupBrewControlTarget(group, GroupBrewControlTarget::GroupFlowRate(rescue_flow_rate))),
@@ -252,18 +246,17 @@ pub fn create_shot_routine(group: GroupIndex, preinfusion_time: Duration, total_
                     RoutineExit::with_description(
                         RoutineExitCondition::AfterDurationRelativeToStart(total_brew_time),
                         RoutineStepExitType::NextStep,
-                        "Finishing rescue phase".into()
+                        "Brew to time".into()
                     ),
                 ],
-                description: Some("Flow rate rescue".into()),
+                description: Some(format!("Shot rescue ({:.0} ml/s)", rescue_flow_rate)),
             },
             // Step 7: Stop brewing, then finish the routine
             RoutineStep {
                 entry_command: Some(MachineCommand::StopBrewing(group)),
-                exits: vec![RoutineExit::with_description(
+                exits: vec![RoutineExit::new(
                     RoutineExitCondition::Never,
                     RoutineStepExitType::Finished,
-                    "Manual finish only".into()
                 )],
                 description: Some("Finishing extraction".into()),
             },
@@ -279,10 +272,9 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
         steps: vec![
             RoutineStep {
                 entry_command: Some(MachineCommand::SetBoilerControlTarget(0, BoilerControlTarget::Temperature(120.0))),
-                exits: vec![ RoutineExit::with_description(
+                exits: vec![ RoutineExit::new(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, 120.0)),
                     RoutineStepExitType::NextStep,
-                    "Waiting for 120°C".into()
                 )],
                 description: Some("Heating to overshoot".into()),
             },
@@ -291,7 +283,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::After(Duration::from_secs(300)),
                     RoutineStepExitType::NextStep,
-                    "Stabilizing for 5 minutes".into()
+                    "Waiting".into()
                 )],
                 description: Some("Stabilizing temperature".into()),
             },
@@ -300,7 +292,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureBelow(boiler_index, 96.0)),
                     RoutineStepExitType::Finished,
-                    "Waiting for temp below 96°C".into()
+                    "Waiting".into()
                 )],
                 description: Some("Adjusting to target".into()),
             },
