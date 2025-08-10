@@ -563,6 +563,7 @@ async fn main_task(spawner: Spawner) -> ! {
         command_channel.sender(),
         ui_status_channel.sender(),
         routine_repository_ref,
+        status_channel.subscriber().unwrap(),
     );
 
     info!("Creating display task");
