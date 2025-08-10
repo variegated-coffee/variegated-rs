@@ -93,8 +93,7 @@ pub enum PidParameterTarget {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum MachineCommand {
     StartBrewing(GroupIndex),
     StopBrewing(GroupIndex),
@@ -103,7 +102,7 @@ pub enum MachineCommand {
     SetBoilerControlTarget(BoilerIndex, BoilerControlTarget),
     SetGroupBrewControlTarget(GroupIndex, GroupBrewControlTarget),
     SetPidParameters(PidParameterTarget, PidParameters),
-    RunRoutine(RoutineIndex),
+    RunRoutine(RoutineIndex, Option<FnvIndexMap<u8, f32, 8>>),
     CancelRoutine,
     EnableBoiler(BoilerIndex),
     DisableBoiler(BoilerIndex),
@@ -111,6 +110,29 @@ pub enum MachineCommand {
     ZeroCalibrateGroupScale(GroupIndex),
     CalibrateGroupScale100g(GroupIndex),
     UpdateCommsStatus(CommsStatus),
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for MachineCommand {
+    fn format(&self, f: defmt::Formatter) {
+        match self {
+            MachineCommand::StartBrewing(idx) => defmt::write!(f, "StartBrewing({})", idx),
+            MachineCommand::StopBrewing(idx) => defmt::write!(f, "StopBrewing({})", idx),
+            MachineCommand::StartPumpingToWaterTap(idx) => defmt::write!(f, "StartPumpingToWaterTap({})", idx),
+            MachineCommand::StopPumpingToWaterTap(idx) => defmt::write!(f, "StopPumpingToWaterTap({})", idx),
+            MachineCommand::SetBoilerControlTarget(idx, target) => defmt::write!(f, "SetBoilerControlTarget({}, {:?})", idx, target),
+            MachineCommand::SetGroupBrewControlTarget(idx, target) => defmt::write!(f, "SetGroupBrewControlTarget({}, {:?})", idx, target),
+            MachineCommand::SetPidParameters(target, params) => defmt::write!(f, "SetPidParameters({:?}, {:?})", target, params),
+            MachineCommand::RunRoutine(idx, params) => defmt::write!(f, "RunRoutine({}, {} params)", idx, params.as_ref().map(|p| p.len()).unwrap_or(0)),
+            MachineCommand::CancelRoutine => defmt::write!(f, "CancelRoutine"),
+            MachineCommand::EnableBoiler(idx) => defmt::write!(f, "EnableBoiler({})", idx),
+            MachineCommand::DisableBoiler(idx) => defmt::write!(f, "DisableBoiler({})", idx),
+            MachineCommand::TareGroupScale(idx) => defmt::write!(f, "TareGroupScale({})", idx),
+            MachineCommand::ZeroCalibrateGroupScale(idx) => defmt::write!(f, "ZeroCalibrateGroupScale({})", idx),
+            MachineCommand::CalibrateGroupScale100g(idx) => defmt::write!(f, "CalibrateGroupScale100g({})", idx),
+            MachineCommand::UpdateCommsStatus(status) => defmt::write!(f, "UpdateCommsStatus({:?})", status),
+        }
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -237,13 +259,26 @@ pub trait PeripheralStatusProvider {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
     pub current_step: Option<usize>,
     pub step_elapsed_time: Option<Duration>,
     pub total_elapsed_time: Option<Duration>,
+    pub resolved_parameters: FnvIndexMap<u8, f32, 8>, // resolved parameter values for display
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for RoutineExecutionStatus {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "RoutineExecutionStatus {{ routine_index: {}, current_step: {:?}, step_elapsed: {:?}, total_elapsed: {:?}, params_count: {} }}", 
+            self.routine_index, 
+            self.current_step, 
+            self.step_elapsed_time, 
+            self.total_elapsed_time,
+            self.resolved_parameters.len()
+        );
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -283,8 +318,8 @@ impl Status {
 #[cfg(feature = "defmt")]
 impl defmt::Format for Status {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "NewStatus {{ mode: {:#?}, routine_execution: {:#?} }}",
-            /*self.boiler_statuses, self.group_statuses, */self.mode, self.routine_execution);
+        defmt::write!(f, "NewStatus {{ mode: {:#?}, routine_running: {} }}",
+            self.mode, self.routine_execution.is_some());
     }
 }
 
@@ -386,7 +421,7 @@ pub struct CommsStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone,  Debug)]
+#[derive(Clone, Debug)]
 pub enum CommsProcessorToApplicationProcessorMessage {
     Command(MachineCommand),
     CommsStatus(CommsStatus),

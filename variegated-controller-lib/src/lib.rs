@@ -16,10 +16,10 @@ use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, PeripheralRegistry};
 use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
+use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
-use crate::routine::{InMemoryRoutineRepository, RoutineExecutionContext};
 
 fn limited_pid() -> PidCtrl<f32> {
     let mut pid = PidCtrl::default();
@@ -295,6 +295,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                 current_step: rxc.current_step,
                 step_elapsed_time,
                 total_elapsed_time,
+                resolved_parameters: rxc.parameters.clone(),
             }
         });
 
@@ -363,9 +364,9 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                     }
                 }
             }
-            MachineCommand::RunRoutine(usize) => {
-                info!("Received command to run routine with index: {}", usize);
-                self.handle_routine_start(usize).await;
+            MachineCommand::RunRoutine(index, params) => {
+                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
+                self.handle_routine_start(index, params).await;
             }
             MachineCommand::CancelRoutine => {
                 info!("Cancelling routine");
@@ -465,7 +466,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         }).await;
     }
 
-    async fn handle_routine_start(&mut self, routine_index: RoutineIndex) {
+    async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
         if self.current_routine.is_some() {
             //warn!("Cannot run routine, already executing a routine");
             return;
@@ -475,7 +476,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
 
         if let Some(routine) = routine {
             info!("Running routine");
-            self.current_routine = Some(RoutineExecutionContext::new(routine_index, routine.clone(), self.state, self.configuration));
+            self.current_routine = Some(RoutineExecutionContext::new(routine_index, routine.clone(), self.state, self.configuration, runtime_params));
             info!("Routine started");
         } else {
             error!("Routine not found: {}", routine_index);
