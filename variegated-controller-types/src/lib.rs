@@ -137,6 +137,24 @@ impl defmt::Format for MachineCommand {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
+pub struct ControlCurve {
+    pub a: f32,  // coefficient for T^2
+    pub b: f32,  // coefficient for T
+    pub c: f32,  // constant term
+    pub min: f32, // minimum allowed value
+    pub max: f32, // maximum allowed value
+}
+
+impl ControlCurve {
+    pub fn evaluate(&self, time_seconds: f32) -> f32 {
+        let value = self.a * time_seconds * time_seconds + self.b * time_seconds + self.c;
+        value.clamp(self.min, self.max)
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BoilerControlTarget {
     Temperature(TemperatureType),
@@ -150,8 +168,11 @@ pub enum BoilerControlTarget {
 #[derive(Clone, Copy, Debug, Default)]
 pub enum GroupBrewControlTarget {
     GroupFlowRate(FlowRateType),
+    GroupFlowRateCurve(ControlCurve),
     Pressure(PressureType),
+    PressureCurve(ControlCurve),
     OutputFlowRate(FlowRateType),
+    OutputFlowRateCurve(ControlCurve),
     FixedDutyCycle(u8),
     FullOn,
     #[default]
