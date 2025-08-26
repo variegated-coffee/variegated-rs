@@ -59,6 +59,7 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     previous_status: Option<Status>,
     temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
+    curve_start_time: Option<Instant>,
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -88,6 +89,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             previous_status: None,
             temperature_movavg: MovAvg::default(),
             brew_start_time: None,
+            curve_start_time: None,
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
@@ -132,11 +134,26 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     }
 
     async fn update_pump(&mut self, actual_pump_control_target: GroupBrewControlTarget, delta_t: f32) -> Output {
+        // Calculate elapsed time for curve evaluation if needed
+        let elapsed_seconds = self.curve_start_time
+            .map(|start| {
+                let duration = Instant::now().saturating_duration_since(start);
+                duration.as_secs() as f32 + (duration.as_millis() % 1000) as f32 / 1000.0
+            })
+            .unwrap_or(0.0);
+        
         let pump_pv = match actual_pump_control_target {
             GroupBrewControlTarget::GroupFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
                 self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_flow_rate_params);
 
+                self.group.get_input_flow_rate().unwrap_or(0.0) as f32
+            },
+            GroupBrewControlTarget::GroupFlowRateCurve(curve) => {
+                let target = curve.evaluate(elapsed_seconds);
+                self.pump_pid.setpoint = target;
+                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_flow_rate_params);
+                
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::Pressure(target) => {
@@ -145,10 +162,24 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
+            GroupBrewControlTarget::PressureCurve(curve) => {
+                let target = curve.evaluate(elapsed_seconds);
+                self.pump_pid.setpoint = target;
+                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_pressure_params);
+                
+                self.group.get_pressure().unwrap_or(0.0) as f32
+            },
             GroupBrewControlTarget::OutputFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
                 self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_output_flow_rate_params);
 
+                self.group.get_output_flow_rate().unwrap_or(0.0) as f32
+            },
+            GroupBrewControlTarget::OutputFlowRateCurve(curve) => {
+                let target = curve.evaluate(elapsed_seconds);
+                self.pump_pid.setpoint = target;
+                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_output_flow_rate_params);
+                
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
             _ => 0.0,
@@ -340,6 +371,19 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             MachineCommand::SetGroupBrewControlTarget(group_index, control_target) => {
                 info!("Setting group brew control target for group {} to {:?}", group_index, control_target);
                 if group_index == 0 {
+                    // Check if this is a curve target and record start time
+                    match control_target {
+                        GroupBrewControlTarget::GroupFlowRateCurve(_) |
+                        GroupBrewControlTarget::PressureCurve(_) |
+                        GroupBrewControlTarget::OutputFlowRateCurve(_) => {
+                            self.curve_start_time = Some(Instant::now());
+                            info!("Starting curve control");
+                        }
+                        _ => {
+                            // Reset curve start time for non-curve targets
+                            self.curve_start_time = None;
+                        }
+                    }
                     self.configuration.group_brew_control_target = control_target;
                 } else {
                     error!("Invalid group index: {}", group_index);
@@ -460,6 +504,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     
     async fn stopped_brewing(&mut self) {
         self.brew_start_time = None;
+        self.curve_start_time = None;  // Reset curve start time when brewing stops
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(true),
             smoothing: Some(false)
@@ -487,6 +532,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         if let Some(routine) = self.current_routine.take() {
             info!("Routine execution finished, saving state and configuration");
             self.configuration = routine.saved_configuration;
+            self.curve_start_time = None;  // Reset curve start time when routine exits
             self.transition_to_state(routine.saved_state).await;
         } else {
             warn!("No routine to exit");
