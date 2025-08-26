@@ -199,13 +199,13 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
     let parameters = vec![
         RoutineParameter { 
             index: 0, 
-            name: "Target Flow Rate".into(), 
+            name: "Tgt Flow Rate".into(), 
             default: 2.0, 
             unit: Some(ParameterUnit::MillilitersPerSecond)
         },
         RoutineParameter { 
             index: 1, 
-            name: "Water Amount".into(), 
+            name: "Water amt".into(), 
             default: 30.0, 
             unit: Some(ParameterUnit::Grams)
         },
@@ -257,43 +257,41 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
 }
 
 pub fn create_shot_routine(group: GroupIndex) -> Routine {
-    let parameters = vec![
-        RoutineParameter { 
-            index: 0, 
-            name: "Preinfusion Time".into(), 
-            default: 5.0, 
-            unit: Some(ParameterUnit::Seconds)
-        },
-        RoutineParameter { 
-            index: 1, 
-            name: "Total Brew Time".into(), 
-            default: 50.0, 
-            unit: Some(ParameterUnit::Seconds)
-        },
-        RoutineParameter { 
-            index: 2, 
-            name: "Target Pressure".into(), 
-            default: 8.0, 
-            unit: Some(ParameterUnit::Bar)
-        },
-        RoutineParameter { 
-            index: 3, 
-            name: "Rescue Trigger Flow".into(), 
-            default: 2.5, 
-            unit: Some(ParameterUnit::MillilitersPerSecond)
-        },
-        RoutineParameter { 
-            index: 4, 
-            name: "Rescue Flow Rate".into(), 
-            default: 1.5, 
-            unit: Some(ParameterUnit::MillilitersPerSecond)
-        },
-    ];
-    
     Routine {
         routine_type: RoutineType::UserDefined,
         name: "Smart shot".into(),
-        parameters,
+        parameters: vec![
+            RoutineParameter {
+                index: 0,
+                name: "Preinf. Time".into(),
+                default: 5.0,
+                unit: Some(ParameterUnit::Seconds)
+            },
+            RoutineParameter {
+                index: 1,
+                name: "Brew Weight".into(),
+                default: 50.0,
+                unit: Some(ParameterUnit::Grams)
+            },
+            RoutineParameter {
+                index: 2,
+                name: "Tgt Press".into(),
+                default: 8.0,
+                unit: Some(ParameterUnit::Bar)
+            },
+            RoutineParameter {
+                index: 3,
+                name: "Resc Trigger".into(),
+                default: 2.5,
+                unit: Some(ParameterUnit::MillilitersPerSecond)
+            },
+            RoutineParameter {
+                index: 4,
+                name: "Rescue Flow".into(),
+                default: 1.5,
+                unit: Some(ParameterUnit::MillilitersPerSecond)
+            },
+        ],
         steps: vec![
             // Step 0
             RoutineStep {
@@ -349,9 +347,9 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 entry_command: None,
                 exits: vec![
                     RoutineExit::with_description(
-                        RoutineExitCondition::AfterDurationRelativeToStart(ParameterValue::Parameter(1)),
+                        RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
                         RoutineStepExitType::JumpToStep(7),
-                        "Brew to time".into()
+                        "Brew to weight".into()
                     ),
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, ParameterValue::Parameter(3))),
@@ -365,9 +363,9 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 entry_command: Some(RoutineCommand::SetGroupFlowRate(group, ParameterValue::Parameter(4))),
                 exits: vec![
                     RoutineExit::with_description(
-                        RoutineExitCondition::AfterDurationRelativeToStart(ParameterValue::Parameter(1)),
+                        RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
                         RoutineStepExitType::NextStep,
-                        "Brew to time".into()
+                        "Brew to weight".into()
                     ),
                 ],
                 description: Some("Shot rescue".into()),
@@ -381,31 +379,12 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 )],
                 description: Some("Finishing extraction".into()),
             },
-
         ],
     }
 }
 
 pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
     let parameters = vec![
-        RoutineParameter { 
-            index: 0, 
-            name: "Overshoot Temperature".into(), 
-            default: 120.0, 
-            unit: Some(ParameterUnit::Celsius)
-        },
-        RoutineParameter { 
-            index: 1, 
-            name: "Stabilization Time".into(), 
-            default: 300.0, 
-            unit: Some(ParameterUnit::Seconds)
-        },
-        RoutineParameter { 
-            index: 2, 
-            name: "Target Temperature".into(), 
-            default: 95.0, 
-            unit: Some(ParameterUnit::Celsius)
-        },
     ];
     
     Routine {
@@ -416,7 +395,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
             RoutineStep {
                 entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(0))),
                 exits: vec![ RoutineExit::new(
-                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, ParameterValue::Parameter(0))),
+                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, ParameterValue::Static(120.0))),
                     RoutineStepExitType::NextStep,
                 )],
                 description: Some("Heating to overshoot".into()),
@@ -424,14 +403,14 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
             RoutineStep {
                 entry_command: None,
                 exits: vec![ RoutineExit::with_description(
-                    RoutineExitCondition::After(ParameterValue::Parameter(1)),
+                    RoutineExitCondition::After(ParameterValue::Static(300.0)),
                     RoutineStepExitType::NextStep,
                     "Waiting".into()
                 )],
                 description: Some("Stabilizing temperature".into()),
             },
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(2))),
+                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Static(95.0))),
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureBelow(boiler_index, ParameterValue::Static(96.0))),
                     RoutineStepExitType::Finished,

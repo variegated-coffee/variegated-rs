@@ -122,6 +122,7 @@ pub(crate) enum UIState {
     ScaleSettings(ScaleSettingsSubState),
     RoutineParameters(RoutineIndex, RoutineParameterEditState),
     ParameterManipulation {
+        edit_state: RoutineParameterEditState,
         routine_index: RoutineIndex,
         param_index: u8,
         current_value: f32,
@@ -565,6 +566,7 @@ where
                                 if let Some(param) = routine.parameters().iter().find(|p| p.index == param_index) {
                                     let current_value = edit_state.parameter_values.get(&param_index).copied().unwrap_or(param.default);
                                     self.status.state = UIState::ParameterManipulation {
+                                        edit_state: edit_state.clone(),
                                         routine_index,
                                         param_index,
                                         current_value,
@@ -575,26 +577,17 @@ where
                             }
                         }
                     }
-                    UIState::ParameterManipulation { routine_index, param_index, current_value, .. } => {
+                    UIState::ParameterManipulation { edit_state, routine_index, param_index, current_value, .. } => {
                         // Return to parameter list with updated value
                         let routine_index = *routine_index;
                         let param_index = *param_index;
                         let current_value = *current_value;
                         
-                        let repo = self.routine_repository.lock().await;
-                        if let Some(routine) = repo.get_routine(routine_index) {
-                            let mut edit_state = RoutineParameterEditState::new(routine);
-                            // Update the parameter value
-                            let _ = edit_state.parameter_values.insert(param_index, current_value);
-                            // Keep the same selection index (the parameter we just edited)
-                            for (i, param) in routine.parameters().iter().enumerate() {
-                                if param.index == param_index {
-                                    edit_state.selected_index = i + 1; // +1 for back button
-                                    break;
-                                }
-                            }
-                            self.status.state = UIState::RoutineParameters(routine_index, edit_state);
-                        }
+                        // Use the preserved edit state and update only the current parameter
+                        let mut preserved_edit_state = edit_state.clone();
+                        preserved_edit_state.parameter_values.insert(param_index, current_value);
+                        
+                        self.status.state = UIState::RoutineParameters(routine_index, preserved_edit_state);
                     }
                     _ => {
                         self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);
