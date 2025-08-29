@@ -42,7 +42,7 @@ pub struct SingleBoilerSingleGroupPidParameters {
     pub pump_output_flow_rate_params: PidParameters,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SingleBoilerSingleGroupConfiguration {
     pub brew_boiler_control_target: BoilerControlTarget,
     pub steam_boiler_control_target: BoilerControlTarget,
@@ -243,14 +243,13 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             let pump_pid_out = self.update_pump(actual_pump_control_target, delta_t).await;
 
             self.send_status(boiler_pid_out, pump_pid_out).await;
+            self.configuration_store.save_settings(&self.current_configuration).await.ok();
 
             Timer::after_millis(100).await;
         }
     }
 
     async fn update_pump(&mut self, actual_pump_control_target: GroupBrewControlTarget, delta_t: f32) -> Output {
-        let configuration = self.configuration_store.load_settings().await.unwrap_or_default();
-
         // Calculate elapsed time for curve evaluation if needed
         let elapsed_seconds = self.curve_start_time
             .map(|start| {
@@ -262,40 +261,40 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
         let pump_pv = match actual_pump_control_target {
             GroupBrewControlTarget::GroupFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
-                self.pump_pid.set_parameters(configuration.pid_parameters.pump_flow_rate_params);
+                self.pump_pid.set_parameters(self.current_configuration.pid_parameters.pump_flow_rate_params);
 
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::GroupFlowRateCurve(curve) => {
                 let target = curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(configuration.pid_parameters.pump_flow_rate_params);
+                self.pump_pid.set_parameters(self.current_configuration.pid_parameters.pump_flow_rate_params);
                 
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::Pressure(target) => {
                 self.pump_pid.setpoint = target as f32;
-                self.pump_pid.set_parameters(configuration.pid_parameters.pump_pressure_params);
+                self.pump_pid.set_parameters(self.current_configuration.pid_parameters.pump_pressure_params);
 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::PressureCurve(curve) => {
                 let target = curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(configuration.pid_parameters.pump_pressure_params);
+                self.pump_pid.set_parameters(self.current_configuration.pid_parameters.pump_pressure_params);
                 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::OutputFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
-                self.pump_pid.set_parameters(configuration.pid_parameters.pump_output_flow_rate_params);
+                self.pump_pid.set_parameters(self.current_configuration.pid_parameters.pump_output_flow_rate_params);
 
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::OutputFlowRateCurve(curve) => {
                 let target = curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(configuration.pid_parameters.pump_output_flow_rate_params);
+                self.pump_pid.set_parameters(self.current_configuration.pid_parameters.pump_output_flow_rate_params);
                 
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
@@ -334,18 +333,16 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
     }
 
     async fn update_boiler(&mut self, actual_boiler_control_target: BoilerControlTarget, delta_t: f32) -> Output {
-        let configuration = self.configuration_store.load_settings().await.unwrap_or_default();
-
         let mut boiler_pv = match actual_boiler_control_target {
             BoilerControlTarget::Temperature(target) => {
                 self.boiler_pid.setpoint = target as f32;
-                self.boiler_pid.set_parameters(configuration.pid_parameters.boiler_temperature_params);
+                self.boiler_pid.set_parameters(self.current_configuration.pid_parameters.boiler_temperature_params);
 
                 self.boiler.get_temperature().unwrap_or(0.0) as f32
             }
             BoilerControlTarget::Pressure(target) => {
                 self.boiler_pid.setpoint = target as f32;
-                self.boiler_pid.set_parameters(configuration.pid_parameters.boiler_pressure_params);
+                self.boiler_pid.set_parameters(self.current_configuration.pid_parameters.boiler_pressure_params);
 
                 self.boiler.get_pressure().unwrap_or(0.0) as f32
             }
@@ -373,16 +370,16 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
     fn get_control_targets(&mut self) -> (BoilerControlTarget, GroupBrewControlTarget) {
         let (actual_boiler_control_target, actual_pump_control_target) = match self.state {
             SingleBoilerSingleGroupControllerState::Brewing => {
-                (self.configuration.brew_boiler_control_target, self.configuration.group_brew_control_target)
+                (self.current_configuration.brew_boiler_control_target, self.current_configuration.group_brew_control_target)
             }
             SingleBoilerSingleGroupControllerState::PumpingToWaterTap => {
-                (self.configuration.brew_boiler_control_target, GroupBrewControlTarget::FullOn)
+                (self.current_configuration.brew_boiler_control_target, GroupBrewControlTarget::FullOn)
             },
             SingleBoilerSingleGroupControllerState::BrewModeIdle => {
-                (self.configuration.brew_boiler_control_target, GroupBrewControlTarget::Off)
+                (self.current_configuration.brew_boiler_control_target, GroupBrewControlTarget::Off)
             }
             SingleBoilerSingleGroupControllerState::SteamModeIdle => {
-                (self.configuration.steam_boiler_control_target, GroupBrewControlTarget::Off)
+                (self.current_configuration.steam_boiler_control_target, GroupBrewControlTarget::Off)
             }
             SingleBoilerSingleGroupControllerState::PowerSave => {
                 (BoilerControlTarget::Off, GroupBrewControlTarget::Off)
@@ -401,14 +398,14 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
             output: brew_boiler_output,
-            control_target: self.configuration.brew_boiler_control_target,
+            control_target: self.current_configuration.brew_boiler_control_target,
         };
 
         let virtual_steam_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
             output: steam_boiler_output,
-            control_target: self.configuration.steam_boiler_control_target,
+            control_target: self.current_configuration.steam_boiler_control_target,
         };
 
         let group_status = GroupStatus {
@@ -421,7 +418,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             pressure: self.group.get_pressure(),
             temperature: self.group.get_temperature(),
             pump_output: pump_output.clone(),
-            control_target: self.configuration.group_brew_control_target,
+            control_target: self.current_configuration.group_brew_control_target,
         };
 
         // Calculate current timestamp if we have comms_status
@@ -489,8 +486,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             MachineCommand::SetBoilerControlTarget(boiler_index, control_target) => {
                 info!("Setting boiler control target for boiler {} to {:?}", boiler_index, control_target);
                 match boiler_index {
-                    0 => self.configuration.brew_boiler_control_target = control_target,
-                    1 => self.configuration.steam_boiler_control_target = control_target,
+                    0 => self.current_configuration.brew_boiler_control_target = control_target,
+                    1 => self.current_configuration.steam_boiler_control_target = control_target,
                     _ => {
                         error!("Invalid boiler index: {}", boiler_index);
                     }
@@ -513,7 +510,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
                             self.curve_start_time = None;
                         }
                     }
-                    self.configuration.group_brew_control_target = control_target;
+                    self.current_configuration.group_brew_control_target = control_target;
                 } else {
                     error!("Invalid group index: {}", group_index);
                 }
@@ -521,19 +518,19 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             MachineCommand::SetPidParameters(target, params) => {
                 match target {
                     PidParameterTarget::BoilerPressure(_) => {
-                        self.configuration.pid_parameters.boiler_pressure_params = params;
+                        self.current_configuration.pid_parameters.boiler_pressure_params = params;
                     }
                     PidParameterTarget::BoilerTemperature(_) => {
-                        self.configuration.pid_parameters.boiler_temperature_params = params;
+                        self.current_configuration.pid_parameters.boiler_temperature_params = params;
                     }
                     PidParameterTarget::GroupFlowRate(_) => {
-                        self.configuration.pid_parameters.pump_flow_rate_params = params;
+                        self.current_configuration.pid_parameters.pump_flow_rate_params = params;
                     }
                     PidParameterTarget::GroupPressure(_) => {
-                        self.configuration.pid_parameters.pump_pressure_params = params;
+                        self.current_configuration.pid_parameters.pump_pressure_params = params;
                     }
                     PidParameterTarget::GroupOutputFlowRate(_) => {
-                        self.configuration.pid_parameters.pump_output_flow_rate_params = params;
+                        self.current_configuration.pid_parameters.pump_output_flow_rate_params = params;
                     }
                 }
             }
@@ -650,7 +647,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
 
         if let Some(routine) = routine {
             info!("Running routine");
-            self.current_routine = Some(RoutineExecutionContext::new(routine_index, routine.clone(), self.state, self.configuration, runtime_params));
+            self.current_routine = Some(RoutineExecutionContext::new(routine_index, routine.clone(), self.state, self.current_configuration, runtime_params));
             info!("Routine started");
         } else {
             error!("Routine not found: {}", routine_index);
@@ -660,7 +657,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
     async fn handle_routine_exit(&mut self) {
         if let Some(routine) = self.current_routine.take() {
             info!("Routine execution finished, saving state and configuration");
-            self.configuration = routine.saved_configuration;
+            self.current_configuration = routine.saved_configuration;
             self.curve_start_time = None;  // Reset curve start time when routine exits
             self.transition_to_state(routine.saved_state).await;
         } else {

@@ -13,30 +13,38 @@ use sequential_storage::map::{fetch_item, store_item, Key, SerializationError, V
 
 pub trait SettingsStorage<SettingsT: Default> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
-    async fn save_settings(&self, data: &SettingsT) -> Result<(), &'static str>;
+    async fn save_settings(&mut self, data: &SettingsT) -> Result<(), &'static str>;
 }
 
-pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> {
+pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> {
     _phantom: core::marker::PhantomData<SettingsT>,
     flash: &'a Mutex<M, T>,
     range: Range<u32>,
     deserialization_buffer: [u8; 2048],
+    cached_value: Option<SettingsT>,
 }
 
-impl <'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+impl <'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
     pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
         Self {
             _phantom: core::marker::PhantomData,
             flash,
             range,
             deserialization_buffer: [0u8; 2048],
+            cached_value: None,
         }
     }
 }
 
-impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> SettingsStorage<SettingsT> for SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SettingsStorage<SettingsT> for SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>
     {
+        // Return cached value if available
+        if let Some(cached) = &self.cached_value {
+            return Ok(cached.clone());
+        }
+
+        // Otherwise load from flash
         let mut flash = self.flash.lock().await;
         let mut cache = NoCache::new();
 
@@ -44,6 +52,8 @@ impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> Setti
             .await;
 
         if let Ok(Some(data)) = item {
+            // Cache the loaded value
+            self.cached_value = Some(data.clone());
             return Ok(data)
         } else {
             if let Err(e) = &item {
@@ -79,11 +89,21 @@ impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> Setti
             info!("No settings found, using default");
         }
 
-        // Placeholder: In real implementation, load from non-volatile storage
-        Ok(SettingsT::default())
+        // Use default and cache it
+        let default_settings = SettingsT::default();
+        self.cached_value = Some(default_settings.clone());
+        Ok(default_settings)
     }
 
-    async fn save_settings(&self, settings: &SettingsT) -> Result<(), &'static str> {
+    async fn save_settings(&mut self, settings: &SettingsT) -> Result<(), &'static str> {
+        // Check if settings are the same as cached value
+        if let Some(ref cached) = self.cached_value {
+            if cached == settings {
+                info!("Settings unchanged, skipping flash write");
+                return Ok(());
+            }
+        }
+
         let mut flash = self.flash.lock().await;
         let mut cache = NoCache::new();
 
@@ -104,6 +124,9 @@ impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> Setti
             &0u8,
             settings
         ).await.expect("Failed to store item");
+
+        // Update the cache with the new settings
+        self.cached_value = Some(settings.clone());
 
         info!("Settings stored successfully");
 
