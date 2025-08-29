@@ -62,6 +62,7 @@ use futures::future::join_all;
 use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
+use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -179,6 +180,7 @@ type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI
 type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 type GravityMutex = Mutex<NoopRawMutex, Gravity<I2cDevice<'static, NoopRawMutex, I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>>>;
+type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
 
 const STATUS_RECEIVERS: usize = 4;
 type StatusChannel = PubSubChannel<NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
@@ -243,6 +245,7 @@ static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = 
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
 static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 
 fn check_stack_usage() -> (usize, usize) {
     unsafe extern "C" {
@@ -311,7 +314,6 @@ async fn main_task(spawner: Spawner) -> ! {
             info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
         }
     }
-
 
     let i2c_p = qwiic_i2c_bus_peripherals!(p);
     let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
@@ -394,7 +396,13 @@ async fn main_task(spawner: Spawner) -> ! {
     let hold = NoopOutputPin {};
     let wp = NoopOutputPin {};
 
-    let mut flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
+    let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
+    let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
+
+    let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    let configuration = settings_storage.load_settings().await.unwrap_or_default();
+
+    info!("Configuration loaded");
     
     let temp_sig: &'static Watch<_, _, 3>  = TEMP_SIGNAL.init(Watch::new());
     let mut temp_sensor = Ads124S08Sensor::new(
@@ -453,7 +461,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let input = pwm::Pwm::new_input(pump_p.pwm_tacho_out, pump_p.pin_tacho_out, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
-    let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(input, pump_rpm_sig.sender(), |v| (v * 60.0/32.0) as RPMType);
+    let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(input, pump_rpm_sig.sender(), None, None, |v| (v * 60.0/32.0) as RPMType);
 
     let pump = variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump::new(pump_pwm);
 
@@ -471,7 +479,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let flow_meter_input = pwm::Pwm::new_input(flow_meter_p.pwm_flow_meter, flow_meter_p.pin_flow_meter, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
-    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), |v| (v * 0.043) * 0.6667 * 0.89 as FlowRateType);
+    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, None, |v| (v * 0.043) * 0.6667 * 0.89 as FlowRateType);
 
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
@@ -491,8 +499,6 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
-
-    let configuration = create_default_configuration();
 
     let mut routine_repository = InMemoryRoutineRepository::new();
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
@@ -514,7 +520,7 @@ async fn main_task(spawner: Spawner) -> ! {
         status_channel.publisher().expect("Failed to get status channel publisher"),
         boiler,
         group,
-        configuration,
+        settings_storage,
         routine_repository_ref,
         &peripheral_registry,
     );
@@ -604,37 +610,6 @@ async fn main_task(spawner: Spawner) -> ! {
 
     loop {
         Timer::after_millis(3000).await;
-    }
-}
-
-fn create_default_configuration() -> SingleBoilerSingleGroupConfiguration {
-    let mut pid_parameters = SingleBoilerSingleGroupPidParameters::default();
-    pid_parameters.boiler_temperature_params = PidParameters {
-        kp: PidTerm::new(3.0, PidLimits::default()),
-        ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-        kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-    };
-    pid_parameters.pump_flow_rate_params = PidParameters {
-        kp: PidTerm::new(10.0, PidLimits::default() ),
-        ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-        kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-    };
-    pid_parameters.pump_output_flow_rate_params = PidParameters {
-        kp: PidTerm::new(10.0, PidLimits::default() ),
-        ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-        kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-    };
-    pid_parameters.pump_pressure_params = PidParameters {
-        kp: PidTerm::new( 10.0, PidLimits::default() ),
-        ki: PidTerm::new( 0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-        kd: PidTerm::new( 30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-    };
-
-    SingleBoilerSingleGroupConfiguration {
-        brew_boiler_control_target: BoilerControlTarget::Temperature(110.0),
-        steam_boiler_control_target: BoilerControlTarget::Off,
-        group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
-        pid_parameters,
     }
 }
 

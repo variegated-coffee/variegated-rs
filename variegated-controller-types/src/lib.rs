@@ -174,6 +174,7 @@ pub enum GroupBrewControlTarget {
     OutputFlowRate(FlowRateType),
     OutputFlowRateCurve(ControlCurve),
     FixedDutyCycle(u8),
+    FixedDutyCycleCurve(ControlCurve),
     FullOn,
     #[default]
     Off
@@ -412,6 +413,16 @@ pub struct BoilerConfiguration {
     pub temperature_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
     pub control_target: BoilerControlTarget,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KalmanParameters {
+    pub process_noise: f32,
+    pub measurement_noise: f32,
+    pub estimated_error: f32,
+    pub posterior_estimate: f32,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -6,7 +6,7 @@ use core::fmt;
 use defmt::{info, Format};
 use embassy_time::{Duration, Instant};
 use heapless::FnvIndexMap;
-use variegated_controller_types::{BoilerControlTarget, BoilerIndex, FlowRateType, GroupBrewControlTarget, GroupIndex, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType};
+use variegated_controller_types::{BoilerControlTarget, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlTarget, GroupIndex, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType};
 
 type UserActionIndex = u8;
 pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
@@ -15,6 +15,7 @@ pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
 pub enum ParameterValue {
     Static(f32),
     Parameter(u8), // index into parameter map
+    DerivedParameter(u8), // index into derived parameter list (separate namespace)
 }
 
 impl fmt::Display for ParameterValue {
@@ -22,6 +23,7 @@ impl fmt::Display for ParameterValue {
         match self {
             ParameterValue::Static(value) => write!(f, "{:.1}", value),
             ParameterValue::Parameter(index) => write!(f, "P{}", index),
+            ParameterValue::DerivedParameter(index) => write!(f, "D{}", index),
         }
     }
 }
@@ -32,6 +34,7 @@ impl ParameterValue {
         match self {
             ParameterValue::Static(value) => *value as u64,
             ParameterValue::Parameter(_) => 0, // Placeholder - should be resolved
+            ParameterValue::DerivedParameter(_) => 0, // Placeholder - should be resolved
         }
     }
 }
@@ -52,6 +55,33 @@ pub struct RoutineParameter {
     pub name: String,  // User-facing, e.g. "Preinfusion Time", "Target Pressure"
     pub default: f32,
     pub unit: Option<ParameterUnit>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DerivedParameter {
+    pub index: u8,  // Separate index space from regular parameters
+    pub name: String,
+    pub unit: Option<ParameterUnit>,
+    pub formula: DerivedFormula,
+}
+
+#[derive(Clone, Debug)]
+pub enum DerivedFormula {
+    Linear {
+        base_param: u8,      // Index of base parameter
+        multiplier: f32,
+        offset: f32,
+    },
+    Sum {
+        params: Vec<u8>,     // Indices of parameters to sum
+    },
+    Difference {
+        param_a: u8,
+        param_b: u8,         // a - b
+    },
+    Product {
+        params: Vec<u8>,     // Indices of parameters to multiply
+    },
 }
 
 #[derive(Clone, Copy, Debug, Format)]
@@ -106,6 +136,12 @@ pub enum RoutineCommand {
     SetGroupFullOn(GroupIndex),
     SetGroupOff(GroupIndex),
     SetBoilerOff(BoilerIndex),
+    
+    // Transition-enabled commands (only for groups since only they support curves)
+    SetGroupFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
 }
 
 #[derive(Clone, Debug)]
@@ -133,15 +169,21 @@ pub struct Routine {
     routine_type: RoutineType,
     name: String,
     parameters: Vec<RoutineParameter>, // max 8
+    derived_parameters: Vec<DerivedParameter>, // max 16
     steps: Vec<RoutineStep>,
 }
 
 impl Routine {
-    pub fn new(routine_type: RoutineType, name: String, parameters: Vec<RoutineParameter>, steps: Vec<RoutineStep>) -> Self {
+    pub fn new(routine_type: RoutineType, name: String, parameters: Vec<RoutineParameter>, derived_parameters: Vec<DerivedParameter>, steps: Vec<RoutineStep>) -> Self {
+        // Validate limits
+        assert!(parameters.len() <= 8, "Maximum 8 regular parameters allowed");
+        assert!(derived_parameters.len() <= 16, "Maximum 16 derived parameters allowed");
+        
         Self {
             routine_type,
             name,
             parameters,
+            derived_parameters,
             steps,
         }
     }
@@ -160,6 +202,10 @@ impl Routine {
 
     pub fn parameters(&self) -> &[RoutineParameter] {
         &self.parameters
+    }
+    
+    pub fn derived_parameters(&self) -> &[DerivedParameter] {
+        &self.derived_parameters
     }
 }
 
@@ -215,6 +261,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
         routine_type: RoutineType::UserDefined,
         name: "Water dispersal".into(),
         parameters,
+        derived_parameters: vec![], // No derived parameters for this routine
         steps: vec![
             // Step 0: Tare group scale
             RoutineStep {
@@ -227,7 +274,8 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
             },
             // Step 1: Set target to flow rate
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupOutputFlowRate(group, ParameterValue::Parameter(0))),
+                entry_command: Some(RoutineCommand::SetGroupFixedDutyCycleWithTransition(group, ParameterValue::Static(50.0), ParameterValue::Static(5.0))),
+//                entry_command: Some(RoutineCommand::SetGroupOutputFlowRateWithTransition(group, ParameterValue::Parameter(0), ParameterValue::Static(8.0))),
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
                     RoutineStepExitType::NextStep,
@@ -292,6 +340,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 unit: Some(ParameterUnit::MillilitersPerSecond)
             },
         ],
+        derived_parameters: vec![], // No derived parameters for this routine
         steps: vec![
             // Step 0
             RoutineStep {
@@ -391,6 +440,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
         routine_type: RoutineType::HeatUp,
         name: "Heat-up".into(),
         parameters,
+        derived_parameters: vec![], // No derived parameters for this routine
         steps: vec![
             RoutineStep {
                 entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(0))),
@@ -469,6 +519,68 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             ParameterValue::Parameter(idx) => {
                 self.parameters.get(idx).copied().unwrap_or(0.0)
             }
+            ParameterValue::DerivedParameter(idx) => {
+                self.resolve_derived_parameter(*idx)
+            }
+        }
+    }
+    
+    fn resolve_derived_parameter(&self, idx: u8) -> f32 {
+        if let Some(derived) = self.routine.derived_parameters.iter()
+            .find(|p| p.index == idx) {
+            
+            match &derived.formula {
+                DerivedFormula::Linear { base_param, multiplier, offset } => {
+                    let base_value = self.parameters.get(base_param).copied().unwrap_or(0.0);
+                    base_value * multiplier + offset
+                }
+                DerivedFormula::Sum { params } => {
+                    params.iter()
+                        .map(|p| self.parameters.get(p).copied().unwrap_or(0.0))
+                        .sum()
+                }
+                DerivedFormula::Difference { param_a, param_b } => {
+                    let a = self.parameters.get(param_a).copied().unwrap_or(0.0);
+                    let b = self.parameters.get(param_b).copied().unwrap_or(0.0);
+                    a - b
+                }
+                DerivedFormula::Product { params } => {
+                    params.iter()
+                        .map(|p| self.parameters.get(p).copied().unwrap_or(0.0))
+                        .product()
+                }
+            }
+        } else {
+            0.0
+        }
+    }
+    
+    fn create_linear_transition_curve(
+        &self, 
+        current_value: f32, 
+        target_value: f32, 
+        transition_time: f32
+    ) -> ControlCurve {
+        // Linear transition: value(t) = current + (target - current) * (t / transition_time)
+        // Rearranged to curve form: value(t) = 0*t² + b*t + c
+        // At t=0: value(0) = c = current_value
+        // At t=transition_time: value(transition_time) = b*transition_time + c = target_value
+        // Therefore: b = (target_value - current_value) / transition_time
+        
+        let b = (target_value - current_value) / transition_time;
+        let c = current_value;
+        
+        // Limits should constrain the curve to the exact range between start and end
+        // This prevents overshooting and ensures safety
+        let min_val = current_value.min(target_value);
+        let max_val = current_value.max(target_value);
+        
+        ControlCurve {
+            a: 0.0,  // No quadratic term for linear transition
+            b,       // Linear coefficient for smooth transition
+            c,       // Starting value (current value)
+            min: min_val, // Lower bound of transition range
+            max: max_val, // Upper bound of transition range
         }
     }
     
@@ -477,7 +589,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         Duration::from_millis((seconds * 1000.0) as u64)
     }
     
-    fn resolve_command(&self, cmd: &RoutineCommand) -> MachineCommand {
+    fn resolve_command(&self, cmd: &RoutineCommand, status: &Status) -> MachineCommand {
         match cmd {
             RoutineCommand::StartBrewing(idx) => MachineCommand::StartBrewing(*idx),
             RoutineCommand::StopBrewing(idx) => MachineCommand::StopBrewing(*idx),
@@ -516,6 +628,87 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             RoutineCommand::SetBoilerOff(idx) => {
                 MachineCommand::SetBoilerControlTarget(*idx, BoilerControlTarget::Off)
             }
+            
+            // Transition-enabled commands
+            RoutineCommand::SetGroupFlowRateWithTransition(idx, target_pv, transition_pv) => {
+                let target_value = self.resolve_value(target_pv);
+                let transition_time = self.resolve_value(transition_pv);
+                
+                if transition_time <= 0.0 {
+                    // No transition - use direct command
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::GroupFlowRate(target_value))
+                } else {
+                    // Create linear transition curve from current value
+                    let current_value = status.get_group_status(*idx)
+                        .and_then(|gs| gs.input_flow_rate)
+                        .unwrap_or(0.0);
+                    let curve = self.create_linear_transition_curve(
+                        current_value, target_value, transition_time
+                    );
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::GroupFlowRateCurve(curve))
+                }
+            }
+            
+            RoutineCommand::SetGroupPressureWithTransition(idx, target_pv, transition_pv) => {
+                let target_value = self.resolve_value(target_pv);
+                let transition_time = self.resolve_value(transition_pv);
+                
+                if transition_time <= 0.0 {
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::Pressure(target_value))
+                } else {
+                    let current_value = status.get_group_status(*idx)
+                        .and_then(|gs| gs.pressure)
+                        .unwrap_or(0.0);
+                    let curve = self.create_linear_transition_curve(
+                        current_value, target_value, transition_time
+                    );
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::PressureCurve(curve))
+                }
+            }
+            
+            RoutineCommand::SetGroupOutputFlowRateWithTransition(idx, target_pv, transition_pv) => {
+                let target_value = self.resolve_value(target_pv);
+                let transition_time = self.resolve_value(transition_pv);
+                
+                if transition_time <= 0.0 {
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::OutputFlowRate(target_value))
+                } else {
+                    let current_value = status.get_group_status(*idx)
+                        .and_then(|gs| gs.output_flow_rate)
+                        .unwrap_or(0.0);
+                    let curve = self.create_linear_transition_curve(
+                        current_value, target_value, transition_time
+                    );
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::OutputFlowRateCurve(curve))
+                }
+            }
+            
+            RoutineCommand::SetGroupFixedDutyCycleWithTransition(idx, target_pv, transition_pv) => {
+                let target_value = self.resolve_value(target_pv);
+                let transition_time = self.resolve_value(transition_pv);
+                
+                if transition_time <= 0.0 {
+                    // No transition - use direct command
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::FixedDutyCycle(target_value as u8))
+                } else {
+                    // Create linear transition curve from current duty cycle
+                    let current_value = status.get_group_status(*idx)
+                        .map(|gs| gs.pump_output.duty_cycle() as f32)
+                        .unwrap_or(0.0);
+                    let curve = self.create_linear_transition_curve(
+                        current_value, target_value, transition_time
+                    );
+                    MachineCommand::SetGroupBrewControlTarget(*idx,
+                        GroupBrewControlTarget::FixedDutyCycleCurve(curve))
+                }
+            }
         }
     }
 
@@ -527,7 +720,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         if self.current_step.is_none() {
             self.currently_executing = true;
             self.execution_start_time = Some(Instant::now());
-            return self.transition_to(0);
+            return self.transition_to(0, status);
         }
 
         // Check exit conditions
@@ -535,32 +728,32 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         for exit in &exits {
             match exit.condition {
                 RoutineExitCondition::Always => {
-                    return self.handle_exit(exit);
+                    return self.handle_exit(exit, status);
                 }
                 RoutineExitCondition::Never => continue,
                 RoutineExitCondition::After(pv) => {
                     let duration = self.resolve_duration(&pv);
                     if self.step_start_time.expect("Step start time is None - Shouldn't happen").elapsed() >= duration {
-                        return self.handle_exit(exit);
+                        return self.handle_exit(exit, status);
                     }
                 }
                 RoutineExitCondition::AfterDurationRelativeToStart(pv) => {
                     let duration = self.resolve_duration(&pv);
                     if self.execution_start_time.expect("Execution start time is None - Shouldn't happen").elapsed() >= duration {
-                        return self.handle_exit(exit);
+                        return self.handle_exit(exit, status);
                     }
                 }
                 RoutineExitCondition::StateConditionMet(condition) => {
                     if self.state_condition_met(condition, status) {
                         info!("State condition met: {:?}", condition);
-                        return self.handle_exit(exit);
+                        return self.handle_exit(exit, status);
                     }
                 }
                 RoutineExitCondition::UserAction(action_index) => {
                     if let Some(user_action_index) = user_action {
                         if user_action_index == action_index {
                             info!("User action condition met: {:?}", action_index);
-                            return self.handle_exit(exit);
+                            return self.handle_exit(exit, status);
                         }
                     }
                 }
@@ -571,13 +764,13 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         None
     }
 
-    fn handle_exit(&mut self, exit: &RoutineExit) -> Option<MachineCommand> {
+    fn handle_exit(&mut self, exit: &RoutineExit, status: &Status) -> Option<MachineCommand> {
         match exit.then {
             RoutineStepExitType::NextStep => {
-                self.transition_to(self.current_step.unwrap() + 1)
+                self.transition_to(self.current_step.unwrap() + 1, status)
             }
             RoutineStepExitType::JumpToStep(step) => {
-                self.transition_to(step)
+                self.transition_to(step, status)
             }
             RoutineStepExitType::Finished => {
                 self.currently_executing = false;
@@ -591,12 +784,12 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         }
     }
 
-    pub fn transition_to(&mut self, step: usize) -> Option<MachineCommand> {
+    pub fn transition_to(&mut self, step: usize, status: &Status) -> Option<MachineCommand> {
         info!("Transitioning to step {}", step);
         self.current_step = Some(step);
         self.step_start_time = Some(Instant::now());
         self.routine.steps[step].entry_command.as_ref()
-            .map(|cmd| self.resolve_command(cmd))
+            .map(|cmd| self.resolve_command(cmd, status))
     }
 
     fn state_condition_met(&self, state_condition: StateCondition, status: &Status) -> bool {

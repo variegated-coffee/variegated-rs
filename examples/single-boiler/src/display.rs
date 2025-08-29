@@ -385,9 +385,16 @@ impl DisplayController {
     }
 
     async fn render_idle_state(&mut self, substate: IdleSubState) {
-        let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index()).unwrap();
+        let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index());
 
-         match boiler_status.control_target {
+        let Some(boiler_status) = boiler_status else {
+            Text::with_baseline("No Boiler", Point::zero(), self.text_style_small, Baseline::Top)
+                .draw(&mut self.display)
+                .unwrap();
+            return;
+        };
+
+        match boiler_status.control_target {
             BoilerControlTarget::Off => {
                 Text::with_baseline("Boiler Off", Point::zero(), self.text_style_small, Baseline::Top)
                     .draw(&mut self.display)
@@ -564,13 +571,20 @@ impl DisplayController {
             .draw(&mut self.display)
             .unwrap();
 
+        Text::with_text_style(group.output_flow_rate.map_or("-".to_string(), |t| format!("{:.1} ml/s", t)).as_str(), Point::new(64, 30), self.text_style_medium_small, TextStyleBuilder::new()
+            .alignment(Alignment::Center)
+            .baseline(Baseline::Top)
+            .build())
+            .draw(&mut self.display)
+            .unwrap();
+
 
         let (tare_color, cal_zero_color, cal_hundered_color) = match substate {
             ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
                 (BinaryColor::On, BinaryColor::On, BinaryColor::On)
             }
             ScaleSettingsSubState::TareSelected => {
-                Rectangle::new(Point::new(20, 32), Size::new(88, 12))
+                Rectangle::new(Point::new(20, 42), Size::new(88, 12))
                     .into_styled(PrimitiveStyleBuilder::new()
                         .fill_color(BinaryColor::On)
                         .build())
@@ -601,23 +615,12 @@ impl DisplayController {
             }
         };
 
-        Text::with_text_style(
-            "Calibrate",
-            Point::new(64, 54),
-            self.text_style_small,
-            TextStyleBuilder::new()
-                .alignment(Alignment::Center)
-                .baseline(Baseline::Bottom)
-                .build()
-        )
-            .draw(&mut self.display)
-            .unwrap();
 
         self.text_style_medium_small.set_text_color(Some(tare_color));
 
         Text::with_text_style(
             "Tare",
-            Point::new(64, 42),
+            Point::new(64, 52),
             self.text_style_medium_small,
             TextStyleBuilder::new()
                 .alignment(Alignment::Center)
@@ -630,7 +633,7 @@ impl DisplayController {
         self.text_style_medium_small.set_text_color(Some(cal_zero_color));
 
         Text::with_text_style(
-            "Zero",
+            "Zero Cal",
             Point::new(16, 62),
             self.text_style_medium_small,
             TextStyleBuilder::new()
@@ -644,7 +647,7 @@ impl DisplayController {
         self.text_style_medium_small.set_text_color(Some(cal_hundered_color));
 
         Text::with_text_style(
-            "100 g",
+            "100g Cal",
             Point::new(112, 62),
             self.text_style_medium_small,
             TextStyleBuilder::new()
@@ -985,6 +988,11 @@ impl DisplayController {
                 } else {
                     0.0 // No routine execution, use fallback
                 }
+            }
+            ParameterValue::DerivedParameter(_) => {
+                // For display purposes, derived parameters aren't directly resolved here
+                // They would be computed on-demand by the routine execution context
+                0.0 
             }
         }
     }
