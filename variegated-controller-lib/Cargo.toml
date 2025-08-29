@@ -25,13 +25,17 @@ movavg = { version = "2.1.0", default-features = false }
 
 defmt = "0.3"
 
-serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }
+serde = { version = "1.0.219", default-features = false, features = ["derive"]}
+serde-json-core = { version = "0.6.0", default-features = false, features = ["defmt"]}
+postcard = { version = "1.1.1", features = ["alloc", "use-crc"] }
 
 cfg-if = "1.0.0"
 variegated-hal = { version = "0.1.0", path = "../variegated-hal" }
-variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
-variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
+variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt", "serde"] }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", features = ["defmt", "serde"] }
 
-[features]
-serde = ["dep:serde", "variegated-control-algorithm/serde", "variegated-controller-types/serde", "serde/derive"]
-default = ["serde"]
+sequential-storage = { version = "5.0.0", features = ["defmt-03"] }
+embedded-storage-async = "0.4.1"
+log = "0.4.27"
+
+crc = "3.3.0"

@@ -615,6 +615,13 @@ where
                         warn!("Switching to Manual Brew mode due to brewing start");
                         // Brewing just started, no routine running, switch to Manual Brew
                         self.status.state = UIState::ManualBrew(ControlMode::default());
+                        
+                        // Set group control target to safe default (duty cycle 0 = Off)
+                        let target = self.status.manual_brew_parameters.to_group_brew_control_target(ControlMode::default());
+                        self.command_sender.send(
+                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), target)
+                        ).await;
+                        
                         self.ui_status_sender.send(self.status.clone()).await;
                     }
                     

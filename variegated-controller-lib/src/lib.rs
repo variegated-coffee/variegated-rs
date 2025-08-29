@@ -1,9 +1,11 @@
 #![no_std]
 
 pub mod routine;
+pub mod settings;
 
 extern crate alloc;
 
+use crc::{Crc, CRC_32_ISCSI};
 use defmt::{error, info, warn, Format};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver};
@@ -13,13 +15,16 @@ use embassy_sync::watch;
 use embassy_time::{Instant, Timer};
 use heapless::FnvIndexMap;
 use movavg::MovAvg;
+use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
+use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, PeripheralRegistry};
-use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status};
+use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters};
 use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
+use crate::settings::SettingsStorage;
 
 fn limited_pid() -> PidCtrl<f32> {
     let mut pid = PidCtrl::default();
@@ -28,7 +33,7 @@ fn limited_pid() -> PidCtrl<f32> {
     pid
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SingleBoilerSingleGroupPidParameters {
     pub boiler_pressure_params: PidParameters,
     pub boiler_temperature_params: PidParameters,
@@ -37,15 +42,121 @@ pub struct SingleBoilerSingleGroupPidParameters {
     pub pump_output_flow_rate_params: PidParameters,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SingleBoilerSingleGroupConfiguration {
     pub brew_boiler_control_target: BoilerControlTarget,
     pub steam_boiler_control_target: BoilerControlTarget,
     pub group_brew_control_target: GroupBrewControlTarget,
     pub pid_parameters: SingleBoilerSingleGroupPidParameters,
+    pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
+    pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
+    pub pump_tacho_pulses_per_liter: Option<f32>,
+    pub flow_sensor_pulses_per_liter: Option<f32>,
 }
 
-pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> {
+impl<'a> Value<'a> for SingleBoilerSingleGroupConfiguration {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        info!("Serializing SingleBoilerSingleGroupConfiguration");
+
+        let slice = match to_slice_crc32(self, buffer, crc.digest()) {
+            Ok(bytes) => Ok(bytes.len()),
+            Err(postcard::Error::SerializeBufferFull) => {
+                warn!("Serialization buffer too small");
+
+                Err(SerializationError::BufferTooSmall)
+            },
+            Err(_) => {
+                warn!("Serialization error");
+
+                Err(SerializationError::InvalidData)
+            },
+        };
+
+        info!("Serialized SingleBoilerSingleGroupConfiguration, len = {}", slice.clone().unwrap_or(0));
+
+        slice
+    }
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError>
+    where
+        Self: Sized
+    {
+        info!("Deserializing configuration");
+
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        let v = match from_bytes_crc32(buffer, crc.digest()) {
+            Ok(value) => Ok(value),
+            Err(postcard::Error::DeserializeUnexpectedEnd) => {
+                warn!("Deserialization buffer too small");
+
+                Err(SerializationError::InvalidFormat)
+            },
+            Err(postcard::Error::DeserializeBadEnum) => {
+                warn!("Deserialization bad enum");
+
+                Err(SerializationError::InvalidFormat)
+            },
+            Err(_) => {
+                warn!("Deserialization error");
+                Err(SerializationError::InvalidFormat)
+            },
+        };
+
+        let vc = v.clone();
+        if vc.is_err() {
+            warn!("Deserialization failed");
+        }
+
+        if let Ok(vc) = vc {
+            info!("Deserialized configuration");
+        }
+
+        v
+    }
+}
+
+impl Default for SingleBoilerSingleGroupConfiguration {
+    fn default() -> Self {
+        let mut pid_parameters = SingleBoilerSingleGroupPidParameters::default();
+
+        pid_parameters.boiler_temperature_params = PidParameters {
+            kp: PidTerm::new(3.0, PidLimits::default()),
+            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
+            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
+        };
+        pid_parameters.pump_flow_rate_params = PidParameters {
+            kp: PidTerm::new(10.0, PidLimits::default() ),
+            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
+            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+        };
+        pid_parameters.pump_output_flow_rate_params = PidParameters {
+            kp: PidTerm::new(10.0, PidLimits::default() ),
+            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
+            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+        };
+        pid_parameters.pump_pressure_params = PidParameters {
+            kp: PidTerm::new( 10.0, PidLimits::default() ),
+            ki: PidTerm::new( 0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
+            kd: PidTerm::new( 30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+        };
+
+        SingleBoilerSingleGroupConfiguration {
+            brew_boiler_control_target: BoilerControlTarget::Temperature(110.0),
+            steam_boiler_control_target: BoilerControlTarget::Off,
+            group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
+            pid_parameters,
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            pump_tacho_pulses_per_liter: None,
+            flow_sensor_pulses_per_liter: None,
+        }
+    }
+}
+
+pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupConfiguration>, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> {
     command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
     status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
     boiler: Boiler<'a, M, N_WATCH>,
@@ -53,7 +164,8 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     state: SingleBoilerSingleGroupControllerState,
     boiler_pid: PidCtrl<f32>,
     pump_pid: PidCtrl<f32>,
-    configuration: SingleBoilerSingleGroupConfiguration,
+    configuration_store: SettingsStoreT,
+    current_configuration: SingleBoilerSingleGroupConfiguration,
     routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
     current_routine: Option<RoutineExecutionContext<SingleBoilerSingleGroupControllerState, SingleBoilerSingleGroupConfiguration>>,
     previous_status: Option<Status>,
@@ -65,13 +177,13 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     peripheral_registry: &'a PeripheralRegistry<'a>,
 }
 
-impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, N_CHANNEL, N_WATCH, N_SUBS> {
+impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupConfiguration>,const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS> {
     pub fn new(
         command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
         status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
         boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
-        configuration: SingleBoilerSingleGroupConfiguration,
+        mut settings_store: SettingsStoreT,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
     ) -> Self {
@@ -83,7 +195,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             state: SingleBoilerSingleGroupControllerState::default(),
             boiler_pid: limited_pid(),
             pump_pid: limited_pid(),
-            configuration,
+            configuration_store: settings_store,
+            current_configuration: SingleBoilerSingleGroupConfiguration::default(),
             routine_repository,
             current_routine: None,
             previous_status: None,
@@ -100,6 +213,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         let mut last_pid_update = Instant::now();
 
         loop {
+            self.current_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
+
             while !self.command_channel_receiver.is_empty() {
                 let command = self.command_channel_receiver.try_receive();
                 if let Ok(command) = command {
@@ -134,6 +249,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     }
 
     async fn update_pump(&mut self, actual_pump_control_target: GroupBrewControlTarget, delta_t: f32) -> Output {
+        let configuration = self.configuration_store.load_settings().await.unwrap_or_default();
+
         // Calculate elapsed time for curve evaluation if needed
         let elapsed_seconds = self.curve_start_time
             .map(|start| {
@@ -145,40 +262,40 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
         let pump_pv = match actual_pump_control_target {
             GroupBrewControlTarget::GroupFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
-                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_flow_rate_params);
+                self.pump_pid.set_parameters(configuration.pid_parameters.pump_flow_rate_params);
 
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::GroupFlowRateCurve(curve) => {
                 let target = curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_flow_rate_params);
+                self.pump_pid.set_parameters(configuration.pid_parameters.pump_flow_rate_params);
                 
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::Pressure(target) => {
                 self.pump_pid.setpoint = target as f32;
-                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_pressure_params);
+                self.pump_pid.set_parameters(configuration.pid_parameters.pump_pressure_params);
 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::PressureCurve(curve) => {
                 let target = curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_pressure_params);
+                self.pump_pid.set_parameters(configuration.pid_parameters.pump_pressure_params);
                 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::OutputFlowRate(target) => {
                 self.pump_pid.setpoint = target as f32;
-                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_output_flow_rate_params);
+                self.pump_pid.set_parameters(configuration.pid_parameters.pump_output_flow_rate_params);
 
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlTarget::OutputFlowRateCurve(curve) => {
                 let target = curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(self.configuration.pid_parameters.pump_output_flow_rate_params);
+                self.pump_pid.set_parameters(configuration.pid_parameters.pump_output_flow_rate_params);
                 
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
@@ -198,9 +315,18 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
             },
             GroupBrewControlTarget::FixedDutyCycle(duty_cycle) => {
                 self.group.set_pump_duty_cycle(duty_cycle).await;
+                info!("Fixed duty cycle target: {}", duty_cycle);
                 Output::FixedDutyCycle(duty_cycle)
             }
+            GroupBrewControlTarget::FixedDutyCycleCurve(curve) => {
+                let target_duty_cycle = curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
+                info!("Fixed duty cycle curve target: {}", target_duty_cycle);
+                info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
+                self.group.set_pump_duty_cycle(target_duty_cycle).await;
+                Output::FixedDutyCycle(target_duty_cycle)
+            }
             _ => {
+                info!("PID target: {}", pump_pid_out.out);
                 self.group.set_pump_duty_cycle(pump_pid_out.out as u8).await;
                 Output::PidOutput(pump_pid_out)
             },
@@ -208,16 +334,18 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
     }
 
     async fn update_boiler(&mut self, actual_boiler_control_target: BoilerControlTarget, delta_t: f32) -> Output {
+        let configuration = self.configuration_store.load_settings().await.unwrap_or_default();
+
         let mut boiler_pv = match actual_boiler_control_target {
             BoilerControlTarget::Temperature(target) => {
                 self.boiler_pid.setpoint = target as f32;
-                self.boiler_pid.set_parameters(self.configuration.pid_parameters.boiler_temperature_params);
+                self.boiler_pid.set_parameters(configuration.pid_parameters.boiler_temperature_params);
 
                 self.boiler.get_temperature().unwrap_or(0.0) as f32
             }
             BoilerControlTarget::Pressure(target) => {
                 self.boiler_pid.setpoint = target as f32;
-                self.boiler_pid.set_parameters(self.configuration.pid_parameters.boiler_pressure_params);
+                self.boiler_pid.set_parameters(configuration.pid_parameters.boiler_pressure_params);
 
                 self.boiler.get_pressure().unwrap_or(0.0) as f32
             }
@@ -375,7 +503,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, const N_CHANNEL: usize, const N_WATCH
                     match control_target {
                         GroupBrewControlTarget::GroupFlowRateCurve(_) |
                         GroupBrewControlTarget::PressureCurve(_) |
-                        GroupBrewControlTarget::OutputFlowRateCurve(_) => {
+                        GroupBrewControlTarget::OutputFlowRateCurve(_) |
+                        GroupBrewControlTarget::FixedDutyCycleCurve(_) => {
                             self.curve_start_time = Some(Instant::now());
                             info!("Starting curve control");
                         }

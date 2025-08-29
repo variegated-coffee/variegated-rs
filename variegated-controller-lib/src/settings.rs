@@ -1,0 +1,112 @@
+use alloc::vec;
+use core::ops::{Deref, DerefMut, Range};
+use defmt::info;
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::mutex::Mutex;
+use embedded_storage_async::nor_flash::{ErrorType, NorFlash};
+use serde_json_core::ser::Error;
+use variegated_controller_types::{BoilerConfiguration, GroupConfiguration};
+use heapless::Vec;
+use postcard::to_slice;
+use sequential_storage::cache::NoCache;
+use sequential_storage::map::{fetch_item, store_item, Key, SerializationError, Value};
+
+pub trait SettingsStorage<SettingsT: Default> {
+    async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
+    async fn save_settings(&self, data: &SettingsT) -> Result<(), &'static str>;
+}
+
+pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> {
+    _phantom: core::marker::PhantomData<SettingsT>,
+    flash: &'a Mutex<M, T>,
+    range: Range<u32>,
+    deserialization_buffer: [u8; 2048],
+}
+
+impl <'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+    pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
+        Self {
+            _phantom: core::marker::PhantomData,
+            flash,
+            range,
+            deserialization_buffer: [0u8; 2048],
+        }
+    }
+}
+
+impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default> SettingsStorage<SettingsT> for SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+    async fn load_settings(&mut self) -> Result<SettingsT, &'static str>
+    {
+        let mut flash = self.flash.lock().await;
+        let mut cache = NoCache::new();
+
+        let item = fetch_item::<u8, SettingsT, _>(flash.deref_mut(), self.range.clone(), &mut cache, &mut self.deserialization_buffer, &0)
+            .await;
+
+        if let Ok(Some(data)) = item {
+            return Ok(data)
+        } else {
+            if let Err(e) = &item {
+                match e {
+                    sequential_storage::Error::Storage { value: _ } => {
+                        info!("Error Storage");
+                    }
+                    sequential_storage::Error::FullStorage => {
+                        info!("Error FullStorage");
+                    }
+                    sequential_storage::Error::Corrupted {} => {
+                        info!("Error Corrupted");
+                    },
+                    sequential_storage::Error::BufferTooBig => {
+                        info!("Error BufferTooBig");
+                    },
+                    /// A provided buffer was to small to be used (usize is size needed)
+                    sequential_storage::Error::BufferTooSmall(usize) => {
+                        info!("Error BufferTooSmall: {}", usize);
+                    },
+                    /// A serialization error (from the key or value)
+                    sequential_storage::Error::SerializationError(SerializationError) => {
+                        info!("Error SerializationError: {:?}", SerializationError);
+                    },
+                    sequential_storage::Error::ItemTooBig => {
+                        info!("Error ItemTooBig");
+                    },
+                    _ => {
+                        info!("Some other error");
+                    }
+                }
+            }
+            info!("No settings found, using default");
+        }
+
+        // Placeholder: In real implementation, load from non-volatile storage
+        Ok(SettingsT::default())
+    }
+
+    async fn save_settings(&self, settings: &SettingsT) -> Result<(), &'static str> {
+        let mut flash = self.flash.lock().await;
+        let mut cache = NoCache::new();
+
+//        let mut serialization_buffer = [0u8; 1024];
+        let mut data_buffer = vec![0u8; 40*1024];
+
+        info!("Setting settings");
+
+  //      let s = to_slice(settings, &mut serialization_buffer).map_err(|_| "Serialization failed")?;
+
+    //    info!("Storing settings to flash, actual len = {}", s.len());
+
+        store_item(
+            flash.deref_mut(),
+            self.range.clone(),
+            &mut cache,
+            &mut data_buffer,
+            &0u8,
+            settings
+        ).await.expect("Failed to store item");
+
+        info!("Settings stored successfully");
+
+        Ok(())
+    }
+}
