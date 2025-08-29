@@ -137,7 +137,7 @@ impl defmt::Format for MachineCommand {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlCurve {
     pub a: f32,  // coefficient for T^2
     pub b: f32,  // coefficient for T
@@ -155,7 +155,7 @@ impl ControlCurve {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BoilerControlTarget {
     Temperature(TemperatureType),
     Pressure(PressureType),
@@ -165,7 +165,7 @@ pub enum BoilerControlTarget {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum GroupBrewControlTarget {
     GroupFlowRate(FlowRateType),
     GroupFlowRateCurve(ControlCurve),
@@ -417,7 +417,7 @@ pub struct BoilerConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct KalmanParameters {
     pub process_noise: f32,
     pub measurement_noise: f32,
