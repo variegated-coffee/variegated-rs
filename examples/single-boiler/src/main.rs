@@ -43,7 +43,7 @@ use embassy_sync::watch::{Watch};
 use embassy_time::{Delay, Duration, Timer};
 use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::ConversionParameters;
-use variegated_controller_lib::{SingleBoilerSingleGroupConfiguration, SingleBoilerSingleGroupController, SingleBoilerSingleGroupPidParameters};
+use variegated_controller_lib::{SingleBoilerSingleGroupPersistentConfiguration, SingleBoilerSingleGroupController, SingleBoilerSingleGroupPidParameters};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
@@ -399,7 +399,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
-    let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();
 
     info!("Configuration loaded");
