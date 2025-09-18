@@ -63,7 +63,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType};
+use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
@@ -186,6 +186,10 @@ const STATUS_RECEIVERS: usize = 4;
 type StatusChannel = PubSubChannel<NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 type StatusSubscriber = Subscriber<'static, NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
+const CONFIGURATION_RECEIVERS: usize = 4;
+type ConfigurationChannel = PubSubChannel<NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
+type ConfigurationSubscriber = Subscriber<'static, NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
+
 struct NoopOutputPin {
 
 }
@@ -243,6 +247,7 @@ static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
+static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
 static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -499,6 +504,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
+    let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
 
     let mut routine_repository = InMemoryRoutineRepository::new();
     routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
@@ -518,12 +524,15 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut controller = SingleBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
+        configuration_channel.publisher().expect("Failed to get configuration channel publisher"),
         boiler,
         group,
         settings_storage,
         routine_repository_ref,
         &peripheral_registry,
     );
+
+    // Controller will publish configuration automatically in its task loop
 
     let button_p = button_peripherals!(p);
     let rotary_p = rotary_encoder_peripherals!(p);
@@ -570,6 +579,7 @@ async fn main_task(spawner: Spawner) -> ! {
         ui_status_channel.sender(),
         routine_repository_ref,
         status_channel.subscriber().unwrap(),
+        configuration_channel.subscriber().unwrap(),
     );
 
     info!("Creating display task");
@@ -580,7 +590,7 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
-    spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), command_channel.sender())).unwrap();
+    spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), command_channel.sender())).unwrap();
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task()).unwrap();

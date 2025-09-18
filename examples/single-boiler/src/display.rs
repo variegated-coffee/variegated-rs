@@ -33,7 +33,7 @@ use crate::rotary::{RoutineParameterEditState};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
-use crate::rotary::{ControlMode, IdleSubState, ScaleSettingsSubState, UIState, UIStatus};
+use crate::rotary::{ControlMode, IdleSubState, ScaleSettingsSubState, UIState, UIStatus, ConfigEditType};
 use crate::list_menu::{ListMenuType, ListMenuState};
 
 pub type DisplayBus = Mutex<NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>>;
@@ -150,7 +150,7 @@ impl DisplayController {
             UIState::Idle(substate) => {
                 self.render_idle_state(substate).await;
             }
-            UIState::ListMenu(menu_type, menu_state) => {
+            UIState::ListMenu(menu_type, menu_state, _) => {
                 self.render_list_menu(menu_type, menu_state).await;
             }
             UIState::SettingsInformation => {
@@ -173,6 +173,9 @@ impl DisplayController {
             }
             UIState::ParameterManipulation { param_name, current_value, param_unit, .. } => {
                 self.render_parameter_manipulation(&param_name, current_value, param_unit).await;
+            }
+            UIState::ConfigValueEdit { config_type, current_value, .. } => {
+                self.render_config_value_edit(&config_type, current_value).await;
             }
             _ => {
                 self.render_old().await;
@@ -230,7 +233,7 @@ impl DisplayController {
         }
 
         // Get menu items from centralized location
-        let items = menu_type.get_items(Some(self.routine_repository)).await;
+        let items = menu_type.get_items(Some(self.routine_repository), Some(&self.status)).await;
 
         // Render menu items
         let visible_items = ListMenuState::VISIBLE_ITEMS;
@@ -1412,6 +1415,93 @@ impl DisplayController {
 
         // Current value prominently displayed with unit
         let value_text = self.format_parameter_value(current_value, param_unit);
+        Text::with_text_style(&value_text, Point::new(64, 20), self.text_style_large,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Adjustment instructions
+        Text::with_text_style("Rotate to adjust", Point::new(64, 45), self.text_style_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+        
+        Text::with_text_style("Press to confirm", Point::new(64, 55), self.text_style_small,
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+    }
+    
+    async fn render_config_value_edit(&mut self, config_type: &ConfigEditType, current_value: f32) {
+        use crate::list_menu::{PidConfigType, PidTermType, PidComponentType};
+        
+        // Generate appropriate title and unit based on config type
+        let (title, unit) = match config_type {
+            ConfigEditType::BoilerTemperature => ("Boiler Temperature", "°C"),
+            ConfigEditType::PidParameter(pid_type, term, component) => {
+                let pid_name = match pid_type {
+                    PidConfigType::BoilerTemperature => "Boiler Temp",
+                    PidConfigType::PumpFlowRate => "Flow Rate", 
+                    PidConfigType::PumpOutputFlowRate => "Output Flow",
+                    PidConfigType::PumpPressure => "Pressure",
+                };
+                
+                let term_name = match term {
+                    PidTermType::Kp => "kP",
+                    PidTermType::Ki => "kI", 
+                    PidTermType::Kd => "kD",
+                };
+                
+                let component_name = match component {
+                    PidComponentType::PositiveScale => "Pos Scale",
+                    PidComponentType::NegativeScale => "Neg Scale",
+                    PidComponentType::UpperLimit => "Upper Lim",
+                    PidComponentType::LowerLimit => "Lower Lim",
+                };
+                
+                let full_title = format!("{} {} {}", pid_name, term_name, component_name);
+                
+                return self.render_config_value_edit_with_title(&full_title, current_value, "").await;
+            }
+        };
+        
+        self.render_config_value_edit_with_title(title, current_value, unit).await;
+    }
+    
+    async fn render_config_value_edit_with_title(&mut self, title: &str, current_value: f32, unit: &str) {
+        // Title
+        Text::with_text_style(title, Point::new(64, 0), self.text_style_medium_small, 
+            TextStyleBuilder::new()
+                .alignment(Alignment::Center)
+                .baseline(Baseline::Top)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Separator line
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        // Current value prominently displayed with unit
+        let value_text = if unit.is_empty() {
+            format!("{:.1}", current_value)
+        } else {
+            format!("{:.1} {}", current_value, unit)
+        };
         Text::with_text_style(&value_text, Point::new(64, 20), self.text_style_large,
             TextStyleBuilder::new()
                 .alignment(Alignment::Center)

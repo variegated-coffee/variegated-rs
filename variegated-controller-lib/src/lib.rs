@@ -19,7 +19,7 @@ use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, PeripheralRegistry};
-use variegated_controller_types::{BoilerControlTarget, BoilerStatus, CommsStatus, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters};
 use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -217,9 +217,10 @@ impl Default for SingleBoilerSingleGroupConfiguration {
     }
 }
 
-pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> {
+pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize, const N_CONFIG_SUBS: usize> {
     command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
     status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
+    configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
     boiler: Boiler<'a, M, N_WATCH>,
     group: Group<'a, M, N_WATCH>,
     state: SingleBoilerSingleGroupControllerState,
@@ -239,7 +240,7 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     peripheral_registry: &'a PeripheralRegistry<'a>,
 }
 
-impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS> {
+impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize, const N_CONFIG_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> SingleBoilerSingleGroupConfiguration {
         SingleBoilerSingleGroupConfiguration {
             brew_boiler_control_target: self.persistent_configuration.brew_boiler_control_target,
@@ -255,6 +256,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
     pub fn new(
         command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
         status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
+        configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
         boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
         mut settings_store: SettingsStoreT,
@@ -264,6 +266,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
         Self {
             command_channel_receiver,
             status_channel_sender,
+            configuration_channel_sender,
             boiler,
             group,
             state: SingleBoilerSingleGroupControllerState::default(),
@@ -286,14 +289,31 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
 
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
+        let mut last_configuration = self.current_configuration();
 
         loop {
             self.persistent_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
+            
+            // Check if configuration changed and publish if it did
+            let current_config = self.current_configuration();
+            if current_config != last_configuration {
+                let config: Configuration = current_config.clone().into();
+                self.configuration_channel_sender.publish_immediate(config);
+                last_configuration = current_config;
+            }
 
             while !self.command_channel_receiver.is_empty() {
                 let command = self.command_channel_receiver.try_receive();
                 if let Ok(command) = command {
                     self.handle_command(command).await;
+                    
+                    // Check if configuration changed after handling command
+                    let current_config = self.current_configuration();
+                    if current_config != last_configuration {
+                        let config: Configuration = current_config.clone().into();
+                        self.configuration_channel_sender.publish_immediate(config);
+                        last_configuration = current_config;
+                    }
                 }
             }
 
@@ -758,5 +778,38 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
         } else {
             warn!("No routine to exit");
         }
+    }
+}
+
+impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
+    fn from(config: SingleBoilerSingleGroupConfiguration) -> Self {
+        let mut configuration = Configuration::default();
+        
+        // Add brew boiler configuration
+        let brew_boiler_config = BoilerConfiguration {
+            temperature_pid_parameters: config.pid_parameters.boiler_temperature_params.clone(),
+            pressure_pid_parameters: config.pid_parameters.boiler_pressure_params.clone(),
+            control_target: config.brew_boiler_control_target,
+        };
+        configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
+        
+        // Add virtual steam boiler configuration
+        let steam_boiler_config = BoilerConfiguration {
+            temperature_pid_parameters: PidParameters::default(), // Virtual steam boiler doesn't have separate PID
+            pressure_pid_parameters: PidParameters::default(),
+            control_target: config.steam_boiler_control_target,
+        };
+        configuration.insert_boiler_configuration(VirtualSteamBoiler.as_index(), steam_boiler_config);
+        
+        // Add group configuration
+        let group_config = GroupConfiguration {
+            flow_rate_pid_parameters: config.pid_parameters.pump_flow_rate_params.clone(),
+            output_flow_rate_pid_parameters: config.pid_parameters.pump_output_flow_rate_params.clone(),
+            pressure_pid_parameters: config.pid_parameters.pump_pressure_params.clone(),
+            brew_control_target: config.group_brew_control_target,
+        };
+        configuration.insert_group_configuration(SingleGroup.as_index(), group_config);
+        
+        configuration
     }
 }

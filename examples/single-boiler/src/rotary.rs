@@ -1,7 +1,7 @@
 use core::cmp::{max, min};
 use defmt::{info, warn, Format};
 use embassy_futures::select::Either::{First, Second};
-use embassy_futures::select::{select, select3, Either3};
+use embassy_futures::select::{select, select3, select4, Either3, Either4};
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder};
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -9,10 +9,11 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerControlTarget, DutyCycleType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, RoutineIndex, TemperatureType, Status};
-use crate::{RoutineRepository, StatusSubscriber};
-use crate::list_menu::{ListMenuType, ListMenuState, MenuItemId};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, Configuration, DutyCycleType, GroupBrewControlTarget, GroupConfiguration, MachineCommand, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
+use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
+use crate::list_menu::{ListMenuType, ListMenuState, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use alloc::string::ToString;
+use alloc::boxed::Box;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameters};
 use alloc::string::String;
@@ -23,6 +24,12 @@ pub(crate) enum ControlMode {
     PumpDutyCycle,
     PumpFlowRate,
     PumpPressure,
+}
+
+#[derive(Debug, Format, Copy, Clone, PartialEq)]
+pub(crate) enum ConfigEditType {
+    BoilerTemperature,
+    PidParameter(PidConfigType, PidTermType, PidComponentType),
 }
 
 impl ControlMode {
@@ -116,7 +123,7 @@ pub(crate) enum UIState {
     ManualBrew(ControlMode),
     DispensingWater,
     RoutineExecution,
-    ListMenu(ListMenuType, ListMenuState),
+    ListMenu(ListMenuType, ListMenuState, Option<Box<(ListMenuType, ListMenuState)>>),
     SettingsInformation,
     SettingsDebugInfo,
     ScaleSettings(ScaleSettingsSubState),
@@ -128,6 +135,12 @@ pub(crate) enum UIState {
         current_value: f32,
         param_name: String,
         param_unit: Option<ParameterUnit>,
+    },
+    ConfigValueEdit {
+        config_type: ConfigEditType,
+        current_value: f32,
+        previous_menu_type: ListMenuType,
+        previous_menu_state: ListMenuState,
     },
 }
 
@@ -334,6 +347,39 @@ pub async fn handle_menu_item_activation(
         MenuItemId::SettingsDebugInfo => Some(UIState::SettingsDebugInfo),
         MenuItemId::SettingsScaleSettings => Some(UIState::ScaleSettings(ScaleSettingsSubState::default())),
         MenuItemId::SettingsManualBrew => Some(UIState::ManualBrew(ControlMode::default())),
+        MenuItemId::SettingsBoilerTemperature => {
+            // This is now handled inline in the match statement to have access to configuration
+            None
+        },
+        MenuItemId::SettingsBoilerTemperaturePID => {
+            let menu_state = ListMenuState::new();
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), menu_state, None))
+        },
+        MenuItemId::SettingsPumpFlowRatePID => {
+            let menu_state = ListMenuState::new();
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), menu_state, None))
+        },
+        MenuItemId::SettingsPumpOutputFlowRatePID => {
+            let menu_state = ListMenuState::new();
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), menu_state, None))
+        },
+        MenuItemId::SettingsPumpPressurePID => {
+            let menu_state = ListMenuState::new();
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpPressure), menu_state, None))
+        },
+        MenuItemId::PidTerm(_term) => {
+            // This will be called from PID config menu, need to get the PID type from context
+            // For now, we'll handle this in the button press logic where we have more context
+            None
+        },
+        MenuItemId::PidComponent(_component) => {
+            // This will be handled in button press logic where we have the full context
+            None
+        },
+        MenuItemId::PidResetParameters => {
+            // This will be handled in button press logic where we have the full context
+            None
+        },
     };
     
     info!("New state set");
@@ -351,8 +397,10 @@ pub(crate) struct RotaryController<'a, C, const N: usize> where
     status: UIStatus,
     routine_repository: &'static RoutineRepository,
     status_receiver: StatusSubscriber,
+    configuration_receiver: ConfigurationSubscriber,
     previous_brewing_state: bool,
     current_status: Status,
+    current_configuration: Option<Configuration>,
 }
 
 impl<'a, C, const N: usize> RotaryController<'a, C, N>
@@ -366,6 +414,7 @@ where
         ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
         routine_repository: &'static RoutineRepository,
         status_receiver: StatusSubscriber,
+        configuration_receiver: ConfigurationSubscriber,
     ) -> Self {
         let mut status = UIStatus::default();
         status.manual_brew_parameters = ManualBrewParameters::new();
@@ -378,8 +427,10 @@ where
             status,
             routine_repository,
             status_receiver,
+            configuration_receiver,
             previous_brewing_state: false,
             current_status: Status::default(),
+            current_configuration: None,
         }
     }
 
@@ -388,13 +439,14 @@ where
         self.ui_status_sender.send(self.status.clone()).await;
 
         loop {
-            let either3 = select3(
+            let either4 = select4(
                 self.rotary.read(),
                 self.button.wait_for_falling_edge(),
-                self.status_receiver.next_message_pure()
+                self.status_receiver.next_message_pure(),
+                self.configuration_receiver.next_message_pure()
             ).await;
-            match either3 {
-                Either3::First(direction) => {
+            match either4 {
+                Either4::First(direction) => {
                     // Rotary encoder was turned
                 match &mut self.status.state {
                     UIState::Idle(substate) => {
@@ -403,7 +455,7 @@ where
                             Direction::CounterClockwise => substate.rotate_clockwise(),
                         };
                     }
-                    UIState::ListMenu(menu_type, menu_state) => {
+                    UIState::ListMenu(menu_type, menu_state, _) => {
                         // Get total items count from centralized location
                         let item_count = menu_type.get_item_count(Some(self.routine_repository)).await;
                         let total_items = item_count + (if menu_type.has_back_button() { 1 } else { 0 });
@@ -458,34 +510,61 @@ where
                             *current_value = (*current_value - 0.5).max(0.0); // Don't go below 0
                         }
                     }
+                    UIState::ConfigValueEdit { config_type, current_value, .. } => {
+                        // Adjust configuration value with appropriate increment
+                        let increment_size = match config_type {
+                            ConfigEditType::BoilerTemperature => 0.5,
+                            ConfigEditType::PidParameter(_, _, component) => match component {
+                                PidComponentType::PositiveScale | PidComponentType::NegativeScale => 0.1,
+                                PidComponentType::UpperLimit | PidComponentType::LowerLimit => 1.0,
+                            }
+                        };
+                        
+                        let increment = match direction {
+                            Direction::CounterClockwise => true,  // CounterClockwise increments
+                            Direction::Clockwise => false,        // Clockwise decrements
+                        };
+                        
+                        if increment {
+                            *current_value += increment_size;
+                        } else {
+                            *current_value = (*current_value - increment_size).max(-100f32); // Don't go below -100
+                        }
+                    }
                     _ => {}
                 }
 
                 self.ui_status_sender.send(self.status.clone()).await;
                 }
-                Either3::Second(_) => {
+                Either4::Second(_) => {
                     // Button was pressed
                 match &self.status.state {
                     UIState::Idle(substate) => {
                         match substate {
                             IdleSubState::RoutineMenuSelected => {
                                 let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state);
+                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None);
                             }
                             IdleSubState::SettingsMenuSelected => {
                                 let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state);
+                                self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None);
                             }
                             _ => {}
                         }
                     }
-                    UIState::ListMenu(menu_type, menu_state) => {
+                    UIState::ListMenu(menu_type, menu_state, parent_state) => {
                         let menu_type = *menu_type;
                         let has_back_button = menu_type.has_back_button();
                         
                         // Check if back button is selected
                         if has_back_button && menu_state.is_back_button_selected() {
-                            self.status.state = UIState::Idle(menu_type.get_back_state());
+                            // Use stored parent state if available, otherwise use default back state
+                            if let Some(parent) = parent_state {
+                                let (parent_menu_type, parent_menu_state) = *parent.clone();
+                                self.status.state = UIState::ListMenu(parent_menu_type, parent_menu_state, None);
+                            } else {
+                                self.status.state = menu_type.get_back_state();
+                            }
                         } else if let Some(item_index) = menu_state.get_selected_item_index(has_back_button) {
                             // Get MenuItemId from centralized location
                             let Some(menu_item_id) = menu_type.get_menu_item_id(item_index) else {
@@ -493,11 +572,135 @@ where
                             };
                             
                             // Handle menu item activation
-                            if let Some(new_state) = handle_menu_item_activation(
-                                menu_item_id,
-                                self.routine_repository
-                            ).await {
-                                self.status.state = new_state;
+                            match menu_item_id {
+                                MenuItemId::SettingsBoilerTemperature => {
+                                    // Get current boiler temperature from configuration
+                                    let current_temp = if let Some(ref config) = self.current_configuration {
+                                        config.get_boiler_configuration(0)
+                                            .map(|bc| {
+                                                match bc.control_target {
+                                                    BoilerControlTarget::Temperature(temp) => temp,
+                                                    _ => 110.0, // Default if not temperature control
+                                                }
+                                            })
+                                            .unwrap_or(110.0)
+                                    } else {
+                                        110.0 // Default
+                                    };
+                                    
+                                    self.status.state = UIState::ConfigValueEdit {
+                                        config_type: ConfigEditType::BoilerTemperature,
+                                        current_value: current_temp,
+                                        previous_menu_type: menu_type,
+                                        previous_menu_state: *menu_state,
+                                    };
+                                },
+                                MenuItemId::PidTerm(term) => {
+                                    // We need to know which PID type we're in
+                                    if let ListMenuType::PidConfig(pid_type) = menu_type {
+                                        let new_menu_state = ListMenuState::new();
+                                        // Store parent menu state
+                                        let parent_state = Some(Box::new((menu_type, *menu_state)));
+                                        self.status.state = UIState::ListMenu(
+                                            ListMenuType::PidTermConfig(pid_type, term), 
+                                            new_menu_state,
+                                            parent_state
+                                        );
+                                    }
+                                },
+                                MenuItemId::PidResetParameters => {
+                                    // We need to know which PID type we're in
+                                    if let ListMenuType::PidConfig(pid_type) = menu_type {
+                                        // Get default PID parameters based on type
+                                        use variegated_controller_types::{PidParameters, PidTerm, PidLimits};
+                                        
+                                        let default_params = match pid_type {
+                                            PidConfigType::BoilerTemperature => PidParameters {
+                                                kp: PidTerm::new(3.0, PidLimits::default()),
+                                                ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
+                                                kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
+                                            },
+                                            PidConfigType::PumpFlowRate | PidConfigType::PumpOutputFlowRate | PidConfigType::PumpPressure => PidParameters {
+                                                kp: PidTerm::new(10.0, PidLimits::default()),
+                                                ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
+                                                kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
+                                            },
+                                        };
+                                        
+                                        // Send command to reset PID parameters
+                                        let target = match pid_type {
+                                            PidConfigType::BoilerTemperature => PidParameterTarget::BoilerTemperature(0),
+                                            PidConfigType::PumpFlowRate => PidParameterTarget::GroupFlowRate(0),
+                                            PidConfigType::PumpOutputFlowRate => PidParameterTarget::GroupOutputFlowRate(0),
+                                            PidConfigType::PumpPressure => PidParameterTarget::GroupPressure(0),
+                                        };
+                                        
+                                        self.command_sender.send(
+                                            MachineCommand::SetPidParameters(target, default_params)
+                                        ).await;
+                                        
+                                        info!("Reset PID parameters for {:?} to defaults", pid_type);
+                                    }
+                                },
+                                MenuItemId::PidComponent(component) => {
+                                    // We need to know which PID type and term we're in
+                                    if let ListMenuType::PidTermConfig(pid_type, term) = menu_type {
+                                        // Get current value from configuration
+                                        let current_value = if let Some(ref config) = self.current_configuration {
+                                            let params = match pid_type {
+                                                PidConfigType::BoilerTemperature => {
+                                                    config.get_boiler_configuration(0)
+                                                        .map(|bc| &bc.temperature_pid_parameters)
+                                                },
+                                                PidConfigType::PumpFlowRate => {
+                                                    config.get_group_configuration(0)
+                                                        .map(|gc| &gc.flow_rate_pid_parameters)
+                                                },
+                                                PidConfigType::PumpOutputFlowRate => {
+                                                    config.get_group_configuration(0)
+                                                        .map(|gc| &gc.output_flow_rate_pid_parameters)
+                                                },
+                                                PidConfigType::PumpPressure => {
+                                                    config.get_group_configuration(0)
+                                                        .map(|gc| &gc.pressure_pid_parameters)
+                                                },
+                                            };
+
+                                            if let Some(params) = params {
+                                                let term_value = match term {
+                                                    PidTermType::Kp => &params.kp,
+                                                    PidTermType::Ki => &params.ki,
+                                                    PidTermType::Kd => &params.kd,
+                                                };
+
+                                                match component {
+                                                    PidComponentType::PositiveScale => term_value.positive_scale,
+                                                    PidComponentType::NegativeScale => term_value.negative_scale,
+                                                    PidComponentType::UpperLimit => 100.0, // TODO: Need getter methods in PID lib
+                                                    PidComponentType::LowerLimit => -100.0, // TODO: Need getter methods in PID lib
+                                                }
+                                            } else {
+                                                1.0 // Default fallback
+                                            }
+                                        } else {
+                                            1.0 // No configuration available yet
+                                        };
+                                        self.status.state = UIState::ConfigValueEdit {
+                                            config_type: ConfigEditType::PidParameter(pid_type, term, component),
+                                            current_value,
+                                            previous_menu_type: menu_type,
+                                            previous_menu_state: *menu_state,
+                                        };
+                                    }
+                                },
+                                _ => {
+                                    if let Some(new_state) = handle_menu_item_activation(
+                                        menu_item_id,
+                                        self.routine_repository
+                                    ).await {
+                                        self.status.state = new_state;
+                                    }
+                                }
                             }
                         }
                     }
@@ -514,7 +717,7 @@ where
                             }
                             ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
                                 // Go back to Settings menu
-                                self.status.state = UIState::ListMenu(ListMenuType::Settings, ListMenuState::default());
+                                self.status.state = UIState::ListMenu(ListMenuType::Settings, ListMenuState::default(), None);
                             }
                         }
                     }
@@ -537,7 +740,7 @@ where
                     UIState::SettingsInformation | UIState::SettingsDebugInfo => {
                         // Go back to settings menu
                         let menu_state = ListMenuState::new();
-                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state);
+                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None);
                     }
                     UIState::RoutineExecution => {
                         // Cancel the currently running routine
@@ -551,7 +754,7 @@ where
                             if edit_state.is_back_button_selected() {
                                 // Back button selected - return to routine menu
                                 let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state);
+                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None);
                             } else if edit_state.is_execute_selected(routine) {
                                 // Execute button selected - run routine with current parameters
                                 let runtime_params = if edit_state.parameter_values.is_empty() {
@@ -589,6 +792,91 @@ where
                         
                         self.status.state = UIState::RoutineParameters(routine_index, preserved_edit_state);
                     }
+                    UIState::ConfigValueEdit { config_type, current_value, previous_menu_type, previous_menu_state, .. } => {
+                        // Send command to update configuration and return to previous menu
+                        let config_type = *config_type;
+                        let current_value = *current_value;
+                        
+                        // Send appropriate command based on config type
+                        match config_type {
+                            ConfigEditType::BoilerTemperature => {
+                                self.command_sender.send(
+                                    MachineCommand::SetBoilerControlTarget(
+                                        0, // Boiler index 0 for single boiler
+                                        BoilerControlTarget::Temperature(current_value)
+                                    )
+                                ).await;
+                            },
+                            ConfigEditType::PidParameter(pid_type, term, component) => {
+                                use crate::list_menu::{PidConfigType, PidTermType, PidComponentType};
+                                use variegated_controller_types::{PidParameterTarget, GroupIndex, BoilerIndex};
+                                
+                                // Get current PID parameters from configuration
+                                let mut updated_params = if let Some(ref config) = self.current_configuration {
+                                    match pid_type {
+                                        PidConfigType::BoilerTemperature => {
+                                            config.get_boiler_configuration(0)
+                                                .map(|bc| bc.temperature_pid_parameters.clone())
+                                                .unwrap_or_default()
+                                        },
+                                        PidConfigType::PumpFlowRate => {
+                                            config.get_group_configuration(0)
+                                                .map(|gc| gc.flow_rate_pid_parameters.clone())
+                                                .unwrap_or_default()
+                                        },
+                                        PidConfigType::PumpOutputFlowRate => {
+                                            config.get_group_configuration(0)
+                                                .map(|gc| gc.output_flow_rate_pid_parameters.clone())
+                                                .unwrap_or_default()
+                                        },
+                                        PidConfigType::PumpPressure => {
+                                            config.get_group_configuration(0)
+                                                .map(|gc| gc.pressure_pid_parameters.clone())
+                                                .unwrap_or_default()
+                                        },
+                                    }
+                                } else {
+                                    // No configuration available yet, use defaults
+                                    PidParameters::default()
+                                };
+                                
+                                // Modify the specific parameter component
+                                let term_ref = match term {
+                                    PidTermType::Kp => &mut updated_params.kp,
+                                    PidTermType::Ki => &mut updated_params.ki, 
+                                    PidTermType::Kd => &mut updated_params.kd,
+                                };
+                                
+                                match component {
+                                    PidComponentType::PositiveScale => term_ref.positive_scale = current_value,
+                                    PidComponentType::NegativeScale => term_ref.negative_scale = current_value,
+                                    PidComponentType::UpperLimit => {
+                                        let _ = term_ref.limits.try_set_upper(current_value);
+                                    },
+                                    PidComponentType::LowerLimit => {
+                                        let _ = term_ref.limits.try_set_lower(current_value);
+                                    },
+                                }
+                                
+                                // Send the updated parameters
+                                let target = match pid_type {
+                                    PidConfigType::BoilerTemperature => PidParameterTarget::BoilerTemperature(0),
+                                    PidConfigType::PumpFlowRate => PidParameterTarget::GroupFlowRate(0), 
+                                    PidConfigType::PumpOutputFlowRate => PidParameterTarget::GroupOutputFlowRate(0),
+                                    PidConfigType::PumpPressure => PidParameterTarget::GroupPressure(0),
+                                };
+                                
+                                self.command_sender.send(
+                                    MachineCommand::SetPidParameters(target, updated_params)
+                                ).await;
+                                
+                                info!("Updated PID parameter: {:?} {:?} {:?} = {}", pid_type, term, component, current_value);
+                            }
+                        }
+                        
+                        // Return to previous menu
+                        self.status.state = UIState::ListMenu(*previous_menu_type, *previous_menu_state, None);
+                    }
                     _ => {
                         self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);
                     }
@@ -597,7 +885,7 @@ where
 
                 Timer::after_millis(300).await;
                 }
-                Either3::Third(status_update) => {
+                Either4::Third(status_update) => {
                     // Status update received - handle automatic UI switching
                     self.current_status = status_update;
                     
@@ -638,6 +926,11 @@ where
 
                     // Update previous brewing state for next iteration
                     self.previous_brewing_state = current_brewing;
+                }
+                Either4::Fourth(configuration_update) => {
+                    // Configuration update received - store the latest configuration
+                    self.current_configuration = Some(configuration_update);
+                    info!("Configuration updated");
                 }
             }
         }

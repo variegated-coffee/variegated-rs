@@ -398,6 +398,24 @@ pub struct Configuration {
     group_configuration: FnvIndexMap<GroupIndex, GroupConfiguration, MAX_GROUPS>,
 }
 
+impl Configuration {
+    pub fn get_boiler_configuration(&self, index: BoilerIndex) -> Option<&BoilerConfiguration> {
+        self.boiler_configuration.get(&index)
+    }
+    
+    pub fn get_group_configuration(&self, index: GroupIndex) -> Option<&GroupConfiguration> {
+        self.group_configuration.get(&index)
+    }
+    
+    pub fn insert_boiler_configuration(&mut self, index: BoilerIndex, config: BoilerConfiguration) {
+        self.boiler_configuration.insert(index, config).ok();
+    }
+    
+    pub fn insert_group_configuration(&mut self, index: GroupIndex, config: GroupConfiguration) {
+        self.group_configuration.insert(index, config).ok();
+    }
+}
+
 #[cfg(feature = "defmt")]
 impl defmt::Format for Configuration {
     fn format(&self, f: defmt::Formatter) {
