@@ -24,49 +24,57 @@ rts_pin = "embassy_rp::peripherals::PIN_11"
 dma_tx = "embassy_rp::peripherals::DMA_CH4"
 dma_rx = "embassy_rp::peripherals::DMA_CH5"
 
-[button_peripherals]
-pin_brew = "embassy_rp::peripherals::PIN_34"
-
-[linear_encoder_peripherals]
+[potentiometer_peripherals]
 adc = "embassy_rp::peripherals::ADC"
-pin_linear_encoder_a = "embassy_rp::peripherals::PIN_43"
+pin_linear_encoder_a = "embassy_rp::peripherals::PIN_47"
 
-[pump_peripherals]
-pwm_speed = "embassy_rp::peripherals::PWM_SLICE3"
-pin_speed = "embassy_rp::peripherals::PIN_22"
-pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE2"
-pin_tacho_out = "embassy_rp::peripherals::PIN_21"
-pin_dir = "embassy_rp::peripherals::PIN_20"
+[gear_pump_peripherals]
+pwm_speed = "embassy_rp::peripherals::PWM_SLICE9"
+pin_speed = "embassy_rp::peripherals::PIN_34"
+pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE8"
+pin_tacho_out = "embassy_rp::peripherals::PIN_33"
+pin_dir = "embassy_rp::peripherals::PIN_35"
+
+[rotary_pump_peripherals]
+pin_rotary_pump_enable = "embassy_rp::peripherals::PIN_40"
 
 [flow_meter_peripherals]
-pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE4"
-pin_flow_meter = "embassy_rp::peripherals::PIN_25"
+pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE3"
+pin_flow_meter = "embassy_rp::peripherals::PIN_23"
 
 [mechanism_peripherals]
-pin_brew_he = "embassy_rp::peripherals::PIN_37"
-pin_service_he = "embassy_rp::peripherals::PIN_36"
-pin_line_solenoid = "embassy_rp::peripherals::PIN_23"
-pin_service_solenoid = "embassy_rp::peripherals::PIN_24"
+pin_brew_he = "embassy_rp::peripherals::PIN_36"
+pin_service_he = "embassy_rp::peripherals::PIN_37"
+pin_group_solenoid = "embassy_rp::peripherals::PIN_26"
+pin_fill_solenoid = "embassy_rp::peripherals::PIN_25"
+pin_tea_solenoid = "embassy_rp::peripherals::PIN_24"
 
-[tank_peripherals]
-pin_tank_level = "embassy_rp::peripherals::PIN_35"
+[sd_card_peripherals]
+pin_clk = "embassy_rp::peripherals::PIN_41"
+pin_cmd = "embassy_rp::peripherals::PIN_42"
+pin_d0 = "embassy_rp::peripherals::PIN_43"
+pin_d1 = "embassy_rp::peripherals::PIN_44"
+pin_d2 = "embassy_rp::peripherals::PIN_45"
+pin_d3 = "embassy_rp::peripherals::PIN_46"
 
 [qwiic_i2c_bus_peripherals]
 i2c = "embassy_rp::peripherals::I2C0"
-scl_pin = "embassy_rp::peripherals::PIN_45"
-sda_pin = "embassy_rp::peripherals::PIN_44"
+scl_pin = "embassy_rp::peripherals::PIN_17"
+sda_pin = "embassy_rp::peripherals::PIN_16"
 
-[display_peripherals]
-uart = "embassy_rp::peripherals::UART0"
-tx_pin = "embassy_rp::peripherals::PIN_17"
-rx_pin = "embassy_rp::peripherals::PIN_16"
-twelve_volt_out_pin = "embassy_rp::peripherals::PIN_15"
-three_volt_out_pin = "embassy_rp::peripherals::PIN_14"
-dma_tx = "embassy_rp::peripherals::DMA_CH2"
-dma_rx = "embassy_rp::peripherals::DMA_CH3"
+[eyespi_display_peripherals]
+spi = "embassy_rp::peripherals::SPI0"
+sclk_pin = "embassy_rp::peripherals::PIN_2"
+mosi_pin = "embassy_rp::peripherals::PIN_3"
+miso_pin = "embassy_rp::peripherals::PIN_4"
+dc_pin = "embassy_rp::peripherals::PIN_6"
+reset_pin = "embassy_rp::peripherals::PIN_7"
+disp_cs_pin = "embassy_rp::peripherals::PIN_12"
+
+[button_mux_peripherals]
+pin_interrupt = "embassy_rp::peripherals::PIN_20"
 
 [irq_aliases]
 EspIrq = "UART1_IRQ"
-DisplayIrq = "UART0_IRQ"
 AdcIrq = "ADC_IRQ_FIFO"
 InternalI2cIrq = "I2C1_IRQ"

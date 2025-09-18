@@ -1,4 +1,3 @@
-use defmt::info;
 use embassy_rp::pwm::Pwm;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::watch::Sender;

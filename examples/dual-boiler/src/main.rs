@@ -48,6 +48,7 @@ use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, Ratiomet
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use embassy_rp::bind_interrupts;
 use embassy_rp::qmi_cs1::QmiCs1;
+use embassy_sync::priority_channel::Min;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embedded_graphics::{
     mono_font::{ascii::FONT_5X7, MonoTextStyleBuilder},
@@ -70,20 +71,19 @@ static HEAP: Heap = Heap::empty();
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
-    DisplayIrq => uart::InterruptHandler<DisplayPeripheralsUart>;
     AdcIrq => adc::InterruptHandler;
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
 });
 
-#[variegated_board_cfg::board_cfg("display_peripherals")]
+#[variegated_board_cfg::board_cfg("eyespi_display_peripherals")]
 struct DisplayPeripherals {
-    uart: Peri<'static, ()>,
-    tx_pin: Peri<'static, ()>,
-    rx_pin: Peri<'static, ()>,
-    twelve_volt_out_pin: Peri<'static, ()>,
-    three_volt_out_pin: Peri<'static, ()>,
-    dma_tx: Peri<'static, ()>,
-    dma_rx: Peri<'static, ()>,
+    spi: Peri<'static, DisplayPeripheralsSpi>,
+    sclk_pin: Peri<'static, ()>,
+    miso_pin: Peri<'static, ()>,
+    mosi_pin: Peri<'static, ()>,
+    disp_cs_pin: Peri<'static, ()>,
+    dc_pin: Peri<'static, ()>,
+    reset_pin: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("internal_spi_bus_peripherals")]
@@ -109,12 +109,7 @@ struct Ads124S08Peripherals {
     pin_cs: Peri<'static, ()>,
 }
 
-#[variegated_board_cfg::board_cfg("button_peripherals")]
-struct ButtonPeripherals {
-    pin_brew: Peri<'static, ()>,
-}
-
-#[variegated_board_cfg::board_cfg("pump_peripherals")]
+#[variegated_board_cfg::board_cfg("gear_pump_peripherals")]
 struct PumpPeripherals {
     pwm_speed: Peri<'static, ()>,
     pin_speed: Peri<'static, ()>,
@@ -133,8 +128,9 @@ struct FlowMeterPeripherals {
 struct MechanismPeripherals {
     pin_brew_he: Peri<'static, ()>,
     pin_service_he: Peri<'static, ()>,
-    pin_line_solenoid: Peri<'static, ()>,
-    pin_service_solenoid: Peri<'static, ()>,
+    pin_group_solenoid: Peri<'static, ()>,
+    pin_fill_solenoid: Peri<'static, ()>,
+    pin_tea_solenoid: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("esp32_peripherals")]
@@ -148,7 +144,7 @@ struct Esp32Peripherals {
     dma_rx: Peri<'static, ()>,
 }
 
-#[variegated_board_cfg::board_cfg("linear_encoder_peripherals")]
+#[variegated_board_cfg::board_cfg("potentiometer_peripherals")]
 struct LinearEncoderPeripherals {
     adc: Peri<'static, ()>,
     pin_linear_encoder_a: Peri<'static, ()>,
@@ -228,17 +224,6 @@ async fn main_task(spawner: Spawner) -> ! {
     spi_config.phase = Phase::CaptureOnSecondTransition;
     spi_config.polarity = Polarity::IdleLow;
 
-/*    let spi_p = InternalSpiBusPeripherals {
-        spi: p.SPI0,
-        sclk_pin: p.PIN_18,
-        mosi_pin: p.PIN_19,
-        miso_pin: p.PIN_16,
-        dma_tx: p.DMA_CH0,
-        dma_rx: p.DMA_CH1,
-    };*/
-    
-    variegated_rp235x_bootloader_tools::current_partition().expect("Failed to get current partition");
-    
     let spi_p = internal_spi_bus_peripherals!(p);
     let ads_p = ads124s08_peripherals!(p);
 
@@ -266,6 +251,8 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
     
     let mut successful_measurements: Vec<SuccessfulMeasurement> = Vec::new();
+
+    let mut relay_pin = Output::new(p.PIN_25, Low);
     
     loop {
         let cap = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN1).await;
@@ -285,7 +272,9 @@ async fn main_task(spawner: Spawner) -> ! {
                 info!("Error reading capacitance: {:?}", e);
             }
         }
-        Timer::after_millis(1000).await;
+
+        relay_pin.toggle();
+        Timer::after_millis(5000).await;
     }
     /*    
         let linear_encoder_p = linear_encoder_peripherals!(p);
@@ -319,4 +308,81 @@ async fn main_task(spawner: Spawner) -> ! {
     
             Timer::after_millis(1000).await;
         }*/
+}
+
+async fn analog_tests<I2C: embedded_hal_async::i2c::I2c>(fdc1004: &mut FDC1004<I2C, Delay>, ads: &AdsMutex) -> ! {
+    loop {
+        // Read capacitance measurements
+        let cin1 = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN1).await;
+        let cin2 = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN2).await;
+
+        // Lock ADS124S08 for PT1000 measurements
+        let mut ads_guard = ads.lock().await;
+
+        // First PT1000 measurement: AIN1-AIN2 with IDAC on AIN0
+        let pt1000_1 = ads_guard.measure_ratiometric_low_side(
+            Mux::AIN1,                    // Input positive
+            Mux::AIN2,                    // Input negative
+            IDACMux::AIN0,                // IDAC1 output
+            IDACMux::Disconnected,        // IDAC2 disconnected
+            ReferenceInput::Refp0Refn0,   // Reference
+            IDACMagnitude::Mag1000uA,     // 1mA current
+            PGAGain::Gain1,               // Gain
+        ).await;
+
+        // Second PT1000 measurement: AIN9-AIN10 with IDAC on AIN8
+        let pt1000_2 = ads_guard.measure_ratiometric_low_side(
+            Mux::AIN9,                    // Input positive
+            Mux::AIN10,                   // Input negative
+            IDACMux::AIN8,                // IDAC1 output
+            IDACMux::Disconnected,        // IDAC2 disconnected
+            ReferenceInput::Refp0Refn0,   // Reference
+            IDACMagnitude::Mag1000uA,     // 1mA current
+            PGAGain::Gain1,               // Gain
+        ).await;
+
+        // Drop the lock
+        drop(ads_guard);
+
+        // Output all measurements using defmt
+        info!("=== Analog Measurements ===");
+
+        // Output capacitance
+        match cin1 {
+            Ok(variegated_fdc1004::SuccessfulMeasurement::MeasurementInRange(c)) => {
+                info!("Capacitance CIN1: {} pF", c.to_pf() as i32);
+            },
+            Ok(variegated_fdc1004::SuccessfulMeasurement::Overflow) => info!("Capacitance CIN1: Overflow"),
+            Ok(variegated_fdc1004::SuccessfulMeasurement::Underflow) => info!("Capacitance CIN1: Underflow"),
+            Err(_) => info!("Capacitance CIN1: Error"),
+        }
+
+        match cin2 {
+            Ok(variegated_fdc1004::SuccessfulMeasurement::MeasurementInRange(c)) => {
+                info!("Capacitance CIN2: {} pF", c.to_pf() as i32);
+            },
+            Ok(variegated_fdc1004::SuccessfulMeasurement::Overflow) => info!("Capacitance CIN2: Overflow"),
+            Ok(variegated_fdc1004::SuccessfulMeasurement::Underflow) => info!("Capacitance CIN2: Underflow"),
+            Err(_) => info!("Capacitance CIN2: Error"),
+        }
+
+        // Output PT1000 measurements
+        match pt1000_1 {
+            Ok(code) => {
+                let resistance = code.ratiometric_resistance(2200.0); // 2.2K reference resistor
+                info!("PT1000 #1 (AIN1-AIN2): {} Ω", resistance);
+            },
+            Err(_) => info!("PT1000 #1 (AIN1-AIN2): Error"),
+        }
+
+        match pt1000_2 {
+            Ok(code) => {
+                let resistance = code.ratiometric_resistance(2200.0); // 2.2K reference resistor
+                info!("PT1000 #2 (AIN9-AIN10): {} Ω", resistance);
+            },
+            Err(_) => info!("PT1000 #2 (AIN9-AIN10): Error"),
+        }
+
+        Timer::after_millis(1000).await;
+    }
 }
