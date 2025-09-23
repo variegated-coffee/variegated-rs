@@ -34,18 +34,18 @@ use embassy_rp::uart::Uart;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
-use embassy_time::{Delay, Instant, Timer};
+use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_graphics::primitives::{PrimitiveStyleBuilder, StyledDrawable};
 use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
 use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::{ConversionParameters, ResistorDividerPosition};
-use variegated_controller_lib::{SingleBoilerSingleGroupController};
+use variegated_controller_lib::{SingleBoilerSingleGroupController, SingleBoilerSingleGroupPersistentConfiguration};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
-use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
+use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMechanism, DualBoilerMechanism, DualBoilerConfig, DualBoilerFillMechanism, PumpStrategy};
 use embassy_rp::bind_interrupts;
 use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::priority_channel::Min;
@@ -60,11 +60,25 @@ use embedded_hal::pwm::SetDutyCycle;
 use oled_async::{displays, prelude::*, Builder};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType};
+use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
-use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
+use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
+use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
+use variegated_mcp23017::{Mcp23017, Mcp23017Config};
+use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
+use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
+use w25q32jv::W25q32jv;
+
+mod mcp23017_hd44780;
+use mcp23017_hd44780::Mcp23017HD44780Device;
+use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
+use variegated_fdc1004::Channel::{CIN3, CIN4};
+use variegated_hal::cap_adc::fdc1004::Fdc1004Sensor;
+use variegated_hal::gpio::gpio_binary_pump::GpioBinaryPump;
+use variegated_hal::noop::NoopOutputPin;
+use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -124,13 +138,18 @@ struct FlowMeterPeripherals {
     pin_flow_meter: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("rotary_pump_peripherals")]
+struct RotaryPumpPeripherals {
+    pin_rotary_pump_enable: Peri<'static, ()>,
+}
+
 #[variegated_board_cfg::board_cfg("mechanism_peripherals")]
 struct MechanismPeripherals {
     pin_brew_he: Peri<'static, ()>,
     pin_service_he: Peri<'static, ()>,
     pin_group_solenoid: Peri<'static, ()>,
     pin_fill_solenoid: Peri<'static, ()>,
-    pin_tea_solenoid: Peri<'static, ()>,
+    pin_water_dispersal_solenoid: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("esp32_peripherals")]
@@ -150,9 +169,16 @@ struct LinearEncoderPeripherals {
     pin_linear_encoder_a: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("settings_flash_peripherals")]
+struct SettingsFlashPeripherals {
+    pin_cs: Peri<'static, ()>,
+}
+
 type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
+type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
+type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
@@ -165,15 +191,22 @@ fn main() -> ! {
 
 static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
 static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
-static ADS: StaticCell<AdsMutex> = StaticCell::new();
-static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
-static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
-static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
+static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
+static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
+static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
+static BREW_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
+static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
+static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
+static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, WaterLevelType, 3>> = StaticCell::new();
+static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, WaterLevelType, 3>> = StaticCell::new();
+static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
+static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
-static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
+static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<PubSubChannel<CriticalSectionRawMutex, Status, 1, 3, 1>> = StaticCell::new();
+static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 
 #[embassy_executor::task]
 async fn main_task(spawner: Spawner) -> ! {
@@ -216,8 +249,6 @@ async fn main_task(spawner: Spawner) -> ! {
         }
     }
 
-
-
     // Shared SPI bus
     let mut spi_config = spi::Config::default();
     spi_config.frequency = 281_000;
@@ -238,151 +269,320 @@ async fn main_task(spawner: Spawner) -> ! {
         info!("Error resetting ADS124S08: {:?}", e);
     }
     info!("Done");
-    
-    let ads = ADS.init(Mutex::new(ads));
+    let dr = ads.read_datarate_reg().await.unwrap();
+    info!("Data rate: {:?}", dr);
+    let ads = ADS_MUTEX.init(Mutex::new(ads));
 
     info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
-    
+
+    let rotary_p = rotary_pump_peripherals!(p);
+    let mechanism_p = mechanism_peripherals!(p);
+
+    let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
+
+    // Create pump and solenoids for dual boiler mechanism
+    let pump_output = GpioBinaryPump::new(Output::new(rotary_p.pin_rotary_pump_enable, Low));
+    let group_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_group_solenoid, Low)));
+    let fill_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_fill_solenoid, Low)));
+    //let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
+
     let i2c_p = internal_i2c_bus_peripherals!(p);
     let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
     let i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(i2c_bus));
     
     let mut fdc1004_dev = I2cDevice::new(i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
-    
-    let mut successful_measurements: Vec<SuccessfulMeasurement> = Vec::new();
 
-    let mut relay_pin = Output::new(p.PIN_25, Low);
-    
+    let fdc1004 = FDC_MUTEX.init(Mutex::new(fdc1004));
+
+    // Initialize MCP23017 for button control
+    let mut mcp23017_dev = I2cDevice::new(i2c_bus);
+    let mcp23017_config = Mcp23017Config {
+        address: 0x20, // Default MCP23017 address
+        sequential_operation: true,
+        mirror_interrupts: false,
+        interrupt_active_high: false,
+        interrupt_open_drain: false,
+    };
+    let mut mcp23017 = Mcp23017::new(mcp23017_dev, Delay, mcp23017_config);
+    mcp23017.init().await.unwrap();
+
+    mcp23017.set_pin_pullup(0, true).await.unwrap();
+    mcp23017.set_pin_pullup(1, true).await.unwrap();
+    mcp23017.set_pin_pullup(2, true).await.unwrap();
+    mcp23017.set_pin_pullup(3, true).await.unwrap();
+    mcp23017.set_pin_pullup(4, true).await.unwrap();
+    mcp23017.set_pin_pullup(5, true).await.unwrap();
+
+    let mut tlc_dev = I2cDevice::new(i2c_bus);
+
+    let iref_config = IrefConfig {
+        current_multiplier: false,
+        voltage_subband: true,
+        current_control: 58,
+    };
+
+    let tlc_config = Tlc59108Config {
+        address: 0x40, // Default TLC59108 address
+        output_change_on_ack: false,
+        group_mode: GroupMode::Dimming,
+        group_brightness: 0,
+        group_frequency: 0,
+        iref_config: Some(iref_config)
+    };
+    let mut tlc = variegated_tlc59108::Tlc59108::new(tlc_dev, Delay, tlc_config);
+    tlc.init().await.unwrap();
+    tlc.set_led(0, 255, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(1, 255, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(2, 255, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(3, 255, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(4, 255, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(5, 255, LedState::PwmAndGroup).await.unwrap();
+
+    // Initialize MCP23017 for LCD control
+    let mut mcp23017_dev = I2cDevice::new(i2c_bus);
+    let mcp23017_config = Mcp23017Config {
+        address: 0x21, // Default MCP23017 address
+        sequential_operation: true,
+        mirror_interrupts: false,
+        interrupt_active_high: false,
+        interrupt_open_drain: false,
+    };
+    let mut mcp23017 = Mcp23017::new(mcp23017_dev, Delay, mcp23017_config);
+    mcp23017.init().await.unwrap();
+    let mut lcd_device = Mcp23017HD44780Device::new(mcp23017);
+    lcd_device.init_pins().await.unwrap();
+
+    // Initialize the LCD controller (16x2 display, 8-bit mode)
+    let initial_config = InitialConfig {
+        data_length: DataLength::EightBit, // Use 8-bit mode for better performance
+        lines: NumberOfLines::Two,
+        font: CharacterFont::FiveByEight,
+    };
+    let runtime_config = RuntimeConfig::default(); // Display on, cursor off, backlight on
+
+    let lcd = Controller::<Delay, _>::new_async(lcd_device, initial_config, runtime_config);
+
+    // Initialize and write initial message to LCD
+    let mut lcd = lcd.init().await.unwrap();
+    lcd.clear().await.unwrap();
+    lcd.write_str("Variegated LCD!".chars()).await.unwrap();
+    lcd.write_line(1, "Dual Boiler".chars()).await.unwrap();
+
+    let flash_p = settings_flash_peripherals!(p);
+    let flash_spi_dev = SpiDevice::new(spi_bus, Output::new(flash_p.pin_cs, High));
+
+    let hold = NoopOutputPin {};
+    let wp = NoopOutputPin {};
+
+    let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
+    let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
+
+    let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    let configuration = settings_storage.load_settings().await.unwrap_or_default();
+/*
+    water.set_high();
+    Timer::after(Duration::from_secs(3)).await;
+    water.set_low();
+
+ */
+    let conversion = ConversionParameters::pt1000();
+
     loop {
-        let cap = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN1).await;
+        info!("-------- Sensor readings --------");
 
-        match cap {
-            Ok(c) => {
-                info!("Capacitance CIN1: {:?}", c);
-                successful_measurements.push(c);
-                info!("Number of successful measurements: {:?}", successful_measurements.len());
-                let prev = successful_measurements.first().unwrap();
-                info!("First successful measurement: {:?}", prev);
-                info!("Heap stats: Free: {}, Used: {}", 
-                    HEAP.free(), 
-                    HEAP.used());
-            }
-            Err(e) => {
-                info!("Error reading capacitance: {:?}", e);
-            }
+        let mut ads_locked = ads.lock().await;
+        let temp_1 = ads_locked.measure_ratiometric_low_side(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1).await;
+        let temp_2 = ads_locked.measure_ratiometric_low_side(Mux::AIN9, Mux::AIN10, IDACMux::AIN8, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1).await;
+
+        let prs_1 = ads_locked.measure_single_ended(Mux::AIN4, ReferenceInput::Refp1Refn1).await;
+        let prs_2 = ads_locked.measure_single_ended(Mux::AIN5, ReferenceInput::Refp1Refn1).await;
+
+        if let Ok(t1) = temp_1 {
+            info!("Temp 1: {} ohm", t1.ratiometric_resistance(2200.0 / 1.031));
+            info!("Temp 1: {} °C", conversion.convert(t1.ratiometric_resistance(2200.0 / 1.031)));
+        } else {
+            info!("Error reading temp 1: {:?}", temp_1);
         }
 
-        relay_pin.toggle();
-        Timer::after_millis(5000).await;
+        if let Ok(t2) = temp_2 {
+            info!("Temp 2: {} ohm", t2.ratiometric_resistance(2200.0 / 1.031));
+        } else {
+            info!("Error reading temp 2: {:?}", temp_2);
+        }
+
+        if let Ok(p1) = prs_1 {
+            info!("Prs 1: {} V", p1.externally_referenced_voltage(0.0, 5.0));
+        } else {
+            info!("Error reading prs 1: {:?}", prs_1);
+        }
+
+        if let Ok(p2) = prs_2 {
+            info!("Prs 2: {} V", p2.externally_referenced_voltage(0.0, 5.0));
+        } else {
+            info!("Error reading prs 2: {:?}", prs_2);
+        }
+
+        let mut fdc_locked = fdc1004.lock().await;
+        let cap_1 = fdc_locked.read_capacitance(CIN4).await;
+        let cap_2 = fdc_locked.read_capacitance(CIN3).await;
+
+        if let Ok(c1) = cap_1 {
+            match c1 {
+                SuccessfulMeasurement::MeasurementInRange(c) => info!("Cap 1: {:?} pF", c.to_pf()),
+                SuccessfulMeasurement::Overflow => info!("Cap 1 overflow"),
+                SuccessfulMeasurement::Underflow => info!("Cap 1 underflow"),
+            }
+        } else {
+            info!("Error reading cap 1: {:?}", cap_1);
+        }
+
+        if let Ok(c2) = cap_2 {
+            match c2 {
+                SuccessfulMeasurement::MeasurementInRange(c) => info!("Cap 2: {:?} pF", c.to_pf()),
+                SuccessfulMeasurement::Overflow => info!("Cap 2 overflow"),
+                SuccessfulMeasurement::Underflow => info!("Cap 2 underflow"),
+            }
+        } else {
+            info!("Error reading cap 2: {:?}", cap_2);
+        }
+
+        Timer::after(Duration::from_secs(2)).await;
     }
-    /*    
-        let linear_encoder_p = linear_encoder_peripherals!(p);
-    
-        let mut adc = Adc::new(linear_encoder_p.adc, Irqs, adc::Config::default());
-        let mut linear_encoder = AdcChannel::new_pin(linear_encoder_p.pin_linear_encoder_a, Pull::None);
-    
-        loop {
-            let level = adc.read(&mut linear_encoder).await;
-            info!("Linear encoder level: {:?}", level);
-    
-            let mut locked = ads.lock().await;
-            let ntc1 = locked.measure_differential(
-                Mux::AIN2,
-                Mux::AIN3,
-                ReferenceInput::Refp0Refn0,
-                PGAGain::Gain1,
-            ).await;
-    
-            if let Ok(ntc1) = ntc1 {
-                info!("NTC1 measurement: {:?}", ntc1.externally_referenced_voltage(0.0, 5.0));
-            } else {
-                info!("Failed to read NTC1 measurement");
-            }
-    
-            info!("NTC1 measurement: {:?}", ntc1.unwrap().);
-            let params = ConversionParameters::thermistor_with_resistor_divider(50000.0, 4000.0, 5.0, 2200.0, ResistorDividerPosition::Upstream);
-            let out = params.convert(ntc1.unwrap().externally_referenced_voltage(0.0, 5.0));
-            
-            info!("NTC1 temperature: {:?}", out);
-    
-            Timer::after_millis(1000).await;
-        }*/
-}
 
-async fn analog_tests<I2C: embedded_hal_async::i2c::I2c>(fdc1004: &mut FDC1004<I2C, Delay>, ads: &AdsMutex) -> ! {
+    // -- Real code --
+
+
+
+
+
+
+
+
+    info!("Configuration loaded");
+
+    let brew_boiler_temp_watch: &'static Watch<_, _, 3>  = BREW_BOILER_TEMP_WATCH.init(Watch::new());
+    let mut brew_temp_sensor = Ads124S08Sensor::new(
+        ads,
+        brew_boiler_temp_watch.sender(),
+        RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0),
+        ConversionParameters::pt1000().with_kalman_filter(0.001, 0.05, 1.0),
+        0.0
+    );
+
+    let brew_boiler_pressure_watch: &'static Watch<_, _, 3> = BREW_BOILER_PRESSURE_WATCH.init(Watch::new());
+    let mut brew_pressure_sensor = Ads124S08Sensor::new(
+        ads,
+        brew_boiler_pressure_watch.sender(),
+        SingleEnded(
+            Mux::AIN4,
+            ReferenceInput::Refp1Refn1,
+            5.0
+        ),
+        ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 15.0)
+            .with_median_filter(5)
+            .with_kalman_filter(0.05, 0.1, 0.5),
+        0.0
+    );
+
+    let steam_boiler_temp_watch: &'static Watch<_, _, 3>  = STEAM_BOILER_TEMP_WATCH.init(Watch::new());
+    let mut steam_temp_sensor = Ads124S08Sensor::new(
+        ads,
+        steam_boiler_temp_watch.sender(),
+        RatiometricLowSide(Mux::AIN9, Mux::AIN10, IDACMux::AIN8, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0),
+        ConversionParameters::pt1000().with_kalman_filter(0.001, 0.05, 1.0),
+        0.0
+    );
+
+    let steam_boiler_pressure_watch: &'static Watch<_, _, 3> = STEAM_BOILER_PRESSURE_WATCH.init(Watch::new());
+    let mut steam_pressure_sensor = Ads124S08Sensor::new(
+        ads,
+        brew_boiler_pressure_watch.sender(),
+        SingleEnded(
+            Mux::AIN5,
+            ReferenceInput::Refp1Refn1,
+            5.0
+        ),
+        ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 15.0)
+            .with_median_filter(5)
+            .with_kalman_filter(0.05, 0.1, 0.5),
+        0.0
+    );
+
+    // Helper function for water level transformer
+    let water_level_transformer = |m: SuccessfulMeasurement| -> WaterLevelType {
+        match m {
+            SuccessfulMeasurement::MeasurementInRange(_c) => 0.into(),
+            SuccessfulMeasurement::Overflow => 100.into(),
+            SuccessfulMeasurement::Underflow => 0.into(),
+        }
+    };
+
+    let steam_boiler_water_level_watch: &'static Watch<_, _, 3>  = STEAM_BOILER_WATER_LEVEL_WATCH.init(Watch::new());
+    let mut steam_boiler_water_level = Fdc1004Sensor::new(
+        fdc1004,
+        steam_boiler_water_level_watch.sender(),
+        water_level_transformer,
+        CIN4
+    );
+
+    let tank_water_level_watch: &'static Watch<_, _, 3>  = TANK_WATER_LEVEL_WATCH.init(Watch::new());
+    let mut tank_water_level = Fdc1004Sensor::new(
+        fdc1004,
+        tank_water_level_watch.sender(),
+        water_level_transformer,
+        CIN3
+    );
+
+    let brew_he_sig: &'static Signal<_, _> = BREW_HE_SIGNAL.init(Signal::new());
+
+    let mut brew_he = GpioBinaryHeatingElement::new(Output::new(mechanism_p.pin_brew_he, Low), brew_he_sig);
+    let brew_he_control = GpioBinaryHeatingElementControl::new(brew_he_sig);
+
+    let brew_boiler = Boiler::new(
+        Box::new(brew_he_control),
+        None,
+        Some(brew_boiler_temp_watch.receiver().unwrap()),
+        Some(brew_boiler_pressure_watch.receiver().unwrap()),
+        None
+    );
+
+    let steam_he_sig: &'static Signal<_, _> = STEAM_HE_SIGNAL.init(Signal::new());
+
+    let mut steam_he = GpioBinaryHeatingElement::new(Output::new(mechanism_p.pin_service_he, Low), steam_he_sig);
+    let steam_he_control = GpioBinaryHeatingElementControl::new(steam_he_sig);
+
+    let steam_boiler = Boiler::new(
+        Box::new(steam_he_control),
+        None,
+        Some(steam_boiler_temp_watch.receiver().unwrap()),
+        Some(steam_boiler_pressure_watch.receiver().unwrap()),
+        Some(steam_boiler_water_level_watch.receiver().unwrap()),
+    );
+
+    // Initialize dual boiler mechanism
+    let dual_boiler_config = DualBoilerConfig {
+        heating_element_interlock: true, // Prevent both heating elements running simultaneously
+        water_dispersal_pump_strategy: Some(PumpStrategy::LowLevelOnly(20.into())),
+        allow_simultaneous_operations: true, // Allow brewing and steaming simultaneously
+    };
+
+    let dual_boiler_mechanism = DualBoilerMechanism::new(
+        Some(Box::new(pump_output)),
+        Some(group_solenoid),
+        Some(fill_solenoid),
+        None,//Some(water_dispersal_solenoid),
+        None,
+        dual_boiler_config,
+    );
+
+    let mechanism_mutex = MECHANISM_MUTEX.init(Mutex::new(dual_boiler_mechanism));
+    let brew_mechanism = DualBoilerBrewMechanism::new(mechanism_mutex);
+    let mut fill_mechanism = DualBoilerFillMechanism::new(mechanism_mutex);
+
+    info!("Dual boiler mechanism initialized");
+
     loop {
-        // Read capacitance measurements
-        let cin1 = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN1).await;
-        let cin2 = fdc1004.read_capacitance(variegated_fdc1004::Channel::CIN2).await;
-
-        // Lock ADS124S08 for PT1000 measurements
-        let mut ads_guard = ads.lock().await;
-
-        // First PT1000 measurement: AIN1-AIN2 with IDAC on AIN0
-        let pt1000_1 = ads_guard.measure_ratiometric_low_side(
-            Mux::AIN1,                    // Input positive
-            Mux::AIN2,                    // Input negative
-            IDACMux::AIN0,                // IDAC1 output
-            IDACMux::Disconnected,        // IDAC2 disconnected
-            ReferenceInput::Refp0Refn0,   // Reference
-            IDACMagnitude::Mag1000uA,     // 1mA current
-            PGAGain::Gain1,               // Gain
-        ).await;
-
-        // Second PT1000 measurement: AIN9-AIN10 with IDAC on AIN8
-        let pt1000_2 = ads_guard.measure_ratiometric_low_side(
-            Mux::AIN9,                    // Input positive
-            Mux::AIN10,                   // Input negative
-            IDACMux::AIN8,                // IDAC1 output
-            IDACMux::Disconnected,        // IDAC2 disconnected
-            ReferenceInput::Refp0Refn0,   // Reference
-            IDACMagnitude::Mag1000uA,     // 1mA current
-            PGAGain::Gain1,               // Gain
-        ).await;
-
-        // Drop the lock
-        drop(ads_guard);
-
-        // Output all measurements using defmt
-        info!("=== Analog Measurements ===");
-
-        // Output capacitance
-        match cin1 {
-            Ok(variegated_fdc1004::SuccessfulMeasurement::MeasurementInRange(c)) => {
-                info!("Capacitance CIN1: {} pF", c.to_pf() as i32);
-            },
-            Ok(variegated_fdc1004::SuccessfulMeasurement::Overflow) => info!("Capacitance CIN1: Overflow"),
-            Ok(variegated_fdc1004::SuccessfulMeasurement::Underflow) => info!("Capacitance CIN1: Underflow"),
-            Err(_) => info!("Capacitance CIN1: Error"),
-        }
-
-        match cin2 {
-            Ok(variegated_fdc1004::SuccessfulMeasurement::MeasurementInRange(c)) => {
-                info!("Capacitance CIN2: {} pF", c.to_pf() as i32);
-            },
-            Ok(variegated_fdc1004::SuccessfulMeasurement::Overflow) => info!("Capacitance CIN2: Overflow"),
-            Ok(variegated_fdc1004::SuccessfulMeasurement::Underflow) => info!("Capacitance CIN2: Underflow"),
-            Err(_) => info!("Capacitance CIN2: Error"),
-        }
-
-        // Output PT1000 measurements
-        match pt1000_1 {
-            Ok(code) => {
-                let resistance = code.ratiometric_resistance(2200.0); // 2.2K reference resistor
-                info!("PT1000 #1 (AIN1-AIN2): {} Ω", resistance);
-            },
-            Err(_) => info!("PT1000 #1 (AIN1-AIN2): Error"),
-        }
-
-        match pt1000_2 {
-            Ok(code) => {
-                let resistance = code.ratiometric_resistance(2200.0); // 2.2K reference resistor
-                info!("PT1000 #2 (AIN9-AIN10): {} Ω", resistance);
-            },
-            Err(_) => info!("PT1000 #2 (AIN9-AIN10): Error"),
-        }
-
-        Timer::after_millis(1000).await;
+        Timer::after_millis(5000).await;
     }
 }

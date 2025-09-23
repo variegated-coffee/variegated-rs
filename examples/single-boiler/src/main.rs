@@ -31,6 +31,7 @@ use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
 use variegated_hal::{Boiler, Group, WithTask, PeripheralRegistry};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
+use variegated_hal::noop::NoopOutputPin;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
 use embassy_futures::select::Either::{First, Second};
@@ -71,7 +72,7 @@ use variegated_gravity_driver::{Gravity, Channel as GravityChannel};
 use variegated_hal::adc::mcp9600::Mcp9600Sensor;
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
-use variegated_hal::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
+use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
 use variegated_hal::scale::{gravity, ScaleController};
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
 use variegated_instrumentation::async_task_loop;
@@ -190,32 +191,6 @@ const CONFIGURATION_RECEIVERS: usize = 4;
 type ConfigurationChannel = PubSubChannel<NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 type ConfigurationSubscriber = Subscriber<'static, NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 
-struct NoopOutputPin {
-
-}
-
-#[derive(Debug)]
-struct NoopOutputPinError {
-
-}
-
-impl Error for NoopOutputPinError {
-    fn kind(&self) -> ErrorKind {
-        ErrorKind::Other
-    }
-}
-
-impl ErrorType for NoopOutputPin { type Error = NoopOutputPinError; }
-
-impl OutputPin for NoopOutputPin {
-    fn set_low(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-
-    fn set_high(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
 
 
 #[global_allocator]
@@ -468,10 +443,10 @@ async fn main_task(spawner: Spawner) -> ! {
     let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
     let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(input, pump_rpm_sig.sender(), None, None, |v| (v * 60.0/32.0) as RPMType);
 
-    let pump = variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump::new(pump_pwm);
+    let pump = Box::new(variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump::new(pump_pwm));
 
     let solenoid_output = Output::new(mechanism_p.pin_solenoid, Low);
-    let solenoid = GpioThreeWaySolenoid::new(solenoid_output);
+    let solenoid = Box::new(GpioBinarySolenoidValve::new(solenoid_output));
 
     let mechanism = SingleBoilerMechanism::new(pump, solenoid);
     let mechanism_mutex: &Mutex<_, _> = MECHANISM_MUTEX.init(Mutex::new(mechanism));

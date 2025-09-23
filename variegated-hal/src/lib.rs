@@ -9,14 +9,18 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
+pub use pump::{Pump, PumpError};
 use heapless::FnvIndexMap;
 use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS};
 use crate::scale::ScaleConfiguration;
 
 pub mod gpio;
 pub mod adc;
+pub mod cap_adc;
 pub mod machine_mechanism;
 pub mod scale;
+pub mod noop;
+pub mod pump;
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {
@@ -275,6 +279,8 @@ pub trait BrewMechanism {
 
 pub trait ValveMechanism {
     fn set_valve_state(&mut self, state: ValveOpenType) -> Result<(), ValveMechanismError>;
+    fn get_valve_state(&self) -> ValveOpenType;
+    fn get_binary_state(&self) -> bool;
 }
 
 pub trait WaterMixerMechanism {

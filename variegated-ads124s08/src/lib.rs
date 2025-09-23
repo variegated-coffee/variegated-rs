@@ -367,7 +367,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         config.pga.enable = true;
         config.pga.gain = gain;
         config.datarate.mode = Mode::Continuous;
-        config.datarate.rate = registers::DataRate::SPS200;
+        config.datarate.rate = registers::DataRate::SPS20;
         config.datarate.filter = Filter::SINC3;
 
         config = self.swap_all_configuration_registers(config).await?;
@@ -563,7 +563,7 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         match &mut self.wait_strategy {
             WaitStrategy::UseDrdyPin(drdy_input) => {
                 // Use timeout for DRDY pin waiting to prevent infinite hang
-                let timeout_ms = self.configuration_registers.datarate.rate.sample_period_ms() * 3; // 3x sample period timeout
+                let timeout_ms = self.configuration_registers.datarate.rate.sample_period_ms() * 5; // 3x sample period timeout
                 let wait_future = drdy_input.wait_for_low();
                 let timeout_future = async {
                     self.delay.delay_ms(timeout_ms).await;
