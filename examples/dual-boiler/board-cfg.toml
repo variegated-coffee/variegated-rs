@@ -47,7 +47,7 @@ pin_brew_he = "embassy_rp::peripherals::PIN_36"
 pin_service_he = "embassy_rp::peripherals::PIN_37"
 pin_group_solenoid = "embassy_rp::peripherals::PIN_26"
 pin_fill_solenoid = "embassy_rp::peripherals::PIN_25"
-pin_tea_solenoid = "embassy_rp::peripherals::PIN_24"
+pin_water_dispersal_solenoid = "embassy_rp::peripherals::PIN_24"
 
 [sd_card_peripherals]
 pin_clk = "embassy_rp::peripherals::PIN_41"
@@ -73,6 +73,9 @@ disp_cs_pin = "embassy_rp::peripherals::PIN_12"
 
 [button_mux_peripherals]
 pin_interrupt = "embassy_rp::peripherals::PIN_20"
+
+[settings_flash_peripherals]
+pin_cs = "embassy_rp::peripherals::PIN_27"
 
 [irq_aliases]
 EspIrq = "UART1_IRQ"

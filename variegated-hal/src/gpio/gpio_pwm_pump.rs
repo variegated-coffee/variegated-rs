@@ -1,13 +1,7 @@
-use defmt::Format;
 use embassy_rp::pwm::PwmOutput;
 use embedded_hal::pwm::SetDutyCycle;
 use crate::DutyCycleType;
-
-#[derive(Debug, Format, Clone, Copy)]
-pub enum GpioPwmPumpError {
-    DutyCycleOutOfRange,
-    PwmError
-}
+use crate::pump::{Pump, PumpError};
 
 pub struct GpioPwmPump<'a> {
     pwm_output: PwmOutput<'a>,
@@ -21,13 +15,19 @@ impl<'a> GpioPwmPump<'a> {
             current_duty_cycle: 0
         }
     }
+}
 
-    pub fn set_duty_cycle(&mut self, duty_cycle: DutyCycleType) -> Result<(), GpioPwmPumpError> {
+impl<'a> Pump for GpioPwmPump<'a> {
+    fn set_duty_cycle(&mut self, duty_cycle: DutyCycleType) -> Result<(), PumpError> {
+        if duty_cycle > 100 {
+            return Err(PumpError::DutyCycleOutOfRange);
+        }
+
         self.current_duty_cycle = duty_cycle;
-        self.pwm_output.set_duty_cycle_percent(duty_cycle).map_err(|_| GpioPwmPumpError::PwmError)
+        self.pwm_output.set_duty_cycle_percent(duty_cycle).map_err(|_| PumpError::PwmError)
     }
-    
-    pub fn get_duty_cycle(&self) -> DutyCycleType {
+
+    fn get_duty_cycle(&self) -> DutyCycleType {
         self.current_duty_cycle
     }
 }

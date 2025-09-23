@@ -1,10 +1,8 @@
 use async_trait::async_trait;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use crate::{BrewMechanism, BrewMechanismError, DutyCycleType};
+use crate::{BrewMechanism, BrewMechanismError, DutyCycleType, Pump, ValveMechanism};
 use alloc::boxed::Box;
-use crate::gpio::gpio_pwm_pump::GpioPwmPump;
-use crate::gpio::gpio_three_way_solenoid::GpioThreeWaySolenoid;
 
 enum SingleBoilerMechanismState {
     Idle,
@@ -13,15 +11,15 @@ enum SingleBoilerMechanismState {
 }
 
 pub struct SingleBoilerMechanism<'a> {
-    pump: GpioPwmPump<'a>,
-    solenoid: GpioThreeWaySolenoid<'a>,
+    pump: Box<dyn Pump + Send + 'a>,
+    solenoid: Box<dyn ValveMechanism + Send + 'a>,
     state: SingleBoilerMechanismState
 }
 
 impl<'a> SingleBoilerMechanism<'a> {
     pub fn new(
-        pump: GpioPwmPump<'a>,
-        solenoid: GpioThreeWaySolenoid<'a>
+        pump: Box<dyn Pump + Send + 'a>,
+        solenoid: Box<dyn ValveMechanism + Send + 'a>
     ) -> Self {
         SingleBoilerMechanism {
             pump,
@@ -33,30 +31,30 @@ impl<'a> SingleBoilerMechanism<'a> {
     pub fn start_brewing(&mut self) {
         // Start brewing process
         self.state = SingleBoilerMechanismState::Brewing;
-        self.solenoid.set_state(true);
+        let _ = self.solenoid.set_valve_state(100);
     }
 
     pub fn stop_brewing(&mut self) {
         // Stop brewing process
         self.state = SingleBoilerMechanismState::Idle;
-        self.solenoid.set_state(false);
+        let _ = self.solenoid.set_valve_state(0);
     }
 
     pub fn set_brew_duty_cycle(&mut self, duty_cycle: DutyCycleType) {
         // Set the duty cycle for brewing
-        self.pump.set_duty_cycle(duty_cycle).expect("TODO: panic message");
+        let _ = self.pump.set_duty_cycle(duty_cycle);
     }
 
     pub fn start_pumping_to_water_tap(&mut self) {
         // Start pumping to water tap
         self.state = SingleBoilerMechanismState::PumpingToWaterTap;
-        self.pump.set_duty_cycle(100).expect("TODO: panic message");
+        let _ = self.pump.set_duty_cycle(100);
     }
 
     pub fn stop_pumping_to_water_tap(&mut self) {
         // Stop pumping to water tap
         self.state = SingleBoilerMechanismState::Idle;
-        self.pump.set_duty_cycle(0).expect("TODO: panic message");
+        let _ = self.pump.set_duty_cycle(0);
     }
 }
 
@@ -111,9 +109,9 @@ impl<'a> BrewMechanism for SingleBoilerBrewMechanism<'a> {
     
     fn get_three_way_valve_open(&self) -> Option<bool> {
         let mechanism = self.mechanism.try_lock();
-        
+
         if let Ok(mechanism) = mechanism {
-            Some(mechanism.solenoid.get_state())
+            Some(mechanism.solenoid.get_binary_state())
         } else {
             None
         }

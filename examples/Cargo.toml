@@ -52,6 +52,8 @@ variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation"}
+variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
+variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal = "1.0.0"
@@ -61,6 +63,8 @@ embedded-graphics-core = "0.4.0"
 display-interface = "0.5.0"
 display-interface-spi = "0.5.0"
 oled_async = "0.1.0-alpha1"
+hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"] }
+ds3231 = { version = "0.3.0", features = ["defmt", "async"] }
 
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.1", features = ["alloc"] }
