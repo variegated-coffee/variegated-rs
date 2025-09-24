@@ -70,6 +70,8 @@ miso_pin = "embassy_rp::peripherals::PIN_4"
 dc_pin = "embassy_rp::peripherals::PIN_6"
 reset_pin = "embassy_rp::peripherals::PIN_7"
 disp_cs_pin = "embassy_rp::peripherals::PIN_12"
+dma_tx = "embassy_rp::peripherals::DMA_CH6"
+dma_rx = "embassy_rp::peripherals::DMA_CH7"
 
 [button_mux_peripherals]
 pin_interrupt = "embassy_rp::peripherals::PIN_20"

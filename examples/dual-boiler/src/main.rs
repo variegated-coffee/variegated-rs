@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+use crate::alloc::string::ToString;
 use num_traits::float::FloatCore;
 extern crate alloc;
 
@@ -35,7 +36,7 @@ use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
 use embassy_time::{Delay, Duration, Instant, Timer};
-use embedded_graphics::primitives::{PrimitiveStyleBuilder, StyledDrawable};
+use embedded_graphics::primitives::{PrimitiveStyleBuilder, StyledDrawable, Circle};
 use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
 use rotary_encoder_hal::Rotary;
@@ -52,12 +53,12 @@ use embassy_sync::priority_channel::Min;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use embedded_graphics::{
     mono_font::{ascii::FONT_5X7, MonoTextStyleBuilder},
-    pixelcolor::BinaryColor,
+    pixelcolor::{BinaryColor, Rgb565, RgbColor},
     prelude::*,
     text::{Baseline, Text},
 };
 use embedded_hal::pwm::SetDutyCycle;
-use oled_async::{displays, prelude::*, Builder};
+use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use variegated_controller_types::{BoilerControlTarget, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType};
@@ -98,6 +99,8 @@ struct DisplayPeripherals {
     disp_cs_pin: Peri<'static, ()>,
     dc_pin: Peri<'static, ()>,
     reset_pin: Peri<'static, ()>,
+    dma_tx: Peri<'static, ()>,
+    dma_rx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("internal_spi_bus_peripherals")]
@@ -180,6 +183,11 @@ type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, S
 type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
 
+// Display type aliases
+type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
+type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>, Output<'static>>;
+type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
+
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -191,6 +199,7 @@ fn main() -> ! {
 
 static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
 static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
+static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
 static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
 static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
 static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
@@ -284,7 +293,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let pump_output = GpioBinaryPump::new(Output::new(rotary_p.pin_rotary_pump_enable, Low));
     let group_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_group_solenoid, Low)));
     let fill_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_fill_solenoid, Low)));
-    //let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
+    let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
 
     let i2c_p = internal_i2c_bus_peripherals!(p);
     let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
@@ -332,11 +341,11 @@ async fn main_task(spawner: Spawner) -> ! {
     };
     let mut tlc = variegated_tlc59108::Tlc59108::new(tlc_dev, Delay, tlc_config);
     tlc.init().await.unwrap();
-    tlc.set_led(0, 255, LedState::PwmAndGroup).await.unwrap();
-    tlc.set_led(1, 255, LedState::PwmAndGroup).await.unwrap();
-    tlc.set_led(2, 255, LedState::PwmAndGroup).await.unwrap();
-    tlc.set_led(3, 255, LedState::PwmAndGroup).await.unwrap();
-    tlc.set_led(4, 255, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(0, 7, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(1, 15, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(2, 31, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(3, 63, LedState::PwmAndGroup).await.unwrap();
+    tlc.set_led(4, 127, LedState::PwmAndGroup).await.unwrap();
     tlc.set_led(5, 255, LedState::PwmAndGroup).await.unwrap();
 
     // Initialize MCP23017 for LCD control
@@ -386,6 +395,10 @@ async fn main_task(spawner: Spawner) -> ! {
     water.set_low();
 
  */
+
+    // Spawn display task
+    //unwrap!(spawner.spawn(display_task(eyespi_display_peripherals!(p))));
+/*
     let conversion = ConversionParameters::pt1000();
 
     loop {
@@ -398,64 +411,84 @@ async fn main_task(spawner: Spawner) -> ! {
         let prs_1 = ads_locked.measure_single_ended(Mux::AIN4, ReferenceInput::Refp1Refn1).await;
         let prs_2 = ads_locked.measure_single_ended(Mux::AIN5, ReferenceInput::Refp1Refn1).await;
 
-        if let Ok(t1) = temp_1 {
+        let t1_out = if let Ok(t1) = temp_1 {
             info!("Temp 1: {} ohm", t1.ratiometric_resistance(2200.0 / 1.031));
             info!("Temp 1: {} °C", conversion.convert(t1.ratiometric_resistance(2200.0 / 1.031)));
+
+            format!("{:.0}o", t1.ratiometric_resistance(2200.0 / 1.031))
         } else {
             info!("Error reading temp 1: {:?}", temp_1);
-        }
+            "Err".to_string()
+        };
 
-        if let Ok(t2) = temp_2 {
+        let t2_out = if let Ok(t2) = temp_2 {
             info!("Temp 2: {} ohm", t2.ratiometric_resistance(2200.0 / 1.031));
+            format!("{:.0}o", t2.ratiometric_resistance(2200.0 / 1.031))
         } else {
             info!("Error reading temp 2: {:?}", temp_2);
-        }
+            "Err".to_string()
+        };
 
-        if let Ok(p1) = prs_1 {
+        let p1_out = if let Ok(p1) = prs_1 {
             info!("Prs 1: {} V", p1.externally_referenced_voltage(0.0, 5.0));
+            format!("{:.1}V", p1.externally_referenced_voltage(0.0, 5.0))
         } else {
             info!("Error reading prs 1: {:?}", prs_1);
-        }
+            "Err".to_string()
+        };
 
-        if let Ok(p2) = prs_2 {
+        let p2_out = if let Ok(p2) = prs_2 {
             info!("Prs 2: {} V", p2.externally_referenced_voltage(0.0, 5.0));
+            format!("{:.1}V", p2.externally_referenced_voltage(0.0, 5.0))
         } else {
             info!("Error reading prs 2: {:?}", prs_2);
-        }
+            "Err".to_string()
+        };
 
         let mut fdc_locked = fdc1004.lock().await;
         let cap_1 = fdc_locked.read_capacitance(CIN4).await;
         let cap_2 = fdc_locked.read_capacitance(CIN3).await;
 
-        if let Ok(c1) = cap_1 {
+        let c1_out = if let Ok(c1) = cap_1 {
             match c1 {
                 SuccessfulMeasurement::MeasurementInRange(c) => info!("Cap 1: {:?} pF", c.to_pf()),
                 SuccessfulMeasurement::Overflow => info!("Cap 1 overflow"),
                 SuccessfulMeasurement::Underflow => info!("Cap 1 underflow"),
             }
+
+            match c1 {
+                SuccessfulMeasurement::MeasurementInRange(c) => format!("{:.0}p", c.to_pf()),
+                SuccessfulMeasurement::Overflow => "Ovfl".to_string(),
+                SuccessfulMeasurement::Underflow => "Uflw".to_string(),
+            }
         } else {
             info!("Error reading cap 1: {:?}", cap_1);
-        }
+            "Err".to_string()
+        };
 
-        if let Ok(c2) = cap_2 {
+        let c2_out = if let Ok(c2) = cap_2 {
             match c2 {
                 SuccessfulMeasurement::MeasurementInRange(c) => info!("Cap 2: {:?} pF", c.to_pf()),
                 SuccessfulMeasurement::Overflow => info!("Cap 2 overflow"),
                 SuccessfulMeasurement::Underflow => info!("Cap 2 underflow"),
             }
+
+            match c2 {
+                SuccessfulMeasurement::MeasurementInRange(c) => format!("{:.0}p", c.to_pf()),
+                SuccessfulMeasurement::Overflow => "Ovfl".to_string(),
+                SuccessfulMeasurement::Underflow => "Uflw".to_string(),
+            }
         } else {
             info!("Error reading cap 2: {:?}", cap_2);
-        }
+            "Err".to_string()
+        };
+
+        lcd.clear().await.unwrap();
+        lcd.write_str(format!("{} {}", t1_out, t2_out).chars()).await.unwrap();
+        lcd.write_line(1, format!("{} {} {} {}", c1_out, c2_out, p1_out, p2_out).chars()).await.unwrap();
 
         Timer::after(Duration::from_secs(2)).await;
-    }
-
-    // -- Real code --
-
-
-
-
-
+    }*/
 
 
 
@@ -571,7 +604,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(Box::new(pump_output)),
         Some(group_solenoid),
         Some(fill_solenoid),
-        None,//Some(water_dispersal_solenoid),
+        Some(water_dispersal_solenoid),
         None,
         dual_boiler_config,
     );
@@ -584,5 +617,116 @@ async fn main_task(spawner: Spawner) -> ! {
 
     loop {
         Timer::after_millis(5000).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn display_task(disp_p: DisplayPeripherals) {
+    info!("Initializing NV3007 display");
+
+    // Allocate display buffer in PSRAM (143,808 bytes for 168x428 RGB565)
+    let display_buffer = Box::leak(Box::new([0u8; 143_808]));
+    info!("Display buffer allocated at: 0x{:x}", display_buffer.as_ptr() as usize);
+
+    // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = 100_000_000;
+    spi_config.phase = embassy_rp::spi::Phase::CaptureOnFirstTransition;
+    spi_config.polarity = embassy_rp::spi::Polarity::IdleLow;
+    let spi = Spi::new(
+        disp_p.spi,
+        disp_p.sclk_pin,
+        disp_p.mosi_pin,
+        disp_p.miso_pin,
+        disp_p.dma_tx,
+        disp_p.dma_rx,
+        spi_config,
+    );
+
+    let spi_bus = DISPLAY_SPI_BUS.init(Mutex::new(spi));
+    let spi_dev = SpiDevice::new(spi_bus, Output::new(disp_p.disp_cs_pin, Level::High));
+
+    // Setup control pins
+    let dc = Output::new(disp_p.dc_pin, Level::Low);
+    let mut reset = Output::new(disp_p.reset_pin, Level::Low);
+
+    // Create display interface
+    let di = SPIInterface::new(spi_dev, dc);
+
+    // Initialize display with user-provided buffer using 279 variant
+    let mut display = Builder::new(Nv3007_168_428 { variant: Nv3007Variant::Variant279 })
+        .with_rotation(DisplayRotation::Rotate0)
+        .connect_with_buffer(di, display_buffer);
+
+    // Hardware reset
+    display.reset(&mut reset, &mut embassy_time::Delay).expect("Failed to reset display");
+    info!("Display reset completed");
+
+    // Initialize display with variant-specific initialization
+    display.init_with_variant().await.expect("Failed to initialize display");
+    info!("Display initialized successfully with 279 variant");
+
+    // Clear and show initial screen
+    display.clear();
+    display.flush().await.expect("Failed to flush display");
+    info!("Display cleared and ready");
+
+    // Bouncing ball state
+    let display_width = 168u16;
+    let display_height = 428u16;
+    let ball_radius = 8i32;
+
+    let mut ball_x = display_width as i32 / 2;
+    let mut ball_y = display_height as i32 / 2;
+    let mut ball_dx = 3i32; // velocity in x direction
+    let mut ball_dy = 2i32; // velocity in y direction
+
+    let ball_colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE, Rgb565::MAGENTA, Rgb565::CYAN, Rgb565::YELLOW];
+    let mut color_index = 0usize;
+
+    // Main display loop
+    loop {
+        display.clear();
+
+        // Update ball position
+        ball_x += ball_dx;
+        ball_y += ball_dy;
+
+        // Collision detection and response
+        if ball_x - ball_radius <= 0 || ball_x + ball_radius >= display_width as i32 {
+            ball_dx = -ball_dx;
+            ball_x = ball_x.clamp(ball_radius, display_width as i32 - ball_radius);
+            color_index = (color_index + 1) % ball_colors.len();
+        }
+
+        if ball_y - ball_radius <= 0 || ball_y + ball_radius >= display_height as i32 {
+            ball_dy = -ball_dy;
+            ball_y = ball_y.clamp(ball_radius, display_height as i32 - ball_radius);
+            color_index = (color_index + 1) % ball_colors.len();
+        }
+
+        // Draw the bouncing ball
+        Circle::new(Point::new(ball_x - ball_radius, ball_y - ball_radius), ball_radius as u32 * 2)
+            .into_styled(PrimitiveStyleBuilder::new()
+                .fill_color(ball_colors[color_index])
+                .build())
+            .draw(&mut *display)
+            .unwrap();
+
+        // Add some text
+        Text::with_baseline("Bouncing Ball Demo", Point::new(84, 400),
+            MonoTextStyleBuilder::new()
+                .font(&FONT_5X7)
+                .text_color(Rgb565::WHITE)
+                .build(),
+            Baseline::Top)
+            .draw(&mut *display)
+            .unwrap();
+
+        // Flush to display
+        display.flush().await.expect("Failed to flush display");
+
+        // Update at ~30 FPS for smooth animation
+//        Timer::after_millis(33).await;
     }
 }

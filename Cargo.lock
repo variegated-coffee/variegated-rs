@@ -860,6 +860,7 @@ dependencies = [
  "variegated-instrumentation",
  "variegated-mcp23017",
  "variegated-mcp9600",
+ "variegated-nv3007",
  "variegated-tlc59108",
  "w25q32jv",
 ]
@@ -2233,6 +2234,26 @@ dependencies = [
  "embassy-executor",
  "embassy-rp",
  "embassy-time",
+ "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "panic-probe",
+]
+
+[[package]]
+name = "variegated-nv3007"
+version = "0.1.0"
+dependencies = [
+ "cortex-m-rt",
+ "defmt 0.3.100",
+ "defmt-rtt",
+ "display-interface",
+ "display-interface-spi",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-sync 0.7.0",
+ "embassy-time",
+ "embedded-graphics",
+ "embedded-graphics-core",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "panic-probe",
 ]

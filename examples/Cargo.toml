@@ -54,6 +54,7 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation"}
 variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
 variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
+variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal = "1.0.0"
