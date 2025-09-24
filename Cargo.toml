@@ -17,6 +17,7 @@ members = [
     "variegated-log",
     "variegated-soft-pwm", "variegated-instrumentation",
     "variegated-mcp23017",
+    "variegated-nv3007",
 ]
 resolver = "2"
 package = { rust-version = "1.85.0" }
