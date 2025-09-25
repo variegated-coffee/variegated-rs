@@ -62,6 +62,13 @@ pub enum WaterMixerMechanismError {
     UnknownError,
 }
 
+#[derive(Debug, Format)]
+pub enum WaterTapMechanismError {
+    InterlockError,
+    NotSupportedError,
+    UnknownError,
+}
+
 pub struct Boiler<'a, M: RawMutex, const N: usize> {
     pub heating_element: Box<dyn HeatingElement>,
     pub fill_mechanism: Option<Box<dyn BoilerFillMechanism>>,
@@ -148,10 +155,9 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         }
     }
 
-    pub async fn set_brew_state(&mut self, brew_state: bool) {
+    pub async fn set_brewing_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) {
         if let Some(brew_mechanism) = &mut self.brew_mechanism {
-            //info!("Setting pump duty cycle to {}%", duty_cycle_percent);
-            brew_mechanism.set_brew_state(brew_state).await.expect("TODO: panic message");
+            brew_mechanism.set_state(brewing, duty_cycle_percent).await.expect("Failed to set brewing state");
         }
     }
 
@@ -160,13 +166,6 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             brew_mechanism.get_brew_state()
         } else {
             false
-        }
-    }
-
-    pub async fn set_pump_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) {
-        if let Some(brew_mechanism) = &mut self.brew_mechanism {
-            //info!("Setting pump duty cycle to {}%", duty_cycle_percent);
-            brew_mechanism.set_pump_duty_cycle(duty_cycle_percent).await.expect("TODO: panic message");
         }
     }
     
@@ -243,11 +242,60 @@ pub struct SteamWand {
     pub valve_mechanism: Option<Box<dyn ValveMechanism>>,
 }
 
-pub struct WaterTap<'a, M: RawMutex> {
+pub struct WaterTap<'a, M: RawMutex, const N: usize> {
+    pub water_tap_mechanism: Option<Box<dyn WaterTapMechanism>>,
     pub valve_mechanism: Option<Box<dyn ValveMechanism>>,
     pub mixer: Option<Box<dyn WaterMixerMechanism>>,
-    pub temperature_sensor: Option<&'a Signal<M, TemperatureType>>,
-    pub flow_sensor: Option<&'a Signal<M, FlowRateType>>,
+    pub temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
+    pub flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+}
+
+impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
+    pub fn new(
+        water_tap_mechanism: Option<Box<dyn WaterTapMechanism>>,
+        valve_mechanism: Option<Box<dyn ValveMechanism>>,
+        mixer: Option<Box<dyn WaterMixerMechanism>>,
+        temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
+        flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+    ) -> Self {
+        Self {
+            water_tap_mechanism,
+            valve_mechanism,
+            mixer,
+            temperature_sensor,
+            flow_sensor,
+        }
+    }
+
+    pub async fn set_water_dispensing_state(&mut self, dispensing: bool, duty_cycle_percent: DutyCycleType) {
+        if let Some(water_tap_mechanism) = &mut self.water_tap_mechanism {
+            water_tap_mechanism.set_state(dispensing, duty_cycle_percent).await.expect("Failed to set water dispensing state");
+        }
+    }
+
+    pub fn get_dispensing_state(&self) -> bool {
+        if let Some(water_tap_mechanism) = &self.water_tap_mechanism {
+            water_tap_mechanism.get_dispensing_state()
+        } else {
+            false
+        }
+    }
+
+    pub fn get_pump_duty_cycle(&self) -> Option<DutyCycleType> {
+        if let Some(water_tap_mechanism) = &self.water_tap_mechanism {
+            water_tap_mechanism.get_pump_duty_cycle()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_temperature(&mut self) -> Option<TemperatureType> {
+        self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
+    pub fn get_flow_rate(&mut self) -> Option<FlowRateType> {
+        self.flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
 }
 
 pub trait WithTask {
@@ -268,13 +316,21 @@ pub trait BoilerFillMechanism {
 
 #[async_trait]
 pub trait BrewMechanism {
-    // Typically this controls a three-way solenoid valve, if present
-    async fn set_brew_state(&mut self, state: bool) -> Result<(), BrewMechanismError>;
-    async fn set_pump_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError>;
-    
+    // Controls brewing state and pump duty cycle in a single operation
+    async fn set_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError>;
+
     fn get_pump_duty_cycle(&self) -> Option<DutyCycleType>;
     fn get_brew_state(&self) -> bool;
     fn get_three_way_valve_open(&self) -> Option<bool>;
+}
+
+#[async_trait]
+pub trait WaterTapMechanism {
+    // Controls water dispensing state and pump duty cycle in a single operation
+    async fn set_state(&mut self, dispensing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), WaterTapMechanismError>;
+
+    fn get_pump_duty_cycle(&self) -> Option<DutyCycleType>;
+    fn get_dispensing_state(&self) -> bool;
 }
 
 pub trait ValveMechanism {

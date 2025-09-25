@@ -218,6 +218,32 @@ impl SingleBoilerSingleGroupControllerBoilers {
     }
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub enum DualBoilerSingleGroupControllerBoilers {
+    BrewBoiler = 0,
+    SteamBoiler = 1,
+}
+
+impl DualBoilerSingleGroupControllerBoilers {
+    pub fn is_brew_boiler(self) -> bool {
+        matches!(self, DualBoilerSingleGroupControllerBoilers::BrewBoiler)
+    }
+
+    pub fn is_steam_boiler(self) -> bool {
+        matches!(self, DualBoilerSingleGroupControllerBoilers::SteamBoiler)
+    }
+
+    pub fn as_index(&self) -> BoilerIndex {
+        match self {
+            DualBoilerSingleGroupControllerBoilers::BrewBoiler => 0,
+            DualBoilerSingleGroupControllerBoilers::SteamBoiler => 1,
+        }
+    }
+}
+
 pub enum SingleGroupControllerGroups {
     SingleGroup = 0,
 }
@@ -340,8 +366,79 @@ impl Status {
 #[cfg(feature = "defmt")]
 impl defmt::Format for Status {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "NewStatus {{ mode: {:#?}, routine_running: {} }}",
-            self.mode, self.routine_execution.is_some());
+        defmt::write!(f, "Status {{");
+
+        // Machine mode and routine status
+        defmt::write!(f, " mode: {:?}", self.mode);
+        if let Some(ref routine) = self.routine_execution {
+            defmt::write!(f, ", routine: {} step:{}", routine.routine_index, routine.current_step);
+        }
+
+        // Boiler statuses
+        defmt::write!(f, ", boilers: [");
+        for (index, boiler_status) in self.boiler_statuses.iter() {
+            defmt::write!(f, " B{}(", index);
+            if let Some(temp) = boiler_status.temperature {
+                defmt::write!(f, "T:{}°C", temp);
+            } else {
+                defmt::write!(f, "T:None");
+            }
+            if let Some(pressure) = boiler_status.pressure {
+                defmt::write!(f, " P:{}bar", pressure);
+            } else {
+                defmt::write!(f, " P:None");
+            }
+            match boiler_status.output {
+                Output::Off => defmt::write!(f, " OUT:Off"),
+                Output::FixedDutyCycle(dc) => defmt::write!(f, " OUT:{}%", dc),
+                Output::PidOutput(pid_out) => defmt::write!(f, " OUT:PID{}%", pid_out.out),
+            }
+            defmt::write!(f, " TARGET:{:?}", boiler_status.control_target);
+            defmt::write!(f, ")");
+        }
+        defmt::write!(f, " ]");
+
+        // Group statuses
+        defmt::write!(f, ", groups: [");
+        for (index, group_status) in self.group_statuses.iter() {
+            defmt::write!(f, " G{}(", index);
+            defmt::write!(f, "brewing:{}", group_status.is_brewing);
+            if let Some(brew_time) = group_status.brew_time {
+                defmt::write!(f, " time:{}s", brew_time.as_secs());
+            }
+            if let Some(in_flow) = group_status.input_flow_rate {
+                defmt::write!(f, " in_flow:{}", in_flow);
+            }
+            if let Some(out_flow) = group_status.output_flow_rate {
+                defmt::write!(f, " out_flow:{}", out_flow);
+            }
+            if let Some(weight) = group_status.output_weight {
+                defmt::write!(f, " weight:{}g", weight);
+            }
+            if let Some(pressure) = group_status.pressure {
+                defmt::write!(f, " P:{}bar", pressure);
+            }
+            if let Some(temp) = group_status.temperature {
+                defmt::write!(f, " T:{}°C", temp);
+            }
+            match group_status.pump_output {
+                Output::Off => defmt::write!(f, " PUMP:Off"),
+                Output::FixedDutyCycle(dc) => defmt::write!(f, " PUMP:{}%", dc),
+                Output::PidOutput(pid_out) => defmt::write!(f, " PUMP:PID{}%", pid_out.out),
+            }
+            defmt::write!(f, ")");
+        }
+        defmt::write!(f, " ]");
+
+        // Communication status
+        if let Some(ref comms) = self.comms_status {
+            defmt::write!(f, ", wifi:{}", comms.wifi_connected);
+            if let Some(timestamp) = comms.timestamp {
+                defmt::write!(f, " ts:{}", timestamp);
+            }
+        }
+
+        defmt::write!(f, " }}");
     }
 }
 

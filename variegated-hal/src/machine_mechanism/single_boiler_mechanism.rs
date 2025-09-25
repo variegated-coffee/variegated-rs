@@ -70,20 +70,14 @@ impl<'a> SingleBoilerBrewMechanism<'a> {
 
 #[async_trait]
 impl<'a> BrewMechanism for SingleBoilerBrewMechanism<'a> {
-    async fn set_brew_state(&mut self, state: bool) -> Result<(), BrewMechanismError> {
+    async fn set_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError> {
         let mut mechanism = self.mechanism.lock().await;
-        if state {
+        if brewing {
             mechanism.start_brewing();
+            mechanism.set_brew_duty_cycle(duty_cycle_percent);
         } else {
             mechanism.stop_brewing();
         }
-        Ok(())
-    }
-
-    async fn set_pump_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError> {
-        let mut mechanism = self.mechanism.lock().await;
-        mechanism.set_brew_duty_cycle(duty_cycle_percent);
-
         Ok(())
     }
 

@@ -25,11 +25,15 @@ impl<'a> GpioBinarySolenoidValve<'a> {
 impl<'a> ValveMechanism for GpioBinarySolenoidValve<'a> {
     fn set_valve_state(&mut self, state: ValveOpenType) -> Result<(), ValveMechanismError> {
         if state > 20 {
-            info!("Opening solenoid");
-            self.output.set_high();
+            if self.output.is_set_low() {
+                info!("Opening solenoid");
+                self.output.set_high();
+            }
         } else {
-            info!("Closing solenoid");
-            self.output.set_low();
+            if self.output.is_set_high() {
+                info!("Closing solenoid");
+                self.output.set_low();
+            }
         }
         Ok(())
     }

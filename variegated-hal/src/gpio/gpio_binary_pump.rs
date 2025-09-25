@@ -35,13 +35,17 @@ impl<'a> Pump for GpioBinaryPump<'a> {
             return Err(PumpError::DutyCycleOutOfRange);
         }
 
+        if self.current_duty_cycle <= 20 && duty_cycle > 20 {
+            info!("Binary pump ON (duty cycle {} > threshold {})", duty_cycle, self.threshold);
+        } else if self.current_duty_cycle > 20 && duty_cycle <= 20 {
+            info!("Binary pump OFF (duty cycle {} <= threshold {})", duty_cycle, self.threshold);
+        }
+
         self.current_duty_cycle = duty_cycle;
 
         if duty_cycle > self.threshold {
-            info!("Binary pump ON (duty cycle {} > threshold {})", duty_cycle, self.threshold);
             self.output.set_high();
         } else {
-            info!("Binary pump OFF (duty cycle {} <= threshold {})", duty_cycle, self.threshold);
             self.output.set_low();
         }
 
