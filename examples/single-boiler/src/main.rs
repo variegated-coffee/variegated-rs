@@ -44,7 +44,7 @@ use embassy_sync::watch::{Watch};
 use embassy_time::{Delay, Duration, Timer};
 use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::ConversionParameters;
-use variegated_controller_lib::{SingleBoilerSingleGroupPersistentConfiguration, SingleBoilerSingleGroupController, SingleBoilerSingleGroupPidParameters};
+use variegated_controller_lib::single_boiler_single_group::{SingleBoilerSingleGroupPersistentConfiguration, SingleBoilerSingleGroupController, SingleBoilerSingleGroupPidParameters};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
