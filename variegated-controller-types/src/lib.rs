@@ -8,8 +8,9 @@ use variegated_control_algorithm::pid::PidOut;
 pub const MAX_BOILERS: usize = 8;
 pub const MAX_GROUPS: usize = 4;
 pub const MAX_WATER_TAPS: usize = 4;
+pub const MAX_STEAM_WANDS: usize = 4;
 pub const MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS: usize = 2;
-pub const MAX_TANKS: usize = 1;
+pub const MAX_TANKS: usize = 2;
 pub const MAX_PERIPHERALS: usize = 16;
 
 
@@ -29,6 +30,7 @@ pub type BoilerIndex = u8;
 pub type GroupIndex = u8;
 pub type WaterTapIndex = u8;
 pub type TankIndex = u8;
+pub type SteamWandIndex = u8;
 
 pub type RoutineIndex = usize;
 
@@ -161,6 +163,14 @@ pub enum BoilerControlTarget {
     Pressure(PressureType),
     #[default]
     Off
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WaterDispersalPumpStrategy {
+    AlwaysPump,
+    NoPump,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -298,6 +308,8 @@ pub enum PeripheralType {
     #[default]
     Scale,
     PressureSensor,
+    FlowMeter,
+    LevelSensor,
 }
 
 pub trait PeripheralStatusProvider {
@@ -334,6 +346,8 @@ impl defmt::Format for RoutineExecutionStatus {
 pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
+    pub water_tap_statuses: FnvIndexMap<WaterTapIndex, WaterTapStatus, MAX_WATER_TAPS>,
+    pub tank_statuses: FnvIndexMap<TankIndex, TankStatus, MAX_TANKS>,
     pub mode: MachineMode,
     pub routine_execution: Option<RoutineExecutionStatus>,
     pub comms_status: Option<CommsStatus>,
@@ -346,6 +360,8 @@ impl Status {
         Status {
             boiler_statuses: FnvIndexMap::new(),
             group_statuses: FnvIndexMap::new(),
+            water_tap_statuses: FnvIndexMap::new(),
+            tank_statuses: FnvIndexMap::new(),
             mode: MachineMode::Off,
             routine_execution: None,
             comms_status: None,
@@ -360,6 +376,14 @@ impl Status {
 
     pub fn get_group_status(&self, group_index: GroupIndex) -> Option<&GroupStatus> {
         self.group_statuses.get(&group_index)
+    }
+
+    pub fn get_water_tap_status(&self, water_tap_index: WaterTapIndex) -> Option<&WaterTapStatus> {
+        self.water_tap_statuses.get(&water_tap_index)
+    }
+
+    pub fn get_tank_status(&self, tank_index: TankIndex) -> Option<&TankStatus> {
+        self.tank_statuses.get(&tank_index)
     }
 }
 
@@ -387,6 +411,11 @@ impl defmt::Format for Status {
                 defmt::write!(f, " P:{}bar", pressure);
             } else {
                 defmt::write!(f, " P:None");
+            }
+            if let Some(water_level) = boiler_status.water_level {
+                defmt::write!(f, " WL:{}%", water_level);
+            } else {
+                defmt::write!(f, " WL:None");
             }
             match boiler_status.output {
                 Output::Off => defmt::write!(f, " OUT:Off"),
@@ -430,6 +459,28 @@ impl defmt::Format for Status {
         }
         defmt::write!(f, " ]");
 
+        // Water tap statuses
+        defmt::write!(f, ", water_taps: [");
+        for (index, water_tap_status) in self.water_tap_statuses.iter() {
+            defmt::write!(f, " WT{}(", index);
+            defmt::write!(f, "dispensing:{}", water_tap_status.is_dispensing);
+            defmt::write!(f, ")");
+        }
+        defmt::write!(f, " ]");
+
+        // Tank statuses
+        defmt::write!(f, ", tanks: [");
+        for (index, tank_status) in self.tank_statuses.iter() {
+            defmt::write!(f, " T{}(", index);
+            if let Some(water_level) = tank_status.water_level {
+                defmt::write!(f, "WL:{}%", water_level);
+            } else {
+                defmt::write!(f, "WL:None");
+            }
+            defmt::write!(f, ")");
+        }
+        defmt::write!(f, " ]");
+
         // Communication status
         if let Some(ref comms) = self.comms_status {
             defmt::write!(f, ", wifi:{}", comms.wifi_connected);
@@ -468,6 +519,7 @@ impl Output {
 pub struct BoilerStatus {
     pub temperature: Option<TemperatureType>,
     pub pressure: Option<PressureType>,
+    pub water_level: Option<WaterLevelType>,
     pub output: Output,
     pub control_target: BoilerControlTarget,
 }
@@ -489,28 +541,107 @@ pub struct GroupStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct WaterTapStatus {
+    pub is_dispensing: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct TankStatus {
+    pub water_level: Option<WaterLevelType>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Default)]
 pub struct Configuration {
-    boiler_configuration: FnvIndexMap<BoilerIndex, BoilerConfiguration, MAX_BOILERS>,
-    group_configuration: FnvIndexMap<GroupIndex, GroupConfiguration, MAX_GROUPS>,
+    pub machine_config: MachineConfiguration,
+    pub boiler_configurations: FnvIndexMap<BoilerIndex, BoilerConfiguration, MAX_BOILERS>,
+    pub group_configurations: FnvIndexMap<GroupIndex, GroupConfiguration, MAX_GROUPS>,
+    pub water_tap_configurations: FnvIndexMap<WaterTapIndex, WaterTapConfiguration, MAX_WATER_TAPS>,
+    pub tank_configurations: FnvIndexMap<TankIndex, TankConfiguration, MAX_TANKS>,
+    pub steam_wand_configurations: FnvIndexMap<SteamWandIndex, SteamWandConfiguration, MAX_STEAM_WANDS>,
 }
 
 impl Configuration {
+    pub fn new() -> Self {
+        Configuration {
+            machine_config: MachineConfiguration::default(),
+            boiler_configurations: FnvIndexMap::new(),
+            group_configurations: FnvIndexMap::new(),
+            water_tap_configurations: FnvIndexMap::new(),
+            tank_configurations: FnvIndexMap::new(),
+            steam_wand_configurations: FnvIndexMap::new(),
+        }
+    }
+
+    // Boiler configuration methods
     pub fn get_boiler_configuration(&self, index: BoilerIndex) -> Option<&BoilerConfiguration> {
-        self.boiler_configuration.get(&index)
+        self.boiler_configurations.get(&index)
     }
-    
-    pub fn get_group_configuration(&self, index: GroupIndex) -> Option<&GroupConfiguration> {
-        self.group_configuration.get(&index)
-    }
-    
+
     pub fn insert_boiler_configuration(&mut self, index: BoilerIndex, config: BoilerConfiguration) {
-        self.boiler_configuration.insert(index, config).ok();
+        self.boiler_configurations.insert(index, config).ok();
     }
-    
+
+    pub fn iter_boilers(&self) -> impl Iterator<Item = (&BoilerIndex, &BoilerConfiguration)> {
+        self.boiler_configurations.iter()
+    }
+
+    // Group configuration methods
+    pub fn get_group_configuration(&self, index: GroupIndex) -> Option<&GroupConfiguration> {
+        self.group_configurations.get(&index)
+    }
+
     pub fn insert_group_configuration(&mut self, index: GroupIndex, config: GroupConfiguration) {
-        self.group_configuration.insert(index, config).ok();
+        self.group_configurations.insert(index, config).ok();
     }
+
+    pub fn iter_groups(&self) -> impl Iterator<Item = (&GroupIndex, &GroupConfiguration)> {
+        self.group_configurations.iter()
+    }
+
+    // Water tap configuration methods
+    pub fn get_water_tap_configuration(&self, index: WaterTapIndex) -> Option<&WaterTapConfiguration> {
+        self.water_tap_configurations.get(&index)
+    }
+
+    pub fn insert_water_tap_configuration(&mut self, index: WaterTapIndex, config: WaterTapConfiguration) {
+        self.water_tap_configurations.insert(index, config).ok();
+    }
+
+    pub fn iter_water_taps(&self) -> impl Iterator<Item = (&WaterTapIndex, &WaterTapConfiguration)> {
+        self.water_tap_configurations.iter()
+    }
+
+    // Tank configuration methods
+    pub fn get_tank_configuration(&self, index: TankIndex) -> Option<&TankConfiguration> {
+        self.tank_configurations.get(&index)
+    }
+
+    pub fn insert_tank_configuration(&mut self, index: TankIndex, config: TankConfiguration) {
+        self.tank_configurations.insert(index, config).ok();
+    }
+
+    pub fn iter_tanks(&self) -> impl Iterator<Item = (&TankIndex, &TankConfiguration)> {
+        self.tank_configurations.iter()
+    }
+
+    // Steam wand configuration methods
+    pub fn get_steam_wand_configuration(&self, index: SteamWandIndex) -> Option<&SteamWandConfiguration> {
+        self.steam_wand_configurations.get(&index)
+    }
+
+    pub fn insert_steam_wand_configuration(&mut self, index: SteamWandIndex, config: SteamWandConfiguration) {
+        self.steam_wand_configurations.insert(index, config).ok();
+    }
+
+    pub fn iter_steam_wands(&self) -> impl Iterator<Item = (&SteamWandIndex, &SteamWandConfiguration)> {
+        self.steam_wand_configurations.iter()
+    }
+
 }
 
 #[cfg(feature = "defmt")]
@@ -524,10 +655,34 @@ impl defmt::Format for Configuration {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
+pub struct PumpConfiguration {
+    pub tacho_pulses_per_liter: Option<f32>,
+    pub max_duty_cycle: Option<DutyCycleType>,
+    pub min_duty_cycle: Option<DutyCycleType>,
+    pub ramp_up_time_ms: Option<u32>,
+    pub ramp_down_time_ms: Option<u32>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct FillConfiguration {
+    pub fill_threshold: Option<WaterLevelType>, // If none, filling is disabled
+    pub pump_configuration: Option<PumpConfiguration>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
 pub struct BoilerConfiguration {
     pub temperature_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
     pub control_target: BoilerControlTarget,
+    pub max_temperature: Option<TemperatureType>,
+    pub max_pressure: Option<PressureType>,
+    pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
+    pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
+    pub fill_config: Option<FillConfiguration>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -540,6 +695,8 @@ pub struct KalmanParameters {
     pub posterior_estimate: f32,
 }
 
+
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
@@ -548,7 +705,72 @@ pub struct GroupConfiguration {
     pub output_flow_rate_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
     pub brew_control_target: GroupBrewControlTarget,
+    pub max_brew_time_seconds: Option<u32>,
+    pub auto_tare_enabled: bool,
+    pub pump_configuration: Option<PumpConfiguration>,
+    pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
+    pub flow_sensor_pulses_per_liter: Option<f32>,
 }
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MachineType {
+    SingleBoilerSingleGroup,
+    DualBoilerSingleGroup,
+    DualBoilerDualGroup,
+}
+
+impl Default for MachineType {
+    fn default() -> Self {
+        MachineType::SingleBoilerSingleGroup
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct MachineConfiguration {
+    pub heating_element_interlock: bool,
+}
+
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct WaterTapConfiguration {
+    pub pump_strategy: WaterDispersalPumpStrategy,
+    pub temperature_target: Option<TemperatureType>,
+    pub max_dispense_time_seconds: Option<u32>,
+    pub flow_rate_limit: Option<FlowRateType>,
+    pub pump_configuration: Option<PumpConfiguration>,
+}
+
+impl Default for WaterDispersalPumpStrategy {
+    fn default() -> Self {
+        WaterDispersalPumpStrategy::AlwaysPump
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct SteamWandConfiguration {
+    pub temperature_target: Option<TemperatureType>,
+    pub pressure_target: Option<PressureType>,
+    pub purge_time_seconds: Option<u32>,
+    pub max_steam_time_seconds: Option<u32>,
+    pub auto_purge_enabled: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct TankConfiguration {
+    pub low_level_warning_threshold: Option<WaterLevelType>,
+    pub water_level_sensor_kalman_parameters: Option<KalmanParameters>,
+}
+
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -580,10 +802,200 @@ pub enum CommsProcessorToApplicationProcessorMessage {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SensorCapability {
+    Temperature,
+    Pressure,
+    WaterLevel,
+    InputFlowRate,
+    OutputFlowRate,
+    Weight,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ActuatorCapability {
+    HeatingElement,
+    Pump,
+    SolenoidValve,
+    ThreeWayValve,
+    WaterMixer,
+    ScaleTare,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ControlModeCapability {
+    TemperaturePid,
+    PressurePid,
+    FlowRatePid,
+    OutputFlowRatePid,
+    FixedDutyCycle,
+    FullOn,
+    Off,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BoilerType {
+    BrewBoiler,
+    SteamBoiler,
+    VirtualSteamBoiler,
+}
+
+impl Default for BoilerType {
+    fn default() -> Self {
+        BoilerType::BrewBoiler
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct BoilerDefinition {
+    pub name: heapless::String<32>,
+    pub boiler_type: BoilerType,
+    pub sensors: heapless::Vec<SensorCapability, 8>,
+    pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    pub control_modes: heapless::Vec<ControlModeCapability, 8>,
+    pub has_fill_mechanism: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct GroupDefinition {
+    pub name: heapless::String<32>,
+    pub sensors: heapless::Vec<SensorCapability, 8>,
+    pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    pub control_modes: heapless::Vec<ControlModeCapability, 8>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct WaterTapDefinition {
+    pub name: heapless::String<32>,
+    pub sensors: heapless::Vec<SensorCapability, 8>,
+    pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    pub control_modes: heapless::Vec<ControlModeCapability, 8>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct SteamWandDefinition {
+    pub name: heapless::String<32>,
+    pub sensors: heapless::Vec<SensorCapability, 8>,
+    pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    pub control_modes: heapless::Vec<ControlModeCapability, 8>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct TankDefinition {
+    pub name: heapless::String<32>,
+    pub sensors: heapless::Vec<SensorCapability, 8>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct PeripheralDefinition {
+    pub peripheral_type: PeripheralType,
+    pub location: heapless::String<32>,
+    pub capabilities: heapless::Vec<SensorCapability, 8>,
+    pub support_calibration: bool,
+    pub via_comms_mcu: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EnvironmentalSensorType {
+    AmbientTemperature,
+    CaseTemperature,
+    ExternalTemperature,
+    Humidity,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct EnvironmentalSensorDefinition {
+    pub name: heapless::String<32>,
+    pub sensor_type: EnvironmentalSensorType,
+    pub measurement_range: Option<(f32, f32)>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug)]
+pub struct MachineDefinition {
+    pub name: heapless::String<32>,
+    pub boilers: FnvIndexMap<BoilerIndex, BoilerDefinition, MAX_BOILERS>,
+    pub groups: FnvIndexMap<GroupIndex, GroupDefinition, MAX_GROUPS>,
+    pub water_taps: FnvIndexMap<WaterTapIndex, WaterTapDefinition, MAX_WATER_TAPS>,
+    pub tanks: FnvIndexMap<TankIndex, TankDefinition, MAX_TANKS>,
+    pub steam_wands: FnvIndexMap<SteamWandIndex, SteamWandDefinition, 4>,
+    pub environmental_sensors: FnvIndexMap<EnvironmentalSensorId, EnvironmentalSensorDefinition, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>,
+    pub peripherals: FnvIndexMap<PeripheralId, PeripheralDefinition, MAX_PERIPHERALS>,
+}
+
+ impl MachineDefinition {
+    pub fn add_boiler(&mut self, index: BoilerIndex, definition: BoilerDefinition) -> Result<(), ()> {
+        self.boilers.insert(index, definition).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn add_group(&mut self, index: GroupIndex, definition: GroupDefinition) -> Result<(), ()> {
+        self.groups.insert(index, definition).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn add_water_tap(&mut self, index: WaterTapIndex, definition: WaterTapDefinition) -> Result<(), ()> {
+        self.water_taps.insert(index, definition).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn add_tank(&mut self, index: TankIndex, definition: TankDefinition) -> Result<(), ()> {
+        self.tanks.insert(index, definition).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn add_peripheral(&mut self, id: PeripheralId, definition: PeripheralDefinition) -> Result<(), ()> {
+        self.peripherals.insert(id, definition).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn add_steam_wand(&mut self, index: u8, definition: SteamWandDefinition) -> Result<(), ()> {
+        self.steam_wands.insert(index, definition).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn add_environmental_sensor(&mut self, id: EnvironmentalSensorId, definition: EnvironmentalSensorDefinition) -> Result<(), ()> {
+        self.environmental_sensors.insert(id, definition).map(|_| ()).map_err(|_| ())
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for MachineDefinition {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "MachineDefinition {{ boilers: {} boilers, groups: {} groups, water_taps: {} water_taps, tanks: {} tanks, steam_wands: {} wands, env_sensors: {} sensors, peripherals: {} peripherals }}",
+            self.boilers.len(),
+            self.groups.len(),
+            self.water_taps.len(),
+            self.tanks.len(),
+            self.steam_wands.len(),
+            self.environmental_sensors.len(),
+            self.peripherals.len(),
+        );
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug)]
 pub enum ApplicationProcessorToCommsProcessorMessage {
     Hello(ProtocolConfig),
     Status(Status),
-    MachineDefinition,
+    MachineDefinition(MachineDefinition),
     Configuration(Configuration),
 }

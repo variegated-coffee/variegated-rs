@@ -15,8 +15,8 @@ use movavg::MovAvg;
 use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
-use variegated_hal::{Boiler, Group, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters};
+use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankStatus};
 use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -50,14 +50,8 @@ pub struct SingleBoilerSingleGroupEphemeralConfiguration {
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SingleBoilerSingleGroupConfiguration {
-    pub brew_boiler_control_target: BoilerControlTarget,
-    pub steam_boiler_control_target: BoilerControlTarget,
-    pub group_brew_control_target: GroupBrewControlTarget,
-    pub pid_parameters: SingleBoilerSingleGroupPidParameters,
-    pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
-    pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
-    pub pump_tacho_pulses_per_liter: Option<f32>,
-    pub flow_sensor_pulses_per_liter: Option<f32>,
+    pub persistent: SingleBoilerSingleGroupPersistentConfiguration,
+    pub ephemeral: SingleBoilerSingleGroupEphemeralConfiguration,
 }
 
 impl<'a> Value<'a> for SingleBoilerSingleGroupPersistentConfiguration {
@@ -171,38 +165,9 @@ impl Default for SingleBoilerSingleGroupPersistentConfiguration {
 
 impl Default for SingleBoilerSingleGroupConfiguration {
     fn default() -> Self {
-        let mut pid_parameters = SingleBoilerSingleGroupPidParameters::default();
-
-        pid_parameters.boiler_temperature_params = PidParameters {
-            kp: PidTerm::new(3.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
-        pid_parameters.pump_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default() ),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-        };
-        pid_parameters.pump_output_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default() ),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-        };
-        pid_parameters.pump_pressure_params = PidParameters {
-            kp: PidTerm::new( 10.0, PidLimits::default() ),
-            ki: PidTerm::new( 0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new( 30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-        };
-
         SingleBoilerSingleGroupConfiguration {
-            brew_boiler_control_target: BoilerControlTarget::Temperature(110.0),
-            steam_boiler_control_target: BoilerControlTarget::Off,
-            group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
-            pid_parameters,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
-            pump_tacho_pulses_per_liter: None,
-            flow_sensor_pulses_per_liter: None,
+            persistent: SingleBoilerSingleGroupPersistentConfiguration::default(),
+            ephemeral: SingleBoilerSingleGroupEphemeralConfiguration::default(),
         }
     }
 }
@@ -213,6 +178,7 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
     configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
     boiler: Boiler<'a, M, N_WATCH>,
     group: Group<'a, M, N_WATCH>,
+    tank: Option<Tank<'a, M, N_WATCH>>,
     state: SingleBoilerSingleGroupControllerState,
     boiler_pid: PidCtrl<f32>,
     pump_pid: PidCtrl<f32>,
@@ -233,14 +199,8 @@ pub struct SingleBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex
 impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize, const N_CONFIG_SUBS: usize> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> SingleBoilerSingleGroupConfiguration {
         SingleBoilerSingleGroupConfiguration {
-            brew_boiler_control_target: self.persistent_configuration.brew_boiler_control_target,
-            steam_boiler_control_target: self.persistent_configuration.steam_boiler_control_target,
-            group_brew_control_target: self.ephemeral_configuration.group_brew_control_target,
-            pid_parameters: self.persistent_configuration.pid_parameters,
-            temperature_sensor_kalman_parameters: self.persistent_configuration.temperature_sensor_kalman_parameters,
-            pressure_sensor_kalman_parameters: self.persistent_configuration.pressure_sensor_kalman_parameters,
-            pump_tacho_pulses_per_liter: self.persistent_configuration.pump_tacho_pulses_per_liter,
-            flow_sensor_pulses_per_liter: self.persistent_configuration.flow_sensor_pulses_per_liter,
+            persistent: self.persistent_configuration.clone(),
+            ephemeral: self.ephemeral_configuration.clone(),
         }
     }
     pub fn new(
@@ -249,6 +209,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
         configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
         boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
+        tank: Option<Tank<'a, M, N_WATCH>>,
         mut settings_store: SettingsStoreT,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -259,6 +220,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             configuration_channel_sender,
             boiler,
             group,
+            tank,
             state: SingleBoilerSingleGroupControllerState::default(),
             boiler_pid: super::limited_pid(),
             pump_pid: super::limited_pid(),
@@ -481,6 +443,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
         let brew_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
+            water_level: self.boiler.get_water_level(),
             output: brew_boiler_output,
             control_target: self.persistent_configuration.brew_boiler_control_target,
         };
@@ -488,6 +451,7 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
         let virtual_steam_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
             pressure: self.boiler.get_pressure(),
+            water_level: self.boiler.get_water_level(),
             output: steam_boiler_output,
             control_target: self.persistent_configuration.steam_boiler_control_target,
         };
@@ -539,9 +503,20 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             }
         });
 
+        // Create tank statuses map - only include tank if it exists
+        let tank_statuses = if let Some(ref mut tank) = self.tank {
+            FnvIndexMap::from_iter([(0, TankStatus {
+                water_level: tank.get_water_level(),
+            })])
+        } else {
+            FnvIndexMap::new()
+        };
+
         let status = Status {
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (VirtualSteamBoiler.as_index(), virtual_steam_boiler_status)]),
             group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
+            water_tap_statuses: FnvIndexMap::new(),
+            tank_statuses,
             mode: Default::default(),
             routine_execution,
             comms_status,
@@ -751,16 +726,8 @@ impl <'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<Singl
             info!("Routine execution finished, saving state and configuration");
             // Restore saved configuration by splitting into persistent and ephemeral parts
             let saved_config = &routine.saved_configuration;
-            self.persistent_configuration = SingleBoilerSingleGroupPersistentConfiguration {
-                brew_boiler_control_target: saved_config.brew_boiler_control_target,
-                steam_boiler_control_target: saved_config.steam_boiler_control_target,
-                pid_parameters: saved_config.pid_parameters,
-                temperature_sensor_kalman_parameters: saved_config.temperature_sensor_kalman_parameters,
-                pressure_sensor_kalman_parameters: saved_config.pressure_sensor_kalman_parameters,
-                pump_tacho_pulses_per_liter: saved_config.pump_tacho_pulses_per_liter,
-                flow_sensor_pulses_per_liter: saved_config.flow_sensor_pulses_per_liter,
-            };
-            self.ephemeral_configuration.group_brew_control_target = saved_config.group_brew_control_target;
+            self.persistent_configuration = saved_config.persistent;
+            self.ephemeral_configuration = saved_config.ephemeral;
             // Save the restored persistent configuration
             self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             self.curve_start_time = None;  // Reset curve start time when routine exits
@@ -777,9 +744,16 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
 
         // Add brew boiler configuration
         let brew_boiler_config = BoilerConfiguration {
-            temperature_pid_parameters: config.pid_parameters.boiler_temperature_params.clone(),
-            pressure_pid_parameters: config.pid_parameters.boiler_pressure_params.clone(),
-            control_target: config.brew_boiler_control_target,
+            temperature_pid_parameters: config.persistent.pid_parameters.boiler_temperature_params.clone(),
+            pressure_pid_parameters: config.persistent.pid_parameters.boiler_pressure_params.clone(),
+            control_target: config.persistent.brew_boiler_control_target,
+            max_temperature: Some(100.0),
+            max_pressure: Some(15.0),
+            // Embedded sensor configuration
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            // No fill pump for single boiler
+            fill_config: None,
         };
         configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
 
@@ -787,18 +761,37 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
         let steam_boiler_config = BoilerConfiguration {
             temperature_pid_parameters: PidParameters::default(), // Virtual steam boiler doesn't have separate PID
             pressure_pid_parameters: PidParameters::default(),
-            control_target: config.steam_boiler_control_target,
+            control_target: config.persistent.steam_boiler_control_target,
+            max_temperature: Some(150.0),
+            max_pressure: Some(3.0),
+            // Embedded sensor configuration
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            // No fill pump for virtual steam boiler
+            fill_config: None,
         };
         configuration.insert_boiler_configuration(VirtualSteamBoiler.as_index(), steam_boiler_config);
 
         // Add group configuration
         let group_config = GroupConfiguration {
-            flow_rate_pid_parameters: config.pid_parameters.pump_flow_rate_params.clone(),
-            output_flow_rate_pid_parameters: config.pid_parameters.pump_output_flow_rate_params.clone(),
-            pressure_pid_parameters: config.pid_parameters.pump_pressure_params.clone(),
-            brew_control_target: config.group_brew_control_target,
+            flow_rate_pid_parameters: config.persistent.pid_parameters.pump_flow_rate_params.clone(),
+            output_flow_rate_pid_parameters: config.persistent.pid_parameters.pump_output_flow_rate_params.clone(),
+            pressure_pid_parameters: config.persistent.pid_parameters.pump_pressure_params.clone(),
+            brew_control_target: config.ephemeral.group_brew_control_target,
+            max_brew_time_seconds: Some(300), // 5 minutes max brew time
+            auto_tare_enabled: true,
+            pump_configuration: None,
+            pressure_sensor_kalman_parameters: None,
+            flow_sensor_pulses_per_liter: None,
         };
         configuration.insert_group_configuration(SingleGroup.as_index(), group_config);
+
+        // Add tank configuration
+        let tank_config = TankConfiguration {
+            low_level_warning_threshold: Some(20),
+            water_level_sensor_kalman_parameters: None,
+        };
+        configuration.insert_tank_configuration(0, tank_config);
 
         configuration
     }

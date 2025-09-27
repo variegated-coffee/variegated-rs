@@ -62,7 +62,7 @@ where
                     // Reset failure counter on successful read
                     self.consecutive_failures = 0;
 
-                    info!("FDC1004: Measurement successful: {:?}", measurement);
+                    //info!("FDC1004: Measurement successful: {:?}", measurement);
 
                     // Transform the measurement and send it
                     let val = (self.transformer)(measurement);

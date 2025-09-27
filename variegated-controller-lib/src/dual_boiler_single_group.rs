@@ -14,8 +14,9 @@ use movavg::MovAvg;
 use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
-use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, KalmanParameters};
+use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
+use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
+use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlTarget, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus};
 use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -40,10 +41,10 @@ pub struct DualBoilerSingleGroupPersistentConfiguration {
     pub pid_parameters: DualBoilerSingleGroupPidParameters,
     pub heating_element_interlock: bool,
     pub allow_simultaneous_operations: bool,
-    pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
-    pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
     pub pump_tacho_pulses_per_liter: Option<f32>,
     pub flow_sensor_pulses_per_liter: Option<f32>,
+    pub service_boiler_fill_threshold: Option<WaterLevelType>,
+    pub water_dispersal_pump_strategy: WaterDispersalPumpStrategy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -53,16 +54,8 @@ pub struct DualBoilerSingleGroupEphemeralConfiguration {
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DualBoilerSingleGroupConfiguration {
-    pub brew_boiler_control_target: BoilerControlTarget,
-    pub steam_boiler_control_target: BoilerControlTarget,
-    pub group_brew_control_target: GroupBrewControlTarget,
-    pub pid_parameters: DualBoilerSingleGroupPidParameters,
-    pub heating_element_interlock: bool,
-    pub allow_simultaneous_operations: bool,
-    pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
-    pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
-    pub pump_tacho_pulses_per_liter: Option<f32>,
-    pub flow_sensor_pulses_per_liter: Option<f32>,
+    pub persistent: DualBoilerSingleGroupPersistentConfiguration,
+    pub ephemeral: DualBoilerSingleGroupEphemeralConfiguration,
 }
 
 impl<'a> Value<'a> for DualBoilerSingleGroupPersistentConfiguration {
@@ -188,70 +181,19 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             pid_parameters,
             heating_element_interlock: false,
             allow_simultaneous_operations: true,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
             pump_tacho_pulses_per_liter: None,
             flow_sensor_pulses_per_liter: None,
+            service_boiler_fill_threshold: Some(20), // Fill when below 20%
+            water_dispersal_pump_strategy: WaterDispersalPumpStrategy::AlwaysPump,
         }
     }
 }
 
 impl Default for DualBoilerSingleGroupConfiguration {
     fn default() -> Self {
-        let mut pid_parameters = DualBoilerSingleGroupPidParameters::default();
-
-        // Brew boiler PID parameters
-        pid_parameters.brew_boiler_temperature_params = PidParameters {
-            kp: PidTerm::new(3.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
-        pid_parameters.brew_boiler_pressure_params = PidParameters {
-            kp: PidTerm::new(3.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
-
-        // Steam boiler PID parameters
-        pid_parameters.steam_boiler_temperature_params = PidParameters {
-            kp: PidTerm::new(5.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
-        pid_parameters.steam_boiler_pressure_params = PidParameters {
-            kp: PidTerm::new(3.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
-
-        // Pump PID parameters
-        pid_parameters.pump_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default() ),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-        };
-        pid_parameters.pump_output_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default() ),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-        };
-        pid_parameters.pump_pressure_params = PidParameters {
-            kp: PidTerm::new( 10.0, PidLimits::default() ),
-            ki: PidTerm::new( 0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new( 30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
-        };
-
         DualBoilerSingleGroupConfiguration {
-            brew_boiler_control_target: BoilerControlTarget::Temperature(93.0),
-            steam_boiler_control_target: BoilerControlTarget::Temperature(120.0),
-            group_brew_control_target: GroupBrewControlTarget::FixedDutyCycle(100),
-            pid_parameters,
-            heating_element_interlock: true,
-            allow_simultaneous_operations: true,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
-            pump_tacho_pulses_per_liter: None,
-            flow_sensor_pulses_per_liter: None,
+            persistent: DualBoilerSingleGroupPersistentConfiguration::default(),
+            ephemeral: DualBoilerSingleGroupEphemeralConfiguration::default(),
         }
     }
 }
@@ -266,6 +208,8 @@ pub struct DualBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, 
     steam_boiler: Boiler<'a, M, N_WATCH>,
     group: Group<'a, M, N_WATCH>,
     water_tap: WaterTap<'a, M, N_WATCH>,
+    tank: Option<Tank<'a, M, N_WATCH>>,
+    fill_mechanism: Option<DualBoilerFillMechanism<'a>>,
 
     // Control systems
     brew_boiler_pid: PidCtrl<f32>,
@@ -303,16 +247,8 @@ pub struct DualBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, 
 impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize, const N_CONFIG_SUBS: usize> DualBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
-            brew_boiler_control_target: self.persistent_configuration.brew_boiler_control_target,
-            steam_boiler_control_target: self.persistent_configuration.steam_boiler_control_target,
-            group_brew_control_target: self.ephemeral_configuration.group_brew_control_target,
-            pid_parameters: self.persistent_configuration.pid_parameters,
-            heating_element_interlock: self.persistent_configuration.heating_element_interlock,
-            allow_simultaneous_operations: self.persistent_configuration.allow_simultaneous_operations,
-            temperature_sensor_kalman_parameters: self.persistent_configuration.temperature_sensor_kalman_parameters,
-            pressure_sensor_kalman_parameters: self.persistent_configuration.pressure_sensor_kalman_parameters,
-            pump_tacho_pulses_per_liter: self.persistent_configuration.pump_tacho_pulses_per_liter,
-            flow_sensor_pulses_per_liter: self.persistent_configuration.flow_sensor_pulses_per_liter,
+            persistent: self.persistent_configuration.clone(),
+            ephemeral: self.ephemeral_configuration.clone(),
         }
     }
 
@@ -324,6 +260,8 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
         steam_boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
         water_tap: WaterTap<'a, M, N_WATCH>,
+        tank: Option<Tank<'a, M, N_WATCH>>,
+        fill_mechanism: Option<DualBoilerFillMechanism<'a>>,
         settings_store: SettingsStoreT,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -336,6 +274,8 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
             steam_boiler,
             group,
             water_tap,
+            tank,
+            fill_mechanism,
             brew_boiler_pid: super::limited_pid(),
             steam_boiler_pid: super::limited_pid(),
             pump_pid: super::limited_pid(),
@@ -344,7 +284,7 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
             configuration_store: settings_store,
             persistent_configuration: DualBoilerSingleGroupPersistentConfiguration::default(),
             ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration::default(),
-            brew_boiler_enabled: false,
+            brew_boiler_enabled: true,
             steam_boiler_enabled: true,
             group_brewing: false,
             water_tap_dispensing: false,
@@ -365,6 +305,7 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
         let mut last_pid_update = Instant::now();
         let mut last_configuration = self.current_configuration();
         let mut last_debug_print = Instant::now();
+        let mut last_configuration_publish = Instant::now();
 
         loop {
             self.persistent_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
@@ -415,6 +356,9 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
             let pump_output = self.update_group_pump(delta_t).await;
             let _water_tap_output = self.update_water_tap(delta_t).await;
 
+            // Update filling logic
+            self.update_service_boiler_filling().await;
+
             self.send_status(brew_boiler_output, steam_boiler_output, pump_output).await;
 
             // Debug print status every 10 seconds
@@ -424,6 +368,16 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
                     debug!("Status: {:?}", status);
                 }
                 last_debug_print = now;
+            }
+
+            // Publish configuration every 10 seconds regardless of changes
+            if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
+                let current_config = self.current_configuration();
+                let config: Configuration = current_config.clone().into();
+                self.configuration_channel_sender.publish_immediate(config);
+                info!("Periodic configuration published");
+                last_configuration_publish = now;
+                last_configuration = current_config;
             }
 
             Timer::after_millis(100).await;
@@ -641,11 +595,34 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
 
     async fn update_water_tap(&mut self, _delta_t: f32) -> Output {
         if self.water_tap_dispensing {
-            self.water_tap.set_water_dispensing_state(true, 100).await;
-            Output::FixedDutyCycle(100)
+            // Apply water dispersal pump strategy
+            let duty_cycle = match self.persistent_configuration.water_dispersal_pump_strategy {
+                WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
+                _ => 100, // Normal pumping
+            };
+            self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
+            Output::FixedDutyCycle(duty_cycle)
         } else {
             self.water_tap.set_water_dispensing_state(false, 0).await;
             Output::Off
+        }
+    }
+
+    async fn update_service_boiler_filling(&mut self) {
+        // Only attempt filling if automatic filling is enabled and we have a fill mechanism
+/*        if !self.persistent_configuration.automatic_filling_enabled {
+            return;
+        }*/
+
+        if let Some(fill_mechanism) = &mut self.fill_mechanism {
+            if let Some(current_level) = self.steam_boiler.get_water_level() {
+                //info!("Checking boiler fill: current level = {}, threshold = {:?}", current_level, self.persistent_configuration.service_boiler_fill_threshold);
+                // Use the existing logic in DualBoilerFillMechanism which handles:
+                // - Threshold checking
+                // - Safety interlocks (won't fill if not idle)
+                // - Automatic start/stop of filling
+                fill_mechanism.check_and_fill_if_needed(current_level, self.persistent_configuration.service_boiler_fill_threshold).await;
+            }
         }
     }
 
@@ -653,6 +630,7 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
         let brew_boiler_status = BoilerStatus {
             temperature: self.brew_boiler.get_temperature(),
             pressure: self.brew_boiler.get_pressure(),
+            water_level: self.brew_boiler.get_water_level(),
             output: brew_boiler_output,
             control_target: self.persistent_configuration.brew_boiler_control_target,
         };
@@ -660,6 +638,7 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
         let steam_boiler_status = BoilerStatus {
             temperature: self.steam_boiler.get_temperature(),
             pressure: self.steam_boiler.get_pressure(),
+            water_level: self.steam_boiler.get_water_level(),
             output: steam_boiler_output,
             control_target: self.persistent_configuration.steam_boiler_control_target,
         };
@@ -711,9 +690,24 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
             }
         });
 
+        let water_tap_status = WaterTapStatus {
+            is_dispensing: self.water_tap_dispensing,
+        };
+
+        // Create tank statuses map - only include tank if it exists
+        let tank_statuses = if let Some(ref mut tank) = self.tank {
+            FnvIndexMap::from_iter([(0, TankStatus {
+                water_level: tank.get_water_level(),
+            })])
+        } else {
+            FnvIndexMap::new()
+        };
+
         let status = Status {
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (SteamBoiler.as_index(), steam_boiler_status)]),
             group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
+            water_tap_statuses: FnvIndexMap::from_iter([(0, water_tap_status)]),
+            tank_statuses,
             mode: Default::default(),
             routine_execution,
             comms_status,
@@ -921,7 +915,12 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
         if !self.water_tap_dispensing {
             info!("Starting water tap dispensing");
             self.water_tap_dispensing = true;
-            self.water_tap.set_water_dispensing_state(true, 100).await;
+            // Apply water dispersal pump strategy
+            let duty_cycle = match self.persistent_configuration.water_dispersal_pump_strategy {
+                WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
+                _ => 100, // Normal pumping
+            };
+            self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
         }
     }
 
@@ -954,18 +953,8 @@ impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBo
             info!("Routine execution finished, saving state and configuration");
             // Restore saved configuration by splitting into persistent and ephemeral parts
             let saved_config = &routine.saved_configuration;
-            self.persistent_configuration = DualBoilerSingleGroupPersistentConfiguration {
-                brew_boiler_control_target: saved_config.brew_boiler_control_target,
-                steam_boiler_control_target: saved_config.steam_boiler_control_target,
-                pid_parameters: saved_config.pid_parameters,
-                heating_element_interlock: saved_config.heating_element_interlock,
-                allow_simultaneous_operations: saved_config.allow_simultaneous_operations,
-                temperature_sensor_kalman_parameters: saved_config.temperature_sensor_kalman_parameters,
-                pressure_sensor_kalman_parameters: saved_config.pressure_sensor_kalman_parameters,
-                pump_tacho_pulses_per_liter: saved_config.pump_tacho_pulses_per_liter,
-                flow_sensor_pulses_per_liter: saved_config.flow_sensor_pulses_per_liter,
-            };
-            self.ephemeral_configuration.group_brew_control_target = saved_config.group_brew_control_target;
+            self.persistent_configuration = saved_config.persistent;
+            self.ephemeral_configuration = saved_config.ephemeral;
             // Save the restored persistent configuration
             self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             self.curve_start_time = None;
@@ -981,28 +970,64 @@ impl From<DualBoilerSingleGroupConfiguration> for Configuration {
 
         // Add brew boiler configuration
         let brew_boiler_config = BoilerConfiguration {
-            temperature_pid_parameters: config.pid_parameters.brew_boiler_temperature_params.clone(),
-            pressure_pid_parameters: config.pid_parameters.brew_boiler_pressure_params.clone(),
-            control_target: config.brew_boiler_control_target,
+            temperature_pid_parameters: config.persistent.pid_parameters.brew_boiler_temperature_params.clone(),
+            pressure_pid_parameters: config.persistent.pid_parameters.brew_boiler_pressure_params.clone(),
+            control_target: config.persistent.brew_boiler_control_target,
+            max_temperature: None,
+            max_pressure: None,
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            fill_config: None,
         };
         configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
 
         // Add steam boiler configuration
         let steam_boiler_config = BoilerConfiguration {
-            temperature_pid_parameters: config.pid_parameters.steam_boiler_temperature_params.clone(),
-            pressure_pid_parameters: config.pid_parameters.steam_boiler_pressure_params.clone(),
-            control_target: config.steam_boiler_control_target,
+            temperature_pid_parameters: config.persistent.pid_parameters.steam_boiler_temperature_params.clone(),
+            pressure_pid_parameters: config.persistent.pid_parameters.steam_boiler_pressure_params.clone(),
+            control_target: config.persistent.steam_boiler_control_target,
+            max_temperature: None,
+            max_pressure: None,
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            fill_config: Some(FillConfiguration {
+                fill_threshold: config.persistent.service_boiler_fill_threshold,
+                pump_configuration: None,
+            }),
         };
         configuration.insert_boiler_configuration(SteamBoiler.as_index(), steam_boiler_config);
 
         // Add group configuration
         let group_config = GroupConfiguration {
-            flow_rate_pid_parameters: config.pid_parameters.pump_flow_rate_params.clone(),
-            output_flow_rate_pid_parameters: config.pid_parameters.pump_output_flow_rate_params.clone(),
-            pressure_pid_parameters: config.pid_parameters.pump_pressure_params.clone(),
-            brew_control_target: config.group_brew_control_target,
+            flow_rate_pid_parameters: config.persistent.pid_parameters.pump_flow_rate_params.clone(),
+            output_flow_rate_pid_parameters: config.persistent.pid_parameters.pump_output_flow_rate_params.clone(),
+            pressure_pid_parameters: config.persistent.pid_parameters.pump_pressure_params.clone(),
+            brew_control_target: config.ephemeral.group_brew_control_target,
+            max_brew_time_seconds: None,
+            auto_tare_enabled: true,
+            pump_configuration: None,
+            pressure_sensor_kalman_parameters: None,
+            flow_sensor_pulses_per_liter: None,
         };
         configuration.insert_group_configuration(SingleGroup.as_index(), group_config);
+
+        let water_tap_config = WaterTapConfiguration {
+            pump_strategy: config.persistent.water_dispersal_pump_strategy,
+            temperature_target: None,
+            max_dispense_time_seconds: None,
+            flow_rate_limit: None,
+            pump_configuration: None,
+        };
+        configuration.insert_water_tap_configuration(0, water_tap_config);
+
+        // Add tank configuration if tank is present
+        // Note: We can't access self.tank here since this is a From implementation
+        // Tank configuration will need to be added separately when tank is detected
+        let tank_config = TankConfiguration {
+            low_level_warning_threshold: Some(20),
+            water_level_sensor_kalman_parameters: None,
+        };
+        configuration.insert_tank_configuration(0, tank_config);
 
         configuration
     }

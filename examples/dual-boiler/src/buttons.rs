@@ -38,7 +38,7 @@ const WATER_TAP_BUTTON: usize = 5;    // Button 6 (Pin 5)
 pub struct ButtonState {
     /// Current brewing state (from status subscription)
     brewing_active: bool,
-    /// Current water dispensing state (tracked internally)
+    /// Current water dispensing state (from status subscription)
     water_dispensing_active: bool,
     /// Previous button states for edge detection (bit-packed)
     last_button_states: u8,
@@ -66,6 +66,11 @@ impl ButtonState {
         // Update brewing state from status
         self.brewing_active = status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index())
             .map(|group| group.is_brewing)
+            .unwrap_or(false);
+
+        // Update water dispensing state from status
+        self.water_dispensing_active = status.get_water_tap_status(0)
+            .map(|water_tap| water_tap.is_dispensing)
             .unwrap_or(false);
     }
 
@@ -119,13 +124,11 @@ impl ButtonState {
     }
 
     /// Get the appropriate command for button 6 (water tap toggle)
-    pub fn get_water_tap_toggle_command(&mut self) -> MachineCommand {
+    pub fn get_water_tap_toggle_command(&self) -> MachineCommand {
         let water_tap_index = 0; // Single water tap at index 0
         if self.water_dispensing_active {
-            self.water_dispensing_active = false;
             MachineCommand::StopPumpingToWaterTap(water_tap_index)
         } else {
-            self.water_dispensing_active = true;
             MachineCommand::StartPumpingToWaterTap(water_tap_index)
         }
     }

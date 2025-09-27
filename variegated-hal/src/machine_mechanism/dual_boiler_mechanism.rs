@@ -3,19 +3,11 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
 use alloc::boxed::Box;
-use defmt::info;
+use defmt::{info, Format};
 
-#[derive(Debug, Clone, Copy)]
-pub enum PumpStrategy {
-    AlwaysPump,
-    LowLevelOnly(WaterLevelType),
-    NoPump,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Format)]
 pub struct DualBoilerConfig {
     pub heating_element_interlock: bool,
-    pub water_dispersal_pump_strategy: Option<PumpStrategy>,
     pub allow_simultaneous_operations: bool,
 }
 
@@ -23,13 +15,12 @@ impl Default for DualBoilerConfig {
     fn default() -> Self {
         DualBoilerConfig {
             heating_element_interlock: true,
-            water_dispersal_pump_strategy: Some(PumpStrategy::LowLevelOnly(20.into())),
             allow_simultaneous_operations: true,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Format)]
 enum DualBoilerMechanismState {
     Idle,
     BrewingOnly,
@@ -278,13 +269,20 @@ impl<'a> DualBoilerFillMechanism<'a> {
         mechanism.request_fill_state(filling, duty_cycle);
     }
 
-    pub async fn check_and_fill_if_needed(&mut self, current_level: WaterLevelType) {
+    pub async fn check_and_fill_if_needed(&mut self, current_level: WaterLevelType, threshold: Option<WaterLevelType>) {
         let mechanism = self.mechanism.lock().await;
-        if let Some(PumpStrategy::LowLevelOnly(threshold)) = mechanism.config.water_dispersal_pump_strategy {
-            if current_level < threshold && matches!(mechanism.state, DualBoilerMechanismState::Idle) {
+
+        if let Some(fill_threshold) = threshold {
+            if current_level < fill_threshold && matches!(mechanism.state, DualBoilerMechanismState::Idle) {
                 drop(mechanism);
                 self.set_fill_state(true, 100).await;
+            } else {
+                drop(mechanism);
+                self.set_fill_state(false, 0).await;
             }
+        } else {
+            drop(mechanism);
+            self.set_fill_state(false, 0).await;
         }
     }
 }

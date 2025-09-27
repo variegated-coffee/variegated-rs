@@ -252,6 +252,20 @@ impl DisplayState {
         }
     }
 
+    /// Format tank level as "T0" (empty) or "T1" (non-empty) (2 chars)
+    fn format_tank_level(&self) -> String {
+        // Check the first available tank
+        if let Some((_, tank_status)) = self.status.tank_statuses.iter().next() {
+            match tank_status.water_level {
+                Some(level) if level > 0 => "T1".to_string(),
+                Some(_) => "T0".to_string(), // 0% water level
+                None => "T?".to_string(), // No sensor data
+            }
+        } else {
+            "T?".to_string() // No tank configured
+        }
+    }
+
     /// Format last brew time as "L:XXs" (5 chars max)
     fn format_last_brew_time(&self) -> String {
         match self.last_brew_time {
@@ -327,7 +341,7 @@ impl DisplayState {
         format!("{} {}{} {} ", temp_str, brew_heating, steam_heating, time_str)
     }
 
-    /// Format standby mode row 2: "2.1b 123.4C L:45s"
+    /// Format standby mode row 2: "2.1b 123.4C T1"
     pub fn format_standby_row2(&self) -> String {
         let steam_pressure = self.status.get_boiler_status(DualBoilerSingleGroupControllerBoilers::SteamBoiler.as_index())
             .and_then(|status| status.pressure);
@@ -337,9 +351,9 @@ impl DisplayState {
 
         let pressure_str = self.format_pressure(steam_pressure);
         let steam_temp_str = self.format_temperature(steam_temp);
-        let last_brew_str = self.format_last_brew_time();
+        let tank_str = self.format_tank_level();
 
-        format!("{} {} {}", pressure_str, steam_temp_str, last_brew_str)
+        format!("{} {} {}", pressure_str, steam_temp_str, tank_str)
     }
 }
 
