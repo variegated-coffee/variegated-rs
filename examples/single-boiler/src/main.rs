@@ -29,7 +29,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
-use variegated_hal::{Boiler, Group, WithTask, PeripheralRegistry};
+use variegated_hal::{Boiler, Group, WithTask, PeripheralRegistry, SensorReading};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use variegated_hal::noop::NoopOutputPin;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -230,14 +230,14 @@ static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static GRAVITY: StaticCell<GravityMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
-static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
-static EXTERNAL_TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
-static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
-static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, WeightType, 3>> = StaticCell::new();
-static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
+static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+static EXTERNAL_TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
+static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
+static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
-static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
-static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
+static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
+static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
 static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
@@ -462,7 +462,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let input = pwm::Pwm::new_input(pump_p.pwm_tacho_out, pump_p.pin_tacho_out, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
-    let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(input, pump_rpm_sig.sender(), None, None, |v| (v * 60.0/32.0) as RPMType);
+    let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(input, pump_rpm_sig.sender(), None, |v| (v * 60.0/32.0) as RPMType, |v| v);
 
     let pump = Box::new(variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump::new(pump_pwm));
 
@@ -480,7 +480,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let flow_meter_input = pwm::Pwm::new_input(flow_meter_p.pwm_flow_meter, flow_meter_p.pin_flow_meter, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
-    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, None, |v| (v * 0.043) * 0.6667 * 0.89 as FlowRateType);
+    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, |v| (v * 0.043) * 0.6667 * 0.89 as FlowRateType, |v| v);
 
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
@@ -489,7 +489,7 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(prs_sig.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
-        Some(output_flow_sig.receiver().unwrap()),
+        None, // output_flow_sig has different raw type (i32) than flow_meter_sig (f32)
         Some(output_weight_sig.receiver().unwrap()),
     );
 

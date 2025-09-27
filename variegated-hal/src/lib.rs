@@ -9,6 +9,12 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
+
+#[derive(Clone, Debug, Format)]
+pub struct SensorReading<Transformed> {
+    pub raw: f32,
+    pub transformed: Transformed,
+}
 pub use pump::{Pump, PumpError};
 use heapless::FnvIndexMap;
 use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS};
@@ -72,18 +78,18 @@ pub enum WaterTapMechanismError {
 pub struct Boiler<'a, M: RawMutex, const N: usize> {
     pub heating_element: Box<dyn HeatingElement>,
     pub fill_mechanism: Option<Box<dyn BoilerFillMechanism>>,
-    pub temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
-    pub pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
-    pub water_level_sensor: Option<Receiver<'a, M, WaterLevelType, N>>,
+    pub temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+    pub pressure_sensor: Option<Receiver<'a, M, SensorReading<PressureType>, N>>,
+    pub water_level_sensor: Option<Receiver<'a, M, SensorReading<WaterLevelType>, N>>,
 }
 
 impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
     pub fn new(
         heating_element: Box<dyn HeatingElement>,
         fill_mechanism: Option<Box<dyn BoilerFillMechanism>>,
-        temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
-        pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
-        water_level_sensor: Option<Receiver<'a, M, WaterLevelType, N>>,
+        temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+        pressure_sensor: Option<Receiver<'a, M, SensorReading<PressureType>, N>>,
+        water_level_sensor: Option<Receiver<'a, M, SensorReading<WaterLevelType>, N>>,
     ) -> Self {
         Self {
             heating_element,
@@ -106,6 +112,14 @@ impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
 
     pub fn get_temperature(&mut self) -> Option<TemperatureType> {
         if let Some(temperature_sensor) = &mut self.temperature_sensor {
+            temperature_sensor.try_get().map(|reading| reading.transformed)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_temperature_reading(&mut self) -> Option<SensorReading<TemperatureType>> {
+        if let Some(temperature_sensor) = &mut self.temperature_sensor {
             temperature_sensor.try_get()
         } else {
             None
@@ -114,6 +128,14 @@ impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
 
     pub fn get_pressure(&mut self) -> Option<PressureType> {
         if let Some(pressure_sensor) = &mut self.pressure_sensor {
+            pressure_sensor.try_get().map(|reading| reading.transformed)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_pressure_reading(&mut self) -> Option<SensorReading<PressureType>> {
+        if let Some(pressure_sensor) = &mut self.pressure_sensor {
             pressure_sensor.try_get()
         } else {
             None
@@ -121,6 +143,14 @@ impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
     }
 
     pub fn get_water_level(&mut self) -> Option<WaterLevelType> {
+        if let Some(water_level_sensor) = &mut self.water_level_sensor {
+            water_level_sensor.try_get().map(|reading| reading.transformed)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_water_level_reading(&mut self) -> Option<SensorReading<WaterLevelType>> {
         if let Some(water_level_sensor) = &mut self.water_level_sensor {
             water_level_sensor.try_get()
         } else {
@@ -133,11 +163,11 @@ pub struct Group<'a, M: RawMutex, const N: usize> {
     pub brew_mechanism: Option<Box<dyn BrewMechanism>>,
     pub heating_element: Option<Box<dyn HeatingElement>>,
     pub scale_controller: Option<Box<dyn scale::ScaleController>>,
-    pub temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
-    pub pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
-    pub input_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
-    pub output_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
-    pub output_weight_sensor: Option<Receiver<'a, M, WeightType, N>>,
+    pub temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+    pub pressure_sensor: Option<Receiver<'a, M, SensorReading<PressureType>, N>>,
+    pub input_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
+    pub output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
+    pub output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
 }
 
 impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
@@ -145,11 +175,11 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         brew_mechanism: Option<Box<dyn BrewMechanism>>,
         heating_element: Option<Box<dyn HeatingElement>>,
         scale_controller: Option<Box<dyn scale::ScaleController>>,
-        temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
-        pressure_sensor: Option<Receiver<'a, M, PressureType, N>>,
-        input_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
-        output_flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
-        output_weight_sensor: Option<Receiver<'a, M, WeightType, N>>,
+        temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+        pressure_sensor: Option<Receiver<'a, M, SensorReading<PressureType>, N>>,
+        input_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
+        output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
+        output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
     ) -> Self {
         Self {
             brew_mechanism,
@@ -194,22 +224,42 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
     }
 
     pub fn get_temperature(&mut self) -> Option<TemperatureType> {
+        self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_temperature_reading(&mut self) -> Option<SensorReading<TemperatureType>> {
         self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub fn get_pressure(&mut self) -> Option<PressureType> {
+        self.pressure_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_pressure_reading(&mut self) -> Option<SensorReading<PressureType>> {
         self.pressure_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub fn get_input_flow_rate(&mut self) -> Option<FlowRateType> {
+        self.input_flow_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_input_flow_reading(&mut self) -> Option<SensorReading<FlowRateType>> {
         self.input_flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub fn get_output_flow_rate(&mut self) -> Option<FlowRateType> {
+        self.output_flow_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_output_flow_reading(&mut self) -> Option<SensorReading<FlowRateType>> {
         self.output_flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub fn get_output_weight(&mut self) -> Option<WeightType> {
+        self.output_weight_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_output_weight_reading(&mut self) -> Option<SensorReading<WeightType>> {
         self.output_weight_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
     
@@ -254,12 +304,12 @@ pub struct WaterTap<'a, M: RawMutex, const N: usize> {
     pub water_tap_mechanism: Option<Box<dyn WaterTapMechanism>>,
     pub valve_mechanism: Option<Box<dyn ValveMechanism>>,
     pub mixer: Option<Box<dyn WaterMixerMechanism>>,
-    pub temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
-    pub flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+    pub temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+    pub flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
 }
 
 pub struct Tank<'a, M: RawMutex, const N: usize> {
-    pub water_level_sensor: Option<Receiver<'a, M, WaterLevelType, N>>,
+    pub water_level_sensor: Option<Receiver<'a, M, SensorReading<WaterLevelType>, N>>,
 }
 
 impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
@@ -267,8 +317,8 @@ impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
         water_tap_mechanism: Option<Box<dyn WaterTapMechanism>>,
         valve_mechanism: Option<Box<dyn ValveMechanism>>,
         mixer: Option<Box<dyn WaterMixerMechanism>>,
-        temperature_sensor: Option<Receiver<'a, M, TemperatureType, N>>,
-        flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
+        temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+        flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
     ) -> Self {
         Self {
             water_tap_mechanism,
@@ -302,20 +352,36 @@ impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
     }
 
     pub fn get_temperature(&mut self) -> Option<TemperatureType> {
+        self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_temperature_reading(&mut self) -> Option<SensorReading<TemperatureType>> {
         self.temperature_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub fn get_flow_rate(&mut self) -> Option<FlowRateType> {
+        self.flow_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_flow_reading(&mut self) -> Option<SensorReading<FlowRateType>> {
         self.flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 }
 
 impl<'a, M: RawMutex, const N: usize> Tank<'a, M, N> {
-    pub fn new(water_level_sensor: Option<Receiver<'a, M, WaterLevelType, N>>) -> Self {
+    pub fn new(water_level_sensor: Option<Receiver<'a, M, SensorReading<WaterLevelType>, N>>) -> Self {
         Self { water_level_sensor }
     }
 
     pub fn get_water_level(&mut self) -> Option<WaterLevelType> {
+        if let Some(water_level_sensor) = &mut self.water_level_sensor {
+            water_level_sensor.try_get().map(|reading| reading.transformed)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_water_level_reading(&mut self) -> Option<SensorReading<WaterLevelType>> {
         if let Some(water_level_sensor) = &mut self.water_level_sensor {
             water_level_sensor.try_get()
         } else {

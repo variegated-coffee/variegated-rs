@@ -198,7 +198,16 @@ impl Default for DualBoilerSingleGroupConfiguration {
     }
 }
 
-pub struct DualBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize, const N_CONFIG_SUBS: usize> {
+pub struct DualBoilerSingleGroupController<
+    'a,
+    ChannelM: RawMutex,
+    M: RawMutex,
+    SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>,
+    const N_CHANNEL: usize,
+    const N_WATCH: usize,
+    const N_SUBS: usize,
+    const N_CONFIG_SUBS: usize
+> {
     command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
     status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
     configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
@@ -244,7 +253,16 @@ pub struct DualBoilerSingleGroupController<'a, ChannelM: RawMutex, M: RawMutex, 
     peripheral_registry: &'a PeripheralRegistry<'a>,
 }
 
-impl<'a, ChannelM: RawMutex, M: RawMutex, SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>, const N_CHANNEL: usize, const N_WATCH: usize, const N_SUBS: usize, const N_CONFIG_SUBS: usize> DualBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+impl<
+    'a,
+    ChannelM: RawMutex,
+    M: RawMutex,
+    SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>,
+    const N_CHANNEL: usize,
+    const N_WATCH: usize,
+    const N_SUBS: usize,
+    const N_CONFIG_SUBS: usize
+> DualBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),

@@ -97,6 +97,14 @@ impl<T: FloatCore + core::default::Default> Limits<T> {
             Err(PidError::LimitOutBound)
         }
     }
+
+    pub fn upper(&self) -> T {
+        self.upper
+    }
+
+    pub fn lower(&self) -> T {
+        self.lower
+    }
 }
 
 impl<T: FloatCore + core::default::Default> Default for Limits<T> {

@@ -7,11 +7,19 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 use variegated_fdc1004::{FDC1004, FDC1004Error, Channel, SuccessfulMeasurement};
 use variegated_instrumentation::async_task_loop;
-use crate::WithTask;
+use crate::{WithTask, SensorReading};
+
+fn successful_measurement_to_f32(measurement: SuccessfulMeasurement) -> f32 {
+    match measurement {
+        SuccessfulMeasurement::MeasurementInRange(capacitance) => capacitance.to_pf(),
+        SuccessfulMeasurement::Underflow => -1.0,  // Sentinel value for underflow
+        SuccessfulMeasurement::Overflow => -2.0,   // Sentinel value for overflow
+    }
+}
 
 pub struct Fdc1004Sensor<'a, M: RawMutex, I2C: I2c, D: DelayNs, T: Clone, F: Fn(SuccessfulMeasurement) -> T, const N: usize> {
     fdc1004: &'a Mutex<M, FDC1004<I2C, D>>,
-    signal: Sender<'a, NoopRawMutex, T, N>,
+    signal: Sender<'a, NoopRawMutex, SensorReading<T>, N>,
     transformer: F,
     channel: Channel,
     consecutive_failures: u8,
@@ -28,7 +36,7 @@ where
 {
     pub fn new(
         fdc1004: &'a Mutex<M, FDC1004<I2C, D>>,
-        signal: Sender<'a, NoopRawMutex, T, N>,
+        signal: Sender<'a, NoopRawMutex, SensorReading<T>, N>,
         transformer: F,
         channel: Channel,
     ) -> Self {
@@ -65,8 +73,14 @@ where
                     //info!("FDC1004: Measurement successful: {:?}", measurement);
 
                     // Transform the measurement and send it
-                    let val = (self.transformer)(measurement);
-                    self.signal.send(val);
+                    let transformed_val = (self.transformer)(measurement);
+
+                    let sensor_reading = SensorReading {
+                        raw: successful_measurement_to_f32(measurement),
+                        transformed: transformed_val,
+                    };
+
+                    self.signal.send(sensor_reading);
                 }
                 Err(e) => {
                     match e {
