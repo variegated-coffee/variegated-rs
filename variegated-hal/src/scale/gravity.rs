@@ -13,7 +13,7 @@ use variegated_adc_tools::ConversionParameters;
 use variegated_gravity_driver::{Channel, Error, Gravity, WeighingConfig};
 use variegated_instrumentation::{async_task_loop};
 use crate::scale::{ScaleController, ScaleError};
-use crate::WithTask;
+use crate::{WithTask, SensorReading};
 use variegated_controller_types::{PeripheralStatusProvider, PeripheralType, PeripheralId};
 
 #[derive(Clone, Copy, Debug, Format)]
@@ -26,9 +26,9 @@ pub enum GravityCommand {
 
 pub struct GravityDevice<'a, M: RawMutex, I2cDevT: I2c, const N: usize> {
     gravity: &'a Mutex<M, Gravity<I2cDevT>>,
-    weight_signal: Option<WatchSender<'a, NoopRawMutex, f32, N>>,
+    weight_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
     weight_conversion_parameters: ConversionParameters,
-    rate_of_change_signal: Option<WatchSender<'a, NoopRawMutex, f32, N>>,
+    rate_of_change_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
     rate_of_change_conversion_parameters: ConversionParameters,
     command_signal: Receiver<'a, CriticalSectionRawMutex, GravityCommand, N>,
     poll_delay: Duration,
@@ -43,8 +43,8 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<'a, M, I2cDevT
     pub fn new(
         gravity: &'a Mutex<M, Gravity<I2cDevT>>,
         channel: Channel,
-        weight_signal: Option<WatchSender<'a, NoopRawMutex, f32, N>>,
-        rate_of_change_signal: Option<WatchSender<'a, NoopRawMutex, f32, N>>,
+        weight_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
+        rate_of_change_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
         weight_conversion_parameters: ConversionParameters,
         rate_of_change_conversion_parameters: ConversionParameters,
         command_signal: Receiver<'a, CriticalSectionRawMutex, GravityCommand, N>,
@@ -169,12 +169,23 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'
                 
                 if let Some(ref weight_signal) = self.weight_signal {
                     if status.zero {
-                        weight_signal.send(self.weight_conversion_parameters.convert(0.0));
+                        let raw_value = 0i32;
+                        let transformed_value = self.weight_conversion_parameters.convert(0.0);
+                        let sensor_reading = SensorReading {
+                            raw: raw_value as f32,
+                            transformed: transformed_value,
+                        };
+                        weight_signal.send(sensor_reading);
                     } else {
                         let res = dev.read_weight(self.channel).await;
 
-                        if let Ok(value) = res {
-                            weight_signal.send(self.weight_conversion_parameters.convert(value as f32));
+                        if let Ok(raw_value) = res {
+                            let transformed_value = self.weight_conversion_parameters.convert(raw_value as f32);
+                            let sensor_reading = SensorReading {
+                                raw: raw_value as f32,
+                                transformed: transformed_value,
+                            };
+                            weight_signal.send(sensor_reading);
                         } else {
                             error!("Failed to read weight from Gravity: {:?}", res);
                             // Drop lock before updating connection status
@@ -187,12 +198,23 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'
 
                 if let Some(ref rate_of_change_signal) = self.rate_of_change_signal {
                     if !status.motion {
-                        rate_of_change_signal.send(self.rate_of_change_conversion_parameters.convert(0.0));
+                        let raw_value = 0i32;
+                        let transformed_value = self.rate_of_change_conversion_parameters.convert(0.0);
+                        let sensor_reading = SensorReading {
+                            raw: raw_value as f32,
+                            transformed: transformed_value,
+                        };
+                        rate_of_change_signal.send(sensor_reading);
                     } else {
                         let res = dev.read_rate_of_change(self.channel).await;
 
-                        if let Ok(value) = res {
-                            rate_of_change_signal.send(self.rate_of_change_conversion_parameters.convert(value as f32));
+                        if let Ok(raw_value) = res {
+                            let transformed_value = self.rate_of_change_conversion_parameters.convert(raw_value as f32);
+                            let sensor_reading = SensorReading {
+                                raw: raw_value as f32,
+                                transformed: transformed_value,
+                            };
+                            rate_of_change_signal.send(sensor_reading);
                         } else {
                             error!("Failed to read rate of change from Gravity: {:?}", res);
                             // Drop lock before updating connection status

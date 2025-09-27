@@ -3,14 +3,14 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::watch::Sender;
 use embassy_time::{Instant, Timer};
 use movavg::MovAvg;
-use crate::WithTask;
+use crate::{WithTask, SensorReading};
 
-pub struct GpioTransformingFrequencyCounter<'a, M: RawMutex, T: Clone, F: Fn(f32) -> T, const N: usize> {
+pub struct GpioTransformingFrequencyCounter<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize> {
     pwm: Pwm<'a>,
-    signal: Sender<'a, M, T, N>,
-    total_pulses_signal: Option<Sender<'a, M, u64, N>>,
-    raw_frequency_signal: Option<Sender<'a, M, f32, N>>,
-    transformer: F,
+    frequency_signal: Sender<'a, M, SensorReading<T>, N>,
+    total_pulses_signal: Option<Sender<'a, M, SensorReading<U>, N>>,
+    frequency_transformer: F,
+    total_transformer: G,
     moving_average: MovAvg<f32, f32, 5>,
     measurements: [(u64, Instant); 10],
     measurement_index: usize,
@@ -21,21 +21,21 @@ pub struct GpioTransformingFrequencyCounter<'a, M: RawMutex, T: Clone, F: Fn(f32
     last_measurement_counter: u16,
 }
 
-impl<'a, M: RawMutex, T: Clone, F: Fn(f32) -> T, const N: usize> GpioTransformingFrequencyCounter<'a, M, T, F, N> {
+impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize> GpioTransformingFrequencyCounter<'a, M, T, U, F, G, N> {
     pub fn new(
-        pwm: Pwm<'a>, 
-        signal: Sender<'a, M, T, N>, 
-        total_pulses_signal: Option<Sender<'a, M, u64, N>>,
-        raw_frequency_signal: Option<Sender<'a, M, f32, N>>,
-        transformer: F
+        pwm: Pwm<'a>,
+        frequency_signal: Sender<'a, M, SensorReading<T>, N>,
+        total_pulses_signal: Option<Sender<'a, M, SensorReading<U>, N>>,
+        frequency_transformer: F,
+        total_transformer: G
     ) -> Self {
         let now = Instant::now();
         GpioTransformingFrequencyCounter {
             pwm,
-            signal,
+            frequency_signal,
             total_pulses_signal,
-            raw_frequency_signal,
-            transformer,
+            frequency_transformer,
+            total_transformer,
             moving_average: MovAvg::default(),
             measurements: [(0u64, now); 10],
             measurement_index: 0,
@@ -74,7 +74,7 @@ impl<'a, M: RawMutex, T: Clone, F: Fn(f32) -> T, const N: usize> GpioTransformin
     }
 }
 
-impl<'a, M: RawMutex, T: Clone, F: Fn(f32) -> T, const N: usize> WithTask for GpioTransformingFrequencyCounter<'a, M, T, F, N> {
+impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize> WithTask for GpioTransformingFrequencyCounter<'a, M, T, U, F, G, N> {
     async fn task(&mut self) {
         // Initialize counter
         self.pwm.set_counter(0);
@@ -136,19 +136,23 @@ impl<'a, M: RawMutex, T: Clone, F: Fn(f32) -> T, const N: usize> WithTask for Gp
             
             // Update tracking variables
             self.last_measurement_instant = measurement_instant;
-            
-            // Send raw frequency signal if configured
-            if let Some(ref raw_signal) = self.raw_frequency_signal {
-                raw_signal.send(frequency);
-            }
-            
+
             // Send transformed frequency signal
-            let v = (self.transformer)(frequency);
-            self.signal.send(v);
-            
+            let transformed_frequency = (self.frequency_transformer)(frequency);
+            let frequency_reading = SensorReading {
+                raw: frequency,
+                transformed: transformed_frequency,
+            };
+            self.frequency_signal.send(frequency_reading);
+
             // Send total pulses signal if configured
             if let Some(ref total_signal) = self.total_pulses_signal {
-                total_signal.send(self.total_pulses);
+                let transformed_total = (self.total_transformer)(self.total_pulses);
+                let total_reading = SensorReading {
+                    raw: self.total_pulses as f32,
+                    transformed: transformed_total,
+                };
+                total_signal.send(total_reading);
             }
         }
     }

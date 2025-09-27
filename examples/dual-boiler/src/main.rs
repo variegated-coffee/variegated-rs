@@ -25,7 +25,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
-use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank};
+use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank, SensorReading};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
@@ -249,16 +249,16 @@ static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
 static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
 static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
 static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
-static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
-static BREW_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
-static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, TemperatureType, 3>> = StaticCell::new();
-static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, PressureType, 3>> = StaticCell::new();
-static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, WaterLevelType, 3>> = StaticCell::new();
-static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, WaterLevelType, 3>> = StaticCell::new();
+static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+static BREW_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
+static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
+static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
+static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
 static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
-static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, FlowRateType, 3>> = StaticCell::new();
+static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
@@ -565,7 +565,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let flow_meter_input = pwm::Pwm::new_input(flow_meter_p.pwm_flow_meter, flow_meter_p.pin_flow_meter, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
-    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, None, |v| (v) as FlowRateType);
+    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, |v| (v) as FlowRateType, |v| v);
 
     let group = Group::new(
         Some(Box::new(brew_mechanism)),

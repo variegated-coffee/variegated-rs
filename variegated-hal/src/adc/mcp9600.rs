@@ -6,11 +6,11 @@ use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c;
 use variegated_adc_tools::ConversionParameters;
 use variegated_mcp9600::MCP9600;
-use crate::WithTask;
+use crate::{WithTask, SensorReading};
 
 pub struct Mcp9600Sensor<'a, M: RawMutex, I2cDevT: I2c, const N: usize> {
     mcp9600: &'a Mutex<M, MCP9600<I2cDevT>>,
-    signal: Sender<'a, NoopRawMutex, f32, N>,
+    signal: Sender<'a, NoopRawMutex, SensorReading<f32>, N>,
     conversion_parameters: ConversionParameters,
     poll_delay: Duration,
 }
@@ -18,7 +18,7 @@ pub struct Mcp9600Sensor<'a, M: RawMutex, I2cDevT: I2c, const N: usize> {
 impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> Mcp9600Sensor<'a, M, I2cDevT, N> {
     pub fn new(
         mcp9600: &'a Mutex<M, MCP9600<I2cDevT>>,
-        signal: Sender<'a, NoopRawMutex, f32, N>,
+        signal: Sender<'a, NoopRawMutex, SensorReading<f32>, N>,
         conversion_parameters: ConversionParameters,
         poll_delay: Duration,
     ) -> Self {
@@ -38,12 +38,17 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for Mcp9600Sensor<'
                 let mut dev = self.mcp9600.lock().await;
 
                 let res = dev.read_hot_junction().await;
-                
-                if let Ok(value) = res {
-                    let val = self.conversion_parameters.convert(value);
 
-                    self.signal.send(val);
-                    //defmt::info!("Read value: {}", val);
+                if let Ok(raw_value) = res {
+                    let transformed_val = self.conversion_parameters.convert(raw_value);
+
+                    let sensor_reading = SensorReading {
+                        raw: raw_value,
+                        transformed: transformed_val,
+                    };
+
+                    self.signal.send(sensor_reading);
+                    //defmt::info!("Read value: {}", transformed_val);
                 } else {
                     error!("Failed to read value from MCP9600: {:?}", res);
                 }

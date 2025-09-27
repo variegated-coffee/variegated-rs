@@ -8,11 +8,11 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
 use embedded_hal_async::digital::Wait;
 use variegated_adc_tools::ConversionParameters;
-use variegated_ads124s08::{ADS124S08, ADS124S08Error};
+use variegated_ads124s08::{ADS124S08, ADS124S08Error, Code};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::Mux;
 use variegated_instrumentation::async_task_loop;
-use crate::WithTask;
+use crate::{WithTask, SensorReading};
 
 pub enum MeasurementType {
     SingleEnded(Mux, ReferenceInput, f32),
@@ -23,7 +23,7 @@ pub enum MeasurementType {
 
 pub struct Ads124S08Sensor<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize> {
     ads124s08: &'a Mutex<M, ADS124S08<SpiDevT, InputPinT, D>>,
-    signal: Sender<'a, NoopRawMutex, f32, N>,
+    signal: Sender<'a, NoopRawMutex, SensorReading<f32>, N>,
     measurement_type: MeasurementType,
     conversion_parameters: ConversionParameters,
     offset: f32,
@@ -37,7 +37,7 @@ pub struct Ads124S08Sensor<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: Input
 impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize> Ads124S08Sensor<'a, M, SpiDevT, InputPinT, D, N> {
     pub fn new(
         ads124s08: &'a Mutex<M, ADS124S08<SpiDevT, InputPinT, D>>,
-        signal: Sender<'a, NoopRawMutex, f32, N>,
+        signal: Sender<'a, NoopRawMutex, SensorReading<f32>, N>,
         measurement_type: MeasurementType,
         conversion_parameters: ConversionParameters,
         offset: f32,
@@ -78,27 +78,32 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                 };
                 
                 match res {
-                    Ok(value) => {
+                    Ok(raw_value) => {
                         // Reset failure counter on successful read
                         self.consecutive_failures = 0;
-                        
+
                         let val = match self.measurement_type {
                             MeasurementType::SingleEnded(_, _, v) => {
-                                value.externally_referenced_voltage(0.0, v)
+                                raw_value.externally_referenced_voltage(0.0, v)
                             }
                             MeasurementType::RatiometricLowSide(_, _, _, _, _, _, _, ref_r) => {
-                                //info!("ADS124S08 Measurement: {} ohms", value.ratiometric_resistance(ref_r));
+                                //info!("ADS124S08 Measurement: {} ohms", raw_value.ratiometric_resistance(ref_r));
 
-                                value.ratiometric_resistance(ref_r)
+                                raw_value.ratiometric_resistance(ref_r)
                             }
                             MeasurementType::AvddBy4 | MeasurementType::DvddBy4 => {
-                                value.internally_referenced_voltage()
+                                raw_value.internally_referenced_voltage()
                             }
                         };
-                        
-                        let val = self.conversion_parameters.convert(val + self.offset);
-                    
-                        self.signal.send(val);
+
+                        let transformed_val = self.conversion_parameters.convert(val + self.offset);
+
+                        let sensor_reading = SensorReading {
+                            raw: val,
+                            transformed: transformed_val,
+                        };
+
+                        self.signal.send(sensor_reading);
                     }
                     Err(e) => {
                         // Check if this is a read timeout error
