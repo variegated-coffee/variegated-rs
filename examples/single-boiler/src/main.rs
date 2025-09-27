@@ -2,7 +2,6 @@
 #![no_main]
 
 mod rotary;
-mod esp_transceiver;
 mod display;
 mod list_menu;
 
@@ -16,6 +15,7 @@ use core::fmt::{Debug, Formatter};
 use core::ops::Deref;
 use core::pin::Pin;
 use defmt::{info, unwrap, warn};
+use heapless::FnvIndexMap;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
@@ -64,7 +64,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType};
+use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
@@ -78,6 +78,7 @@ use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravitySt
 use variegated_instrumentation::async_task_loop;
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
+use variegated_comms::esp_transceiver_main;
 use crate::rotary::{UIStatus};
 
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
@@ -87,6 +88,26 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     RotaryEncoderPioIrq => pio::InterruptHandler<RotaryEncoderPeripheralsPio>;
     QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
 });
+
+// Embassy task wrapper for ESP transceiver (single-boiler)
+#[embassy_executor::task]
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition) {
+    let mut config = uart::Config::default();
+    config.baudrate = 115200;
+
+    let mut uart = Uart::new(
+        esp_p.uart,
+        esp_p.tx_pin,
+        esp_p.rx_pin,
+        Irqs,
+        esp_p.dma_rx,
+        esp_p.dma_tx,
+        config
+    );
+
+    let (uart_tx, uart_rx) = uart.split();
+    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, command_sender, machine_definition).await;
+}
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
 struct DisplayPeripherals {
@@ -496,12 +517,115 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
+    // Create the MachineDefinition for a single boiler single group machine
+    let mut machine_definition = MachineDefinition {
+        name: heapless::String::try_from("Silvia").unwrap(),
+        boilers: FnvIndexMap::new(),
+        groups: FnvIndexMap::new(),
+        water_taps: FnvIndexMap::new(),
+        tanks: FnvIndexMap::new(),
+        steam_wands: FnvIndexMap::new(),
+        environmental_sensors: FnvIndexMap::new(),
+        peripherals: FnvIndexMap::new(),
+    };
+
+    // Define the brew boiler (main boiler for single boiler machines)
+    let mut brew_boiler_sensors = heapless::Vec::new();
+    let _ = brew_boiler_sensors.push(SensorCapability::Temperature);
+    let _ = brew_boiler_sensors.push(SensorCapability::Pressure);
+
+    let mut brew_boiler_actuators = heapless::Vec::new();
+    let _ = brew_boiler_actuators.push(ActuatorCapability::HeatingElement);
+
+    let mut brew_boiler_control_modes = heapless::Vec::new();
+    let _ = brew_boiler_control_modes.push(ControlModeCapability::TemperaturePid);
+    let _ = brew_boiler_control_modes.push(ControlModeCapability::PressurePid);
+    let _ = brew_boiler_control_modes.push(ControlModeCapability::Off);
+
+    let brew_boiler_def = BoilerDefinition {
+        name: heapless::String::try_from("Main Boiler").unwrap(),
+        boiler_type: BoilerType::BrewBoiler,
+        sensors: brew_boiler_sensors,
+        actuators: brew_boiler_actuators,
+        control_modes: brew_boiler_control_modes,
+        has_fill_mechanism: false,  // Single boiler typically doesn't have auto-fill
+    };
+    let _ = machine_definition.add_boiler(0, brew_boiler_def);
+
+    // Define the virtual steam boiler (for single boiler machines in steam mode)
+    let mut virtual_steam_sensors = heapless::Vec::new();
+    let _ = virtual_steam_sensors.push(SensorCapability::Temperature);
+    let _ = virtual_steam_sensors.push(SensorCapability::Pressure);
+
+    let mut virtual_steam_actuators = heapless::Vec::new();
+    let _ = virtual_steam_actuators.push(ActuatorCapability::HeatingElement);
+
+    let mut virtual_steam_control_modes = heapless::Vec::new();
+    let _ = virtual_steam_control_modes.push(ControlModeCapability::TemperaturePid);
+    let _ = virtual_steam_control_modes.push(ControlModeCapability::PressurePid);
+    let _ = virtual_steam_control_modes.push(ControlModeCapability::Off);
+
+    let virtual_steam_boiler_def = BoilerDefinition {
+        name: heapless::String::try_from("Virtual Steam").unwrap(),
+        boiler_type: BoilerType::VirtualSteamBoiler,
+        sensors: virtual_steam_sensors,
+        actuators: virtual_steam_actuators,
+        control_modes: virtual_steam_control_modes,
+        has_fill_mechanism: false,
+    };
+    let _ = machine_definition.add_boiler(1, virtual_steam_boiler_def);
+
+    // Define the single group
+    let mut group_sensors = heapless::Vec::new();
+    let _ = group_sensors.push(SensorCapability::Pressure);
+    let _ = group_sensors.push(SensorCapability::InputFlowRate);
+    let _ = group_sensors.push(SensorCapability::OutputFlowRate);
+    let _ = group_sensors.push(SensorCapability::Weight);
+
+    let mut group_actuators = heapless::Vec::new();
+    let _ = group_actuators.push(ActuatorCapability::Pump);
+    let _ = group_actuators.push(ActuatorCapability::ThreeWayValve);
+
+    let mut group_control_modes = heapless::Vec::new();
+    let _ = group_control_modes.push(ControlModeCapability::FlowRatePid);
+    let _ = group_control_modes.push(ControlModeCapability::OutputFlowRatePid);
+    let _ = group_control_modes.push(ControlModeCapability::PressurePid);
+    let _ = group_control_modes.push(ControlModeCapability::FixedDutyCycle);
+    let _ = group_control_modes.push(ControlModeCapability::FullOn);
+    let _ = group_control_modes.push(ControlModeCapability::Off);
+
+    let group_def = GroupDefinition {
+        name: heapless::String::try_from("Group").unwrap(),
+        sensors: group_sensors,
+        actuators: group_actuators,
+        control_modes: group_control_modes,
+    };
+    let _ = machine_definition.add_group(0, group_def);
+
+    // Add Gravity scale peripheral if present
+    if group.scale_controller.is_some() {
+        let mut scale_capabilities = heapless::Vec::new();
+        let _ = scale_capabilities.push(SensorCapability::Weight);
+
+        let scale_def = PeripheralDefinition {
+            peripheral_type: PeripheralType::Scale,
+            location: heapless::String::try_from("Drip Tray").unwrap(),
+            capabilities: scale_capabilities,
+            support_calibration: true,
+            via_comms_mcu: false,
+        };
+        let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
+    }
+
+    info!("Machine definition created: {:?}", machine_definition);
+
     let mut controller = SingleBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
         configuration_channel.publisher().expect("Failed to get configuration channel publisher"),
         boiler,
         group,
+        None, // tank - not used in this example
         settings_storage,
         routine_repository_ref,
         &peripheral_registry,
@@ -565,7 +689,7 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
-    spawner.spawn(esp_transceiver::esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), command_channel.sender())).unwrap();
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), command_channel.sender(), machine_definition)).unwrap();
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task()).unwrap();

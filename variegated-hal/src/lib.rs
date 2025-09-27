@@ -119,6 +119,14 @@ impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
             None
         }
     }
+
+    pub fn get_water_level(&mut self) -> Option<WaterLevelType> {
+        if let Some(water_level_sensor) = &mut self.water_level_sensor {
+            water_level_sensor.try_get()
+        } else {
+            None
+        }
+    }
 }
 
 pub struct Group<'a, M: RawMutex, const N: usize> {
@@ -250,6 +258,10 @@ pub struct WaterTap<'a, M: RawMutex, const N: usize> {
     pub flow_sensor: Option<Receiver<'a, M, FlowRateType, N>>,
 }
 
+pub struct Tank<'a, M: RawMutex, const N: usize> {
+    pub water_level_sensor: Option<Receiver<'a, M, WaterLevelType, N>>,
+}
+
 impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
     pub fn new(
         water_tap_mechanism: Option<Box<dyn WaterTapMechanism>>,
@@ -295,6 +307,20 @@ impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
 
     pub fn get_flow_rate(&mut self) -> Option<FlowRateType> {
         self.flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+}
+
+impl<'a, M: RawMutex, const N: usize> Tank<'a, M, N> {
+    pub fn new(water_level_sensor: Option<Receiver<'a, M, WaterLevelType, N>>) -> Self {
+        Self { water_level_sensor }
+    }
+
+    pub fn get_water_level(&mut self) -> Option<WaterLevelType> {
+        if let Some(water_level_sensor) = &mut self.water_level_sensor {
+            water_level_sensor.try_get()
+        } else {
+            None
+        }
     }
 }
 

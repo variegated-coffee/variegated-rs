@@ -10,6 +10,7 @@ use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::pin::Pin;
 use defmt::{info, unwrap};
+use heapless::FnvIndexMap;
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
@@ -24,7 +25,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
-use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask};
+use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
@@ -46,7 +47,7 @@ use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, Refe
 use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
-use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMechanism, DualBoilerWaterTapMechanism, DualBoilerMechanism, DualBoilerConfig, DualBoilerFillMechanism, PumpStrategy};
+use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMechanism, DualBoilerWaterTapMechanism, DualBoilerMechanism, DualBoilerConfig, DualBoilerFillMechanism};
 use embassy_rp::bind_interrupts;
 use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::priority_channel::Min;
@@ -62,7 +63,7 @@ use futures::future::join_all;
 use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType};
+use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -84,7 +85,7 @@ use led_controller::led_controller_task;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
+use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::Channel::{CIN3, CIN4};
 use variegated_hal::cap_adc::fdc1004::Fdc1004Sensor;
@@ -93,6 +94,7 @@ use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBre
 use variegated_hal::noop::NoopOutputPin;
 use variegated_hal::scale::gravity::GravityStatusProvider;
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
+use variegated_comms::esp_transceiver_main;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -102,6 +104,26 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     AdcIrq => adc::InterruptHandler;
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
 });
+
+// Embassy task wrapper for ESP transceiver (dual-boiler)
+#[embassy_executor::task]
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition) {
+    let mut config = uart::Config::default();
+    config.baudrate = 115200;
+
+    let mut uart = Uart::new(
+        esp_p.uart,
+        esp_p.tx_pin,
+        esp_p.rx_pin,
+        Irqs,
+        esp_p.dma_rx,
+        esp_p.dma_tx,
+        config
+    );
+
+    let (uart_tx, uart_rx) = uart.split();
+    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, command_sender, machine_definition).await;
+}
 
 #[variegated_board_cfg::board_cfg("eyespi_display_peripherals")]
 struct DisplayPeripherals {
@@ -245,6 +267,7 @@ static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
 
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
+static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
 
 
 
@@ -398,8 +421,8 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let mut settings_storage = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();
-    let configuration = DualBoilerSingleGroupPersistentConfiguration::default();
-    settings_storage.save_settings(&configuration).await.unwrap();
+//    let configuration = DualBoilerSingleGroupPersistentConfiguration::default();
+//    settings_storage.save_settings(&configuration).await.unwrap();
 
 
     info!("Configuration loaded");
@@ -408,7 +431,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut brew_temp_sensor = Ads124S08Sensor::new(
         ads,
         brew_boiler_temp_watch.sender(),
-        RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0 / 1.03),
+        RatiometricLowSide(Mux::AIN9, Mux::AIN10, IDACMux::AIN8, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0 / 1.03),
         ConversionParameters::pt1000().with_kalman_filter(0.001, 0.05, 1.0),
         0.0
     );
@@ -432,7 +455,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut steam_temp_sensor = Ads124S08Sensor::new(
         ads,
         steam_boiler_temp_watch.sender(),
-        RatiometricLowSide(Mux::AIN9, Mux::AIN10, IDACMux::AIN8, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0 / 1.03),
+        RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0 / 1.03),
         ConversionParameters::pt1000().with_kalman_filter(0.001, 0.05, 1.0),
         0.0
     );
@@ -455,7 +478,7 @@ async fn main_task(spawner: Spawner) -> ! {
     // Helper function for water level transformer
     let water_level_transformer = |m: SuccessfulMeasurement| -> WaterLevelType {
         match m {
-            SuccessfulMeasurement::MeasurementInRange(c) => if c.to_pf() > 60 {
+            SuccessfulMeasurement::MeasurementInRange(c) => if c.to_pf() > 60.0 {
                 100.into()
             } else {
                 0.into()
@@ -470,7 +493,7 @@ async fn main_task(spawner: Spawner) -> ! {
         fdc1004,
         steam_boiler_water_level_watch.sender(),
         water_level_transformer,
-        CIN4
+        CIN3
     );
 
     let tank_water_level_watch: &'static Watch<_, _, 3>  = TANK_WATER_LEVEL_WATCH.init(Watch::new());
@@ -478,7 +501,11 @@ async fn main_task(spawner: Spawner) -> ! {
         fdc1004,
         tank_water_level_watch.sender(),
         water_level_transformer,
-        CIN3
+        CIN4
+    );
+
+    let tank = Tank::new(
+        Some(tank_water_level_watch.receiver().unwrap()),
     );
 
     let brew_he_sig: &'static Signal<_, _> = BREW_HE_SIGNAL.init(Signal::new());
@@ -509,8 +536,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
     // Initialize dual boiler mechanism
     let dual_boiler_config = DualBoilerConfig {
-        heating_element_interlock: true, // Prevent both heating elements running simultaneously
-        water_dispersal_pump_strategy: Some(PumpStrategy::NoPump),
+        heating_element_interlock: false, // Prevent both heating elements running simultaneously
         allow_simultaneous_operations: true, // Allow brewing and steaming simultaneously
     };
 
@@ -530,6 +556,9 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Dual boiler mechanism initialized");
 
     let flow_meter_p = flow_meter_peripherals!(p);
+
+    // Extract ESP32 peripherals for communication
+    let esp_p = esp32_peripherals!(p);
 
     let mut pwm_input_config = pwm::Config::default();
     pwm_input_config.divider = 1.into();
@@ -560,26 +589,145 @@ async fn main_task(spawner: Spawner) -> ! {
     );
 
     // Create peripheral registry and register peripherals
-    let mut peripheral_registry = PeripheralRegistry::new();
+    let peripheral_registry = PERIPHERAL_REGISTRY.init(PeripheralRegistry::new());
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
     let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
 
     let mut routine_repository = InMemoryRoutineRepository::new();
-    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
     routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
+
+    // Create the MachineDefinition for a dual boiler single group machine
+    let mut machine_definition = MachineDefinition {
+        name: heapless::String::try_from("GS3").unwrap(),
+        boilers: FnvIndexMap::new(),
+        groups: FnvIndexMap::new(),
+        water_taps: FnvIndexMap::new(),
+        tanks: FnvIndexMap::new(),
+        steam_wands: FnvIndexMap::new(),
+        environmental_sensors: FnvIndexMap::new(),
+        peripherals: FnvIndexMap::new(),
+    };
+
+    // Define the brew boiler
+    let mut brew_boiler_sensors = heapless::Vec::new();
+    let _ = brew_boiler_sensors.push(SensorCapability::Temperature);
+    let _ = brew_boiler_sensors.push(SensorCapability::Pressure);
+
+    let mut brew_boiler_actuators = heapless::Vec::new();
+    let _ = brew_boiler_actuators.push(ActuatorCapability::HeatingElement);
+
+    let mut brew_boiler_control_modes = heapless::Vec::new();
+    let _ = brew_boiler_control_modes.push(ControlModeCapability::TemperaturePid);
+    let _ = brew_boiler_control_modes.push(ControlModeCapability::PressurePid);
+    let _ = brew_boiler_control_modes.push(ControlModeCapability::Off);
+
+    let brew_boiler_def = BoilerDefinition {
+        name: heapless::String::try_from("Brew Boiler").unwrap(),
+        boiler_type: BoilerType::BrewBoiler,
+        sensors: brew_boiler_sensors,
+        actuators: brew_boiler_actuators,
+        control_modes: brew_boiler_control_modes,
+        has_fill_mechanism: true,
+    };
+    let _ = machine_definition.add_boiler(0, brew_boiler_def);
+
+    // Define the steam boiler
+    let mut steam_boiler_sensors = heapless::Vec::new();
+    let _ = steam_boiler_sensors.push(SensorCapability::Temperature);
+    let _ = steam_boiler_sensors.push(SensorCapability::Pressure);
+    let _ = steam_boiler_sensors.push(SensorCapability::WaterLevel);
+
+    let mut steam_boiler_actuators = heapless::Vec::new();
+    let _ = steam_boiler_actuators.push(ActuatorCapability::HeatingElement);
+
+    let mut steam_boiler_control_modes = heapless::Vec::new();
+    let _ = steam_boiler_control_modes.push(ControlModeCapability::TemperaturePid);
+    let _ = steam_boiler_control_modes.push(ControlModeCapability::PressurePid);
+    let _ = steam_boiler_control_modes.push(ControlModeCapability::Off);
+
+    let steam_boiler_def = BoilerDefinition {
+        name: heapless::String::try_from("Steam Boiler").unwrap(),
+        boiler_type: BoilerType::SteamBoiler,
+        sensors: steam_boiler_sensors,
+        actuators: steam_boiler_actuators,
+        control_modes: steam_boiler_control_modes,
+        has_fill_mechanism: true,
+    };
+    let _ = machine_definition.add_boiler(1, steam_boiler_def);
+
+    // Define the single group
+    let mut group_sensors = heapless::Vec::new();
+    let _ = group_sensors.push(SensorCapability::Temperature);
+    let _ = group_sensors.push(SensorCapability::Pressure);
+    let _ = group_sensors.push(SensorCapability::InputFlowRate);
+    let _ = group_sensors.push(SensorCapability::OutputFlowRate);
+    let _ = group_sensors.push(SensorCapability::Weight);
+
+    let mut group_actuators = heapless::Vec::new();
+    let _ = group_actuators.push(ActuatorCapability::Pump);
+    let _ = group_actuators.push(ActuatorCapability::ThreeWayValve);
+    let _ = group_actuators.push(ActuatorCapability::HeatingElement);
+
+    let mut group_control_modes = heapless::Vec::new();
+    let _ = group_control_modes.push(ControlModeCapability::FlowRatePid);
+    let _ = group_control_modes.push(ControlModeCapability::OutputFlowRatePid);
+    let _ = group_control_modes.push(ControlModeCapability::PressurePid);
+    let _ = group_control_modes.push(ControlModeCapability::FixedDutyCycle);
+    let _ = group_control_modes.push(ControlModeCapability::FullOn);
+    let _ = group_control_modes.push(ControlModeCapability::Off);
+
+    let group_def = GroupDefinition {
+        name: heapless::String::try_from("Group").unwrap(),
+        sensors: group_sensors,
+        actuators: group_actuators,
+        control_modes: group_control_modes,
+    };
+    let _ = machine_definition.add_group(0, group_def);
+
+    let mut water_tap_actuators = heapless::Vec::new();
+    water_tap_actuators.push(ActuatorCapability::SolenoidValve).ok();
+
+    let mut water_tap_control_modes = heapless::Vec::new();
+    let _ = water_tap_control_modes.push(ControlModeCapability::FullOn);
+    let _ = water_tap_control_modes.push(ControlModeCapability::Off);
+
+    let water_tap_def = WaterTapDefinition {
+        name: heapless::String::try_from("Water Tap").unwrap(),
+        sensors: heapless::Vec::new(),
+        actuators: water_tap_actuators,
+        control_modes: water_tap_control_modes,
+    };
+
+    let _ = machine_definition.add_water_tap(0, water_tap_def);
+
+    let mut tank_sensors = heapless::Vec::new();
+    tank_sensors.push(SensorCapability::WaterLevel).ok();
+    let tank_def = TankDefinition {
+        name: heapless::String::try_from("Water Tank").unwrap(),
+        sensors: tank_sensors,
+    };
+    let _ = machine_definition.add_tank(0, tank_def);
+
+    // Add scale peripheral if present
+    if let Some(scale_controller) = &group.scale_controller {
+        let mut scale_capabilities = heapless::Vec::new();
+        let _ = scale_capabilities.push(SensorCapability::Weight);
+
+        let scale_def = PeripheralDefinition {
+            peripheral_type: PeripheralType::Scale,
+            location: heapless::String::try_from("Drip Tray").unwrap(),
+            capabilities: scale_capabilities,
+            support_calibration: true,
+            via_comms_mcu: false,
+        };
+        let _ = machine_definition.add_peripheral(0x5C1E, scale_def); // GRAVITY_PERIPHERAL_ID
+    }
+
+    info!("Machine definition created: {:?}", machine_definition);
 
     let mut controller = DualBoilerSingleGroupController::new(
         command_channel.receiver(),
@@ -589,9 +737,11 @@ async fn main_task(spawner: Spawner) -> ! {
         steam_boiler,
         group,
         water_tap,
+        Some(tank),
+        Some(fill_mechanism),
         settings_storage,
         routine_repository_ref,
-        &peripheral_registry,
+        peripheral_registry,
     );
 
     // Create status subscriber for LCD display and spawn the task
@@ -612,6 +762,14 @@ async fn main_task(spawner: Spawner) -> ! {
 
     // Spawn the LED breathing controller task
     unwrap!(spawner.spawn(led_controller_task(tlc, led_status_receiver)));
+
+    // Create status and configuration subscribers for ESP transceiver and spawn the task
+    let esp_status_receiver = status_channel.subscriber().expect("Failed to get ESP status subscriber");
+    let esp_configuration_receiver = configuration_channel.subscriber().expect("Failed to get ESP configuration subscriber");
+    let esp_command_sender = command_channel.sender();
+
+    // Spawn the ESP transceiver task
+    unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition)));
 
     info!("Creating huge future join task");
 

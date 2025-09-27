@@ -3,8 +3,9 @@
 //! This module provides LED breathing effects using the TLC59108 8-channel LED driver.
 //! The breathing patterns provide visual feedback about the machine's operational state:
 //!
-//! - **Idle State**: All LEDs slowly breathe between brightness 2-63 (3 second cycle)
-//! - **Brewing State**: LED 1 quickly breathes between brightness 192-255 (1 second cycle)
+//! - **Fixed behavior**: LEDs 1-4, 6-7 always breathe at low level (5-48 brightness, 9 second cycle)
+//! - **LED 0**: Breathes intensely (192-255, 1 second cycle) when dispensing water, otherwise low level
+//! - **LED 5**: Breathes intensely (192-255, 1 second cycle) when brewing, otherwise low level
 //!
 //! The breathing effects use sine wave calculations to create smooth, organic-looking
 //! light transitions that are visually pleasing and clearly indicate machine status.
@@ -34,7 +35,7 @@ const IDLE_BREATHING_PERIOD: f32 = 9.0;
 const BREWING_BREATHING_PERIOD: f32 = 1.0;
 
 /// Idle breathing brightness range (2 to 63)
-const IDLE_MIN_BRIGHTNESS: f32 = 2.0;
+const IDLE_MIN_BRIGHTNESS: f32 = 5.0;
 const IDLE_MAX_BRIGHTNESS: f32 = 48.0;
 
 /// Brewing breathing brightness range (192 to 255)
@@ -48,6 +49,8 @@ const PI: f32 = 3.14159265359;
 pub struct LedBreathingState {
     /// Current brewing state (from status subscription)
     is_brewing: bool,
+    /// Current water dispensing state (from status subscription)
+    is_dispensing: bool,
     /// When the current breathing cycle started
     start_time: Instant,
     /// Last LED update time for rate limiting
@@ -60,6 +63,7 @@ impl LedBreathingState {
         let now = Instant::now();
         Self {
             is_brewing: false,
+            is_dispensing: false,
             start_time: now,
             last_update: now,
         }
@@ -71,11 +75,19 @@ impl LedBreathingState {
             .map(|group| group.is_brewing)
             .unwrap_or(false);
 
-        // If brewing state changed, restart the breathing cycle
-        if new_brewing_state != self.is_brewing {
+        // Check water tap dispensing state (check first water tap)
+        let new_dispensing_state = status.water_tap_statuses.iter()
+            .next()
+            .map(|(_, tap_status)| tap_status.is_dispensing)
+            .unwrap_or(false);
+
+        // If brewing or dispensing state changed, restart the breathing cycle
+        if new_brewing_state != self.is_brewing || new_dispensing_state != self.is_dispensing {
             self.is_brewing = new_brewing_state;
+            self.is_dispensing = new_dispensing_state;
             self.start_time = Instant::now();
-            defmt::info!("LED breathing state changed: brewing = {}", self.is_brewing);
+            defmt::info!("LED breathing state changed: brewing = {}, dispensing = {}",
+                        self.is_brewing, self.is_dispensing);
         }
     }
 
@@ -126,29 +138,26 @@ impl LedBreathingState {
 
     /// Get LED brightness values for the current state
     pub fn get_led_brightness_values(&self) -> [u8; NUM_LEDS] {
-        if self.is_brewing {
-            // Brewing: Only LED 1 (index 0) breathes, others off
-            let mut brightness = [0u8; NUM_LEDS];
+        // Start with all LEDs at idle/low brightness
+        let mut brightness = [self.calculate_idle_brightness(); NUM_LEDS];
+
+        // LED 0: Intense when dispensing water
+        if self.is_dispensing {
             brightness[0] = self.calculate_brewing_brightness();
-            brightness
-        } else {
-            // Idle: All LEDs breathe together
-            let idle_brightness = self.calculate_idle_brightness();
-            [idle_brightness; NUM_LEDS]
         }
+
+        // LED 5: Intense when brewing
+        if self.is_brewing {
+            brightness[5] = self.calculate_brewing_brightness();
+        }
+
+        brightness
     }
 
     /// Get LED states for the current brightness mode
     pub fn get_led_states(&self) -> [LedState; NUM_LEDS] {
-        if self.is_brewing {
-            // Brewing: LED 1 uses PWM, others off
-            let mut states = [LedState::Off; NUM_LEDS];
-            states[0] = LedState::Pwm;
-            states
-        } else {
-            // Idle: All LEDs use PWM
-            [LedState::Pwm; NUM_LEDS]
-        }
+        // All LEDs always use PWM mode (brightness controlled via PWM values)
+        [LedState::Pwm; NUM_LEDS]
     }
 }
 
@@ -182,8 +191,10 @@ pub async fn led_controller_task(
                     unsafe {
                         LOG_COUNTER += 1;
                         if LOG_COUNTER % 30 == 0 {
-                            if led_state.is_brewing {
-                                defmt::trace!("LED breathing: brewing mode, LED1 brightness = {}", brightness_values[0]);
+                            if led_state.is_brewing || led_state.is_dispensing {
+                                defmt::trace!("LED breathing: brewing={}, dispensing={}, LED0={}, LED5={}",
+                                            led_state.is_brewing, led_state.is_dispensing,
+                                            brightness_values[0], brightness_values[5]);
                             } else {
                                 defmt::trace!("LED breathing: idle mode, brightness = {}", brightness_values[0]);
                             }

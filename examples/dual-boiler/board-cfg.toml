@@ -43,8 +43,8 @@ pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE3"
 pin_flow_meter = "embassy_rp::peripherals::PIN_23"
 
 [mechanism_peripherals]
-pin_brew_he = "embassy_rp::peripherals::PIN_36"
-pin_service_he = "embassy_rp::peripherals::PIN_37"
+pin_brew_he = "embassy_rp::peripherals::PIN_37"
+pin_service_he = "embassy_rp::peripherals::PIN_36"
 pin_group_solenoid = "embassy_rp::peripherals::PIN_26"
 pin_fill_solenoid = "embassy_rp::peripherals::PIN_25"
 pin_water_dispersal_solenoid = "embassy_rp::peripherals::PIN_24"

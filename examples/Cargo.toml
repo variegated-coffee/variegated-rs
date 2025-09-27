@@ -55,6 +55,7 @@ variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrume
 variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
 variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
 variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics"] }
+variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal = "1.0.0"
@@ -66,6 +67,7 @@ display-interface-spi = "0.5.0"
 oled_async = "0.1.0-alpha1"
 hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"] }
 ds3231 = { version = "0.3.0", features = ["defmt", "async"] }
+heapless = "0.8.0"
 
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.1", features = ["alloc"] }
