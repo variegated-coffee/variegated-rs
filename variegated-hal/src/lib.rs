@@ -8,7 +8,7 @@ use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
-pub use variegated_controller_types::{DutyCycleType, FlowRateType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
+pub use variegated_controller_types::{DutyCycleType, FlowRateType, InputVolumeType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
 
 #[derive(Clone, Debug, Format)]
 pub struct SensorReading<Transformed> {
@@ -166,6 +166,7 @@ pub struct Group<'a, M: RawMutex, const N: usize> {
     pub temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
     pub pressure_sensor: Option<Receiver<'a, M, SensorReading<PressureType>, N>>,
     pub input_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
+    pub input_volume_sensor: Option<Receiver<'a, M, SensorReading<InputVolumeType>, N>>,
     pub output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
     pub output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
 }
@@ -178,6 +179,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
         pressure_sensor: Option<Receiver<'a, M, SensorReading<PressureType>, N>>,
         input_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
+        input_volume_sensor: Option<Receiver<'a, M, SensorReading<InputVolumeType>, N>>,
         output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
         output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
     ) -> Self {
@@ -188,6 +190,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             temperature_sensor,
             pressure_sensor,
             input_flow_sensor,
+            input_volume_sensor,
             output_flow_sensor,
             output_weight_sensor,
         }
@@ -245,6 +248,14 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
 
     pub fn get_input_flow_reading(&mut self) -> Option<SensorReading<FlowRateType>> {
         self.input_flow_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
+    pub fn get_input_volume(&mut self) -> Option<InputVolumeType> {
+        self.input_volume_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_input_volume_reading(&mut self) -> Option<SensorReading<InputVolumeType>> {
+        self.input_volume_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub fn get_output_flow_rate(&mut self) -> Option<FlowRateType> {

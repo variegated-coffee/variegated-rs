@@ -18,6 +18,7 @@ pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
 pub type WaterLevelType = u8; // Percent
 pub type FlowRateType = f32; // ml/s
+pub type InputVolumeType = f64; // ml
 pub type WeightType = f32; // g
 pub type WeightChangeType  = f32; // g/s
 pub type FrequencyType = f32; // Hz
@@ -101,8 +102,31 @@ pub enum MachineCommand {
     StopBrewing(GroupIndex),
     StartPumpingToWaterTap(WaterTapIndex),
     StopPumpingToWaterTap(WaterTapIndex),
-    SetBoilerControlTarget(BoilerIndex, BoilerControlTarget),
-    SetGroupBrewControlTarget(GroupIndex, GroupBrewControlTarget),
+
+    /// Set boiler control mode, optionally updating target values
+    /// Examples:
+    /// - SetBoilerControlTarget(0, Temperature, None) - Switch to temp mode with remembered target
+    /// - SetBoilerControlTarget(0, Temperature, Some({target_temperature: Some(95.0), ..})) - Switch to temp mode at 95°C
+    /// - SetBoilerControlTarget(0, Off, None) - Turn off, preserving all target values
+    SetBoilerControlTarget(BoilerIndex, BoilerControlMode, Option<BoilerControlTargetValuesUpdate>),
+
+    /// Update boiler target values without changing mode
+    /// Examples:
+    /// - SetBoilerControlTargetValues(0, {target_temperature: Some(95.0), ..}) - Change temp to 95°C
+    /// - SetBoilerControlTargetValues(0, {target_pressure: Some(9.0), ..}) - Change pressure to 9 bar
+    SetBoilerControlTargetValues(BoilerIndex, BoilerControlTargetValuesUpdate),
+
+    /// Set group brew control mode, optionally updating target values
+    /// Examples:
+    /// - SetGroupBrewControlTarget(0, Pressure, None) - Switch to pressure mode with remembered target
+    /// - SetGroupBrewControlTarget(0, FixedDutyCycle, Some({duty_cycle: Some(60), ..})) - 60% duty cycle
+    SetGroupBrewControlTarget(GroupIndex, GroupBrewControlMode, Option<GroupBrewControlTargetValuesUpdate>),
+
+    /// Update group brew target values without changing mode
+    /// Example:
+    /// - SetGroupBrewControlTargetValues(0, {pressure: Some(9.0), ..}) - Adjust pressure to 9 bar
+    SetGroupBrewControlTargetValues(GroupIndex, GroupBrewControlTargetValuesUpdate),
+
     SetPidParameters(PidParameterTarget, PidParameters),
     RunRoutine(RoutineIndex, Option<FnvIndexMap<u8, f32, 8>>),
     CancelRoutine,
@@ -122,8 +146,10 @@ impl defmt::Format for MachineCommand {
             MachineCommand::StopBrewing(idx) => defmt::write!(f, "StopBrewing({})", idx),
             MachineCommand::StartPumpingToWaterTap(idx) => defmt::write!(f, "StartPumpingToWaterTap({})", idx),
             MachineCommand::StopPumpingToWaterTap(idx) => defmt::write!(f, "StopPumpingToWaterTap({})", idx),
-            MachineCommand::SetBoilerControlTarget(idx, target) => defmt::write!(f, "SetBoilerControlTarget({}, {:?})", idx, target),
-            MachineCommand::SetGroupBrewControlTarget(idx, target) => defmt::write!(f, "SetGroupBrewControlTarget({}, {:?})", idx, target),
+            MachineCommand::SetBoilerControlTarget(idx, mode, values) => defmt::write!(f, "SetBoilerControlTarget({}, {:?}, {:?})", idx, mode, values),
+            MachineCommand::SetBoilerControlTargetValues(idx, values) => defmt::write!(f, "SetBoilerControlTargetValues({}, {:?})", idx, values),
+            MachineCommand::SetGroupBrewControlTarget(idx, mode, values) => defmt::write!(f, "SetGroupBrewControlTarget({}, {:?}, {:?})", idx, mode, values),
+            MachineCommand::SetGroupBrewControlTargetValues(idx, values) => defmt::write!(f, "SetGroupBrewControlTargetValues({}, {:?})", idx, values),
             MachineCommand::SetPidParameters(target, params) => defmt::write!(f, "SetPidParameters({:?}, {:?})", target, params),
             MachineCommand::RunRoutine(idx, params) => defmt::write!(f, "RunRoutine({}, {} params)", idx, params.as_ref().map(|p| p.len()).unwrap_or(0)),
             MachineCommand::CancelRoutine => defmt::write!(f, "CancelRoutine"),
@@ -155,15 +181,66 @@ impl ControlCurve {
     }
 }
 
+// ===== BOILER CONTROL TYPES =====
+
+/// The control mode for a boiler - what type of control is active
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum BoilerControlTarget {
-    Temperature(TemperatureType),
-    Pressure(PressureType),
+pub enum BoilerControlMode {
+    Temperature,  // Control based on temperature
+    Pressure,     // Control based on pressure
     #[default]
-    Off
+    Off          // No control - heater off
 }
+
+/// All stored target values for boiler control
+/// These values persist regardless of current mode
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoilerControlTargetValues {
+    pub target_temperature: TemperatureType,
+    pub target_pressure: PressureType,
+}
+
+impl Default for BoilerControlTargetValues {
+    fn default() -> Self {
+        Self {
+            target_temperature: 93.0,  // Default brew temperature
+            target_pressure: 1.0,       // Default pressure in bar
+        }
+    }
+}
+
+/// Update structure for changing boiler target values
+/// Only specified fields will be updated
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoilerControlTargetValuesUpdate {
+    pub temperature: Option<TemperatureType>,
+    pub pressure: Option<PressureType>,
+}
+
+/// Complete boiler control state
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoilerControlState {
+    pub mode: BoilerControlMode,
+    pub values: BoilerControlTargetValues,
+}
+
+impl Default for BoilerControlState {
+    fn default() -> Self {
+        Self {
+            mode: BoilerControlMode::Off,
+            values: BoilerControlTargetValues::default(),
+        }
+    }
+}
+
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -173,22 +250,89 @@ pub enum WaterDispersalPumpStrategy {
     NoPump,
 }
 
+// ===== GROUP BREW CONTROL TYPES =====
+
+/// The control mode for group brewing
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum GroupBrewControlTarget {
-    GroupFlowRate(FlowRateType),
-    GroupFlowRateCurve(ControlCurve),
-    Pressure(PressureType),
-    PressureCurve(ControlCurve),
-    OutputFlowRate(FlowRateType),
-    OutputFlowRateCurve(ControlCurve),
-    FixedDutyCycle(u8),
-    FixedDutyCycleCurve(ControlCurve),
-    FullOn,
+pub enum GroupBrewControlMode {
+    GroupFlowRate,        // Control pump to achieve flow rate at group
+    GroupFlowRateCurve,   // Follow a flow rate curve over time
+    Pressure,             // Control pump to achieve pressure
+    PressureCurve,        // Follow a pressure curve over time
+    OutputFlowRate,       // Control based on output (scale) flow rate
+    OutputFlowRateCurve,  // Follow output flow curve over time
+    FixedDutyCycle,       // Fixed pump duty cycle
+    FixedDutyCycleCurve,  // Follow duty cycle curve over time
+    FullOn,               // Pump at 100%
     #[default]
-    Off
+    Off                   // Pump off
 }
+
+/// All stored target values for group brew control
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupBrewControlTargetValues {
+    pub flow_rate: FlowRateType,
+    pub flow_rate_curve: ControlCurve,
+    pub pressure: PressureType,
+    pub pressure_curve: ControlCurve,
+    pub output_flow_rate: FlowRateType,
+    pub output_flow_rate_curve: ControlCurve,
+    pub duty_cycle: u8,
+    pub duty_cycle_curve: ControlCurve,
+}
+
+impl Default for GroupBrewControlTargetValues {
+    fn default() -> Self {
+        Self {
+            flow_rate: 2.5,  // Default 2.5 ml/s
+            flow_rate_curve: ControlCurve { a: 0.0, b: 2.5, c: 0.0, min: 0.0, max: 10.0 },
+            pressure: 9.0,   // Default 9 bar
+            pressure_curve: ControlCurve { a: 0.0, b: 0.0, c: 9.0, min: 0.0, max: 15.0 },
+            output_flow_rate: 2.0,  // Default 2.0 ml/s output
+            output_flow_rate_curve: ControlCurve { a: 0.0, b: 2.0, c: 0.0, min: 0.0, max: 10.0 },
+            duty_cycle: 100,  // Default 100%
+            duty_cycle_curve: ControlCurve { a: 0.0, b: 0.0, c: 100.0, min: 0.0, max: 100.0 },
+        }
+    }
+}
+
+/// Update structure for changing group brew target values
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GroupBrewControlTargetValuesUpdate {
+    pub flow_rate: Option<FlowRateType>,
+    pub flow_rate_curve: Option<ControlCurve>,
+    pub pressure: Option<PressureType>,
+    pub pressure_curve: Option<ControlCurve>,
+    pub output_flow_rate: Option<FlowRateType>,
+    pub output_flow_rate_curve: Option<ControlCurve>,
+    pub duty_cycle: Option<u8>,
+    pub duty_cycle_curve: Option<ControlCurve>,
+}
+
+/// Complete group brew control state
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupBrewControlState {
+    pub mode: GroupBrewControlMode,
+    pub values: GroupBrewControlTargetValues,
+}
+
+impl Default for GroupBrewControlState {
+    fn default() -> Self {
+        Self {
+            mode: GroupBrewControlMode::Off,
+            values: GroupBrewControlTargetValues::default(),
+        }
+    }
+}
+
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -422,7 +566,8 @@ impl defmt::Format for Status {
                 Output::FixedDutyCycle(dc) => defmt::write!(f, " OUT:{}%", dc),
                 Output::PidOutput(pid_out) => defmt::write!(f, " OUT:PID{}%", pid_out.out),
             }
-            defmt::write!(f, " TARGET:{:?}", boiler_status.control_target);
+            defmt::write!(f, " MODE:{:?}", boiler_status.control_state.mode);
+            defmt::write!(f, " VALUES:T{}°C/P{}bar", boiler_status.control_state.values.target_temperature, boiler_status.control_state.values.target_pressure);
             defmt::write!(f, ")");
         }
         defmt::write!(f, " ]");
@@ -437,6 +582,9 @@ impl defmt::Format for Status {
             }
             if let Some(in_flow) = group_status.input_flow_rate {
                 defmt::write!(f, " in_flow:{}", in_flow);
+            }
+            if let Some(volume) = group_status.input_volume {
+                defmt::write!(f, " volume:{}ml", volume);
             }
             if let Some(out_flow) = group_status.output_flow_rate {
                 defmt::write!(f, " out_flow:{}", out_flow);
@@ -521,7 +669,7 @@ pub struct BoilerStatus {
     pub pressure: Option<PressureType>,
     pub water_level: Option<WaterLevelType>,
     pub output: Output,
-    pub control_target: BoilerControlTarget,
+    pub control_state: BoilerControlState,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -532,12 +680,13 @@ pub struct GroupStatus {
     pub three_way_valve_open: Option<bool>,
     pub brew_time: Option<Duration>,
     pub input_flow_rate: Option<FlowRateType>,
+    pub input_volume: Option<InputVolumeType>,
     pub output_flow_rate: Option<FlowRateType>,
     pub output_weight: Option<WeightType>,
     pub pressure: Option<PressureType>,
     pub temperature: Option<TemperatureType>,
     pub pump_output: Output,
-    pub control_target: GroupBrewControlTarget,
+    pub control_state: GroupBrewControlState,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -677,7 +826,7 @@ pub struct FillConfiguration {
 pub struct BoilerConfiguration {
     pub temperature_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
-    pub control_target: BoilerControlTarget,
+    pub control_state: BoilerControlState,
     pub max_temperature: Option<TemperatureType>,
     pub max_pressure: Option<PressureType>,
     pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
@@ -704,7 +853,7 @@ pub struct GroupConfiguration {
     pub flow_rate_pid_parameters: PidParameters,
     pub output_flow_rate_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
-    pub brew_control_target: GroupBrewControlTarget,
+    pub brew_control_state: GroupBrewControlState,
     pub max_brew_time_seconds: Option<u32>,
     pub auto_tare_enabled: bool,
     pub pump_configuration: Option<PumpConfiguration>,

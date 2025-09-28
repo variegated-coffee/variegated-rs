@@ -9,7 +9,7 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlTarget, Configuration, DutyCycleType, GroupBrewControlTarget, GroupConfiguration, MachineCommand, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupConfiguration, MachineCommand, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuState, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use alloc::string::ToString;
@@ -200,27 +200,54 @@ impl ManualBrewParameters {
         }
     }
 
-    pub fn to_group_brew_control_target(&self, mode: ControlMode) -> GroupBrewControlTarget {
+    pub fn to_group_brew_control_command(&self, mode: ControlMode) -> (GroupBrewControlMode, Option<GroupBrewControlTargetValuesUpdate>) {
         match mode {
             ControlMode::PumpDutyCycle => {
                 if self.duty_cycle == 0 {
-                    GroupBrewControlTarget::Off
+                    (GroupBrewControlMode::Off, None)
                 } else {
-                    GroupBrewControlTarget::FixedDutyCycle(self.duty_cycle)
+                    (GroupBrewControlMode::FixedDutyCycle, Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: None,
+                        flow_rate_curve: None,
+                        pressure: None,
+                        pressure_curve: None,
+                        output_flow_rate: None,
+                        output_flow_rate_curve: None,
+                        duty_cycle: Some(self.duty_cycle),
+                        duty_cycle_curve: None
+                    }))
                 }
             }
             ControlMode::PumpFlowRate => {
                 if self.flow_rate <= 0.0 {
-                    GroupBrewControlTarget::Off
+                    (GroupBrewControlMode::Off, None)
                 } else {
-                    GroupBrewControlTarget::GroupFlowRate(self.flow_rate)
+                    (GroupBrewControlMode::GroupFlowRate, Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: Some(self.flow_rate),
+                        flow_rate_curve: None,
+                        pressure: None,
+                        pressure_curve: None,
+                        output_flow_rate: None,
+                        output_flow_rate_curve: None,
+                        duty_cycle: None,
+                        duty_cycle_curve: None
+                    }))
                 }
             }
             ControlMode::PumpPressure => {
                 if self.pressure <= 0.0 {
-                    GroupBrewControlTarget::Off
+                    (GroupBrewControlMode::Off, None)
                 } else {
-                    GroupBrewControlTarget::Pressure(self.pressure)
+                    (GroupBrewControlMode::Pressure, Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: None,
+                        flow_rate_curve: None,
+                        pressure: Some(self.pressure),
+                        pressure_curve: None,
+                        output_flow_rate: None,
+                        output_flow_rate_curve: None,
+                        duty_cycle: None,
+                        duty_cycle_curve: None
+                    }))
                 }
             }
         }
@@ -481,9 +508,9 @@ where
                         self.status.manual_brew_parameters.adjust_value(*control_mode, increment);
                         
                         // Send command to update the group brew control target
-                        let target = self.status.manual_brew_parameters.to_group_brew_control_target(*control_mode);
+                        let (mode, values) = self.status.manual_brew_parameters.to_group_brew_control_command(*control_mode);
                         self.command_sender.send(
-                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), target)
+                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), mode, values)
                         ).await;
                     }
                     UIState::RoutineParameters(routine_index, edit_state) => {
@@ -578,10 +605,7 @@ where
                                     let current_temp = if let Some(ref config) = self.current_configuration {
                                         config.get_boiler_configuration(0)
                                             .map(|bc| {
-                                                match bc.control_target {
-                                                    BoilerControlTarget::Temperature(temp) => temp,
-                                                    _ => 110.0, // Default if not temperature control
-                                                }
+                                                bc.control_state.values.target_temperature
                                             })
                                             .unwrap_or(110.0)
                                     } else {
@@ -732,9 +756,9 @@ where
                         self.status.state = UIState::ManualBrew(new_mode);
                         
                         // Send command to update the group brew control target with new mode
-                        let target = self.status.manual_brew_parameters.to_group_brew_control_target(new_mode);
+                        let (mode, values) = self.status.manual_brew_parameters.to_group_brew_control_command(new_mode);
                         self.command_sender.send(
-                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), target)
+                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), mode, values)
                         ).await;
                     }
                     UIState::SettingsInformation | UIState::SettingsDebugInfo => {
@@ -803,7 +827,11 @@ where
                                 self.command_sender.send(
                                     MachineCommand::SetBoilerControlTarget(
                                         0, // Boiler index 0 for single boiler
-                                        BoilerControlTarget::Temperature(current_value)
+                                        BoilerControlMode::Temperature,
+                                        Some(BoilerControlTargetValuesUpdate {
+                                            temperature: Some(current_value),
+                                            pressure: None
+                                        })
                                     )
                                 ).await;
                             },
@@ -905,9 +933,9 @@ where
                         self.status.state = UIState::ManualBrew(ControlMode::default());
                         
                         // Set group control target to safe default (duty cycle 0 = Off)
-                        let target = self.status.manual_brew_parameters.to_group_brew_control_target(ControlMode::default());
+                        let (mode, values) = self.status.manual_brew_parameters.to_group_brew_control_command(ControlMode::default());
                         self.command_sender.send(
-                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), target)
+                            MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), mode, values)
                         ).await;
                         
                         self.ui_status_sender.send(self.status.clone()).await;

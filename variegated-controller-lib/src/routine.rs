@@ -6,7 +6,7 @@ use core::fmt;
 use defmt::{info, Format};
 use embassy_time::{Duration, Instant};
 use heapless::FnvIndexMap;
-use variegated_controller_types::{BoilerControlTarget, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlTarget, GroupIndex, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType};
 
 type UserActionIndex = u8;
 pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
@@ -100,6 +100,7 @@ pub enum StateCondition {
     WaterTapFlowRateBelow(WaterTapIndex, ParameterValue),
     OutputWeightAbove(GroupIndex, ParameterValue),
     OutputWeightBelow(GroupIndex, ParameterValue),
+    InputVolumeAboveRelativeToStart(GroupIndex, ParameterValue),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -304,174 +305,6 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
     }
 }
 
-pub fn create_shot_routine(group: GroupIndex) -> Routine {
-    Routine {
-        routine_type: RoutineType::UserDefined,
-        name: "Smart shot".into(),
-        parameters: vec![
-            RoutineParameter {
-                index: 0,
-                name: "Preinf. Time".into(),
-                default: 5.0,
-                unit: Some(ParameterUnit::Seconds)
-            },
-            RoutineParameter {
-                index: 1,
-                name: "Brew Weight".into(),
-                default: 50.0,
-                unit: Some(ParameterUnit::Grams)
-            },
-            RoutineParameter {
-                index: 2,
-                name: "Tgt Press".into(),
-                default: 8.0,
-                unit: Some(ParameterUnit::Bar)
-            },
-            RoutineParameter {
-                index: 3,
-                name: "Resc Trigger".into(),
-                default: 2.5,
-                unit: Some(ParameterUnit::MillilitersPerSecond)
-            },
-            RoutineParameter {
-                index: 4,
-                name: "Rescue Flow".into(),
-                default: 1.5,
-                unit: Some(ParameterUnit::MillilitersPerSecond)
-            },
-        ],
-        derived_parameters: vec![], // No derived parameters for this routine
-        steps: vec![
-            // Step 0
-            RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
-                exits: vec![RoutineExit::new(
-                    RoutineExitCondition::Always,
-                    RoutineStepExitType::NextStep
-                )],
-                description: None,
-            },
-            // Step 1/2: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
-            RoutineStep {
-                entry_command: Some(RoutineCommand::StartBrewing(group)),
-                exits: vec![RoutineExit::new(
-                    RoutineExitCondition::After(ParameterValue::Static(1.0)),
-                    RoutineStepExitType::NextStep
-                )],
-                description: Some("Fast fill".into()),
-            },
-            RoutineStep {
-                entry_command: None,
-                exits: vec![RoutineExit::with_description(
-                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerPressureAbove(group, ParameterValue::Static(2.0))),
-                    RoutineStepExitType::NextStep,
-                    "Group filled?".into()
-                )],
-                description: Some("Fast fill".into()),
-            },
-            // Step 3: Set pump to Off, then wait for preinfusion time
-            RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupOff(group)),
-                exits: vec![RoutineExit::with_description(
-                    RoutineExitCondition::After(ParameterValue::Parameter(0)),
-                    RoutineStepExitType::NextStep,
-                    "Pre-infusing".into()
-                )],
-                description: Some("Pre-infusion".into()),
-            },
-            // Step 4: Set pressure target to target_pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
-            RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupPressure(group, ParameterValue::Parameter(2))),
-                exits: vec![
-                    RoutineExit::with_description(
-                        RoutineExitCondition::After(ParameterValue::Static(2.0)),
-                        RoutineStepExitType::NextStep,
-                        "Stabilizing".into()
-                    )
-                ],
-                description: Some("Ramping to pressure".into()),
-            },
-            // Step 5/6: Keep going at target_pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
-            RoutineStep {
-                entry_command: None,
-                exits: vec![
-                    RoutineExit::with_description(
-                        RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
-                        RoutineStepExitType::JumpToStep(7),
-                        "Brew to weight".into()
-                    ),
-                    RoutineExit::with_description(
-                        RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, ParameterValue::Parameter(3))),
-                        RoutineStepExitType::NextStep,
-                        "Shot rescue".into()
-                    )
-                ],
-                description: Some("Brewing".into()),
-            },
-            RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupFlowRate(group, ParameterValue::Parameter(4))),
-                exits: vec![
-                    RoutineExit::with_description(
-                        RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
-                        RoutineStepExitType::NextStep,
-                        "Brew to weight".into()
-                    ),
-                ],
-                description: Some("Shot rescue".into()),
-            },
-            // Step 7: Stop brewing, then finish the routine
-            RoutineStep {
-                entry_command: Some(RoutineCommand::StopBrewing(group)),
-                exits: vec![RoutineExit::new(
-                    RoutineExitCondition::Never,
-                    RoutineStepExitType::Finished,
-                )],
-                description: Some("Finishing extraction".into()),
-            },
-        ],
-    }
-}
-
-pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
-    let parameters = vec![
-    ];
-    
-    Routine {
-        routine_type: RoutineType::HeatUp,
-        name: "Heat-up".into(),
-        parameters,
-        derived_parameters: vec![], // No derived parameters for this routine
-        steps: vec![
-            RoutineStep {
-                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(0))),
-                exits: vec![ RoutineExit::new(
-                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, ParameterValue::Static(120.0))),
-                    RoutineStepExitType::NextStep,
-                )],
-                description: Some("Heating to overshoot".into()),
-            },
-            RoutineStep {
-                entry_command: None,
-                exits: vec![ RoutineExit::with_description(
-                    RoutineExitCondition::After(ParameterValue::Static(300.0)),
-                    RoutineStepExitType::NextStep,
-                    "Waiting".into()
-                )],
-                description: Some("Stabilizing temperature".into()),
-            },
-            RoutineStep {
-                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Static(95.0))),
-                exits: vec![ RoutineExit::with_description(
-                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureBelow(boiler_index, ParameterValue::Static(96.0))),
-                    RoutineStepExitType::Finished,
-                    "Waiting".into()
-                )],
-                description: Some("Adjusting to target".into()),
-            },
-        ],
-    }
-}
-
 pub struct RoutineExecutionContext<StateT, ConfigurationT> {
     pub(crate) routine_index: RoutineIndex,
     pub(crate) routine: Routine,
@@ -481,7 +314,8 @@ pub struct RoutineExecutionContext<StateT, ConfigurationT> {
     pub(crate) execution_start_time: Option<Instant>,
     pub(crate) step_start_time: Option<Instant>,
     pub(crate) parameters: RoutineParameters, // resolved parameters
-    
+    pub(crate) input_volume_at_start: Option<InputVolumeType>,
+
     pub(crate) saved_state: StateT,
     pub(crate) saved_configuration: ConfigurationT,
 }
@@ -508,6 +342,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             execution_start_time: None,
             step_start_time: None,
             parameters,
+            input_volume_at_start: None,
             saved_state,
             saved_configuration,
         }
@@ -596,37 +431,85 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             RoutineCommand::TareGroupScale(idx) => MachineCommand::TareGroupScale(*idx),
             
             RoutineCommand::SetBoilerTemperature(idx, pv) => {
-                MachineCommand::SetBoilerControlTarget(*idx, 
-                    BoilerControlTarget::Temperature(self.resolve_value(pv)))
+                MachineCommand::SetBoilerControlTarget(*idx,
+                    BoilerControlMode::Temperature,
+                    Some(BoilerControlTargetValuesUpdate {
+                        temperature: Some(self.resolve_value(pv)),
+                        pressure: None
+                    }))
             }
             RoutineCommand::SetBoilerPressure(idx, pv) => {
-                MachineCommand::SetBoilerControlTarget(*idx, 
-                    BoilerControlTarget::Pressure(self.resolve_value(pv)))
+                MachineCommand::SetBoilerControlTarget(*idx,
+                    BoilerControlMode::Pressure,
+                    Some(BoilerControlTargetValuesUpdate {
+                        temperature: None,
+                        pressure: Some(self.resolve_value(pv))
+                    }))
             }
             RoutineCommand::SetGroupFlowRate(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
-                    GroupBrewControlTarget::GroupFlowRate(self.resolve_value(pv)))
+                    GroupBrewControlMode::GroupFlowRate,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: Some(self.resolve_value(pv)),
+                        flow_rate_curve: None,
+                        pressure: None,
+                        pressure_curve: None,
+                        output_flow_rate: None,
+                        output_flow_rate_curve: None,
+                        duty_cycle: None,
+                        duty_cycle_curve: None
+                    }))
             }
             RoutineCommand::SetGroupPressure(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
-                    GroupBrewControlTarget::Pressure(self.resolve_value(pv)))
+                    GroupBrewControlMode::Pressure,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: None,
+                        flow_rate_curve: None,
+                        pressure: Some(self.resolve_value(pv)),
+                        pressure_curve: None,
+                        output_flow_rate: None,
+                        output_flow_rate_curve: None,
+                        duty_cycle: None,
+                        duty_cycle_curve: None
+                    }))
             }
             RoutineCommand::SetGroupOutputFlowRate(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
-                    GroupBrewControlTarget::OutputFlowRate(self.resolve_value(pv)))
+                    GroupBrewControlMode::OutputFlowRate,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: None,
+                        flow_rate_curve: None,
+                        pressure: None,
+                        pressure_curve: None,
+                        output_flow_rate: Some(self.resolve_value(pv)),
+                        output_flow_rate_curve: None,
+                        duty_cycle: None,
+                        duty_cycle_curve: None
+                    }))
             }
             RoutineCommand::SetGroupFixedDutyCycle(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
-                    GroupBrewControlTarget::FixedDutyCycle(self.resolve_value(pv) as u8))
+                    GroupBrewControlMode::FixedDutyCycle,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        flow_rate: None,
+                        flow_rate_curve: None,
+                        pressure: None,
+                        pressure_curve: None,
+                        output_flow_rate: None,
+                        output_flow_rate_curve: None,
+                        duty_cycle: Some(self.resolve_value(pv) as u8),
+                        duty_cycle_curve: None
+                    }))
             }
             RoutineCommand::SetGroupFullOn(idx) => {
-                MachineCommand::SetGroupBrewControlTarget(*idx, GroupBrewControlTarget::FullOn)
+                MachineCommand::SetGroupBrewControlTarget(*idx, GroupBrewControlMode::FullOn, None)
             }
             RoutineCommand::SetGroupOff(idx) => {
-                MachineCommand::SetGroupBrewControlTarget(*idx, GroupBrewControlTarget::Off)
+                MachineCommand::SetGroupBrewControlTarget(*idx, GroupBrewControlMode::Off, None)
             }
             RoutineCommand::SetBoilerOff(idx) => {
-                MachineCommand::SetBoilerControlTarget(*idx, BoilerControlTarget::Off)
+                MachineCommand::SetBoilerControlTarget(*idx, BoilerControlMode::Off, None)
             }
             
             // Transition-enabled commands
@@ -637,7 +520,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 if transition_time <= 0.0 {
                     // No transition - use direct command
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::GroupFlowRate(target_value))
+                        GroupBrewControlMode::GroupFlowRate,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: Some(target_value),
+                            output_flow_rate: None,
+                            pressure: None,
+                            duty_cycle: None,
+                            flow_rate_curve: None,
+                            pressure_curve: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle_curve: None
+                        }))
                 } else {
                     // Create linear transition curve from current value
                     let current_value = status.get_group_status(*idx)
@@ -647,7 +540,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         current_value, target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::GroupFlowRateCurve(curve))
+                        GroupBrewControlMode::GroupFlowRateCurve,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            flow_rate_curve: Some(curve),
+                            pressure: None,
+                            pressure_curve: None,
+                            output_flow_rate: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle: None,
+                            duty_cycle_curve: None
+                        }))
                 }
             }
             
@@ -657,7 +560,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 
                 if transition_time <= 0.0 {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::Pressure(target_value))
+                        GroupBrewControlMode::Pressure,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            output_flow_rate: None,
+                            pressure: Some(target_value),
+                            duty_cycle: None,
+                            flow_rate_curve: None,
+                            pressure_curve: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle_curve: None
+                        }))
                 } else {
                     let current_value = status.get_group_status(*idx)
                         .and_then(|gs| gs.pressure)
@@ -666,7 +579,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         current_value, target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::PressureCurve(curve))
+                        GroupBrewControlMode::PressureCurve,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            flow_rate_curve: None,
+                            pressure: None,
+                            pressure_curve: Some(curve),
+                            output_flow_rate: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle: None,
+                            duty_cycle_curve: None
+                        }))
                 }
             }
             
@@ -676,7 +599,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 
                 if transition_time <= 0.0 {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::OutputFlowRate(target_value))
+                        GroupBrewControlMode::OutputFlowRate,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            output_flow_rate: Some(target_value),
+                            pressure: None,
+                            duty_cycle: None,
+                            flow_rate_curve: None,
+                            pressure_curve: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle_curve: None
+                        }))
                 } else {
                     let current_value = status.get_group_status(*idx)
                         .and_then(|gs| gs.output_flow_rate)
@@ -685,7 +618,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         current_value, target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::OutputFlowRateCurve(curve))
+                        GroupBrewControlMode::OutputFlowRateCurve,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            flow_rate_curve: None,
+                            pressure: None,
+                            pressure_curve: None,
+                            output_flow_rate: None,
+                            output_flow_rate_curve: Some(curve),
+                            duty_cycle: None,
+                            duty_cycle_curve: None
+                        }))
                 }
             }
             
@@ -696,7 +639,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 if transition_time <= 0.0 {
                     // No transition - use direct command
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::FixedDutyCycle(target_value as u8))
+                        GroupBrewControlMode::FixedDutyCycle,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            output_flow_rate: None,
+                            pressure: None,
+                            duty_cycle: Some(target_value as u8),
+                            flow_rate_curve: None,
+                            pressure_curve: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle_curve: None
+                        }))
                 } else {
                     // Create linear transition curve from current duty cycle
                     let current_value = status.get_group_status(*idx)
@@ -706,7 +659,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         current_value, target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
-                        GroupBrewControlTarget::FixedDutyCycleCurve(curve))
+                        GroupBrewControlMode::FixedDutyCycleCurve,
+                        Some(GroupBrewControlTargetValuesUpdate {
+                            flow_rate: None,
+                            flow_rate_curve: None,
+                            pressure: None,
+                            pressure_curve: None,
+                            output_flow_rate: None,
+                            output_flow_rate_curve: None,
+                            duty_cycle: None,
+                            duty_cycle_curve: Some(curve)
+                        }))
                 }
             }
         }
@@ -720,6 +683,11 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         if self.current_step.is_none() {
             self.currently_executing = true;
             self.execution_start_time = Some(Instant::now());
+            // Capture the input volume at start from the first group's status
+            // This assumes group 0 exists - in practice this would be determined by the routine
+            if let Some(group_status) = status.get_group_status(0) {
+                self.input_volume_at_start = group_status.input_volume;
+            }
             return self.transition_to(0, status);
         }
 
@@ -839,6 +807,20 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 let threshold = self.resolve_value(&pv);
                 status.get_group_status(idx).map_or(false, |s| s.output_weight.unwrap_or(0.0) < threshold)
             }
+            StateCondition::InputVolumeAboveRelativeToStart(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                if let Some(start_volume) = self.input_volume_at_start {
+                    status.get_group_status(idx).map_or(false, |s| {
+                        if let Some(current_volume) = s.input_volume {
+                            (current_volume - start_volume) > threshold as f64
+                        } else {
+                            false
+                        }
+                    })
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -876,5 +858,241 @@ impl InMemoryRoutineRepository {
     
     pub fn get_routine_count(&self) -> usize {
         self.routines.len()
+    }
+}
+
+
+pub fn create_shot_routine(group: GroupIndex) -> Routine {
+    Routine {
+        routine_type: RoutineType::UserDefined,
+        name: "Smart shot".into(),
+        parameters: vec![
+            RoutineParameter {
+                index: 0,
+                name: "Preinf. Time".into(),
+                default: 5.0,
+                unit: Some(ParameterUnit::Seconds)
+            },
+            RoutineParameter {
+                index: 1,
+                name: "Brew Weight".into(),
+                default: 50.0,
+                unit: Some(ParameterUnit::Grams)
+            },
+            RoutineParameter {
+                index: 2,
+                name: "Tgt Press".into(),
+                default: 8.0,
+                unit: Some(ParameterUnit::Bar)
+            },
+            RoutineParameter {
+                index: 3,
+                name: "Resc Trigger".into(),
+                default: 2.5,
+                unit: Some(ParameterUnit::MillilitersPerSecond)
+            },
+            RoutineParameter {
+                index: 4,
+                name: "Rescue Flow".into(),
+                default: 1.5,
+                unit: Some(ParameterUnit::MillilitersPerSecond)
+            },
+        ],
+        derived_parameters: vec![], // No derived parameters for this routine
+        steps: vec![
+            // Step 0
+            RoutineStep {
+                entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
+                exits: vec![RoutineExit::new(
+                    RoutineExitCondition::Always,
+                    RoutineStepExitType::NextStep
+                )],
+                description: None,
+            },
+            // Step 1/2: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
+            RoutineStep {
+                entry_command: Some(RoutineCommand::StartBrewing(group)),
+                exits: vec![RoutineExit::new(
+                    RoutineExitCondition::After(ParameterValue::Static(1.0)),
+                    RoutineStepExitType::NextStep
+                )],
+                description: Some("Fast fill".into()),
+            },
+            RoutineStep {
+                entry_command: None,
+                exits: vec![RoutineExit::with_description(
+                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerPressureAbove(group, ParameterValue::Static(2.0))),
+                    RoutineStepExitType::NextStep,
+                    "Group filled?".into()
+                )],
+                description: Some("Fast fill".into()),
+            },
+            // Step 3: Set pump to Off, then wait for preinfusion time
+            RoutineStep {
+                entry_command: Some(RoutineCommand::SetGroupOff(group)),
+                exits: vec![RoutineExit::with_description(
+                    RoutineExitCondition::After(ParameterValue::Parameter(0)),
+                    RoutineStepExitType::NextStep,
+                    "Pre-infusing".into()
+                )],
+                description: Some("Pre-infusion".into()),
+            },
+            // Step 4: Set pressure target to pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
+            RoutineStep {
+                entry_command: Some(RoutineCommand::SetGroupPressure(group, ParameterValue::Parameter(2))),
+                exits: vec![
+                    RoutineExit::with_description(
+                        RoutineExitCondition::After(ParameterValue::Static(2.0)),
+                        RoutineStepExitType::NextStep,
+                        "Stabilizing".into()
+                    )
+                ],
+                description: Some("Ramping to pressure".into()),
+            },
+            // Step 5/6: Keep going at pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
+            RoutineStep {
+                entry_command: None,
+                exits: vec![
+                    RoutineExit::with_description(
+                        RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
+                        RoutineStepExitType::JumpToStep(7),
+                        "Brew to weight".into()
+                    ),
+                    RoutineExit::with_description(
+                        RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, ParameterValue::Parameter(3))),
+                        RoutineStepExitType::NextStep,
+                        "Shot rescue".into()
+                    )
+                ],
+                description: Some("Brewing".into()),
+            },
+            RoutineStep {
+                entry_command: Some(RoutineCommand::SetGroupFlowRate(group, ParameterValue::Parameter(4))),
+                exits: vec![
+                    RoutineExit::with_description(
+                        RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
+                        RoutineStepExitType::NextStep,
+                        "Brew to weight".into()
+                    ),
+                ],
+                description: Some("Shot rescue".into()),
+            },
+            // Step 7: Stop brewing, then finish the routine
+            RoutineStep {
+                entry_command: Some(RoutineCommand::StopBrewing(group)),
+                exits: vec![RoutineExit::new(
+                    RoutineExitCondition::Never,
+                    RoutineStepExitType::Finished,
+                )],
+                description: Some("Finishing extraction".into()),
+            },
+        ],
+    }
+}
+
+pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
+    let parameters = vec![
+    ];
+
+    Routine {
+        routine_type: RoutineType::HeatUp,
+        name: "Heat-up".into(),
+        parameters,
+        derived_parameters: vec![], // No derived parameters for this routine
+        steps: vec![
+            RoutineStep {
+                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(0))),
+                exits: vec![ RoutineExit::new(
+                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, ParameterValue::Static(120.0))),
+                    RoutineStepExitType::NextStep,
+                )],
+                description: Some("Heating to overshoot".into()),
+            },
+            RoutineStep {
+                entry_command: None,
+                exits: vec![ RoutineExit::with_description(
+                    RoutineExitCondition::After(ParameterValue::Static(300.0)),
+                    RoutineStepExitType::NextStep,
+                    "Waiting".into()
+                )],
+                description: Some("Stabilizing temperature".into()),
+            },
+            RoutineStep {
+                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Static(95.0))),
+                exits: vec![ RoutineExit::with_description(
+                    RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureBelow(boiler_index, ParameterValue::Static(96.0))),
+                    RoutineStepExitType::Finished,
+                    "Waiting".into()
+                )],
+                description: Some("Adjusting to target".into()),
+            },
+        ],
+    }
+}
+
+pub fn create_volumetric_shot_routine(group: GroupIndex, pulses: u16, bloom_after: Option<Duration>, bloom_time: Option<Duration>) -> Routine {
+    let mut steps = vec![
+        RoutineStep {
+            entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::Always,
+                RoutineStepExitType::NextStep
+            )],
+            description: None,
+        },
+        RoutineStep {
+            entry_command: Some(RoutineCommand::StartBrewing(group)),
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::Always,
+                RoutineStepExitType::NextStep
+            )],
+            description: Some("Filling".into()),
+        },
+    ];
+
+    if let (Some(bloom_after), Some(bloom_time)) = (bloom_after, bloom_time) {
+        steps.push(RoutineStep {
+            entry_command: None,
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
+                RoutineStepExitType::NextStep
+            )],
+            description: Some("Filling".into()),
+        });
+        steps.push(RoutineStep {
+            entry_command: Some(RoutineCommand::SetGroupOff(group)),
+            exits: vec![RoutineExit::with_description(
+                RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
+                RoutineStepExitType::NextStep,
+                "Blooming".into()
+            )],
+            description: Some("Blooming".into()),
+        });
+        steps.push(RoutineStep {
+            entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::Always,
+                RoutineStepExitType::NextStep
+            )],
+            description: Some("Brewing".into()),
+        });
+    }
+
+    steps.push(RoutineStep {
+        entry_command: None,
+        exits: vec![RoutineExit::with_description(
+            RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Static(pulses as f32))),
+            RoutineStepExitType::Finished,
+            "Reached target volume".into()
+        )],
+        description: Some("Brewing".into()),
+    });
+
+    Routine {
+        routine_type: RoutineType::UserDefined,
+        name: "Volumetric shot".into(),
+        parameters: vec![],
+        derived_parameters: vec![], // No derived parameters for this routine
+        steps
     }
 }
