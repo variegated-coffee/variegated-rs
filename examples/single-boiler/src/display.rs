@@ -24,7 +24,7 @@ use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_7X13};
 use embedded_graphics::text::{Alignment, TextStyle, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
-use variegated_controller_types::{BoilerControlTarget, GroupBrewControlTarget, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, GroupBrewControlMode, GroupBrewControlState, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -397,13 +397,14 @@ impl DisplayController {
             return;
         };
 
-        match boiler_status.control_target {
-            BoilerControlTarget::Off => {
+        match boiler_status.control_state.mode {
+            BoilerControlMode::Off => {
                 Text::with_baseline("Boiler Off", Point::zero(), self.text_style_small, Baseline::Top)
                     .draw(&mut self.display)
                     .unwrap();
             }
-            BoilerControlTarget::Temperature(temp) => {
+            BoilerControlMode::Temperature => {
+                let temp = boiler_status.control_state.values.target_temperature;
                 Text::with_text_style(boiler_status.temperature.map_or("-".to_string(), |t| format!("{:.1} C", t)).as_str(), Point::new(64, 0), self.text_style_large, TextStyleBuilder::new()
                     .alignment(Alignment::Center)
                     .baseline(Baseline::Top)
@@ -424,7 +425,8 @@ impl DisplayController {
                         .unwrap();
                 }
             },
-            BoilerControlTarget::Pressure(pressure) => {
+            BoilerControlMode::Pressure => {
+                let pressure = boiler_status.control_state.values.target_pressure;
 
             },
         };
@@ -1136,10 +1138,10 @@ impl DisplayController {
         let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index()).unwrap();
         let group_status = self.status.get_group_status(SingleGroup.as_index()).unwrap();
 
-        let target_temp = match boiler_status.control_target {
-            BoilerControlTarget::Off => 0.0,
-            BoilerControlTarget::Temperature(temp, ..) => temp,
-            BoilerControlTarget::Pressure(_, ..) => 0.0,
+        let target_temp = match boiler_status.control_state.mode {
+            BoilerControlMode::Off => 0.0,
+            BoilerControlMode::Temperature => boiler_status.control_state.values.target_temperature,
+            BoilerControlMode::Pressure => 0.0,
         };
 
         if let Some(temp) = boiler_status.temperature {
@@ -1148,8 +1150,8 @@ impl DisplayController {
                 .unwrap();
         }
 
-        let pump_dc = match group_status.control_target {
-            GroupBrewControlTarget::FixedDutyCycle(dc) => dc,
+        let pump_dc = match group_status.control_state.mode {
+            GroupBrewControlMode::FixedDutyCycle => group_status.control_state.values.duty_cycle,
             _ => 0
         };
 

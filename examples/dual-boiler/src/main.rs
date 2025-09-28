@@ -63,7 +63,7 @@ use futures::future::join_all;
 use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -95,6 +95,7 @@ use variegated_hal::noop::NoopOutputPin;
 use variegated_hal::scale::gravity::GravityStatusProvider;
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
+use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -259,6 +260,7 @@ static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>
 static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
+static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
@@ -560,12 +562,32 @@ async fn main_task(spawner: Spawner) -> ! {
     // Extract ESP32 peripherals for communication
     let esp_p = esp32_peripherals!(p);
 
-    let mut pwm_input_config = pwm::Config::default();
+/*    let mut pwm_input_config = pwm::Config::default();
     pwm_input_config.divider = 1.into();
     let flow_meter_input = pwm::Pwm::new_input(flow_meter_p.pwm_flow_meter, flow_meter_p.pin_flow_meter, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
+ */
+
+    let flow_meter_input = Input::new(flow_meter_p.pin_flow_meter, Pull::Up);
+
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
-    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, |v| (v) as FlowRateType, |v| v);
+    let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
+
+/*    let mut flow_meter = GpioTransformingFrequencyCounter::new(
+        flow_meter_input,
+        flow_meter_sig.sender(),
+        Some(input_volume_sig.sender()),
+        |v| v as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
+        |pulses| pulses as InputVolumeType  // Total pulses to ml
+    );*/
+
+    let mut flow_meter = GpioTransformingPulseCounter::new(
+        flow_meter_input,
+        flow_meter_sig.sender(),
+        Some(input_volume_sig.sender()),
+        |pulses| pulses as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
+        |pulses| pulses as InputVolumeType  // Total pulses to ml
+    );
 
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
@@ -574,6 +596,7 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
+        Some(input_volume_sig.receiver().unwrap()),
         None,
         None,
     );
