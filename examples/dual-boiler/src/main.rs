@@ -621,7 +621,7 @@ async fn main_task(spawner: Spawner) -> ! {
  */
 
     let Pio {
-        mut common, irq0, sm0, sm1, ..
+        mut common, irq0, sm0, sm1, irq1, ..
     } = Pio::new(flow_meter_p.pio, Irqs);
 
 
