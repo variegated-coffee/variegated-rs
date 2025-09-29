@@ -11,70 +11,61 @@ use embassy_time::{Duration, Instant, Timer};
 use fixed::traits::ToFixed;
 use crate::{SensorReading, WithTask};
 
-// Static storage for DMA writes - one per PIO instance to avoid conflicts
+// Static storage for DMA writes - one per PIO instance and state machine
 #[unsafe(link_section = ".uninit.PIO_COUNTER")]
-static mut PIO0_COUNTER_VALUE: u32 = 0;
+static mut PIO0_COUNTER_VALUES: [u32; 4] = [0; 4];
 
 #[unsafe(link_section = ".uninit.PIO_COUNTER")]
-static mut PIO1_COUNTER_VALUE: u32 = 0;
+static mut PIO1_COUNTER_VALUES: [u32; 4] = [0; 4];
 
 #[cfg(feature = "rp235x")]
 #[unsafe(link_section = ".uninit.PIO_COUNTER")]
-static mut PIO2_COUNTER_VALUE: u32 = 0;
+static mut PIO2_COUNTER_VALUES: [u32; 4] = [0; 4];
 
-// Wrap counters for each PIO instance
-static PIO0_WRAP_COUNT: AtomicU32 = AtomicU32::new(0);
-static PIO1_WRAP_COUNT: AtomicU32 = AtomicU32::new(0);
-
-#[cfg(feature = "rp235x")]
-static PIO2_WRAP_COUNT: AtomicU32 = AtomicU32::new(0);
-
-// Track which state machines are using wrap detection
-static PIO0_SM_MASK: AtomicU32 = AtomicU32::new(0);
-static PIO1_SM_MASK: AtomicU32 = AtomicU32::new(0);
+// Wrap counters for each PIO instance and state machine
+static PIO0_WRAP_COUNTS: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)
+];
+static PIO1_WRAP_COUNTS: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)
+];
 
 #[cfg(feature = "rp235x")]
-static PIO2_SM_MASK: AtomicU32 = AtomicU32::new(0);
+static PIO2_WRAP_COUNTS: [AtomicU32; 4] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)
+];
 
-/// Get the counter value pointer for a specific PIO instance
-fn get_counter_ptr(pio_num: u8) -> *mut u32 {
+
+/// Get the counter value pointer for a specific PIO instance and state machine
+fn get_counter_ptr(pio_num: u8, sm_num: u8) -> *mut u32 {
+    assert!(sm_num < 4, "Invalid state machine number");
     match pio_num {
-        0 => unsafe { &raw mut PIO0_COUNTER_VALUE },
-        1 => unsafe { &raw mut PIO1_COUNTER_VALUE },
+        0 => unsafe { &raw mut PIO0_COUNTER_VALUES[sm_num as usize] },
+        1 => unsafe { &raw mut PIO1_COUNTER_VALUES[sm_num as usize] },
         #[cfg(feature = "rp235x")]
-        2 => unsafe { &raw mut PIO2_COUNTER_VALUE },
+        2 => unsafe { &raw mut PIO2_COUNTER_VALUES[sm_num as usize] },
         _ => panic!("Invalid PIO number"),
     }
 }
 
-/// Get the wrap counter for a specific PIO instance
-fn get_wrap_counter(pio_num: u8) -> &'static AtomicU32 {
+/// Get the wrap counter for a specific PIO instance and state machine
+fn get_wrap_counter(pio_num: u8, sm_num: u8) -> &'static AtomicU32 {
+    assert!(sm_num < 4, "Invalid state machine number");
     match pio_num {
-        0 => &PIO0_WRAP_COUNT,
-        1 => &PIO1_WRAP_COUNT,
+        0 => &PIO0_WRAP_COUNTS[sm_num as usize],
+        1 => &PIO1_WRAP_COUNTS[sm_num as usize],
         #[cfg(feature = "rp235x")]
-        2 => &PIO2_WRAP_COUNT,
-        _ => panic!("Invalid PIO number"),
-    }
-}
-
-/// Get the SM mask for tracking which state machines use wrap detection
-fn get_sm_mask(pio_num: u8) -> &'static AtomicU32 {
-    match pio_num {
-        0 => &PIO0_SM_MASK,
-        1 => &PIO1_SM_MASK,
-        #[cfg(feature = "rp235x")]
-        2 => &PIO2_SM_MASK,
+        2 => &PIO2_WRAP_COUNTS[sm_num as usize],
         _ => panic!("Invalid PIO number"),
     }
 }
 
 
-pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel> {
+pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel> {
     pio_num: u8,
     sm_num: u8,
     sm: StateMachine<'d, P, SM>,
-    irq0: Irq<'d, P, 0>,
+    irq: Irq<'d, P, IRQ>,
     dma_channel: Peri<'d, C>,
     frequency_signal: Sender<'d, M, SensorReading<T>, N>,
     total_pulses_signal: Option<Sender<'d, M, SensorReading<U>, N>>,
@@ -88,13 +79,13 @@ pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: 
     wrap_counter: &'static AtomicU32,
 }
 
-impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
-    GpioPioTransformingPulseCounter<'d, P, SM, M, T, U, F, G, N, C>
+impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
+    GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
     pub fn new(
         pio_common: &mut Common<'d, P>,
         mut sm: StateMachine<'d, P, SM>,
-        irq0: Irq<'d, P, 0>,
+        irq: Irq<'d, P, IRQ>,
         dma_channel: Peri<'d, C>,
         pin: embassy_rp::Peri<'d, impl PioPin>,
         frequency_signal: Sender<'d, M, SensorReading<T>, N>,
@@ -122,6 +113,9 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
         // Install the PIO program
         let program = pio::pio_asm!(
             ".wrap_target",
+            // Useful for testing wrapping logic
+            // "set x, 5",
+            // "jmp loop",
             "init:",
             "set x, 0",
             "mov x, ~x",
@@ -130,7 +124,7 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
             "wait 0 pin 0",
             // If necessary, add up to 22 no-ops here to debounce
             "jmp x--, do_push",
-            "irq nowait 0",
+            "irq nowait 0 rel",
             "do_push:",
             "mov isr, x",
             "push block",
@@ -158,13 +152,9 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
         sm.set_config(&cfg);
         sm.set_enable(true);
 
-        // Register this SM for wrap detection
-        let sm_mask = get_sm_mask(pio_num);
-        sm_mask.fetch_or(1 << sm_num, Ordering::Release);
-
-        // Get memory locations
-        let counter_ptr = get_counter_ptr(pio_num);
-        let wrap_counter = get_wrap_counter(pio_num);
+        // Get memory locations for this specific PIO and state machine
+        let counter_ptr = get_counter_ptr(pio_num, sm_num);
+        let wrap_counter = get_wrap_counter(pio_num, sm_num);
 
         // Configure DMA for continuous counter updates using low-level API
         // Extract DREQ and FIFO address from the RX side
@@ -212,7 +202,7 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
             pio_num,
             sm_num,
             sm,
-            irq0,
+            irq,
             dma_channel,
             frequency_signal,
             total_pulses_signal,
@@ -273,8 +263,8 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
     }
 }
 
-impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
-    Drop for GpioPioTransformingPulseCounter<'d, P, SM, M, T, U, F, G, N, C>
+impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
+    Drop for GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
     fn drop(&mut self) {
         // Stop DMA using low-level abort
@@ -289,14 +279,12 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
         // Wait for DMA to stop
         while dma_regs.ctrl_trig().read().busy() {}
 
-        // Unregister this SM from wrap detection
-        let sm_mask = get_sm_mask(self.pio_num);
-        sm_mask.fetch_and(!(1 << self.sm_num), Ordering::Release);
+        // No need to unregister SM since each SM has independent storage
     }
 }
 
-impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
-    WithTask for GpioPioTransformingPulseCounter<'d, P, SM, M, T, U, F, G, N, C>
+impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
+    WithTask for GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
     async fn task(&mut self) {
         // DMA continuously updates the counter value from PIO FIFO
@@ -304,7 +292,7 @@ impl<'d, P: Instance + 'static, const SM: usize, M: RawMutex, T: Clone, U: Clone
         let mut measurement_timer = Timer::after(Duration::from_millis(1000));
 
         loop {
-            let irq_future = self.irq0.wait();
+            let irq_future = self.irq.wait();
             match select(irq_future, &mut measurement_timer).await {
                 Either::First(_) => {
                     // IRQ triggered - increment wrap counter
