@@ -41,6 +41,8 @@ pin_rotary_pump_enable = "embassy_rp::peripherals::PIN_40"
 [flow_meter_peripherals]
 pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE3"
 pin_flow_meter = "embassy_rp::peripherals::PIN_23"
+pio = "embassy_rp::peripherals::PIO0"
+dma = "embassy_rp::peripherals::DMA_CH8"
 
 [mechanism_peripherals]
 pin_brew_he = "embassy_rp::peripherals::PIN_37"
@@ -56,6 +58,7 @@ pin_d0 = "embassy_rp::peripherals::PIN_43"
 pin_d1 = "embassy_rp::peripherals::PIN_44"
 pin_d2 = "embassy_rp::peripherals::PIN_45"
 pin_d3 = "embassy_rp::peripherals::PIN_46"
+pin_det = "embassy_rp::peripherals::PIN_5"
 
 [qwiic_i2c_bus_peripherals]
 i2c = "embassy_rp::peripherals::I2C0"
@@ -79,7 +82,11 @@ pin_interrupt = "embassy_rp::peripherals::PIN_20"
 [settings_flash_peripherals]
 pin_cs = "embassy_rp::peripherals::PIN_27"
 
+[watchdog_peripherals]
+watchdog = "embassy_rp::peripherals::WATCHDOG"
+
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 AdcIrq = "ADC_IRQ_FIFO"
 InternalI2cIrq = "I2C1_IRQ"
+FlowMeterPioIrq = "PIO0_IRQ_0"
