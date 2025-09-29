@@ -592,36 +592,11 @@ async fn main_task(spawner: Spawner) -> ! {
     // Extract ESP32 peripherals for communication
     let esp_p = esp32_peripherals!(p);
 
-/*    let mut pwm_input_config = pwm::Config::default();
-    pwm_input_config.divider = 1.into();
-    let flow_meter_input = pwm::Pwm::new_input(flow_meter_p.pwm_flow_meter, flow_meter_p.pin_flow_meter, Pull::Up, InputMode::FallingEdge, pwm_input_config);
-
- */
-
-    //let flow_meter_input = Input::new(flow_meter_p.pin_flow_meter, Pull::Up);
-
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
     let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
 
-/*    let mut flow_meter = GpioTransformingFrequencyCounter::new(
-        flow_meter_input,
-        flow_meter_sig.sender(),
-        Some(input_volume_sig.sender()),
-        |v| v as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
-        |pulses| pulses as InputVolumeType  // Total pulses to ml
-    );*/
-
-/*    let mut flow_meter = GpioTransformingPulseCounter::new(
-        flow_meter_input,
-        flow_meter_sig.sender(),
-        Some(input_volume_sig.sender()),
-        |pulses| pulses as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
-        |pulses| pulses as InputVolumeType  // Total pulses to ml
-    );
- */
-
     let Pio {
-        mut common, irq0, sm0, sm1, irq1, ..
+        mut common, irq0, sm0, ..
     } = Pio::new(flow_meter_p.pio, Irqs);
 
 
@@ -633,8 +608,8 @@ async fn main_task(spawner: Spawner) -> ! {
         flow_meter_p.pin_flow_meter,
         flow_meter_sig.sender(),
         Some(input_volume_sig.sender()),
-        |pulses| pulses as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
-        |pulses| pulses as InputVolumeType  // Total pulses to ml
+        |pulses| (pulses / 2.79) as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
+        |pulses| ((pulses as f64) / 2.79f64) as InputVolumeType  // Total pulses to ml
     );
 
     let group = Group::new(
@@ -881,13 +856,13 @@ async fn sd_det_toggle_task(mut sd_det_pin: Output<'static>) {
         sd_det_pin.set_high();
 
         // Wait 1 second
-        Timer::after_millis(500).await;
+        Timer::after_millis(50).await;
 
         // Toggle the pin low
         sd_det_pin.set_low();
 
         // Wait 1 second
-        Timer::after_millis(500).await;
+        Timer::after_millis(50).await;
     }
 }
 

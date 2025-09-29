@@ -2,6 +2,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use defmt::info;
 use embassy_futures::select::{select, Either};
 use embassy_rp::dma;
+use embassy_rp::gpio::Pull;
+use embassy_rp::pac::dma::vals::DataSize;
 use embassy_rp::Peri;
 use embassy_rp::pio::{Common, Config, FifoJoin, Instance, Irq, PioPin, ShiftConfig, ShiftDirection, StateMachine};
 use pio;
@@ -87,7 +89,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
         mut sm: StateMachine<'d, P, SM>,
         irq: Irq<'d, P, IRQ>,
         dma_channel: Peri<'d, C>,
-        pin: embassy_rp::Peri<'d, impl PioPin>,
+        pin: Peri<'d, impl PioPin>,
         frequency_signal: Sender<'d, M, SensorReading<T>, N>,
         total_pulses_signal: Option<Sender<'d, M, SensorReading<U>, N>>,
         frequency_transformer: F,
@@ -134,7 +136,8 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
         let installed = pio_common.load_program(&program.program);
 
         // Make PIO pin
-        let pio_pin = pio_common.make_pio_pin(pin);
+        let mut pio_pin = pio_common.make_pio_pin(pin);
+        pio_pin.set_pull(Pull::Up);
 
         // Configure the state machine
         let mut cfg = Config::default();
@@ -147,7 +150,15 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
             threshold: 32,
         };
         cfg.fifo_join = FifoJoin::RxOnly;
-        cfg.clock_divider = 1u8.to_fixed();
+
+        // To calculate the maximum pulse frequency we can measure:
+        // 6 instructions per pulse (2x wait, 2x jmp, 1x mov, 1x push) + nops
+        // Default frequency is 150 MHz, so 150 / 6 / div = max frequency
+        // For example, with divider=128, max frequency is ~195 kHz
+        // For a flow meter, we can expect < 10 kHz, so a divider of
+        // 2048 would give a max frequency of ~11.5 kHz - which is a good
+        // balance of noise immunity and max frequency
+        cfg.clock_divider = 2048u16.to_fixed();
 
         sm.set_config(&cfg);
         sm.set_enable(true);
@@ -155,6 +166,11 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
         // Get memory locations for this specific PIO and state machine
         let counter_ptr = get_counter_ptr(pio_num, sm_num);
         let wrap_counter = get_wrap_counter(pio_num, sm_num);
+
+        unsafe {
+            core::ptr::write_volatile(counter_ptr, 0xFFFFFFFF); // Reset to max
+        }
+        wrap_counter.store(0, Ordering::Release); // Reset wrap count
 
         // Configure DMA for continuous counter updates using low-level API
         // Extract DREQ and FIFO address from the RX side
@@ -189,7 +205,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
             // Configure and start DMA
             dma_regs.ctrl_trig().write(|w| {
                 w.set_treq_sel(dreq); // PIO RX DREQ
-                w.set_data_size(embassy_rp::pac::dma::vals::DataSize::SIZE_WORD);
+                w.set_data_size(DataSize::SIZE_WORD);
                 w.set_incr_read(false);  // Don't increment read address (always read from FIFO)
                 w.set_incr_write(false); // Don't increment write address (always write to same location)
                 w.set_chain_to(dma_channel.number()); // Chain to self for continuous operation
@@ -218,18 +234,16 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
     }
 
     /// Read the total pulse count with retry logic to handle wrap races
-    fn read_total_pulses(&self) -> u64 {
+    fn read_total_pulses(&self) -> (Instant, u64) {
         loop {
             let wraps1 = self.wrap_counter.load(Ordering::Acquire) as u64;
             let counter = unsafe { core::ptr::read_volatile(self.counter_ptr) } as u64;
             let wraps2 = self.wrap_counter.load(Ordering::Acquire) as u64;
 
-            info!("Read wraps1: {}, counter: {}, wraps2: {}", wraps1, counter, wraps2);
-
             if wraps1 == wraps2 {
                 // No wrap occurred during read
                 // Since we count down, pulses = total_wraps * 2^32 + (2^32 - counter)
-                return (wraps1 << 32) + (0xFFFFFFFF - counter);
+                return (Instant::now(), (wraps1 << 32) + (0xFFFFFFFF - counter));
             }
             // Wrap occurred during read, retry
         }
@@ -278,8 +292,6 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
 
         // Wait for DMA to stop
         while dma_regs.ctrl_trig().read().busy() {}
-
-        // No need to unregister SM since each SM has independent storage
     }
 }
 
@@ -289,7 +301,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
     async fn task(&mut self) {
         // DMA continuously updates the counter value from PIO FIFO
         // We handle both IRQ-based wrap detection and periodic measurements
-        let mut measurement_timer = Timer::after(Duration::from_millis(1000));
+        let mut measurement_timer = Timer::after(Duration::from_millis(100));
 
         loop {
             let irq_future = self.irq.wait();
@@ -301,10 +313,9 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                 }
                 Either::Second(_) => {
                     // Timer expired - take measurement
-                    measurement_timer = Timer::after(Duration::from_millis(1000));
+                    measurement_timer = Timer::after(Duration::from_millis(100));
 
-                    let measurement_instant = Instant::now();
-                    let total_pulses = self.read_total_pulses();
+                    let (measurement_instant, total_pulses) = self.read_total_pulses();
 
                     // Check startup complete
                     if !self.startup_complete &&
@@ -313,8 +324,6 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                         self.startup_complete = true;
                         info!("PIO pulse counter startup complete");
                     }
-
-                    info!("Total pulses: {}", total_pulses);
 
                     // Store measurement
                     self.measurements[self.measurement_index] = (total_pulses, measurement_instant);
