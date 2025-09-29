@@ -28,9 +28,11 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 movavg = { version = "2.1.0", default-features = false }
 log = "0.4.27"
 heapless = { version = "0.8", features = ["defmt-03"] }
+fixed = "1.23.1"
+pio = "0.3"
 
 [features]
 rp2040 = ["embassy-rp/rp2040"]
-rp235xa = ["embassy-rp/rp235xa"]
-rp235xb = ["embassy-rp/rp235xb"]
-
+rp235xa = ["embassy-rp/rp235xa", "rp235x"]
+rp235xb = ["embassy-rp/rp235xb", "rp235x"]
+rp235x = []

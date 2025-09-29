@@ -17,7 +17,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{adc, i2c, pwm, spi, uart, Peri};
+use embassy_rp::{adc, i2c, pio, pwm, spi, uart, watchdog, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -49,6 +49,7 @@ use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMechanism, DualBoilerWaterTapMechanism, DualBoilerMechanism, DualBoilerConfig, DualBoilerFillMechanism};
 use embassy_rp::bind_interrupts;
+use embassy_rp::pio::Pio;
 use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::priority_channel::Min;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
@@ -95,6 +96,7 @@ use variegated_hal::noop::NoopOutputPin;
 use variegated_hal::scale::gravity::GravityStatusProvider;
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
+use variegated_hal::gpio::gpio_pio_pulse_counter::GpioPioTransformingPulseCounter;
 use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
 
 #[global_allocator]
@@ -104,6 +106,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
     AdcIrq => adc::InterruptHandler;
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
+    FlowMeterPioIrq => pio::InterruptHandler<FlowMeterPeripheralsPio>;
 });
 
 // Embassy task wrapper for ESP transceiver (dual-boiler)
@@ -175,6 +178,8 @@ struct PumpPeripherals {
 struct FlowMeterPeripherals {
     pwm_flow_meter: Peri<'static, ()>,
     pin_flow_meter: Peri<'static, ()>,
+    pio: Peri<'static, ()>,
+    dma: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("rotary_pump_peripherals")]
@@ -202,6 +207,17 @@ struct Esp32Peripherals {
     dma_rx: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("sd_card_peripherals")]
+struct SdCardPeripherals {
+    pin_clk: Peri<'static, ()>,
+    pin_cmd: Peri<'static, ()>,
+    pin_d0: Peri<'static, ()>,
+    pin_d1: Peri<'static, ()>,
+    pin_d2: Peri<'static, ()>,
+    pin_d3: Peri<'static, ()>,
+    pin_det: Peri<'static, ()>,
+}
+
 #[variegated_board_cfg::board_cfg("potentiometer_peripherals")]
 struct LinearEncoderPeripherals {
     adc: Peri<'static, ()>,
@@ -213,12 +229,16 @@ struct SettingsFlashPeripherals {
     pin_cs: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("watchdog_peripherals")]
+struct WatchdogPeripherals {
+    watchdog: Peri<'static, ()>,
+}
+
 type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
 type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
-
 // Display type aliases
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
 type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>, Output<'static>>;
@@ -342,8 +362,12 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let rotary_p = rotary_pump_peripherals!(p);
     let mechanism_p = mechanism_peripherals!(p);
+    let sd_card_p = sd_card_peripherals!(p);
 
     let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
+
+    // Create SD detect pin output for toggling
+    let sd_det_pin = Output::new(sd_card_p.pin_det, Low);
 
     // Create pump and solenoids for dual boiler mechanism
     let pump_output = GpioBinaryPump::new(Output::new(rotary_p.pin_rotary_pump_enable, Low));
@@ -420,6 +444,12 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
+
+    // Initialize watchdog
+    let watchdog_p = watchdog_peripherals!(p);
+    let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
+    watchdog.start(Duration::from_secs(16)); // 5 second timeout
+    info!("Watchdog initialized with 16 second timeout");
 
     let mut settings_storage = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();
@@ -568,7 +598,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
  */
 
-    let flow_meter_input = Input::new(flow_meter_p.pin_flow_meter, Pull::Up);
+    //let flow_meter_input = Input::new(flow_meter_p.pin_flow_meter, Pull::Up);
 
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
     let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
@@ -581,8 +611,26 @@ async fn main_task(spawner: Spawner) -> ! {
         |pulses| pulses as InputVolumeType  // Total pulses to ml
     );*/
 
-    let mut flow_meter = GpioTransformingPulseCounter::new(
+/*    let mut flow_meter = GpioTransformingPulseCounter::new(
         flow_meter_input,
+        flow_meter_sig.sender(),
+        Some(input_volume_sig.sender()),
+        |pulses| pulses as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
+        |pulses| pulses as InputVolumeType  // Total pulses to ml
+    );
+ */
+
+    let Pio {
+        mut common, irq0, sm0, sm1, ..
+    } = Pio::new(flow_meter_p.pio, Irqs);
+
+
+    let mut flow_meter = GpioPioTransformingPulseCounter::new(
+        &mut common,
+        sm0,
+        irq0,
+        flow_meter_p.dma,
+        flow_meter_p.pin_flow_meter,
         flow_meter_sig.sender(),
         Some(input_volume_sig.sender()),
         |pulses| pulses as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
@@ -765,6 +813,7 @@ async fn main_task(spawner: Spawner) -> ! {
         settings_storage,
         routine_repository_ref,
         peripheral_registry,
+        Some(watchdog),
     );
 
     // Create status subscriber for LCD display and spawn the task
@@ -794,6 +843,9 @@ async fn main_task(spawner: Spawner) -> ! {
     // Spawn the ESP transceiver task
     unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition)));
 
+    // Spawn the SD detect pin toggle task
+    unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
+
     info!("Creating huge future join task");
 
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
@@ -818,6 +870,25 @@ async fn main_task(spawner: Spawner) -> ! {
         Timer::after_millis(3000).await;
     }
 
+}
+
+#[embassy_executor::task]
+async fn sd_det_toggle_task(mut sd_det_pin: Output<'static>) {
+    info!("Starting SD detect pin toggle task");
+
+    loop {
+        // Toggle the pin high
+        sd_det_pin.set_high();
+
+        // Wait 1 second
+        Timer::after_millis(500).await;
+
+        // Toggle the pin low
+        sd_det_pin.set_low();
+
+        // Wait 1 second
+        Timer::after_millis(500).await;
+    }
 }
 
 #[embassy_executor::task]

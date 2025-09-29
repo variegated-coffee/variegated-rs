@@ -19,6 +19,7 @@ embedded-hal-async = "1.0.0"
 embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
 embassy-sync = { version = "0.7.0", features = ["defmt"] }
 embassy-futures = { version = "0.1.1" }
+embassy-rp = { version = "0.6.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
 movavg = { version = "2.1.0", default-features = false }
@@ -39,3 +40,9 @@ embedded-storage-async = "0.4.1"
 log = "0.4.27"
 
 crc = "3.3.0"
+
+[features]
+rp2040 = ["embassy-rp/rp2040"]
+rp235xa = ["embassy-rp/rp235xa", "rp235x"]
+rp235xb = ["embassy-rp/rp235xb", "rp235x"]
+rp235x = []

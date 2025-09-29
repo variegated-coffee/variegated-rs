@@ -3,6 +3,7 @@ extern crate alloc;
 
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::{debug, error, info, warn, Format};
+use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::Receiver;
 use embassy_sync::mutex::Mutex;
@@ -269,6 +270,7 @@ pub struct DualBoilerSingleGroupController<
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
+    watchdog: Option<Watchdog>,
 }
 
 impl<
@@ -301,6 +303,7 @@ impl<
         settings_store: SettingsStoreT,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
+        watchdog: Option<Watchdog>,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -334,6 +337,7 @@ impl<
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
+            watchdog,
         }
     }
 
@@ -414,6 +418,11 @@ impl<
                 info!("Periodic configuration published");
                 last_configuration_publish = now;
                 last_configuration = current_config;
+            }
+
+            // Feed the watchdog to prevent system reset
+            if let Some(ref mut watchdog) = self.watchdog {
+                watchdog.feed();
             }
 
             Timer::after_millis(100).await;
