@@ -10,11 +10,15 @@ bench = false
 [dependencies]
 defmt = { version = "0.3", optional = true }
 heapless = "0.8.0"
+chrono = { version = "0.4", default-features = false, features = ["serde"] }
 serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }
+schemars = { version = "0.8", default-features = false, features = ["derive"], optional = true }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
 
 [features]
 serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "heapless/serde"]
+std = []
+schemars = ["dep:schemars", "serde", "std", "variegated-control-algorithm/schemars"]
 defmt = ["dep:defmt", "heapless/defmt-03"]
 double_boiler = []
 single_boiler = []

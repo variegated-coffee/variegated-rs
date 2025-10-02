@@ -1,8 +1,15 @@
-#![no_std]
+#![cfg_attr(not(feature = "std"), no_std)]
+
 extern crate alloc;
 
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
 use core::time::Duration;
-use heapless::FnvIndexMap;
+use chrono::{Datelike, NaiveDate, Weekday};
+use heapless::{FnvIndexMap};
+use heapless::FnvIndexSet;
 use variegated_control_algorithm::pid::PidOut;
 
 pub const MAX_BOILERS: usize = 8;
@@ -12,7 +19,6 @@ pub const MAX_STEAM_WANDS: usize = 4;
 pub const MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS: usize = 2;
 pub const MAX_TANKS: usize = 2;
 pub const MAX_PERIPHERALS: usize = 16;
-
 
 pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
@@ -46,6 +52,7 @@ pub type EnvironmentalSensorId = u8; // Unique identifier for environmental sens
 pub type PeripheralId = u16; // Unique identifier for peripherals
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub struct ProtocolVersion {
@@ -56,20 +63,21 @@ pub struct ProtocolVersion {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub struct ProtocolConfig {
-    /// The protocol version used by the machine.
+    /// The protocol version.
     pub protocol_version: ProtocolVersion,
-    /// The maximum number of boilers supported by the machine.
+    /// The maximum number of boilers supported by this compile of the protocol.
     pub max_boilers: usize,
-    /// The maximum number of groups supported by the machine.
+    /// The maximum number of groups supported by this compile of the protocol.
     pub max_groups: usize,
-    /// The maximum number of water taps supported by the machine.
+    /// The maximum number of water taps supported by this compile of the protocol.
     pub max_water_taps: usize,
-    /// The maximum number of tanks supported by the machine.
+    /// The maximum number of tanks supported by this compile of the protocol.
     pub max_tanks: usize,
-    /// The maximum number of environmental temperature sensors supported by the machine.
+    /// The maximum number of environmental temperature sensors supported by this compile of the protocol.
     pub max_environmental_temperature_sensors: usize,
 }
 
@@ -85,6 +93,7 @@ pub const PROTOCOL_CONFIG: ProtocolConfig = ProtocolConfig {
 };
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub enum PidParameterTarget {
@@ -96,7 +105,8 @@ pub enum PidParameterTarget {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone)]
 pub enum MachineCommand {
     StartBrewing(GroupIndex),
     StopBrewing(GroupIndex),
@@ -128,7 +138,7 @@ pub enum MachineCommand {
     SetGroupBrewControlTargetValues(GroupIndex, GroupBrewControlTargetValuesUpdate),
 
     SetPidParameters(PidParameterTarget, PidParameters),
-    RunRoutine(RoutineIndex, Option<FnvIndexMap<u8, f32, 8>>),
+    RunRoutine(RoutineIndex, #[cfg_attr(feature = "schemars", schemars(with = "Option<std::collections::HashMap<u8, f32>>"))] Option<FnvIndexMap<u8, f32, 8>>),
     CancelRoutine,
     EnableBoiler(BoilerIndex),
     DisableBoiler(BoilerIndex),
@@ -136,6 +146,12 @@ pub enum MachineCommand {
     ZeroCalibrateGroupScale(GroupIndex),
     CalibrateGroupScale100g(GroupIndex),
     UpdateCommsStatus(CommsStatus),
+    AddScheduleItem(ScheduleItem),
+    RemoveScheduleItem(usize),
+    UpdateScheduleItem(usize, ScheduleItem),
+    AddRoutine(Routine),
+    RemoveRoutine(usize),
+    UpdateRoutine(usize, Routine),
 }
 
 #[cfg(feature = "defmt")]
@@ -159,11 +175,18 @@ impl defmt::Format for MachineCommand {
             MachineCommand::ZeroCalibrateGroupScale(idx) => defmt::write!(f, "ZeroCalibrateGroupScale({})", idx),
             MachineCommand::CalibrateGroupScale100g(idx) => defmt::write!(f, "CalibrateGroupScale100g({})", idx),
             MachineCommand::UpdateCommsStatus(status) => defmt::write!(f, "UpdateCommsStatus({:?})", status),
+            MachineCommand::AddScheduleItem(item) => defmt::write!(f, "AddScheduleItem({})", item),
+            MachineCommand::RemoveScheduleItem(idx) => defmt::write!(f, "RemoveScheduleItem({})", idx),
+            MachineCommand::UpdateScheduleItem(idx, item) => defmt::write!(f, "UpdateScheduleItem({}, {})", idx, item),
+            MachineCommand::AddRoutine(routine) => defmt::write!(f, "AddRoutine()"),
+            MachineCommand::RemoveRoutine(idx) => defmt::write!(f, "RemoveRoutine({})", idx),
+            MachineCommand::UpdateRoutine(idx, routine) => defmt::write!(f, "UpdateRoutine({})", idx),
         }
     }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlCurve {
@@ -186,6 +209,7 @@ impl ControlCurve {
 /// The control mode for a boiler - what type of control is active
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BoilerControlMode {
     Temperature,  // Control based on temperature
@@ -198,6 +222,7 @@ pub enum BoilerControlMode {
 /// These values persist regardless of current mode
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoilerControlTargetValues {
     pub target_temperature: TemperatureType,
@@ -217,6 +242,7 @@ impl Default for BoilerControlTargetValues {
 /// Only specified fields will be updated
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoilerControlTargetValuesUpdate {
     pub temperature: Option<TemperatureType>,
@@ -226,6 +252,7 @@ pub struct BoilerControlTargetValuesUpdate {
 /// Complete boiler control state
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoilerControlState {
     pub mode: BoilerControlMode,
@@ -244,6 +271,7 @@ impl Default for BoilerControlState {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaterDispersalPumpStrategy {
     AlwaysPump,
@@ -255,6 +283,7 @@ pub enum WaterDispersalPumpStrategy {
 /// The control mode for group brewing
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum GroupBrewControlMode {
     GroupFlowRate,        // Control pump to achieve flow rate at group
@@ -273,6 +302,7 @@ pub enum GroupBrewControlMode {
 /// All stored target values for group brew control
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupBrewControlTargetValues {
     pub flow_rate: FlowRateType,
@@ -303,6 +333,7 @@ impl Default for GroupBrewControlTargetValues {
 /// Update structure for changing group brew target values
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GroupBrewControlTargetValuesUpdate {
     pub flow_rate: Option<FlowRateType>,
@@ -318,6 +349,7 @@ pub struct GroupBrewControlTargetValuesUpdate {
 /// Complete group brew control state
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupBrewControlState {
     pub mode: GroupBrewControlMode,
@@ -336,6 +368,7 @@ impl Default for GroupBrewControlState {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub enum SingleBoilerSingleGroupControllerState {
     #[default]
@@ -348,6 +381,7 @@ pub enum SingleBoilerSingleGroupControllerState {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum SingleBoilerSingleGroupControllerBoilers {
@@ -374,6 +408,7 @@ impl SingleBoilerSingleGroupControllerBoilers {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum DualBoilerSingleGroupControllerBoilers {
@@ -412,6 +447,7 @@ impl SingleGroupControllerGroups {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub enum MachineMode {
     On,
@@ -422,6 +458,7 @@ pub enum MachineMode {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PeripheralInfo {
     pub peripheral_type: PeripheralType,
@@ -429,8 +466,10 @@ pub struct PeripheralInfo {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct PeripheralStatus {
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<PeripheralId, PeripheralInfo>"))]
     pub peripherals: FnvIndexMap<PeripheralId, PeripheralInfo, MAX_PERIPHERALS>,
 }
 
@@ -446,6 +485,7 @@ impl defmt::Format for PeripheralStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum PeripheralType {
@@ -463,12 +503,14 @@ pub trait PeripheralStatusProvider {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
     pub current_step: Option<usize>,
     pub step_elapsed_time: Option<Duration>,
     pub total_elapsed_time: Option<Duration>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<u8, f32>"))]
     pub resolved_parameters: FnvIndexMap<u8, f32, 8>, // resolved parameter values for display
 }
 
@@ -486,11 +528,16 @@ impl defmt::Format for RoutineExecutionStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct Status {
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<BoilerIndex, BoilerStatus>"))]
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<GroupIndex, GroupStatus>"))]
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<WaterTapIndex, WaterTapStatus>"))]
     pub water_tap_statuses: FnvIndexMap<WaterTapIndex, WaterTapStatus, MAX_WATER_TAPS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<TankIndex, TankStatus>"))]
     pub tank_statuses: FnvIndexMap<TankIndex, TankStatus, MAX_TANKS>,
     pub mode: MachineMode,
     pub routine_execution: Option<RoutineExecutionStatus>,
@@ -642,6 +689,7 @@ impl defmt::Format for Status {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default)]
 pub enum Output {
@@ -662,6 +710,7 @@ impl Output {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct BoilerStatus {
@@ -672,13 +721,27 @@ pub struct BoilerStatus {
     pub control_state: BoilerControlState,
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PreviousBrewInfo {
+    pub brew_time: Duration,
+    pub brew_input_volume: Option<InputVolumeType>,
+    pub output_weight: Option<WeightType>,
+    pub started_at_millis: u64,  // Milliseconds since system start
+    pub stopped_at_millis: u64,  // Milliseconds since system start
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct GroupStatus {
     pub is_brewing: bool,
     pub three_way_valve_open: Option<bool>,
     pub brew_time: Option<Duration>,
+    pub brew_input_volume: Option<InputVolumeType>,
     pub input_flow_rate: Option<FlowRateType>,
     pub input_volume: Option<InputVolumeType>,
     pub output_flow_rate: Option<FlowRateType>,
@@ -687,9 +750,11 @@ pub struct GroupStatus {
     pub temperature: Option<TemperatureType>,
     pub pump_output: Output,
     pub control_state: GroupBrewControlState,
+    pub previous_brew: Option<PreviousBrewInfo>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct WaterTapStatus {
@@ -698,20 +763,102 @@ pub struct WaterTapStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct TankStatus {
     pub water_level: Option<WaterLevelType>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
+pub struct ScheduleTrigger {
+    pub on_minute: u8,
+    pub on_hour: u8,
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<std::vec::Vec<String>>"))]
+    pub on_days: Option<FnvIndexSet<Weekday, 8>>, // If None, trigger every day
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub on_date: Option<NaiveDate>,
+    pub enabled: bool,
+    pub once: bool, // If true, remove schedule item after triggering
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for ScheduleTrigger {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "ScheduleTrigger {{ {:02}:{:02}", self.on_hour, self.on_minute);
+
+        if let Some(ref days) = self.on_days {
+            defmt::write!(f, " days:[");
+            for day in days {
+                let day_str = match day {
+                    Weekday::Mon => "Mon",
+                    Weekday::Tue => "Tue",
+                    Weekday::Wed => "Wed",
+                    Weekday::Thu => "Thu",
+                    Weekday::Fri => "Fri",
+                    Weekday::Sat => "Sat",
+                    Weekday::Sun => "Sun",
+                };
+                defmt::write!(f, "{},", day_str);
+            }
+            defmt::write!(f, "]");
+        }
+
+        if let Some(ref date) = self.on_date {
+            defmt::write!(f, " date:{}-{:02}-{:02}", date.year(), date.month(), date.day());
+        }
+
+        if !self.enabled {
+            defmt::write!(f, " DISABLED");
+        }
+
+        if self.once {
+            defmt::write!(f, " once");
+        }
+
+        defmt::write!(f, " }}");
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Default)]
+pub struct ScheduleItem {
+    pub trigger_at: ScheduleTrigger,
+    pub commands: Vec<MachineCommand>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for ScheduleItem {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "ScheduleItem {{ trigger_at: {}, commands: [", self.trigger_at);
+        for (i, cmd) in self.commands.iter().enumerate() {
+            if i > 0 {
+                defmt::write!(f, ", ");
+            }
+            defmt::write!(f, "{}", cmd);
+        }
+        defmt::write!(f, "] }}");
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Default)]
 pub struct Configuration {
     pub machine_config: MachineConfiguration,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<BoilerIndex, BoilerConfiguration>"))]
     pub boiler_configurations: FnvIndexMap<BoilerIndex, BoilerConfiguration, MAX_BOILERS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<GroupIndex, GroupConfiguration>"))]
     pub group_configurations: FnvIndexMap<GroupIndex, GroupConfiguration, MAX_GROUPS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<WaterTapIndex, WaterTapConfiguration>"))]
     pub water_tap_configurations: FnvIndexMap<WaterTapIndex, WaterTapConfiguration, MAX_WATER_TAPS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<TankIndex, TankConfiguration>"))]
     pub tank_configurations: FnvIndexMap<TankIndex, TankConfiguration, MAX_TANKS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<SteamWandIndex, SteamWandConfiguration>"))]
     pub steam_wand_configurations: FnvIndexMap<SteamWandIndex, SteamWandConfiguration, MAX_STEAM_WANDS>,
+    pub schedules: Vec<ScheduleItem>,
 }
 
 impl Configuration {
@@ -723,6 +870,7 @@ impl Configuration {
             water_tap_configurations: FnvIndexMap::new(),
             tank_configurations: FnvIndexMap::new(),
             steam_wand_configurations: FnvIndexMap::new(),
+            schedules: vec![],
         }
     }
 
@@ -802,6 +950,7 @@ impl defmt::Format for Configuration {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct PumpConfiguration {
@@ -813,6 +962,7 @@ pub struct PumpConfiguration {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct FillConfiguration {
@@ -821,6 +971,7 @@ pub struct FillConfiguration {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct BoilerConfiguration {
@@ -836,6 +987,7 @@ pub struct BoilerConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct KalmanParameters {
     pub process_noise: f32,
@@ -847,6 +999,7 @@ pub struct KalmanParameters {
 
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct GroupConfiguration {
@@ -863,6 +1016,7 @@ pub struct GroupConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MachineType {
     SingleBoilerSingleGroup,
@@ -878,6 +1032,7 @@ impl Default for MachineType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct MachineConfiguration {
     pub heating_element_interlock: bool,
@@ -885,6 +1040,7 @@ pub struct MachineConfiguration {
 
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct WaterTapConfiguration {
@@ -903,6 +1059,7 @@ impl Default for WaterDispersalPumpStrategy {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct SteamWandConfiguration {
     pub temperature_target: Option<TemperatureType>,
@@ -914,6 +1071,7 @@ pub struct SteamWandConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct TankConfiguration {
     pub low_level_warning_threshold: Option<WaterLevelType>,
@@ -923,6 +1081,7 @@ pub struct TankConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone,  Debug)]
 pub struct ExternalSensorData {
     pub id: EnvironmentalSensorId,
@@ -931,6 +1090,7 @@ pub struct ExternalSensorData {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub struct CommsStatus {
     pub timestamp: Option<u64>, // Unix timestamp in seconds
@@ -939,18 +1099,21 @@ pub struct CommsStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone)]
 pub enum CommsProcessorToApplicationProcessorMessage {
     Command(MachineCommand),
     CommsStatus(CommsStatus),
     RequestStatus,
     RequestMachineDefinition,
     RequestConfiguration,
+    RequestRoutines,
     ExternalSensorUpdate(ExternalSensorData),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SensorCapability {
     Temperature,
@@ -962,6 +1125,7 @@ pub enum SensorCapability {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ActuatorCapability {
@@ -975,6 +1139,7 @@ pub enum ActuatorCapability {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlModeCapability {
     TemperaturePid,
@@ -987,6 +1152,7 @@ pub enum ControlModeCapability {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BoilerType {
@@ -1003,60 +1169,86 @@ impl Default for BoilerType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct BoilerDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
     pub boiler_type: BoilerType,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
     pub has_fill_mechanism: bool,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct GroupDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct WaterTapDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct SteamWandDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct TankDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct PeripheralDefinition {
     pub peripheral_type: PeripheralType,
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub location: heapless::String<32>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub capabilities: heapless::Vec<SensorCapability, 8>,
     pub support_calibration: bool,
     pub via_comms_mcu: bool,
@@ -1064,6 +1256,7 @@ pub struct PeripheralDefinition {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EnvironmentalSensorType {
     AmbientTemperature,
@@ -1074,23 +1267,34 @@ pub enum EnvironmentalSensorType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct EnvironmentalSensorDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
     pub sensor_type: EnvironmentalSensorType,
     pub measurement_range: Option<(f32, f32)>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct MachineDefinition {
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<BoilerIndex, BoilerDefinition>"))]
     pub boilers: FnvIndexMap<BoilerIndex, BoilerDefinition, MAX_BOILERS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<GroupIndex, GroupDefinition>"))]
     pub groups: FnvIndexMap<GroupIndex, GroupDefinition, MAX_GROUPS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<WaterTapIndex, WaterTapDefinition>"))]
     pub water_taps: FnvIndexMap<WaterTapIndex, WaterTapDefinition, MAX_WATER_TAPS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<TankIndex, TankDefinition>"))]
     pub tanks: FnvIndexMap<TankIndex, TankDefinition, MAX_TANKS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<SteamWandIndex, SteamWandDefinition>"))]
     pub steam_wands: FnvIndexMap<SteamWandIndex, SteamWandDefinition, 4>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<EnvironmentalSensorId, EnvironmentalSensorDefinition>"))]
     pub environmental_sensors: FnvIndexMap<EnvironmentalSensorId, EnvironmentalSensorDefinition, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<PeripheralId, PeripheralDefinition>"))]
     pub peripherals: FnvIndexMap<PeripheralId, PeripheralDefinition, MAX_PERIPHERALS>,
 }
 
@@ -1140,11 +1344,317 @@ impl defmt::Format for MachineDefinition {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone)]
+pub struct RoutineList {
+    pub routines: Vec<Routine>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for RoutineList {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "RoutineList {{ routines: [");
+        for (i, routine) in self.routines.iter().enumerate() {
+            if i > 0 {
+                defmt::write!(f, ", ");
+            }
+            defmt::write!(f, "{}", routine.name.as_str());
+        }
+        defmt::write!(f, "] }}");
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone)]
 pub enum ApplicationProcessorToCommsProcessorMessage {
     Hello(ProtocolConfig),
     Status(Status),
     MachineDefinition(MachineDefinition),
     Configuration(Configuration),
+    Routines(RoutineList),
+}
+
+
+pub type UserActionIndex = u8;
+pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum ParameterValue {
+    Static(f32),
+    Parameter(u8), // index into parameter map
+    DerivedParameter(u8), // index into derived parameter list (separate namespace)
+}
+
+impl fmt::Display for ParameterValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParameterValue::Static(value) => write!(f, "{:.1}", value),
+            ParameterValue::Parameter(index) => write!(f, "P{}", index),
+            ParameterValue::DerivedParameter(index) => write!(f, "D{}", index),
+        }
+    }
+}
+
+impl ParameterValue {
+    // For display purposes, treat Parameter as a placeholder value
+    pub fn as_secs(&self) -> u64 {
+        match self {
+            ParameterValue::Static(value) => *value as u64,
+            ParameterValue::Parameter(_) => 0, // Placeholder - should be resolved
+            ParameterValue::DerivedParameter(_) => 0, // Placeholder - should be resolved
+        }
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParameterUnit {
+    Seconds,
+    Celsius,
+    Bar,
+    MillilitersPerSecond,
+    Grams,
+    Percent,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub struct RoutineParameter {
+    pub index: u8,
+    pub name: String,  // User-facing, e.g. "Preinfusion Time", "Target Pressure"
+    pub default: f32,
+    pub unit: Option<ParameterUnit>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub struct DerivedParameter {
+    pub index: u8,  // Separate index space from regular parameters
+    pub name: String,
+    pub unit: Option<ParameterUnit>,
+    pub formula: DerivedFormula,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub enum DerivedFormula {
+    Linear {
+        base_param: u8,      // Index of base parameter
+        multiplier: f32,
+        offset: f32,
+    },
+    Sum {
+        params: Vec<u8>,     // Indices of parameters to sum
+    },
+    Difference {
+        param_a: u8,
+        param_b: u8,         // a - b
+    },
+    Product {
+        params: Vec<u8>,     // Indices of parameters to multiply
+    },
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum StateCondition {
+    Brewing(GroupIndex),
+    NotBrewing(GroupIndex),
+    BoilerTemperatureAbove(BoilerIndex, ParameterValue),
+    BoilerTemperatureBelow(BoilerIndex, ParameterValue),
+    BoilerPressureAbove(BoilerIndex, ParameterValue),
+    BoilerPressureBelow(BoilerIndex, ParameterValue),
+    GroupInputFlowRateAbove(GroupIndex, ParameterValue),
+    GroupInputFlowRateBelow(GroupIndex, ParameterValue),
+    GroupPressureAbove(GroupIndex, ParameterValue),
+    GroupPressureBelow(GroupIndex, ParameterValue),
+    WaterTapFlowRateAbove(WaterTapIndex, ParameterValue),
+    WaterTapFlowRateBelow(WaterTapIndex, ParameterValue),
+    OutputWeightAbove(GroupIndex, ParameterValue),
+    OutputWeightBelow(GroupIndex, ParameterValue),
+    InputVolumeAboveRelativeToStart(GroupIndex, ParameterValue),
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum RoutineExitCondition {
+    Always,
+    Never,
+    After(ParameterValue), // seconds as f32, converted to Duration at runtime
+    AfterDurationRelativeToStart(ParameterValue),
+    StateConditionMet(StateCondition),
+    UserAction(UserActionIndex),
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum RoutineStepExitType {
+    NextStep,
+    JumpToStep(usize),
+    Finished,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub enum RoutineCommand {
+    // Direct pass-through for non-parameterizable commands
+    StartBrewing(GroupIndex),
+    StopBrewing(GroupIndex),
+    TareGroupScale(GroupIndex),
+
+    // Parameterizable commands
+    SetBoilerTemperature(BoilerIndex, ParameterValue),
+    SetBoilerPressure(BoilerIndex, ParameterValue),
+    SetGroupFlowRate(GroupIndex, ParameterValue),
+    SetGroupPressure(GroupIndex, ParameterValue),
+    SetGroupOutputFlowRate(GroupIndex, ParameterValue),
+    SetGroupFixedDutyCycle(GroupIndex, ParameterValue),
+    SetGroupFullOn(GroupIndex),
+    SetGroupOff(GroupIndex),
+    SetBoilerOff(BoilerIndex),
+
+    // Transition-enabled commands (only for groups since only they support curves)
+    SetGroupFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub struct RoutineExit {
+    pub condition: RoutineExitCondition,
+    pub then: RoutineStepExitType,
+    pub description: Option<String>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub struct RoutineStep {
+    pub entry_command: Option<RoutineCommand>,
+    pub exits: Vec<RoutineExit>,
+    pub description: Option<String>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum RoutineType {
+    HeatUp,
+    UserDefined,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone)]
+pub struct Routine {
+    pub routine_type: RoutineType,
+    pub name: String,
+    pub parameters: Vec<RoutineParameter>, // max 8
+    pub derived_parameters: Vec<DerivedParameter>, // max 16
+    pub steps: Vec<RoutineStep>,
+    pub finally: Vec<RoutineCommand>,
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for Routine {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(f, "Routine {{ name: {}, type: {:?}, parameters: {}, derived_parameters: {}, steps: {} }}",
+            self.name.as_str(),
+            self.routine_type,
+            self.parameters.len(),
+            self.derived_parameters.len(),
+            self.steps.len(),
+        );
+    }
+}
+
+impl Routine {
+    pub fn new(routine_type: RoutineType, name: String, parameters: Vec<RoutineParameter>, derived_parameters: Vec<DerivedParameter>, steps: Vec<RoutineStep>) -> Self {
+        // Validate limits
+        assert!(parameters.len() <= 8, "Maximum 8 regular parameters allowed");
+        assert!(derived_parameters.len() <= 16, "Maximum 16 derived parameters allowed");
+
+        Self {
+            routine_type,
+            name,
+            parameters,
+            derived_parameters,
+            steps,
+            finally: vec![],
+        }
+    }
+
+    pub fn routine_type(&self) -> RoutineType {
+        self.routine_type
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn steps(&self) -> &[RoutineStep] {
+        &self.steps
+    }
+
+    pub fn parameters(&self) -> &[RoutineParameter] {
+        &self.parameters
+    }
+
+    pub fn derived_parameters(&self) -> &[DerivedParameter] {
+        &self.derived_parameters
+    }
+}
+
+impl RoutineExit {
+    pub fn new(condition: RoutineExitCondition, then: RoutineStepExitType) -> Self {
+        Self {
+            condition,
+            then,
+            description: None,
+        }
+    }
+
+    pub fn with_description(condition: RoutineExitCondition, then: RoutineStepExitType, description: String) -> Self {
+        Self {
+            condition,
+            then,
+            description: Some(description),
+        }
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+}
+
+impl RoutineStep {
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn exits(&self) -> &[RoutineExit] {
+        &self.exits
+    }
 }

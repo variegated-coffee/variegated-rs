@@ -2,13 +2,17 @@
 //!
 //! This module provides button control functionality using MCP23017 I2C GPIO expander.
 //! Handles 6 buttons with the following mappings:
-//! - Button 1 (Pin 0): Toggle brewing (start/stop brewing for the single group)
+//! - Buttons 1-4 (Pins 0-3): Trigger/cancel routines 0-3
+//!   - When no routine is running: starts the corresponding routine
+//!   - When a routine is running: any of these buttons cancels it
+//! - Button 5 (Pin 4): Toggle brewing (start/stop brewing for the single group)
 //! - Button 6 (Pin 5): Toggle water dispensing (start/stop pumping to water tap)
 //!
 //! Features:
 //! - Button debouncing to prevent spurious triggers
 //! - State tracking via status subscription to determine toggle actions
 //! - Integration with the machine command system
+//! - Routine control with any-button cancel functionality
 
 use alloc::format;
 use core::time::Duration;
@@ -30,8 +34,14 @@ const DEBOUNCE_TIME_MS: u64 = 50;
 /// Number of buttons on the controller
 const NUM_BUTTONS: usize = 6;
 
+/// Button indices for routine control (buttons 0-3)
+const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
+const ROUTINE_BUTTON_1: usize = 1;    // Button 2 (Pin 1) - Triggers routine 1
+const ROUTINE_BUTTON_2: usize = 2;    // Button 3 (Pin 2) - Triggers routine 2
+const ROUTINE_BUTTON_3: usize = 3;    // Button 4 (Pin 3) - Triggers routine 3
+
 /// Button indices for specific functions
-const BREWING_BUTTON: usize = 0;      // Button 1 (Pin 0)
+const BREWING_BUTTON: usize = 4;      // Button 5 (Pin 4)
 const WATER_TAP_BUTTON: usize = 5;    // Button 6 (Pin 5)
 
 /// Button state tracking for debouncing and toggle logic
@@ -40,6 +50,8 @@ pub struct ButtonState {
     brewing_active: bool,
     /// Current water dispensing state (from status subscription)
     water_dispensing_active: bool,
+    /// Current routine execution state (from status subscription)
+    routine_executing: bool,
     /// Previous button states for edge detection (bit-packed)
     last_button_states: u8,
     /// Last debounce time for each button
@@ -55,6 +67,7 @@ impl ButtonState {
         Self {
             brewing_active: false,
             water_dispensing_active: false,
+            routine_executing: false,
             last_button_states: 0xFF, // All buttons released (active low with pullups)
             last_debounce_time: [now; NUM_BUTTONS],
             debounced_states: [false; NUM_BUTTONS], // false = not pressed
@@ -72,6 +85,9 @@ impl ButtonState {
         self.water_dispensing_active = status.get_water_tap_status(0)
             .map(|water_tap| water_tap.is_dispensing)
             .unwrap_or(false);
+
+        // Update routine execution state from status
+        self.routine_executing = status.routine_execution.is_some();
     }
 
     /// Update button states with debouncing
@@ -132,6 +148,17 @@ impl ButtonState {
             MachineCommand::StartPumpingToWaterTap(water_tap_index)
         }
     }
+
+    /// Get the appropriate command for routine buttons (0-3)
+    /// If a routine is executing, returns CancelRoutine
+    /// Otherwise, returns RunRoutine for the specified routine index
+    pub fn get_routine_command(&self, routine_index: usize) -> MachineCommand {
+        if self.routine_executing {
+            MachineCommand::CancelRoutine
+        } else {
+            MachineCommand::RunRoutine(routine_index, None)
+        }
+    }
 }
 
 /// Embassy task for running the button controller
@@ -159,10 +186,27 @@ pub async fn button_controller_task(
                 if button_state.update_buttons(button_states) {
                     // Check for button presses and send appropriate commands
 
-                    // Button 1: Brewing toggle
+                    // Routine buttons (0-3): Start routine or cancel if any routine is running
+                    for button_idx in [ROUTINE_BUTTON_0, ROUTINE_BUTTON_1, ROUTINE_BUTTON_2, ROUTINE_BUTTON_3] {
+                        if button_state.is_button_just_pressed(button_idx) {
+                            let command = button_state.get_routine_command(button_idx);
+
+                            if button_state.routine_executing {
+                                defmt::info!("Button {} pressed - cancelling routine", button_idx + 1);
+                            } else {
+                                defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
+                            }
+
+                            if let Err(_) = command_sender.try_send(command) {
+                                defmt::warn!("Failed to send routine command - channel full");
+                            }
+                        }
+                    }
+
+                    // Button 5: Brewing toggle
                     if button_state.is_button_just_pressed(BREWING_BUTTON) {
                         let command = button_state.get_brewing_toggle_command();
-                        defmt::info!("Button 1 pressed - sending brewing command: {:?}", command);
+                        defmt::info!("Button 5 pressed - sending brewing command: {:?}", command);
 
                         if let Err(_) = command_sender.try_send(command) {
                             defmt::warn!("Failed to send brewing command - channel full");
@@ -176,13 +220,6 @@ pub async fn button_controller_task(
 
                         if let Err(_) = command_sender.try_send(command) {
                             defmt::warn!("Failed to send water tap command - channel full");
-                        }
-                    }
-
-                    // Log other button presses for debugging
-                    for i in 0..NUM_BUTTONS {
-                        if i != BREWING_BUTTON && i != WATER_TAP_BUTTON && button_state.is_button_just_pressed(i) {
-                            defmt::info!("Button {} pressed (not mapped)", i + 1);
                         }
                     }
                 }

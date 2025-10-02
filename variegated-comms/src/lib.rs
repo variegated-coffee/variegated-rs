@@ -2,7 +2,9 @@
 
 extern crate alloc;
 use alloc::vec::Vec;
+use alloc::boxed::Box;
 use core::cell::RefCell;
+use chrono::{DateTime, Utc};
 use defmt::info;
 use embassy_futures::join::join4;
 use embassy_rp::uart::{UartRx, UartTx};
@@ -19,6 +21,8 @@ use variegated_controller_types::{
     Status
 };
 use embassy_sync::channel::{Channel, Sender};
+use variegated_controller_lib::routine::InMemoryRoutineRepository;
+use variegated_timekeeping::TimeKeeper;
 
 /// Generic ESP32-C6 transceiver task that handles bidirectional communication
 ///
@@ -32,6 +36,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
     mut status_receiver: Subscriber<'static, M, Status, 1, 4, 1>,
     mut configuration_receiver: Subscriber<'static, M, Configuration, 1, 4, 1>,
+    routine_repository: &'static embassy_sync::mutex::Mutex<NoopRawMutex, InMemoryRoutineRepository>,
     command_sender: Sender<'static, M, MachineCommand, 10>,
     machine_definition: MachineDefinition
 ) {
@@ -41,11 +46,14 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     let tx_sender = tx_channel.sender();
     let tx_receiver = tx_channel.receiver();
 
-    // Use shared state for last sent configuration
-    let last_sent_config: Mutex<M, RefCell<Option<Configuration>>> = Mutex::new(RefCell::new(None));
+    // Use shared state for last sent configuration (heap-allocated to save stack space)
+    let last_sent_config: Mutex<M, RefCell<Option<Box<Configuration>>>> = Mutex::new(RefCell::new(None));
+
+    // Box the machine definition to save stack space
+    let machine_definition = Box::new(machine_definition);
 
     // Send initial machine definition to ESP32
-    let initial_response = ApplicationProcessorToCommsProcessorMessage::MachineDefinition(machine_definition.clone());
+    let initial_response = ApplicationProcessorToCommsProcessorMessage::MachineDefinition((*machine_definition).clone());
     if let Ok(output) = to_allocvec_cobs(&initial_response) {
         let _ = tx_sender.send(output).await;
         info!("Sent initial machine definition to ESP32");
@@ -80,7 +88,14 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
                                         let boot_time = now_unix - seconds_since_boot;
 
-                                        info!("System boot UNIX time: {}", boot_time);
+                                        if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
+                                            // Set time and sync to RTC if available
+                                           if TimeKeeper::set_time(now_datetime).is_ok() {
+                                                info!("System time synchronized to UTC (timestamp: {})", now_unix);
+                                            } else {
+                                                info!("Failed to set system time");
+                                            }
+                                        }
                                     }
 
                                     // Forward CommsStatus to controller
@@ -94,14 +109,17 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                 CommsProcessorToApplicationProcessorMessage::RequestConfiguration => {
                                     info!("Configuration requested by ESP32");
 
-                                    // Get current configuration if we have one
-                                    let current_config = last_sent_config.lock(|cell| cell.borrow().clone());
-                                    if let Some(ref config) = current_config {
-                                        let response = ApplicationProcessorToCommsProcessorMessage::Configuration(config.clone());
-                                        if let Ok(output) = to_allocvec_cobs(&response) {
-                                            let _ = tx_sender.send(output).await;
-                                            info!("Sent current configuration to ESP32");
-                                        }
+                                    // Serialize inside the lock to minimize clone lifetime
+                                    let output = last_sent_config.lock(|cell| {
+                                        cell.borrow().as_ref().and_then(|boxed_config| {
+                                            let response = ApplicationProcessorToCommsProcessorMessage::Configuration((**boxed_config).clone());
+                                            to_allocvec_cobs(&response).ok()
+                                        })
+                                    });
+
+                                    if let Some(output) = output {
+                                        let _ = tx_sender.send(output).await;
+                                        info!("Sent current configuration to ESP32");
                                     } else {
                                         info!("No configuration available yet");
                                     }
@@ -110,12 +128,31 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     info!("Machine definition requested by ESP32");
 
                                     // Send the machine definition
-                                    let response = ApplicationProcessorToCommsProcessorMessage::MachineDefinition(machine_definition.clone());
+                                    let response = ApplicationProcessorToCommsProcessorMessage::MachineDefinition((*machine_definition).clone());
                                     if let Ok(output) = to_allocvec_cobs(&response) {
                                         let _ = tx_sender.send(output).await;
                                         info!("Sent machine definition to ESP32");
                                     } else {
                                         info!("Failed to serialize machine definition");
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::RequestRoutines => {
+                                    info!("Routines requested by ESP32");
+
+                                    let repo_locked = routine_repository.lock().await;
+                                    // Fetch routines from repository
+                                    let routines = repo_locked.iterate_routines();
+
+                                    let routines = routines.cloned().collect::<Vec<_>>();
+                                    let routine_list = variegated_controller_types::RoutineList { routines };
+
+                                    // Send the routines
+                                    let response = ApplicationProcessorToCommsProcessorMessage::Routines(routine_list);
+                                    if let Ok(output) = to_allocvec_cobs(&response) {
+                                        let _ = tx_sender.send(output).await;
+                                        info!("Sent routines to ESP32");
+                                    } else {
+                                        info!("Failed to serialize routines");
                                     }
                                 }
                                 _ => {
@@ -143,14 +180,16 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             loop {
                 let config = configuration_receiver.next_message_pure().await;
 
-                // Always send configuration updates (since we can't compare Configuration directly)
-                // The ESP32 can handle duplicate configurations if needed
+                // Serialize and box in tight scope to minimize stack usage
                 let response = ApplicationProcessorToCommsProcessorMessage::Configuration(config.clone());
-                if let Ok(output) = to_allocvec_cobs(&response) {
+                let output = to_allocvec_cobs(&response);
+
+                if let Ok(output) = output {
                     let _ = tx_sender.send(output).await;
                     info!("Sent updated configuration to ESP32");
+                    // Box after successful send
                     last_sent_config.lock(|cell| {
-                        cell.replace(Some(config));
+                        cell.replace(Some(Box::new(config)));
                     });
                 } else {
                     info!("Failed to serialize configuration");

@@ -6,253 +6,19 @@ use core::fmt;
 use defmt::{info, Format};
 use embassy_time::{Duration, Instant};
 use heapless::FnvIndexMap;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType};
-
-type UserActionIndex = u8;
-pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
-
-#[derive(Clone, Copy, Debug, Format)]
-pub enum ParameterValue {
-    Static(f32),
-    Parameter(u8), // index into parameter map
-    DerivedParameter(u8), // index into derived parameter list (separate namespace)
-}
-
-impl fmt::Display for ParameterValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParameterValue::Static(value) => write!(f, "{:.1}", value),
-            ParameterValue::Parameter(index) => write!(f, "P{}", index),
-            ParameterValue::DerivedParameter(index) => write!(f, "D{}", index),
-        }
-    }
-}
-
-impl ParameterValue {
-    // For display purposes, treat Parameter as a placeholder value
-    pub fn as_secs(&self) -> u64 {
-        match self {
-            ParameterValue::Static(value) => *value as u64,
-            ParameterValue::Parameter(_) => 0, // Placeholder - should be resolved
-            ParameterValue::DerivedParameter(_) => 0, // Placeholder - should be resolved
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Format, PartialEq)]
-pub enum ParameterUnit {
-    Seconds,
-    Celsius,
-    Bar,
-    MillilitersPerSecond,
-    Grams,
-    Percent,
-}
-
-#[derive(Clone, Debug)]
-pub struct RoutineParameter {
-    pub index: u8,
-    pub name: String,  // User-facing, e.g. "Preinfusion Time", "Target Pressure"
-    pub default: f32,
-    pub unit: Option<ParameterUnit>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DerivedParameter {
-    pub index: u8,  // Separate index space from regular parameters
-    pub name: String,
-    pub unit: Option<ParameterUnit>,
-    pub formula: DerivedFormula,
-}
-
-#[derive(Clone, Debug)]
-pub enum DerivedFormula {
-    Linear {
-        base_param: u8,      // Index of base parameter
-        multiplier: f32,
-        offset: f32,
-    },
-    Sum {
-        params: Vec<u8>,     // Indices of parameters to sum
-    },
-    Difference {
-        param_a: u8,
-        param_b: u8,         // a - b
-    },
-    Product {
-        params: Vec<u8>,     // Indices of parameters to multiply
-    },
-}
-
-#[derive(Clone, Copy, Debug, Format)]
-pub enum StateCondition {
-    Brewing(GroupIndex),
-    NotBrewing(GroupIndex),
-    BoilerTemperatureAbove(BoilerIndex, ParameterValue),
-    BoilerTemperatureBelow(BoilerIndex, ParameterValue),
-    BoilerPressureAbove(BoilerIndex, ParameterValue),
-    BoilerPressureBelow(BoilerIndex, ParameterValue),
-    GroupInputFlowRateAbove(GroupIndex, ParameterValue),
-    GroupInputFlowRateBelow(GroupIndex, ParameterValue),
-    GroupPressureAbove(GroupIndex, ParameterValue),
-    GroupPressureBelow(GroupIndex, ParameterValue),
-    WaterTapFlowRateAbove(WaterTapIndex, ParameterValue),
-    WaterTapFlowRateBelow(WaterTapIndex, ParameterValue),
-    OutputWeightAbove(GroupIndex, ParameterValue),
-    OutputWeightBelow(GroupIndex, ParameterValue),
-    InputVolumeAboveRelativeToStart(GroupIndex, ParameterValue),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum RoutineExitCondition {
-    Always,
-    Never,
-    After(ParameterValue), // seconds as f32, converted to Duration at runtime
-    AfterDurationRelativeToStart(ParameterValue),
-    StateConditionMet(StateCondition),
-    UserAction(UserActionIndex),
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RoutineStepExitType {
-    NextStep,
-    JumpToStep(usize),
-    Finished,
-}
-
-#[derive(Clone, Debug)]
-pub enum RoutineCommand {
-    // Direct pass-through for non-parameterizable commands
-    StartBrewing(GroupIndex),
-    StopBrewing(GroupIndex),
-    TareGroupScale(GroupIndex),
-    
-    // Parameterizable commands
-    SetBoilerTemperature(BoilerIndex, ParameterValue),
-    SetBoilerPressure(BoilerIndex, ParameterValue),
-    SetGroupFlowRate(GroupIndex, ParameterValue),
-    SetGroupPressure(GroupIndex, ParameterValue),
-    SetGroupOutputFlowRate(GroupIndex, ParameterValue),
-    SetGroupFixedDutyCycle(GroupIndex, ParameterValue),
-    SetGroupFullOn(GroupIndex),
-    SetGroupOff(GroupIndex),
-    SetBoilerOff(BoilerIndex),
-    
-    // Transition-enabled commands (only for groups since only they support curves)
-    SetGroupFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-    SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-    SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-    SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-}
-
-#[derive(Clone, Debug)]
-pub struct RoutineExit {
-    pub condition: RoutineExitCondition,
-    pub then: RoutineStepExitType,
-    pub description: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RoutineStep {
-    entry_command: Option<RoutineCommand>,
-    exits: Vec<RoutineExit>,
-    description: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RoutineType {
-    HeatUp,
-    UserDefined,
-}
-
-#[derive(Clone)]
-pub struct Routine {
-    routine_type: RoutineType,
-    name: String,
-    parameters: Vec<RoutineParameter>, // max 8
-    derived_parameters: Vec<DerivedParameter>, // max 16
-    steps: Vec<RoutineStep>,
-}
-
-impl Routine {
-    pub fn new(routine_type: RoutineType, name: String, parameters: Vec<RoutineParameter>, derived_parameters: Vec<DerivedParameter>, steps: Vec<RoutineStep>) -> Self {
-        // Validate limits
-        assert!(parameters.len() <= 8, "Maximum 8 regular parameters allowed");
-        assert!(derived_parameters.len() <= 16, "Maximum 16 derived parameters allowed");
-        
-        Self {
-            routine_type,
-            name,
-            parameters,
-            derived_parameters,
-            steps,
-        }
-    }
-
-    pub fn routine_type(&self) -> RoutineType {
-        self.routine_type
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn steps(&self) -> &[RoutineStep] {
-        &self.steps
-    }
-
-    pub fn parameters(&self) -> &[RoutineParameter] {
-        &self.parameters
-    }
-    
-    pub fn derived_parameters(&self) -> &[DerivedParameter] {
-        &self.derived_parameters
-    }
-}
-
-impl RoutineExit {
-    pub fn new(condition: RoutineExitCondition, then: RoutineStepExitType) -> Self {
-        Self {
-            condition,
-            then,
-            description: None,
-        }
-    }
-
-    pub fn with_description(condition: RoutineExitCondition, then: RoutineStepExitType, description: String) -> Self {
-        Self {
-            condition,
-            then,
-            description: Some(description),
-        }
-    }
-
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
-}
-
-impl RoutineStep {
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
-
-    pub fn exits(&self) -> &[RoutineExit] {
-        &self.exits
-    }
-}
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, Routine, RoutineParameter, ParameterUnit, RoutineType, RoutineStep, RoutineCommand, RoutineExit, RoutineExitCondition, StateCondition, ParameterValue, RoutineStepExitType, RoutineParameters, DerivedFormula, UserActionIndex};
 
 pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
     let parameters = vec![
         RoutineParameter { 
             index: 0, 
-            name: "Tgt Flow Rate".into(), 
+            name: "Tgt Flow Rate".try_into().unwrap(),
             default: 2.0, 
             unit: Some(ParameterUnit::MillilitersPerSecond)
         },
         RoutineParameter { 
             index: 1, 
-            name: "Water amt".into(), 
+            name: "Water amt".try_into().unwrap(),
             default: 30.0, 
             unit: Some(ParameterUnit::Grams)
         },
@@ -260,7 +26,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
     
     Routine {
         routine_type: RoutineType::UserDefined,
-        name: "Water dispersal".into(),
+        name: "Water dispersal".try_into().unwrap(),
         parameters,
         derived_parameters: vec![], // No derived parameters for this routine
         steps: vec![
@@ -271,7 +37,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
                     RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightBelow(group, ParameterValue::Static(0.1))),
                     RoutineStepExitType::NextStep
                 )],
-                description: Some("Taring".into()),
+                description: Some("Taring".try_into().unwrap()),
             },
             // Step 1: Set target to flow rate
             RoutineStep {
@@ -281,7 +47,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
                     RoutineExitCondition::Always,
                     RoutineStepExitType::NextStep,
                 )],
-                description: Some("Setting target flow rate".into()),
+                description: Some("Setting target flow rate".try_into().unwrap()),
             },
             // Step 2: Start brewing, wait for the group to reach output weight above the specified amount
             RoutineStep {
@@ -290,7 +56,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
                     RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
                     RoutineStepExitType::NextStep
                 )],
-                description: Some("Dispensing water".into()),
+                description: Some("Dispensing water".try_into().unwrap()),
             },
             // Step 3: Stop brewing, then finish the routine
             RoutineStep {
@@ -299,9 +65,10 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
                     RoutineExitCondition::Always,
                     RoutineStepExitType::Finished
                 )],
-                description: Some("Stopping water flow".into()),
+                description: Some("Stopping water flow".try_into().unwrap()),
             },
         ],
+        finally: vec![],
     }
 }
 
@@ -314,7 +81,6 @@ pub struct RoutineExecutionContext<StateT, ConfigurationT> {
     pub(crate) execution_start_time: Option<Instant>,
     pub(crate) step_start_time: Option<Instant>,
     pub(crate) parameters: RoutineParameters, // resolved parameters
-    pub(crate) input_volume_at_start: Option<InputVolumeType>,
 
     pub(crate) saved_state: StateT,
     pub(crate) saved_configuration: ConfigurationT,
@@ -342,7 +108,6 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             execution_start_time: None,
             step_start_time: None,
             parameters,
-            input_volume_at_start: None,
             saved_state,
             saved_configuration,
         }
@@ -675,6 +440,14 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         }
     }
 
+    /// Get resolved finally commands to execute when routine exits
+    pub fn finally(&self, status: &Status) -> Vec<MachineCommand> {
+        self.routine.finally
+            .iter()
+            .map(|cmd| self.resolve_command(cmd, status))
+            .collect()
+    }
+
     pub fn step(&mut self, status: &Status, user_action: Option<UserActionIndex>) -> Option<MachineCommand> {
         if self.finished_executing {
             return None; // Routine has finished executing
@@ -683,11 +456,6 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         if self.current_step.is_none() {
             self.currently_executing = true;
             self.execution_start_time = Some(Instant::now());
-            // Capture the input volume at start from the first group's status
-            // This assumes group 0 exists - in practice this would be determined by the routine
-            if let Some(group_status) = status.get_group_status(0) {
-                self.input_volume_at_start = group_status.input_volume;
-            }
             return self.transition_to(0, status);
         }
 
@@ -809,17 +577,9 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             }
             StateCondition::InputVolumeAboveRelativeToStart(idx, pv) => {
                 let threshold = self.resolve_value(&pv);
-                if let Some(start_volume) = self.input_volume_at_start {
-                    status.get_group_status(idx).map_or(false, |s| {
-                        if let Some(current_volume) = s.input_volume {
-                            (current_volume - start_volume) > threshold as f64
-                        } else {
-                            false
-                        }
-                    })
-                } else {
-                    false
-                }
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.brew_input_volume.map_or(false, |volume| volume > threshold as f64)
+                })
             }
         }
     }
@@ -827,6 +587,15 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
 
 pub struct InMemoryRoutineRepository {
     routines: Vec<Routine>,
+}
+
+pub trait RoutineRepository {
+    fn get_routine(&self, index: usize) -> Option<&Routine>;
+    fn add_routine(&mut self, routine: Routine);
+    fn remove_routine(&mut self, index: usize) -> Option<Routine>;
+    fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str>;
+    fn iterate_routines(&self) -> impl Iterator<Item = &Routine>;
+    fn get_routine_count(&self) -> usize;
 }
 
 impl InMemoryRoutineRepository {
@@ -851,6 +620,15 @@ impl InMemoryRoutineRepository {
             None
         }
     }
+
+    pub fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str> {
+        if index < self.routines.len() {
+            self.routines[index] = routine;
+            Ok(())
+        } else {
+            Err("Index out of bounds")
+        }
+    }
     
     pub fn iterate_routines(&self) -> impl Iterator<Item = &Routine> {
         self.routines.iter()
@@ -865,35 +643,35 @@ impl InMemoryRoutineRepository {
 pub fn create_shot_routine(group: GroupIndex) -> Routine {
     Routine {
         routine_type: RoutineType::UserDefined,
-        name: "Smart shot".into(),
+        name: "Smart shot".try_into().unwrap(),
         parameters: vec![
             RoutineParameter {
                 index: 0,
-                name: "Preinf. Time".into(),
+                name: "Preinf. Time".try_into().unwrap(),
                 default: 5.0,
                 unit: Some(ParameterUnit::Seconds)
             },
             RoutineParameter {
                 index: 1,
-                name: "Brew Weight".into(),
+                name: "Brew Weight".try_into().unwrap(),
                 default: 50.0,
                 unit: Some(ParameterUnit::Grams)
             },
             RoutineParameter {
                 index: 2,
-                name: "Tgt Press".into(),
+                name: "Tgt Press".try_into().unwrap(),
                 default: 8.0,
                 unit: Some(ParameterUnit::Bar)
             },
             RoutineParameter {
                 index: 3,
-                name: "Resc Trigger".into(),
+                name: "Resc Trigger".try_into().unwrap(),
                 default: 2.5,
                 unit: Some(ParameterUnit::MillilitersPerSecond)
             },
             RoutineParameter {
                 index: 4,
-                name: "Rescue Flow".into(),
+                name: "Rescue Flow".try_into().unwrap(),
                 default: 1.5,
                 unit: Some(ParameterUnit::MillilitersPerSecond)
             },
@@ -916,16 +694,16 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                     RoutineExitCondition::After(ParameterValue::Static(1.0)),
                     RoutineStepExitType::NextStep
                 )],
-                description: Some("Fast fill".into()),
+                description: Some("Fast fill".try_into().unwrap()),
             },
             RoutineStep {
                 entry_command: None,
                 exits: vec![RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerPressureAbove(group, ParameterValue::Static(2.0))),
                     RoutineStepExitType::NextStep,
-                    "Group filled?".into()
+                    "Group filled?".try_into().unwrap()
                 )],
-                description: Some("Fast fill".into()),
+                description: Some("Fast fill".try_into().unwrap()),
             },
             // Step 3: Set pump to Off, then wait for preinfusion time
             RoutineStep {
@@ -933,9 +711,9 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 exits: vec![RoutineExit::with_description(
                     RoutineExitCondition::After(ParameterValue::Parameter(0)),
                     RoutineStepExitType::NextStep,
-                    "Pre-infusing".into()
+                    "Pre-infusing".try_into().unwrap()
                 )],
-                description: Some("Pre-infusion".into()),
+                description: Some("Pre-infusion".try_into().unwrap()),
             },
             // Step 4: Set pressure target to pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
             RoutineStep {
@@ -944,10 +722,10 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                     RoutineExit::with_description(
                         RoutineExitCondition::After(ParameterValue::Static(2.0)),
                         RoutineStepExitType::NextStep,
-                        "Stabilizing".into()
+                        "Stabilizing".try_into().unwrap()
                     )
                 ],
-                description: Some("Ramping to pressure".into()),
+                description: Some("Ramping to pressure".try_into().unwrap()),
             },
             // Step 5/6: Keep going at pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
             RoutineStep {
@@ -956,15 +734,15 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
                         RoutineStepExitType::JumpToStep(7),
-                        "Brew to weight".into()
+                        "Brew to weight".try_into().unwrap()
                     ),
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::GroupInputFlowRateAbove(group, ParameterValue::Parameter(3))),
                         RoutineStepExitType::NextStep,
-                        "Shot rescue".into()
+                        "Shot rescue".try_into().unwrap()
                     )
                 ],
-                description: Some("Brewing".into()),
+                description: Some("Brewing".try_into().unwrap()),
             },
             RoutineStep {
                 entry_command: Some(RoutineCommand::SetGroupFlowRate(group, ParameterValue::Parameter(4))),
@@ -972,10 +750,10 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
                         RoutineStepExitType::NextStep,
-                        "Brew to weight".into()
+                        "Brew to weight".try_into().unwrap()
                     ),
                 ],
-                description: Some("Shot rescue".into()),
+                description: Some("Shot rescue".try_into().unwrap()),
             },
             // Step 7: Stop brewing, then finish the routine
             RoutineStep {
@@ -984,9 +762,10 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                     RoutineExitCondition::Never,
                     RoutineStepExitType::Finished,
                 )],
-                description: Some("Finishing extraction".into()),
+                description: Some("Finishing extraction".try_into().unwrap()),
             },
         ],
+        finally: vec![],
     }
 }
 
@@ -996,7 +775,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
 
     Routine {
         routine_type: RoutineType::HeatUp,
-        name: "Heat-up".into(),
+        name: "Heat-up".try_into().unwrap(),
         parameters,
         derived_parameters: vec![], // No derived parameters for this routine
         steps: vec![
@@ -1006,31 +785,32 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, ParameterValue::Static(120.0))),
                     RoutineStepExitType::NextStep,
                 )],
-                description: Some("Heating to overshoot".into()),
+                description: Some("Heating to overshoot".try_into().unwrap()),
             },
             RoutineStep {
                 entry_command: None,
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::After(ParameterValue::Static(300.0)),
                     RoutineStepExitType::NextStep,
-                    "Waiting".into()
+                    "Waiting".try_into().unwrap()
                 )],
-                description: Some("Stabilizing temperature".into()),
+                description: Some("Stabilizing temperature".try_into().unwrap()),
             },
             RoutineStep {
                 entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Static(95.0))),
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureBelow(boiler_index, ParameterValue::Static(96.0))),
                     RoutineStepExitType::Finished,
-                    "Waiting".into()
+                    "Waiting".try_into().unwrap()
                 )],
-                description: Some("Adjusting to target".into()),
+                description: Some("Adjusting to target".try_into().unwrap()),
             },
         ],
+        finally: vec![],
     }
 }
 
-pub fn create_volumetric_shot_routine(group: GroupIndex, pulses: u16, bloom_after: Option<Duration>, bloom_time: Option<Duration>) -> Routine {
+pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom_after: Option<Duration>, bloom_time: Option<Duration>) -> Routine {
     let mut steps = vec![
         RoutineStep {
             entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
@@ -1046,7 +826,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, pulses: u16, bloom_afte
                 RoutineExitCondition::Always,
                 RoutineStepExitType::NextStep
             )],
-            description: Some("Filling".into()),
+            description: Some("Filling".try_into().unwrap()),
         },
     ];
 
@@ -1057,16 +837,16 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, pulses: u16, bloom_afte
                 RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
                 RoutineStepExitType::NextStep
             )],
-            description: Some("Filling".into()),
+            description: Some("Filling".try_into().unwrap()),
         });
         steps.push(RoutineStep {
             entry_command: Some(RoutineCommand::SetGroupOff(group)),
             exits: vec![RoutineExit::with_description(
                 RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
                 RoutineStepExitType::NextStep,
-                "Blooming".into()
+                "Blooming".try_into().unwrap()
             )],
-            description: Some("Blooming".into()),
+            description: Some("Blooming".try_into().unwrap()),
         });
         steps.push(RoutineStep {
             entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
@@ -1074,25 +854,36 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, pulses: u16, bloom_afte
                 RoutineExitCondition::Always,
                 RoutineStepExitType::NextStep
             )],
-            description: Some("Brewing".into()),
+            description: Some("Brewing".try_into().unwrap()),
         });
     }
 
     steps.push(RoutineStep {
         entry_command: None,
         exits: vec![RoutineExit::with_description(
-            RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Static(pulses as f32))),
-            RoutineStepExitType::Finished,
-            "Reached target volume".into()
+            RoutineExitCondition::StateConditionMet(StateCondition::InputVolumeAboveRelativeToStart(group, ParameterValue::Static(milliliters))),
+            RoutineStepExitType::NextStep,
+            "Reached target volume".try_into().unwrap()
         )],
-        description: Some("Brewing".into()),
+        description: Some("Brewing".try_into().unwrap()),
+    });
+
+    steps.push(RoutineStep {
+        entry_command: Some(RoutineCommand::StopBrewing(group)),
+        exits: vec![RoutineExit::with_description(
+            RoutineExitCondition::Always,
+            RoutineStepExitType::Finished,
+            "Reached target volume".try_into().unwrap()
+        )],
+        description: Some("Brewing".try_into().unwrap()),
     });
 
     Routine {
         routine_type: RoutineType::UserDefined,
-        name: "Volumetric shot".into(),
+        name: "Volumetric shot".try_into().unwrap(),
         parameters: vec![],
         derived_parameters: vec![], // No derived parameters for this routine
-        steps
+        steps,
+        finally: vec![],
     }
 }

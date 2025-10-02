@@ -19,6 +19,7 @@ members = [
     "variegated-mcp23017",
     "variegated-nv3007",
     "variegated-comms",
+    "variegated-timekeeping",
 ]
 resolver = "2"
 package = { rust-version = "1.85.0" }
