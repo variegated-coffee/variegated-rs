@@ -1,8 +1,10 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::{debug, error, info, warn, Format};
+use embassy_rp::adc::Config;
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::Receiver;
@@ -17,11 +19,12 @@ use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus};
-use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters};
+use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
+use crate::schedule::InMemoryScheduleStore;
 use crate::settings::SettingsStorage;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -35,7 +38,7 @@ pub struct DualBoilerSingleGroupPidParameters {
     pub pump_output_flow_rate_params: PidParameters,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DualBoilerSingleGroupPersistentConfiguration {
     pub brew_boiler_control_state: BoilerControlState,
     pub steam_boiler_control_state: BoilerControlState,
@@ -53,7 +56,7 @@ pub struct DualBoilerSingleGroupEphemeralConfiguration {
     pub group_brew_control_state: GroupBrewControlState,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DualBoilerSingleGroupConfiguration {
     pub persistent: DualBoilerSingleGroupPersistentConfiguration,
     pub ephemeral: DualBoilerSingleGroupEphemeralConfiguration,
@@ -261,11 +264,16 @@ pub struct DualBoilerSingleGroupController<
     routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
     current_routine: Option<RoutineExecutionContext<u8, DualBoilerSingleGroupConfiguration>>,
 
+    // Schedule store
+    schedule_store: &'static Mutex<NoopRawMutex, InMemoryScheduleStore>,
+
     // Status tracking
     previous_status: Option<Status>,
     brew_temperature_movavg: MovAvg<f32, f32, 10>,
     steam_temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
+    brew_start_input_volume: Option<InputVolumeType>,
+    previous_brew: Option<crate::PreviousBrewInfo>,
     curve_start_time: Option<Instant>,
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
@@ -302,6 +310,7 @@ impl<
         fill_mechanism: Option<DualBoilerFillMechanism<'a>>,
         settings_store: SettingsStoreT,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
+        schedule_store: &'static Mutex<NoopRawMutex, InMemoryScheduleStore>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
     ) -> Self {
@@ -328,17 +337,90 @@ impl<
             group_brewing: false,
             water_tap_dispensing: false,
             routine_repository,
+            schedule_store,
             current_routine: None,
             previous_status: None,
             brew_temperature_movavg: MovAvg::default(),
             steam_temperature_movavg: MovAvg::default(),
             brew_start_time: None,
+            brew_start_input_volume: None,
+            previous_brew: None,
             curve_start_time: None,
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
             watchdog,
         }
+    }
+
+    async fn create_general_configuration(&mut self) -> Configuration {
+        let mut configuration = Configuration::default();
+        let current_config = self.current_configuration();
+
+        // Add brew boiler configuration
+        let brew_boiler_config = BoilerConfiguration {
+            temperature_pid_parameters: current_config.persistent.pid_parameters.brew_boiler_temperature_params.clone(),
+            pressure_pid_parameters: current_config.persistent.pid_parameters.brew_boiler_pressure_params.clone(),
+            control_state: current_config.persistent.brew_boiler_control_state,
+            max_temperature: None,
+            max_pressure: None,
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            fill_config: None,
+        };
+        configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
+
+        // Add steam boiler configuration
+        let steam_boiler_config = BoilerConfiguration {
+            temperature_pid_parameters: current_config.persistent.pid_parameters.steam_boiler_temperature_params.clone(),
+            pressure_pid_parameters: current_config.persistent.pid_parameters.steam_boiler_pressure_params.clone(),
+            control_state: current_config.persistent.steam_boiler_control_state,
+            max_temperature: None,
+            max_pressure: None,
+            temperature_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: None,
+            fill_config: Some(FillConfiguration {
+                fill_threshold: current_config.persistent.service_boiler_fill_threshold,
+                pump_configuration: None,
+            }),
+        };
+        configuration.insert_boiler_configuration(SteamBoiler.as_index(), steam_boiler_config);
+
+        // Add group configuration
+        let group_config = GroupConfiguration {
+            flow_rate_pid_parameters: current_config.persistent.pid_parameters.pump_flow_rate_params.clone(),
+            output_flow_rate_pid_parameters: current_config.persistent.pid_parameters.pump_output_flow_rate_params.clone(),
+            pressure_pid_parameters: current_config.persistent.pid_parameters.pump_pressure_params.clone(),
+            brew_control_state: current_config.ephemeral.group_brew_control_state,
+            max_brew_time_seconds: None,
+            auto_tare_enabled: true,
+            pump_configuration: None,
+            pressure_sensor_kalman_parameters: None,
+            flow_sensor_pulses_per_liter: None,
+        };
+        configuration.insert_group_configuration(SingleGroup.as_index(), group_config);
+
+        let water_tap_config = WaterTapConfiguration {
+            pump_strategy: current_config.persistent.water_dispersal_pump_strategy,
+            temperature_target: None,
+            max_dispense_time_seconds: None,
+            flow_rate_limit: None,
+            pump_configuration: None,
+        };
+        configuration.insert_water_tap_configuration(0, water_tap_config);
+
+        // Add tank configuration if tank is present
+        // Note: We can't access self.tank here since this is a From implementation
+        // Tank configuration will need to be added separately when tank is detected
+        let tank_config = TankConfiguration {
+            low_level_warning_threshold: Some(20),
+            water_level_sensor_kalman_parameters: None,
+        };
+        configuration.insert_tank_configuration(0, tank_config);
+
+        configuration.schedules = self.schedule_store.lock().await.get_schedules().to_vec();
+
+        configuration
     }
 
     pub async fn task(&mut self) {
@@ -350,27 +432,14 @@ impl<
         loop {
             self.persistent_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
 
-            // Check if configuration changed and publish if it did
-            let current_config = self.current_configuration();
-            if current_config != last_configuration {
-                let config: Configuration = current_config.clone().into();
-                self.configuration_channel_sender.publish_immediate(config);
-                last_configuration = current_config;
-            }
+            last_configuration = self.update_configuration_if_changed(last_configuration).await;
 
             // Handle incoming commands
             while !self.command_channel_receiver.is_empty() {
                 let command = self.command_channel_receiver.try_receive();
                 if let Ok(command) = command {
                     self.handle_command(command).await;
-
-                    // Check if configuration changed after handling command
-                    let current_config = self.current_configuration();
-                    if current_config != last_configuration {
-                        let config: Configuration = current_config.clone().into();
-                        self.configuration_channel_sender.publish_immediate(config);
-                        last_configuration = current_config;
-                    }
+                    last_configuration = self.update_configuration_if_changed(last_configuration).await;
                 }
             }
 
@@ -413,8 +482,7 @@ impl<
             // Publish configuration every 10 seconds regardless of changes
             if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
                 let current_config = self.current_configuration();
-                let config: Configuration = current_config.clone().into();
-                self.configuration_channel_sender.publish_immediate(config);
+                self.publish_general_configuration().await;
                 info!("Periodic configuration published");
                 last_configuration_publish = now;
                 last_configuration = current_config;
@@ -427,6 +495,22 @@ impl<
 
             Timer::after_millis(100).await;
         }
+    }
+
+    async fn update_configuration_if_changed(&mut self, previous_configuration: DualBoilerSingleGroupConfiguration) -> DualBoilerSingleGroupConfiguration {
+        // Check if configuration changed and publish if it did
+        let current_config = self.current_configuration();
+        if current_config != previous_configuration {
+            self.publish_general_configuration().await;
+            return current_config;
+        }
+
+        previous_configuration
+    }
+
+    async fn publish_general_configuration(&mut self) {
+        let config: Configuration = self.create_general_configuration().await;;
+        self.configuration_channel_sender.publish_immediate(config);
     }
 
     // Safety interlock logic
@@ -623,13 +707,13 @@ impl<
             GroupBrewControlMode::FixedDutyCycle => {
                 let duty_cycle = control_state.values.duty_cycle;
                 self.group.set_brewing_state(true, duty_cycle).await;
-                info!("Fixed duty cycle target: {}", duty_cycle);
+                //info!("Fixed duty cycle target: {}", duty_cycle);
                 Output::FixedDutyCycle(duty_cycle)
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
                 let target_duty_cycle = control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
-                info!("Fixed duty cycle curve target: {}", target_duty_cycle);
-                info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
+                //info!("Fixed duty cycle curve target: {}", target_duty_cycle);
+                //info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
                 self.group.set_brewing_state(true, target_duty_cycle).await;
                 Output::FixedDutyCycle(target_duty_cycle)
             }
@@ -691,10 +775,16 @@ impl<
             control_state: self.persistent_configuration.steam_boiler_control_state,
         };
 
+        let brew_input_volume = match (self.brew_start_input_volume, self.group.get_input_volume()) {
+            (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
+            _ => None,
+        };
+
         let group_status = GroupStatus {
             is_brewing: self.group_brewing,
             three_way_valve_open: self.group.get_three_way_valve_open(),
             brew_time: self.brew_start_time.map(|start| start.elapsed().into()),
+            brew_input_volume,
             input_flow_rate: self.group.get_input_flow_rate(),
             input_volume: self.group.get_input_volume(),
             output_flow_rate: self.group.get_output_flow_rate(),
@@ -703,6 +793,7 @@ impl<
             temperature: self.group.get_temperature(),
             pump_output: pump_output.clone(),
             control_state: self.ephemeral_configuration.group_brew_control_state,
+            previous_brew: self.previous_brew.map(|info| info.into()),
         };
 
         // Calculate current timestamp if we have comms_status
@@ -769,6 +860,25 @@ impl<
     }
 
     async fn handle_command(&mut self, command: MachineCommand) {
+        info!("Received command: {:?}", command);
+
+        match command {
+            MachineCommand::RunRoutine(index, params) => {
+                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
+                self.handle_routine_start(index, params).await;
+            }
+            MachineCommand::CancelRoutine => {
+                info!("Cancelling routine");
+                self.handle_routine_exit().await;
+            }
+            _ => {
+                // All other commands delegate to the finally handler
+                self.handle_routine_finally_commands(command).await;
+            }
+        }
+    }
+
+    async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::StartBrewing(_) => {
                 if self.persistent_configuration.allow_simultaneous_operations || !self.water_tap_dispensing {
@@ -986,14 +1096,6 @@ impl<
                     }
                 }
             }
-            MachineCommand::RunRoutine(index, params) => {
-                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
-                self.handle_routine_start(index, params).await;
-            }
-            MachineCommand::CancelRoutine => {
-                info!("Cancelling routine");
-                self.handle_routine_exit().await;
-            }
             MachineCommand::TareGroupScale(group_index) => {
                 if group_index == 0 {
                     info!("Taring group scale");
@@ -1023,6 +1125,43 @@ impl<
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }
+            MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
+                warn!("Ignoring unsupported command in finally block: {:?}", command);
+            }
+            MachineCommand::RemoveScheduleItem(idx) => {
+                info!("Removing schedule item at index {}", idx);
+                let res = self.schedule_store.lock().await.remove_schedule(idx);
+                if res.is_none() {
+                    warn!("Failed to remove schedule at index {}: index out of bounds", idx);
+                }
+            }
+            MachineCommand::AddScheduleItem(item) => {
+                info!("Adding new schedule item");
+                self.schedule_store.lock().await.add_schedule(item);
+            }
+            MachineCommand::UpdateScheduleItem(idx, item) => {
+                info!("Updating schedule item at index {}", idx);
+                let res = self.schedule_store.lock().await.update_schedule(idx, item);
+                if res.is_err() {
+                    warn!("Failed to update schedule at index {}: index out of bounds", idx);
+                }
+            }
+            MachineCommand::AddRoutine(routine) => {
+                info!("Adding new routine");
+                self.routine_repository.lock().await.add_routine(routine);
+            }
+            MachineCommand::RemoveRoutine(idx) => {
+                let res = self.routine_repository.lock().await.remove_routine(idx);
+                if res.is_none() {
+                    warn!("Failed to remove routine at index {}: index out of bounds", idx);
+                }
+            }
+            MachineCommand::UpdateRoutine(idx, Routine) => {
+                let res = self.routine_repository.lock().await.update_routine(idx, Routine);
+                if res.is_err() {
+                    warn!("Failed to update routine at index {}: index out of bounds", idx);
+                }
+            }
         }
     }
 
@@ -1031,6 +1170,7 @@ impl<
             info!("Starting brewing");
             self.group_brewing = true;
             self.brew_start_time = Some(Instant::now());
+            self.brew_start_input_volume = self.group.get_input_volume();
             self.group.set_brewing_state(true, 0).await;
 
             // Give initial PID boost for temperature drop compensation
@@ -1047,8 +1187,28 @@ impl<
     async fn stop_brewing(&mut self) {
         if self.group_brewing {
             info!("Stopping brewing");
+
+            // Capture previous brew data before clearing
+            if let Some(started_at) = self.brew_start_time {
+                let stopped_at = Instant::now();
+                let brew_time = started_at.elapsed().into();
+                let brew_input_volume = self.brew_start_input_volume.and_then(|start_volume|
+                    self.group.get_input_volume().map(|current| current - start_volume)
+                );
+                let output_weight = self.group.get_output_weight();
+
+                self.previous_brew = Some(crate::PreviousBrewInfo {
+                    brew_time,
+                    brew_input_volume,
+                    output_weight,
+                    started_at,
+                    stopped_at,
+                });
+            }
+
             self.group_brewing = false;
             self.brew_start_time = None;
+            self.brew_start_input_volume = None;
             self.curve_start_time = None;
             self.group.set_brewing_state(false, 0).await;
 
@@ -1099,84 +1259,34 @@ impl<
     async fn handle_routine_exit(&mut self) {
         if let Some(routine) = self.current_routine.take() {
             info!("Routine execution finished, saving state and configuration");
+
+            // Get finally commands
+            let default_status = Status::default();
+            let status = self.previous_status.as_ref().unwrap_or(&default_status);
+            let finally_commands = routine.finally(status);
+
+            // In a single group setting, it always makes sense to stop brewing and water tap dispensing
+            if self.group_brewing {
+                self.stop_brewing().await;
+            }
+            if self.water_tap_dispensing {
+                self.stop_water_tap_dispensing().await;
+            }
+
             // Restore saved configuration by splitting into persistent and ephemeral parts
             let saved_config = &routine.saved_configuration;
-            self.persistent_configuration = saved_config.persistent;
+            self.persistent_configuration = saved_config.persistent.clone();
             self.ephemeral_configuration = saved_config.ephemeral;
             // Save the restored persistent configuration
             self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             self.curve_start_time = None;
+
+            // Execute finally commands
+            for cmd in finally_commands {
+                self.handle_routine_finally_commands(cmd).await;
+            }
         } else {
             warn!("No routine to exit");
         }
-    }
-}
-
-impl From<DualBoilerSingleGroupConfiguration> for Configuration {
-    fn from(config: DualBoilerSingleGroupConfiguration) -> Self {
-        let mut configuration = Configuration::default();
-
-        // Add brew boiler configuration
-        let brew_boiler_config = BoilerConfiguration {
-            temperature_pid_parameters: config.persistent.pid_parameters.brew_boiler_temperature_params.clone(),
-            pressure_pid_parameters: config.persistent.pid_parameters.brew_boiler_pressure_params.clone(),
-            control_state: config.persistent.brew_boiler_control_state,
-            max_temperature: None,
-            max_pressure: None,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
-            fill_config: None,
-        };
-        configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
-
-        // Add steam boiler configuration
-        let steam_boiler_config = BoilerConfiguration {
-            temperature_pid_parameters: config.persistent.pid_parameters.steam_boiler_temperature_params.clone(),
-            pressure_pid_parameters: config.persistent.pid_parameters.steam_boiler_pressure_params.clone(),
-            control_state: config.persistent.steam_boiler_control_state,
-            max_temperature: None,
-            max_pressure: None,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
-            fill_config: Some(FillConfiguration {
-                fill_threshold: config.persistent.service_boiler_fill_threshold,
-                pump_configuration: None,
-            }),
-        };
-        configuration.insert_boiler_configuration(SteamBoiler.as_index(), steam_boiler_config);
-
-        // Add group configuration
-        let group_config = GroupConfiguration {
-            flow_rate_pid_parameters: config.persistent.pid_parameters.pump_flow_rate_params.clone(),
-            output_flow_rate_pid_parameters: config.persistent.pid_parameters.pump_output_flow_rate_params.clone(),
-            pressure_pid_parameters: config.persistent.pid_parameters.pump_pressure_params.clone(),
-            brew_control_state: config.ephemeral.group_brew_control_state,
-            max_brew_time_seconds: None,
-            auto_tare_enabled: true,
-            pump_configuration: None,
-            pressure_sensor_kalman_parameters: None,
-            flow_sensor_pulses_per_liter: None,
-        };
-        configuration.insert_group_configuration(SingleGroup.as_index(), group_config);
-
-        let water_tap_config = WaterTapConfiguration {
-            pump_strategy: config.persistent.water_dispersal_pump_strategy,
-            temperature_target: None,
-            max_dispense_time_seconds: None,
-            flow_rate_limit: None,
-            pump_configuration: None,
-        };
-        configuration.insert_water_tap_configuration(0, water_tap_config);
-
-        // Add tank configuration if tank is present
-        // Note: We can't access self.tank here since this is a From implementation
-        // Tank configuration will need to be added separately when tank is detected
-        let tank_config = TankConfiguration {
-            low_level_warning_threshold: Some(20),
-            water_level_sensor_kalman_parameters: None,
-        };
-        configuration.insert_tank_configuration(0, tank_config);
-
-        configuration
     }
 }

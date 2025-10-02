@@ -1,0 +1,34 @@
+[package]
+name = "variegated-timekeeping"
+version = "0.1.0"
+edition = "2024"
+description = "Date and time handling for embedded espresso machine controllers"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT OR Apache-2.0"
+keywords = ["embedded", "async", "datetime", "timezone"]
+categories = ["embedded", "date-and-time", "no-std"]
+
+[lib]
+test = false
+bench = false
+
+[features]
+default = []
+defmt = ["dep:defmt", "embassy-time/defmt", "embassy-sync/defmt"]
+serde = ["chrono/serde"]
+
+[dependencies]
+embassy-time = "0.4"
+embassy-sync = "0.7"
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+# chrono-tz = { version = "0.10", default-features = false }
+defmt = { version = "0.3", optional = true }
+
+[dev-dependencies]
+embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.4.0", features = ["defmt"] }
+embassy-rp = { version = "0.6.0", features = ["defmt", "time-driver", "rp235xb"] }
+cortex-m-rt = "0.7.0"
+defmt = "0.3"
+defmt-rtt = "0.4"
+panic-probe = { version = "0.3", features = ["print-defmt"] }

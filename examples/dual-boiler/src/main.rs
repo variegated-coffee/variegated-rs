@@ -9,9 +9,11 @@ use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::pin::Pin;
+use chrono::NaiveDateTime;
 use defmt::{info, unwrap};
 use heapless::FnvIndexMap;
 use display_interface_spi::SPIInterface;
+use ds3231::{Config, InterruptControl, Oscillator, SquareWaveFrequency, TimeRepresentation, DS3231};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
@@ -48,7 +50,9 @@ use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurem
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
 use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMechanism, DualBoilerWaterTapMechanism, DualBoilerMechanism, DualBoilerConfig, DualBoilerFillMechanism};
+use variegated_timekeeping::TimeKeeper;
 use embassy_rp::bind_interrupts;
+use embassy_rp::i2c::I2c;
 use embassy_rp::pio::Pio;
 use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::priority_channel::Min;
@@ -64,7 +68,7 @@ use futures::future::join_all;
 use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -84,7 +88,7 @@ use display::lcd_display_task;
 use buttons::button_controller_task;
 use led_controller::led_controller_task;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
-use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
+use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -96,6 +100,7 @@ use variegated_hal::noop::NoopOutputPin;
 use variegated_hal::scale::gravity::GravityStatusProvider;
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
+use variegated_controller_lib::schedule::InMemoryScheduleStore;
 use variegated_hal::gpio::gpio_pio_pulse_counter::GpioPioTransformingPulseCounter;
 use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
 
@@ -106,12 +111,20 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
     AdcIrq => adc::InterruptHandler;
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
+    QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
     FlowMeterPioIrq => pio::InterruptHandler<FlowMeterPeripheralsPio>;
 });
 
 // Embassy task wrapper for ESP transceiver (dual-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition) {
+async fn esp_transceiver_task(
+    esp_p: Esp32Peripherals,
+    status_receiver: Subscriber<'static, CriticalSectionRawMutex, Status, 1, 4, 1>,
+    configuration_receiver: Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, 4, 1>,
+    command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, MachineCommand, 10>,
+    machine_definition: MachineDefinition,
+    routine_repository: &'static RoutineRepository,
+) {
     let mut config = uart::Config::default();
     config.baudrate = 115200;
 
@@ -126,8 +139,9 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, command_sender, machine_definition).await;
+    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition).await;
 }
+
 
 #[variegated_board_cfg::board_cfg("eyespi_display_peripherals")]
 struct DisplayPeripherals {
@@ -154,6 +168,13 @@ struct InternalSpiBusPeripherals {
 
 #[variegated_board_cfg::board_cfg("internal_i2c_bus_peripherals")]
 struct InternalI2cBusPeripherals {
+    i2c: Peri<'static, ()>,
+    sda_pin: Peri<'static, ()>,
+    scl_pin: Peri<'static, ()>,
+}
+
+#[variegated_board_cfg::board_cfg("qwiic_i2c_bus_peripherals")]
+struct QwiicI2cBusPeripherals {
     i2c: Peri<'static, ()>,
     sda_pin: Peri<'static, ()>,
     scl_pin: Peri<'static, ()>,
@@ -236,6 +257,8 @@ struct WatchdogPeripherals {
 
 type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
+type QwiicI2CDevice = I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
+type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
 type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
@@ -243,7 +266,6 @@ type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRa
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
 type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>, Output<'static>>;
 type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
-
 
 const STATUS_RECEIVERS: usize = 4;
 type StatusChannel = PubSubChannel<CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
@@ -254,6 +276,7 @@ type ConfigurationChannel = PubSubChannel<CriticalSectionRawMutex, Configuration
 type ConfigurationSubscriber = Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 
 type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
+type ScheduleStore = Mutex<NoopRawMutex, InMemoryScheduleStore>;
 
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
@@ -267,6 +290,7 @@ fn main() -> ! {
 
 static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
 static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
+static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
 static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
 static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
@@ -286,6 +310,7 @@ static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineComma
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
+static SCHEDULE_STORE: StaticCell<ScheduleStore> = StaticCell::new();
 
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -297,7 +322,7 @@ static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
 async fn main_task(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
 
-    Timer::after_millis(2000).await;
+    Timer::after_millis(1000).await;
     defmt::info!("Starting!");
     let psram_config = embassy_rp::psram::Config::aps6404l();
     defmt::info!("Initing!");
@@ -375,17 +400,45 @@ async fn main_task(spawner: Spawner) -> ! {
     let fill_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_fill_solenoid, Low)));
     let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
 
-    let i2c_p = internal_i2c_bus_peripherals!(p);
-    let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
-    let i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(i2c_bus));
-    
-    let mut fdc1004_dev = I2cDevice::new(i2c_bus);
+    let internal_i2c_p = internal_i2c_bus_peripherals!(p);
+    let internal_i2c_bus = embassy_rp::i2c::I2c::new_async(internal_i2c_p.i2c, internal_i2c_p.scl_pin, internal_i2c_p.sda_pin, Irqs, i2c::Config::default());
+    let internal_i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(internal_i2c_bus));
+
+    let qwiic_i2c_p = qwiic_i2c_bus_peripherals!(p);
+    let qwiic_i2c_bus = embassy_rp::i2c::I2c::new_async(qwiic_i2c_p.i2c, qwiic_i2c_p.scl_pin, qwiic_i2c_p.sda_pin, Irqs, i2c::Config::default());
+    let qwiic_i2c_bus = QWIIC_I2C_BUS.init(Mutex::new(qwiic_i2c_bus));
+
+    let rtc_dev = I2cDevice::new(qwiic_i2c_bus);
+/*    let mut rtc = DS3231::new(rtc_dev, 0x68);
+    let config = Config {
+        time_representation: TimeRepresentation::TwentyFourHour,
+        square_wave_frequency: SquareWaveFrequency::Hz1,
+        interrupt_control: InterruptControl::SquareWave,
+        battery_backed_square_wave: false,
+        oscillator_enable: Oscillator::Enabled,
+    };
+    rtc.configure(&config).await.unwrap();*/
+
+    // Initialize TimeKeeper with timezone
+    TimeKeeper::init();
+
+/*    let res = rtc.datetime().await;
+    match res {
+        Ok(datetime) => {
+            info!("RTC datetime: {:?}", datetime.format("%Y-%m-%d %H:%M:%S").to_string().as_str());
+        }
+        Err(e) => {
+            info!("Error reading RTC datetime");
+        }
+    }*/
+
+    let mut fdc1004_dev = I2cDevice::new(internal_i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
 
     let fdc1004 = FDC_MUTEX.init(Mutex::new(fdc1004));
 
     // Initialize MCP23017 for button control
-    let mut mcp23017_dev = I2cDevice::new(i2c_bus);
+    let mut mcp23017_dev = I2cDevice::new(internal_i2c_bus);
     let btn_mcp23017_config = Mcp23017Config {
         address: 0x20, // Default MCP23017 address
         sequential_operation: true,
@@ -403,7 +456,7 @@ async fn main_task(spawner: Spawner) -> ! {
     btn_mcp23017.set_pin_pullup(4, true).await.unwrap();
     btn_mcp23017.set_pin_pullup(5, true).await.unwrap();
 
-    let mut tlc_dev = I2cDevice::new(i2c_bus);
+    let mut tlc_dev = I2cDevice::new(internal_i2c_bus);
 
     let iref_config = IrefConfig {
         current_multiplier: false,
@@ -423,7 +476,7 @@ async fn main_task(spawner: Spawner) -> ! {
     tlc.init().await.unwrap();
 
     // Initialize MCP23017 for LCD control
-    let mut mcp23017_dev = I2cDevice::new(i2c_bus);
+    let mut mcp23017_dev = I2cDevice::new(internal_i2c_bus);
     let lcd_mcp23017_config = Mcp23017Config {
         address: 0x21, // LCD MCP23017 address
         sequential_operation: true,
@@ -642,9 +695,26 @@ async fn main_task(spawner: Spawner) -> ! {
     let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
 
     let mut routine_repository = InMemoryRoutineRepository::new();
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
+    routine_repository.add_routine(create_volumetric_shot_routine(0, 64.5, None, None));
+    routine_repository.add_routine(create_volumetric_shot_routine(0, 84.5, Some(Duration::from_secs(3)), Some(Duration::from_secs(7))));
+    routine_repository.add_routine(create_volumetric_shot_routine(0, 68.0, None, None));
+    routine_repository.add_routine(create_volumetric_shot_routine(0, 84.5, None, None));
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
+
+    let mut schedule_store = InMemoryScheduleStore::new();
+    schedule_store.add_schedule(ScheduleItem {
+        trigger_at: ScheduleTrigger {
+            on_hour: 10,
+            on_minute: 30,
+            on_days: None,
+            on_date: None,
+            once: false,
+            enabled: true
+        },
+        commands: vec![MachineCommand::CancelRoutine]
+    });
+    let schedule_store_ref = SCHEDULE_STORE.init(Mutex::new(schedule_store));
 
     // Create the MachineDefinition for a dual boiler single group machine
     let mut machine_definition = MachineDefinition {
@@ -787,6 +857,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(fill_mechanism),
         settings_storage,
         routine_repository_ref,
+        schedule_store_ref,
         peripheral_registry,
         Some(watchdog),
     );
@@ -795,7 +866,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let display_status_receiver = status_channel.subscriber().expect("Failed to get display status subscriber");
 
     // Spawn the LCD display task
-    unwrap!(spawner.spawn(lcd_display_task(lcd_device, display_status_receiver)));
+    unwrap!(spawner.spawn(lcd_display_task(lcd_device, display_status_receiver, routine_repository_ref)));
 
     // Create status subscriber for button controller and spawn the task
     let button_status_receiver = status_channel.subscriber().expect("Failed to get button status subscriber");
@@ -816,12 +887,14 @@ async fn main_task(spawner: Spawner) -> ! {
     let esp_command_sender = command_channel.sender();
 
     // Spawn the ESP transceiver task
-    unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition)));
+    unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
 
     // Spawn the SD detect pin toggle task
-    unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
+    //unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
 
     info!("Creating huge future join task");
+
+    //let rtc_future = sync_rtc(&mut rtc);
 
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
         vec![
@@ -835,6 +908,7 @@ async fn main_task(spawner: Spawner) -> ! {
             Box::pin(steam_boiler_water_level.task()),
             Box::pin(tank_water_level.task()),
             Box::pin(controller.task()),
+            //Box::pin(rtc_future),
         ];
 
     join_all(futures).await;
@@ -845,6 +919,27 @@ async fn main_task(spawner: Spawner) -> ! {
         Timer::after_millis(3000).await;
     }
 
+}
+/*
+async fn sync_rtc(rtc: &mut DS3231<QwiicI2CDevice>) {
+    Timer::after(Duration::from_secs(30)).await;
+
+    loop {
+        // Get current time from TimeKeeper
+        let now = TimeKeeper::now_utc();
+
+        if let Some(now) = now {
+            let naive = now.naive_utc();
+/*            let res = rtc.set_datetime(&naive).await;
+
+            match res {
+                Ok(()) => info!("RTC synchronized to UTC time: {:?}", naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()),
+                Err(e) => info!("Error setting RTC datetime"),
+            }*/
+        }
+
+        Timer::after(Duration::from_secs(3600)).await;
+    }
 }
 
 #[embassy_executor::task]
@@ -975,4 +1070,4 @@ async fn display_task(disp_p: DisplayPeripherals) {
         // Update at ~30 FPS for smooth animation
 //        Timer::after_millis(33).await;
     }
-}
+}*/

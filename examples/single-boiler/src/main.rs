@@ -64,7 +64,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{BoilerControlTarget, Configuration, DutyCycleType, FlowRateType, GroupBrewControlTarget, MachineCommand, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
+use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
@@ -489,6 +489,7 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(prs_sig.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
+        None, // input_volume_sensor
         None, // output_flow_sig has different raw type (i32) than flow_meter_sig (f32)
         Some(output_weight_sig.receiver().unwrap()),
     );

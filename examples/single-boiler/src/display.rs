@@ -1131,6 +1131,9 @@ impl DisplayController {
             StateCondition::OutputWeightBelow(_, _) => {
                 "Waiting for output".into()
             }
+            StateCondition::InputVolumeAboveRelativeToStart(_, _) => {
+                "Waiting for volume".into()
+            }
         }
     }
 

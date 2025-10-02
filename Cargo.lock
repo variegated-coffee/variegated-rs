@@ -200,6 +200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "145052bdd345b87320e369255277e3fb5152762ad123a901ef5c262dd38fe8d2"
 dependencies = [
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -443,12 +444,17 @@ dependencies = [
  "bitfield 0.19.2",
  "cfg-if",
  "chrono",
- "defmt 1.0.1",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "maybe-async-cfg",
  "paste",
 ]
+
+[[package]]
+name = "dyn-clone"
+version = "1.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "either"
@@ -485,7 +491,21 @@ dependencies = [
  "critical-section",
  "defmt 0.3.100",
  "document-features",
- "embassy-executor-macros",
+ "embassy-executor-macros 0.6.2",
+]
+
+[[package]]
+name = "embassy-executor"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06070468370195e0e86f241c8e5004356d696590a678d47d6676795b2e439c6b"
+dependencies = [
+ "cortex-m",
+ "critical-section",
+ "defmt 1.0.1",
+ "document-features",
+ "embassy-executor-macros 0.7.0",
+ "embassy-executor-timer-queue",
 ]
 
 [[package]]
@@ -499,6 +519,24 @@ dependencies = [
  "quote",
  "syn 2.0.106",
 ]
+
+[[package]]
+name = "embassy-executor-macros"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfdddc3a04226828316bf31393b6903ee162238576b1584ee2669af215d55472"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "embassy-executor-timer-queue"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc328bf943af66b80b98755db9106bf7e7471b0cf47dc8559cd9a6be504cc9c"
 
 [[package]]
 name = "embassy-futures"
@@ -634,7 +672,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc55c748d16908a65b166d09ce976575fb8852cf60ccd06174092b41064d8f83"
 dependencies = [
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "heapless 0.8.0",
 ]
 
@@ -823,6 +861,7 @@ checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
 name = "examples"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
@@ -830,7 +869,7 @@ dependencies = [
  "display-interface-spi",
  "ds3231",
  "embassy-embedded-hal",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-futures",
  "embassy-rp",
  "embassy-sync 0.7.0",
@@ -863,6 +902,7 @@ dependencies = [
  "variegated-mcp23017",
  "variegated-mcp9600",
  "variegated-nv3007",
+ "variegated-timekeeping",
  "variegated-tlc59108",
  "w25q32jv",
 ]
@@ -1085,6 +1125,12 @@ checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
+
+[[package]]
+name = "itoa"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
 name = "keccak"
@@ -1648,6 +1694,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+dependencies = [
+ "dyn-clone",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1714,6 +1784,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.106",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.29.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.143"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d401abef1d108fbd9cbaebc3e46611f4b1021f714a0597a71f41ee463f5f4a5a"
+dependencies = [
+ "itoa",
+ "memchr",
+ "ryu",
+ "serde",
 ]
 
 [[package]]
@@ -2031,7 +2124,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-embedded-hal",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-futures",
  "embassy-rp",
  "embassy-time",
@@ -2058,8 +2151,9 @@ dependencies = [
 name = "variegated-comms"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "defmt 0.3.100",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-futures",
  "embassy-rp",
  "embassy-sync 0.7.0",
@@ -2067,7 +2161,9 @@ dependencies = [
  "embedded-alloc",
  "postcard",
  "serde",
+ "variegated-controller-lib",
  "variegated-controller-types",
+ "variegated-timekeeping",
 ]
 
 [[package]]
@@ -2076,6 +2172,7 @@ version = "0.1.0"
 dependencies = [
  "defmt 0.3.100",
  "num-traits",
+ "schemars",
  "serde",
 ]
 
@@ -2112,8 +2209,10 @@ dependencies = [
 name = "variegated-controller-types"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "defmt 0.3.100",
  "heapless 0.8.0",
+ "schemars",
  "serde",
  "variegated-control-algorithm",
 ]
@@ -2134,7 +2233,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-executor",
+ "embassy-executor 0.9.1",
  "embassy-rp",
  "embassy-time",
  "log",
@@ -2153,7 +2252,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-embedded-hal",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-rp",
  "embassy-time",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2207,7 +2306,7 @@ version = "0.1.0"
 dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-rp",
  "embassy-usb-logger",
  "log",
@@ -2221,7 +2320,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-embedded-hal",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-futures",
  "embassy-rp",
  "embassy-sync 0.7.0",
@@ -2252,7 +2351,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-embedded-hal",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-rp",
  "embassy-time",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2268,7 +2367,7 @@ dependencies = [
  "defmt-rtt",
  "display-interface",
  "display-interface-spi",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-rp",
  "embassy-sync 0.7.0",
  "embassy-time",
@@ -2288,6 +2387,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-timekeeping"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cortex-m-rt",
+ "defmt 0.3.100",
+ "defmt-rtt",
+ "embassy-executor 0.7.0",
+ "embassy-rp",
+ "embassy-sync 0.7.0",
+ "embassy-time",
+ "panic-probe",
+]
+
+[[package]]
 name = "variegated-tlc59108"
 version = "0.1.0"
 dependencies = [
@@ -2295,7 +2409,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embassy-embedded-hal",
- "embassy-executor",
+ "embassy-executor 0.7.0",
  "embassy-rp",
  "embassy-time",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",

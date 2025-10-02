@@ -148,7 +148,7 @@ impl LedBreathingState {
 
         // LED 5: Intense when brewing
         if self.is_brewing {
-            brightness[5] = self.calculate_brewing_brightness();
+            brightness[1] = self.calculate_brewing_brightness();
         }
 
         brightness

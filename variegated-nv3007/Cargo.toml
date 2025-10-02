@@ -27,7 +27,7 @@ defmt = { version = "0.3", optional = true }
 embedded-graphics-core = { version = "0.4", optional = true }
 
 [dev-dependencies]
-embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 embassy-rp = { version = "0.6.0", features = ["defmt", "time-driver", "rp235xb"] }
 display-interface-spi = "0.5"
 cortex-m-rt = "0.7.0"

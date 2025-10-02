@@ -11,6 +11,7 @@ pub enum PidError {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct PidTerm<T: FloatCore + Default> {
@@ -38,6 +39,7 @@ impl <T: FloatCore + Default> PidTerm<T> {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct PidParameters<T: FloatCore + core::default::Default> {
@@ -48,6 +50,7 @@ pub struct PidParameters<T: FloatCore + core::default::Default> {
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Limits<T: FloatCore + core::default::Default> {
     lower: T,
@@ -296,6 +299,7 @@ impl<T: FloatCore + core::default::Default> PidIn<T> {
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Hash, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PidOut<T: FloatCore + core::default::Default> {
     pub p: T,

@@ -148,3 +148,4 @@ Since this project contains embedded code that targets `thumbv8m.main-none-eabih
 
 This project is in active development with unstable APIs (< 1.0.0). Breaking changes occur between minor versions but not patch versions.
 - If checking or building a particular crate doesn't work, you should try to build the examples.
+- You're not done until both the dual-boiler and single-boiler examples compile

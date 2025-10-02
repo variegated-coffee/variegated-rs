@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::{error, info, warn, Format};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
@@ -16,8 +17,8 @@ use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankStatus};
-use crate::routine::{RoutineParameters, RoutineExecutionContext, InMemoryRoutineRepository};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankStatus, RoutineParameters};
+use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
@@ -214,6 +215,8 @@ pub struct SingleBoilerSingleGroupController<
     previous_status: Option<Status>,
     temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
+    brew_start_input_volume: Option<InputVolumeType>,
+    previous_brew: Option<crate::PreviousBrewInfo>,
     curve_start_time: Option<Instant>,
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
@@ -265,6 +268,8 @@ impl<
             previous_status: None,
             temperature_movavg: MovAvg::default(),
             brew_start_time: None,
+            brew_start_input_volume: None,
+            previous_brew: None,
             curve_start_time: None,
             comms_status: None,
             comms_status_received_instant: None,
@@ -500,10 +505,16 @@ impl<
             control_state: self.persistent_configuration.steam_boiler_control_state,
         };
 
+        let brew_input_volume = match (self.brew_start_input_volume, self.group.get_input_volume()) {
+            (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
+            _ => None,
+        };
+
         let group_status = GroupStatus {
             is_brewing: self.state == SingleBoilerSingleGroupControllerState::Brewing,
             three_way_valve_open: self.group.get_three_way_valve_open(),
             brew_time: self.brew_start_time.map(|start| start.elapsed().into()),
+            brew_input_volume,
             input_flow_rate: self.group.get_input_flow_rate(),
             input_volume: self.group.get_input_volume(),
             output_flow_rate: self.group.get_output_flow_rate(),
@@ -512,6 +523,7 @@ impl<
             temperature: self.group.get_temperature(),
             pump_output: pump_output.clone(),
             control_state: self.ephemeral_configuration.group_brew_control_state,
+            previous_brew: self.previous_brew.map(|info| info.into()),
         };
 
         // Calculate current timestamp if we have comms_status
@@ -574,6 +586,23 @@ impl<
     }
 
     async fn handle_command(&mut self, command: MachineCommand) {
+        match command {
+            MachineCommand::RunRoutine(index, params) => {
+                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
+                self.handle_routine_start(index, params).await;
+            }
+            MachineCommand::CancelRoutine => {
+                info!("Cancelling routine");
+                self.handle_routine_exit().await;
+            }
+            _ => {
+                // All other commands delegate to the finally handler
+                self.handle_routine_finally_commands(command).await;
+            }
+        }
+    }
+
+    async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::StartBrewing(_) => {
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::Brewing).await;
@@ -745,14 +774,6 @@ impl<
                 // Save after updating PID parameters
                 self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             }
-            MachineCommand::RunRoutine(index, params) => {
-                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
-                self.handle_routine_start(index, params).await;
-            }
-            MachineCommand::CancelRoutine => {
-                info!("Cancelling routine");
-                self.handle_routine_exit().await;
-            }
             MachineCommand::EnableBoiler(boiler_index) => {
                 if boiler_index == 0 && self.state == SingleBoilerSingleGroupControllerState::SteamModeIdle {
                     info!("Enabling brew boiler");
@@ -804,6 +825,10 @@ impl<
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }
+            MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
+                warn!("Ignoring unsupported command in finally block: {:?}", command);
+            }
+            _ => {}
         }
     }
 
@@ -831,6 +856,7 @@ impl<
 
     async fn started_brewing(&mut self) {
         self.brew_start_time = Some(Instant::now());
+        self.brew_start_input_volume = self.group.get_input_volume();
         self.boiler_pid.ki.accumulate += 50.0; // Initial accumulation to compensate for initial temperature drop
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(false),
@@ -840,7 +866,26 @@ impl<
     }
 
     async fn stopped_brewing(&mut self) {
+        // Capture previous brew data before clearing
+        if let Some(started_at) = self.brew_start_time {
+            let stopped_at = Instant::now();
+            let brew_time = started_at.elapsed().into();
+            let brew_input_volume = self.brew_start_input_volume.and_then(|start_volume|
+                self.group.get_input_volume().map(|current| current - start_volume)
+            );
+            let output_weight = self.group.get_output_weight();
+
+            self.previous_brew = Some(crate::PreviousBrewInfo {
+                brew_time,
+                brew_input_volume,
+                output_weight,
+                started_at,
+                stopped_at,
+            });
+        }
+
         self.brew_start_time = None;
+        self.brew_start_input_volume = None;
         self.curve_start_time = None;  // Reset curve start time when brewing stops
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(true),
@@ -868,6 +913,12 @@ impl<
     async fn handle_routine_exit(&mut self) {
         if let Some(routine) = self.current_routine.take() {
             info!("Routine execution finished, saving state and configuration");
+
+            // Get finally commands
+            let default_status = Status::default();
+            let status = self.previous_status.as_ref().unwrap_or(&default_status);
+            let finally_commands = routine.finally(status);
+
             // Restore saved configuration by splitting into persistent and ephemeral parts
             let saved_config = &routine.saved_configuration;
             self.persistent_configuration = saved_config.persistent;
@@ -876,6 +927,11 @@ impl<
             self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             self.curve_start_time = None;  // Reset curve start time when routine exits
             self.transition_to_state(routine.saved_state).await;
+
+            // Execute finally commands
+            for cmd in finally_commands {
+                self.handle_routine_finally_commands(cmd).await;
+            }
         } else {
             warn!("No routine to exit");
         }

@@ -11,6 +11,8 @@ embassy-futures = "0.1.1"
 embassy-rp = { version = "0.6.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
 embassy-sync = { version = "0.7.0", features = ["defmt"] }
 embassy-time = { version = "0.4.0", features = ["defmt"] }
+variegated-timekeeping = { path = "../variegated-timekeeping", features = [] }
+chrono = { version = "0.4", default-features = false }
 
 # Serialization
 postcard = { version = "1.0", default-features = false, features = ["alloc"] }
@@ -21,6 +23,7 @@ embedded-alloc = { version = "0.5.1" }
 defmt = "0.3"
 
 # Local dependencies
+variegated-controller-lib = { path = "../variegated-controller-lib" }
 variegated-controller-types = { path = "../variegated-controller-types" }
 
 [features]

@@ -32,6 +32,7 @@ defmt = "0.3"
 defmt-rtt = "0.4"
 
 embedded-alloc = { version = "0.5.1" }
+ds3231 = { version = "0.3.0", features = ["async"] }
 
 static_cell = "2"
 
@@ -56,6 +57,7 @@ variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", feat
 variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
 variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics"] }
 variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
+variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal = "1.0.0"
@@ -66,8 +68,10 @@ display-interface = "0.5.0"
 display-interface-spi = "0.5.0"
 oled_async = "0.1.0-alpha1"
 hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"] }
-ds3231 = { version = "0.3.0", features = ["defmt", "async"] }
 heapless = "0.8.0"
+
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+#chrono-tz = { version = "0.10", default-features = false }
 
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.1", features = ["alloc"] }
