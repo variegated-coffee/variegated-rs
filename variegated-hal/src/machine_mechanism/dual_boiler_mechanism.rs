@@ -171,6 +171,7 @@ impl<'a> DualBoilerMechanism<'a> {
 
         let (pump_duty, group_solenoid, water_solenoid, fill_solenoid, steam_solenoid) =
             if let Some(brew_duty) = self.brew_request {
+                //info!("Arbitrating for brewing with duty {}", brew_duty);
                 // Brewing gets pump + group solenoid
                 // BLOCKS fill solenoid (safety - can't fill service boiler while brewing)
                 // Allows water/steam if configured
@@ -182,6 +183,7 @@ impl<'a> DualBoilerMechanism<'a> {
                     self.steam_dispersal_request && self.config.allow_simultaneous_operations
                 )
             } else if let Some(water_duty) = self.water_dispersal_request {
+                //info!("Arbitrating for water dispersal with duty {}", water_duty);
                 // Water dispersal gets pump + water solenoid
                 // Blocks fill solenoid (resource conflict - can't use pump for both)
                 (
@@ -192,13 +194,16 @@ impl<'a> DualBoilerMechanism<'a> {
                     self.steam_dispersal_request
                 )
             } else if let Some(fill_duty) = self.fill_request {
+                //info!("Arbitrating for fill with duty {}", fill_duty);
                 // Fill gets pump + fill solenoid
                 // Blocks everything else (pump busy)
                 (fill_duty, false, false, true, false)
             } else if self.steam_dispersal_request {
+                //info!("Arbitrating for steam dispersal");
                 // Steam only (no pump needed)
                 (0, false, false, false, true)
             } else {
+                //info!("No active requests, setting all off");
                 // All off
                 (0, false, false, false, false)
             };
@@ -223,7 +228,7 @@ impl<'a> DualBoilerMechanism<'a> {
 
     // Unified resource request methods
     pub fn request_brew_state(&mut self, brewing: bool, duty_cycle: DutyCycleType) {
-        self.brew_request = if brewing && duty_cycle > 0 {
+        self.brew_request = if brewing {
             Some(duty_cycle)
         } else {
             None
@@ -232,7 +237,7 @@ impl<'a> DualBoilerMechanism<'a> {
     }
 
     pub fn request_water_dispersal_state(&mut self, dispensing: bool, duty_cycle: DutyCycleType) {
-        self.water_dispersal_request = if dispensing && duty_cycle > 0 {
+        self.water_dispersal_request = if dispensing {
             Some(duty_cycle)
         } else {
             None
@@ -241,7 +246,7 @@ impl<'a> DualBoilerMechanism<'a> {
     }
 
     pub fn request_fill_state(&mut self, filling: bool, duty_cycle: DutyCycleType) {
-        self.fill_request = if filling && duty_cycle > 0 {
+        self.fill_request = if filling {
             Some(duty_cycle)
         } else {
             None

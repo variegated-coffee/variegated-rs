@@ -21,7 +21,7 @@ serde = ["chrono/serde"]
 embassy-time = "0.4"
 embassy-sync = "0.7"
 chrono = { version = "0.4", default-features = false, features = ["alloc"] }
-# chrono-tz = { version = "0.10", default-features = false }
+chrono-tz = { version = "0.10", default-features = false }
 defmt = { version = "0.3", optional = true }
 
 [dev-dependencies]

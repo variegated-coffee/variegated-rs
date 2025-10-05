@@ -33,7 +33,9 @@ postcard = { version = "1.1.1", features = ["alloc", "use-crc"] }
 cfg-if = "1.0.0"
 variegated-hal = { version = "0.1.0", path = "../variegated-hal" }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt", "serde"] }
-variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", features = ["defmt", "serde"] }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", features = ["defmt", "serde", "sequential-storage"] }
+variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
+chrono = { version = "0.4", default-features = false, features = [] }
 
 sequential-storage = { version = "5.0.0", features = ["defmt-03"] }
 embedded-storage-async = "0.4.1"

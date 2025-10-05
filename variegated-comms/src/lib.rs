@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use core::cell::RefCell;
 use chrono::{DateTime, Utc};
-use defmt::info;
+use defmt::{error, info};
 use embassy_futures::join::join4;
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
@@ -21,7 +21,7 @@ use variegated_controller_types::{
     Status
 };
 use embassy_sync::channel::{Channel, Sender};
-use variegated_controller_lib::routine::InMemoryRoutineRepository;
+use variegated_controller_lib::routine::{InMemoryRoutineRepository, RoutineRepository};
 use variegated_timekeeping::TimeKeeper;
 
 /// Generic ESP32-C6 transceiver task that handles bidirectional communication
@@ -31,12 +31,12 @@ use variegated_timekeeping::TimeKeeper;
 /// 2. Message receiving from comms processor and command forwarding
 /// 3. UART TX coordination for all outgoing data
 /// 4. Configuration monitoring and proactive broadcasting
-pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex>(
+pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository>(
     mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
     mut status_receiver: Subscriber<'static, M, Status, 1, 4, 1>,
     mut configuration_receiver: Subscriber<'static, M, Configuration, 1, 4, 1>,
-    routine_repository: &'static embassy_sync::mutex::Mutex<NoopRawMutex, InMemoryRoutineRepository>,
+    routine_repository: &'static embassy_sync::mutex::Mutex<NoopRawMutex, R>,
     command_sender: Sender<'static, M, MachineCommand, 10>,
     machine_definition: MachineDefinition
 ) {
@@ -70,14 +70,15 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             }
         },
         async {
-            let mut buf = [0u8; 256];
+            let mut buf = [0u8; 1024];
             loop {
                 let res = uart_rx.read_to_break(&mut buf).await;
                 if let Ok(len) = res {
                     if len > 0 {
                         let received_data = &mut buf[..len];
+                        info!("Received {} bytes", len);
                         if let Ok(message) = from_bytes_cobs::<CommsProcessorToApplicationProcessorMessage>(received_data) {
-                            info!("Received message: {:?}", message);
+                            info!("Received message, {:?}", message);
 
                             match message {
                                 CommsProcessorToApplicationProcessorMessage::CommsStatus(status) => {
@@ -139,9 +140,9 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                 CommsProcessorToApplicationProcessorMessage::RequestRoutines => {
                                     info!("Routines requested by ESP32");
 
-                                    let repo_locked = routine_repository.lock().await;
+                                    let mut repo_locked = routine_repository.lock().await;
                                     // Fetch routines from repository
-                                    let routines = repo_locked.iterate_routines();
+                                    let routines = repo_locked.iterate_routines().await;
 
                                     let routines = routines.cloned().collect::<Vec<_>>();
                                     let routine_list = variegated_controller_types::RoutineList { routines };
@@ -160,7 +161,8 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                 }
                             }
                         } else {
-                            info!("Failed to deserialize received data");
+                            error!("Failed to deserialize received data");
+                            info!("Data: {:x}", received_data);
                         }
                     }
                 } else {

@@ -3,6 +3,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use core::ops::DerefMut;
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::{error, info, warn, Format};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
@@ -18,10 +19,11 @@ use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankStatus, RoutineParameters};
-use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository};
+use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
+use variegated_timekeeping::TimeKeeper;
 use crate::settings::SettingsStorage;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -578,6 +580,7 @@ impl<
             routine_execution,
             comms_status,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
+            current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());
@@ -898,8 +901,8 @@ impl<
             //warn!("Cannot run routine, already executing a routine");
             return;
         }
-        let repo = self.routine_repository.lock().await;
-        let routine = repo.get_routine(routine_index);
+        let mut repo = self.routine_repository.lock().await;
+        let routine = repo.get_routine(routine_index).await;
 
         if let Some(routine) = routine {
             info!("Running routine");
