@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use core::time::Duration;
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, Weekday};
 use heapless::{FnvIndexMap};
 use heapless::FnvIndexSet;
 use variegated_control_algorithm::pid::PidOut;
@@ -152,6 +152,7 @@ pub enum MachineCommand {
     AddRoutine(Routine),
     RemoveRoutine(usize),
     UpdateRoutine(usize, Routine),
+    SetMachineMode(MachineMode),
 }
 
 #[cfg(feature = "defmt")]
@@ -181,6 +182,7 @@ impl defmt::Format for MachineCommand {
             MachineCommand::AddRoutine(routine) => defmt::write!(f, "AddRoutine()"),
             MachineCommand::RemoveRoutine(idx) => defmt::write!(f, "RemoveRoutine({})", idx),
             MachineCommand::UpdateRoutine(idx, routine) => defmt::write!(f, "UpdateRoutine({})", idx),
+            MachineCommand::SetMachineMode(mode) => defmt::write!(f, "SetMachineMode({:?})", mode),
         }
     }
 }
@@ -448,7 +450,7 @@ impl SingleGroupControllerGroups {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum MachineMode {
     On,
     #[default]
@@ -543,6 +545,8 @@ pub struct Status {
     pub routine_execution: Option<RoutineExecutionStatus>,
     pub comms_status: Option<CommsStatus>,
     pub peripheral_status: PeripheralStatus,
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub current_local_time: Option<NaiveDateTime>
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
 
@@ -557,6 +561,7 @@ impl Status {
             routine_execution: None,
             comms_status: None,
             peripheral_status: PeripheralStatus::default(),
+            current_local_time: None,
 //            environmental_temperature_sensors: FnvIndexMap::new(),
         }
     }
@@ -1563,6 +1568,8 @@ pub struct RoutineStep {
 pub enum RoutineType {
     HeatUp,
     UserDefined,
+    Cleaning,
+    HardwareButtonMapped,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1656,5 +1663,95 @@ impl RoutineStep {
 
     pub fn exits(&self) -> &[RoutineExit] {
         &self.exits
+    }
+}
+
+// Sequential storage implementation for Routine
+#[cfg(feature = "sequential-storage")]
+use sequential_storage::map::{SerializationError, Value};
+#[cfg(feature = "sequential-storage")]
+use postcard::{to_slice_crc32, from_bytes_crc32};
+#[cfg(feature = "sequential-storage")]
+use crc::{Crc, CRC_32_ISCSI};
+
+#[cfg(feature = "sequential-storage")]
+impl<'a> Value<'a> for Routine {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        let slice = match to_slice_crc32(self, buffer, crc.digest()) {
+            Ok(bytes) => Ok(bytes.len()),
+            Err(postcard::Error::SerializeBufferFull) => {
+                Err(SerializationError::BufferTooSmall)
+            },
+            Err(_) => {
+                Err(SerializationError::InvalidData)
+            },
+        };
+
+        slice
+    }
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError>
+    where
+        Self: Sized
+    {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        let v = match from_bytes_crc32(buffer, crc.digest()) {
+            Ok(value) => Ok(value),
+            Err(postcard::Error::DeserializeUnexpectedEnd) => {
+                Err(SerializationError::InvalidFormat)
+            },
+            Err(postcard::Error::DeserializeBadEnum) => {
+                Err(SerializationError::InvalidFormat)
+            },
+            Err(_) => {
+                Err(SerializationError::InvalidFormat)
+            },
+        };
+
+        v
+    }
+}
+
+#[cfg(feature = "sequential-storage")]
+impl<'a> Value<'a> for ScheduleItem {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        let slice = match to_slice_crc32(self, buffer, crc.digest()) {
+            Ok(bytes) => Ok(bytes.len()),
+            Err(postcard::Error::SerializeBufferFull) => {
+                Err(SerializationError::BufferTooSmall)
+            },
+            Err(_) => {
+                Err(SerializationError::InvalidData)
+            },
+        };
+
+        slice
+    }
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError>
+    where
+        Self: Sized
+    {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        let v = match from_bytes_crc32(buffer, crc.digest()) {
+            Ok(value) => Ok(value),
+            Err(postcard::Error::DeserializeUnexpectedEnd) => {
+                Err(SerializationError::InvalidFormat)
+            },
+            Err(postcard::Error::DeserializeBadEnum) => {
+                Err(SerializationError::InvalidFormat)
+            },
+            Err(_) => {
+                Err(SerializationError::InvalidFormat)
+            },
+        };
+
+        v
     }
 }

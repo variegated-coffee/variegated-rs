@@ -23,7 +23,8 @@ use hd44780_controller::controller::{Controller, config::{InitialConfig, Runtime
 use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
 use embassy_time::Delay;
 use embedded_hal_async::delay::DelayNs;
-use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, Status};
+use variegated_controller_lib::routine::RoutineRepository;
+use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, MachineMode, ParameterValue, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, Status};
 use variegated_timekeeping::TimeKeeper;
 use crate::{StatusSubscriber, mcp23017_hd44780::Mcp23017HD44780Device};
 
@@ -47,12 +48,12 @@ pub struct DisplayState {
     /// Track whether display has been initialized with content
     display_initialized: bool,
     /// Routine repository for looking up routine details
-    routine_repository: &'static crate::RoutineRepository,
+    routine_repository: &'static crate::RoutineRepositoryMutex,
 }
 
 impl DisplayState {
     /// Create a new display state tracker
-    pub fn new(status_receiver: StatusSubscriber, routine_repository: &'static crate::RoutineRepository) -> Self {
+    pub fn new(status_receiver: StatusSubscriber, routine_repository: &'static crate::RoutineRepositoryMutex) -> Self {
         Self {
             status_receiver,
             status: Status::default(),
@@ -114,6 +115,19 @@ impl DisplayState {
 
     /// Get the formatted text for the current display state
     pub async fn get_display_text(&self) -> (String, String) {
+        // Check machine mode first
+        match self.status.mode {
+            MachineMode::Off => {
+                return (self.format_off_row1(), self.format_off_row2());
+            }
+            MachineMode::PowerSaveStandby => {
+                return (self.format_power_save_standby_row1(), self.format_power_save_standby_row2());
+            }
+            MachineMode::On => {
+                // Continue with normal logic when machine is on
+            }
+        }
+
         // Check for routine execution first
         if self.status.routine_execution.is_some() {
             return (self.format_routine_row1().await, self.format_routine_row2().await);
@@ -252,7 +266,7 @@ impl DisplayState {
 
     /// Format time as "HH:MM" (5 chars) from Unix timestamp
     fn format_current_time(&self) -> String {
-        if let Some(now) = TimeKeeper::now_utc(){
+        if let Some(now) = TimeKeeper::now_local() {
             format!("{:02}:{:02}", now.time().hour(), now.time().minute())
         } else {
             "--:--".to_string()
@@ -317,6 +331,26 @@ impl DisplayState {
     }
 
     // ===== Display Layout Formatters =====
+
+    /// Format off mode row 1: "Off" centered
+    pub fn format_off_row1(&self) -> String {
+        "      Off       ".to_string()
+    }
+
+    /// Format off mode row 2: Empty
+    pub fn format_off_row2(&self) -> String {
+        "                ".to_string()
+    }
+
+    /// Format power save standby mode row 1: "Standby" centered
+    pub fn format_power_save_standby_row1(&self) -> String {
+        "    Standby     ".to_string()
+    }
+
+    /// Format power save standby mode row 2: Empty
+    pub fn format_power_save_standby_row2(&self) -> String {
+        "                ".to_string()
+    }
 
     /// Format brewing mode row 1: "123.4C 8.5b XO  "
     pub fn format_brewing_row1(&self) -> String {
@@ -411,8 +445,8 @@ impl DisplayState {
     /// Format routine execution mode row 1: "X/Y StepDesc"
     pub async fn format_routine_row1(&self) -> String {
         if let Some(routine_execution) = &self.status.routine_execution {
-            let routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index as usize) {
+            let mut routine_repo = self.routine_repository.lock().await;
+            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index as usize).await {
                 if let Some(current_step_idx) = routine_execution.current_step {
                     let total_steps = routine.steps().len();
                     let step_num = current_step_idx + 1;
@@ -451,8 +485,8 @@ impl DisplayState {
     /// Format routine execution mode row 2: Shows first exit condition with current value
     pub async fn format_routine_row2(&self) -> String {
         if let Some(routine_execution) = &self.status.routine_execution {
-            let routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index as usize) {
+            let mut routine_repo = self.routine_repository.lock().await;
+            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index as usize).await {
                 if let Some(current_step_idx) = routine_execution.current_step {
                     if let Some(step) = routine.steps().get(current_step_idx) {
                         // Get first exit condition
@@ -576,7 +610,7 @@ impl DisplayState {
 pub async fn lcd_display_task(
     lcd_device: Mcp23017HD44780Device<I2cDevice<'static, NoopRawMutex, I2c<'static, embassy_rp::peripherals::I2C1, Async>>, Delay>,
     status_receiver: StatusSubscriber,
-    routine_repository: &'static crate::RoutineRepository,
+    routine_repository: &'static crate::RoutineRepositoryMutex,
 ) {
     // Initialize the HD44780 LCD controller configuration
     let initial_config = InitialConfig {

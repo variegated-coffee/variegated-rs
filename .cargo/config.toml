@@ -5,6 +5,7 @@
 #runner = "probe-rs run --chip RP2040 --protocol swd --probe 1366:0105"
 #runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E6633861A3554938"
 #runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E66430A64B3D6822"
+#runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E66430A64B5D2F27"
 runner = "./examples/probe-runner.sh"
 #runner = "elf2uf2-rs"
 

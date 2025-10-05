@@ -45,7 +45,7 @@ extern crate alloc;
 
 use core::cell::RefCell;
 use chrono::{DateTime, Datelike, TimeZone, Utc, Weekday};
-//use chrono_tz::Tz;
+use chrono_tz::Tz;
 use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::Instant;
 
@@ -59,8 +59,8 @@ struct TimeKeeperState {
     anchor_instant: Option<Instant>,
     /// Anchor point: UTC DateTime when the time was set
     anchor_datetime: Option<DateTime<Utc>>,
-    // Current timezone
-//    timezone: Tz,
+    /// Current timezone
+    timezone: Tz,
 }
 
 /// Global storage for TimeKeeper state
@@ -86,7 +86,7 @@ impl TimeKeeper {
     ///
     /// TimeKeeper::init(Los_Angeles);
     /// ```
-    pub fn init() {
+    pub fn init(timezone: Tz) {
         STATE.lock(|cell| {
             let mut opt = cell.borrow_mut();
             if opt.is_some() {
@@ -95,7 +95,7 @@ impl TimeKeeper {
             *opt = Some(TimeKeeperState {
                 anchor_instant: None,
                 anchor_datetime: None,
-//                timezone,
+                timezone,
             });
         });
     }
@@ -123,7 +123,7 @@ impl TimeKeeper {
             Ok(())
         })
     }
-/*
+
     /// Set the timezone.
     ///
     /// # Example
@@ -141,7 +141,7 @@ impl TimeKeeper {
             Ok(())
         })
     }
-*/
+
     /// Get the current UTC time.
     ///
     /// Returns `None` if the TimeKeeper has not been initialized with `set_time()`.
@@ -168,7 +168,7 @@ impl TimeKeeper {
             anchor_datetime.checked_add_signed(duration)
         })
     }
-/*
+
     /// Get the current local time in the configured timezone.
     ///
     /// Returns `None` if the TimeKeeper has not been initialized with `set_time()`.
@@ -197,7 +197,7 @@ impl TimeKeeper {
             Some(utc_time.with_timezone(&timezone))
         })
     }
-*/
+
     /// Convert an embassy_time::Instant to a DateTime<Utc>.
     ///
     /// Returns `None` if the TimeKeeper has not been initialized or if the
@@ -251,7 +251,7 @@ impl TimeKeeper {
         let micros = duration.num_microseconds()? as u64;
         Some(embassy_time::Timer::after(embassy_time::Duration::from_micros(micros)))
     }
-/*
+
     pub fn timer_until_local(datetime: DateTime<Tz>) -> Option<embassy_time::Timer> {
         let now = Self::now_local()?;
         if datetime <= now {
@@ -294,7 +294,7 @@ impl TimeKeeper {
             opt.as_ref().map(|s| s.timezone).unwrap_or(Tz::UTC)
         })
     }
-*/
+
     /// Check if the TimeKeeper has been initialized with a time.
     pub fn is_initialized() -> bool {
         STATE.lock(|cell| {

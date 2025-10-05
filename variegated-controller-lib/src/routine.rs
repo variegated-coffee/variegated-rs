@@ -1,11 +1,18 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use alloc::collections::btree_map::BTreeMap;
 use alloc::format;
-use core::fmt;
+use core::{fmt, iter};
+use core::ops::{DerefMut, Range};
 use defmt::{info, Format};
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant};
+use embedded_storage_async::nor_flash::NorFlash;
 use heapless::FnvIndexMap;
+use sequential_storage::cache::NoCache;
+use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
 use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, Routine, RoutineParameter, ParameterUnit, RoutineType, RoutineStep, RoutineCommand, RoutineExit, RoutineExitCondition, StateCondition, ParameterValue, RoutineStepExitType, RoutineParameters, DerivedFormula, UserActionIndex};
 
 pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
@@ -585,17 +592,159 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
     }
 }
 
-pub struct InMemoryRoutineRepository {
-    routines: Vec<Routine>,
-}
 
 pub trait RoutineRepository {
-    fn get_routine(&self, index: usize) -> Option<&Routine>;
-    fn add_routine(&mut self, routine: Routine);
-    fn remove_routine(&mut self, index: usize) -> Option<Routine>;
-    fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str>;
-    fn iterate_routines(&self) -> impl Iterator<Item = &Routine>;
-    fn get_routine_count(&self) -> usize;
+    async fn get_routine(&mut self, index: usize) -> Option<&Routine>;
+    async fn add_routine(&mut self, routine: Routine);
+    async fn remove_routine(&mut self, index: usize) -> Option<Routine>;
+    async fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str>;
+    async fn iterate_routines(&mut self) -> impl Iterator<Item = &Routine>;
+    async fn get_routine_count(&mut self) -> usize;
+}
+
+pub struct SequentialStorageRoutineRepository<'a, M: RawMutex, T: NorFlash> {
+    flash: &'a Mutex<M, T>,
+    range: Range<u32>,
+    deserialization_buffer: [u8; 2048],
+    cache: BTreeMap<usize, Routine>,
+    cache_initialized: bool
+}
+
+impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T> {
+    pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
+        Self {
+            flash,
+            range,
+            deserialization_buffer: [0u8; 2048],
+            cache: BTreeMap::new(),
+            cache_initialized: false
+        }
+    }
+
+    pub async fn load_from_flash(&mut self) -> Result<(), &'static str> {
+        if self.cache_initialized {
+            info!("Cache already initialized, skipping load");
+            return Ok(());
+        }
+
+        let mut cache = NoCache::new();
+
+        let mut guard = self.flash.lock().await;
+        let flash_ref = guard.deref_mut();
+
+        info!("Loading routines from flash...");
+        // Create the iterator of map items
+        let mut iterator = fetch_all_items::<u16, _, _>(
+            flash_ref,
+            self.range.clone(),
+            &mut cache,
+            &mut self.deserialization_buffer
+        )
+        .await
+        .unwrap();
+
+        while let Some((key, value)) = iterator
+            .next::<Option<Routine>>(&mut self.deserialization_buffer)
+            .await
+            .unwrap()
+        {
+            info!("Loaded routine at index {}: {:?}", key, value);
+            if let Some(routine) = value {
+                self.cache.insert(key as usize, routine);
+            } else {
+                self.cache.remove(&(key as usize));
+            }
+        }
+
+        self.cache_initialized = true;
+
+        Ok(())
+    }
+
+    async fn store_in_flash(&mut self, index: usize, routine: &Option<Routine>) -> Result<(), &'static str> {
+        let mut guard = self.flash.lock().await;
+        let flash_ref = guard.deref_mut();
+
+        let mut cache = NoCache::new();
+
+        let key = index as u16;
+
+        store_item(
+            flash_ref,
+            self.range.clone(),
+            &mut cache,
+            &mut self.deserialization_buffer,
+            &key,
+            routine
+        ).await
+            .map_err(|_| "Failed to store item in flash")?;
+
+        // @todo Handle full storage by erasing the range and rewriting all items
+
+        info!("Stored routine at index {} in flash", index);
+
+        Ok(())
+    }
+}
+
+impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRoutineRepository<'a, M, T> {
+    async fn get_routine(&mut self, index: usize) -> Option<&Routine> {
+        self.load_from_flash().await.ok()?;
+        self.cache.get(&(index as usize))
+    }
+
+    async fn add_routine(&mut self, routine: Routine) {
+        self.load_from_flash().await.ok().unwrap();
+        let index = self.cache.len();
+        let opt = Some(routine);
+        self.store_in_flash(index, &opt).await.expect("Failed to store routine in flash");
+        self.cache.insert(index, opt.unwrap());
+    }
+
+    async fn remove_routine(&mut self, index: usize) -> Option<Routine> {
+        let routine = self.cache.remove(&index);
+        if routine.is_some() {
+            let opt: Option<Routine> = None;
+            let _ = self.store_in_flash(index, &opt).await;
+        }
+
+        routine
+    }
+
+    async fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str> {
+        self.load_from_flash().await?;
+
+        if self.cache.contains_key(&index) {
+            let opt = Some(routine);
+            self.store_in_flash(index, &opt).await?;
+            self.cache.insert(index, opt.unwrap());
+            Ok(())
+        } else {
+            Err("Index out of bounds")
+        }
+    }
+
+    async fn iterate_routines(&mut self) -> impl Iterator<Item = &Routine> {
+        let res = self.load_from_flash().await;
+        if res.is_err() {
+            info!("Error loading routines from flash: {:?}", res.err());
+        }
+
+        self.cache.values()
+    }
+
+    async fn get_routine_count(&mut self) -> usize {
+        if let Err(e) = self.load_from_flash().await {
+            info!("Error loading routines from flash: {:?}", e);
+            return 0;
+        }
+
+        self.cache.len()
+    }
+}
+
+pub struct InMemoryRoutineRepository {
+    routines: Vec<Routine>,
 }
 
 impl InMemoryRoutineRepository {
@@ -604,16 +753,18 @@ impl InMemoryRoutineRepository {
             routines: Vec::new(),
         }
     }
+}
 
-    pub fn get_routine(&self, index: usize) -> Option<&Routine> {
+impl RoutineRepository for InMemoryRoutineRepository {
+    async fn get_routine(&mut self, index: usize) -> Option<&Routine> {
         self.routines.get(index)
     }
 
-    pub fn add_routine(&mut self, routine: Routine) {
+    async fn add_routine(&mut self, routine: Routine) {
         self.routines.push(routine);
     }
     
-    pub fn remove_routine(&mut self, index: usize) -> Option<Routine> {
+    async fn remove_routine(&mut self, index: usize) -> Option<Routine> {
         if index < self.routines.len() {
             Some(self.routines.remove(index))
         } else {
@@ -621,7 +772,7 @@ impl InMemoryRoutineRepository {
         }
     }
 
-    pub fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str> {
+    async fn update_routine(&mut self, index: usize, routine: Routine) -> Result<(), &'static str> {
         if index < self.routines.len() {
             self.routines[index] = routine;
             Ok(())
@@ -630,11 +781,11 @@ impl InMemoryRoutineRepository {
         }
     }
     
-    pub fn iterate_routines(&self) -> impl Iterator<Item = &Routine> {
+    async fn iterate_routines(&mut self) -> impl Iterator<Item = &Routine> {
         self.routines.iter()
     }
     
-    pub fn get_routine_count(&self) -> usize {
+    async fn get_routine_count(&mut self) -> usize {
         self.routines.len()
     }
 }
@@ -810,7 +961,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
     }
 }
 
-pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom_after: Option<Duration>, bloom_time: Option<Duration>) -> Routine {
+pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom_after: Option<Duration>, bloom_time: Option<Duration>, name: Option<String>) -> Routine {
     let mut steps = vec![
         RoutineStep {
             entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
@@ -878,9 +1029,11 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
         description: Some("Brewing".try_into().unwrap()),
     });
 
+    let routine_name = name.unwrap_or_else(|| "Volumetric shot".into());
+
     Routine {
         routine_type: RoutineType::UserDefined,
-        name: "Volumetric shot".try_into().unwrap(),
+        name: routine_name,
         parameters: vec![],
         derived_parameters: vec![], // No derived parameters for this routine
         steps,

@@ -24,7 +24,7 @@ use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_7X13};
 use embedded_graphics::text::{Alignment, TextStyle, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, GroupBrewControlMode, GroupBrewControlState, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, GroupBrewControlMode, GroupBrewControlState, MachineMode, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -388,22 +388,53 @@ impl DisplayController {
     }
 
     async fn render_idle_state(&mut self, substate: IdleSubState) {
-        let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index());
-
-        let Some(boiler_status) = boiler_status else {
-            Text::with_baseline("No Boiler", Point::zero(), self.text_style_small, Baseline::Top)
-                .draw(&mut self.display)
-                .unwrap();
-            return;
-        };
-
-        match boiler_status.control_state.mode {
-            BoilerControlMode::Off => {
-                Text::with_baseline("Boiler Off", Point::zero(), self.text_style_small, Baseline::Top)
+        // Check machine mode first
+        let should_skip_boiler_info = match self.status.mode {
+            MachineMode::Off => {
+                Text::with_text_style("Machine Off", Point::new(64, 20), self.text_style_large,
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Center)
+                        .baseline(Baseline::Top)
+                        .build())
                     .draw(&mut self.display)
                     .unwrap();
+                true
             }
-            BoilerControlMode::Temperature => {
+            MachineMode::PowerSaveStandby => {
+                Text::with_text_style("Standby Mode", Point::new(64, 20), self.text_style_large,
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Center)
+                        .baseline(Baseline::Top)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+                true
+            }
+            MachineMode::On => {
+                // Continue with normal rendering when machine is on
+                false
+            }
+        };
+
+        if !should_skip_boiler_info {
+            let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index());
+
+            let Some(boiler_status) = boiler_status else {
+                Text::with_baseline("No Boiler", Point::zero(), self.text_style_small, Baseline::Top)
+                    .draw(&mut self.display)
+                    .unwrap();
+                // Still render menu buttons below
+                self.render_idle_menu_buttons(substate);
+                return;
+            };
+
+            match boiler_status.control_state.mode {
+                BoilerControlMode::Off => {
+                    Text::with_baseline("Boiler Off", Point::zero(), self.text_style_small, Baseline::Top)
+                        .draw(&mut self.display)
+                        .unwrap();
+                }
+                BoilerControlMode::Temperature => {
                 let temp = boiler_status.control_state.values.target_temperature;
                 Text::with_text_style(boiler_status.temperature.map_or("-".to_string(), |t| format!("{:.1} C", t)).as_str(), Point::new(64, 0), self.text_style_large, TextStyleBuilder::new()
                     .alignment(Alignment::Center)
@@ -431,32 +462,38 @@ impl DisplayController {
             },
         };
 
-        Text::with_text_style(
-            format!("{:.0}%", boiler_status.output.duty_cycle()).as_str(),
-            Point::new(128, 32),
-            self.text_style_medium_small,
-            TextStyleBuilder::new()
-                .alignment(Alignment::Right)
-                .baseline(Baseline::Top)
-                .build()
-        )
-            .draw(&mut self.display)
-            .unwrap();
-
-        if let PidOutput(pid) = boiler_status.output {
             Text::with_text_style(
-                format!("P {:.0} I {:.0} D {:.0}", pid.p, pid.i, pid.d).as_str(),
-                Point::new(64, 44),
-                self.text_style_small,
+                format!("{:.0}%", boiler_status.output.duty_cycle()).as_str(),
+                Point::new(128, 32),
+                self.text_style_medium_small,
                 TextStyleBuilder::new()
-                    .alignment(Alignment::Center)
+                    .alignment(Alignment::Right)
                     .baseline(Baseline::Top)
                     .build()
             )
                 .draw(&mut self.display)
                 .unwrap();
-        }
 
+            if let PidOutput(pid) = boiler_status.output {
+                Text::with_text_style(
+                    format!("P {:.0} I {:.0} D {:.0}", pid.p, pid.i, pid.d).as_str(),
+                    Point::new(64, 44),
+                    self.text_style_small,
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Center)
+                        .baseline(Baseline::Top)
+                        .build()
+                )
+                    .draw(&mut self.display)
+                    .unwrap();
+            }
+        } // End of !should_skip_boiler_info block
+
+        // Always render menu buttons
+        self.render_idle_menu_buttons(substate);
+    }
+
+    fn render_idle_menu_buttons(&mut self, substate: IdleSubState) {
         let (routine_color, settings_color) = match substate {
             IdleSubState::NoMenuItemSelected => {
                 (BinaryColor::On, BinaryColor::On)
@@ -520,8 +557,6 @@ impl DisplayController {
                 .build())
             .draw(&mut self.display)
             .unwrap();
-
-        ()
     }
 
     async fn render_scale_settings(&mut self, substate: ScaleSettingsSubState) {
