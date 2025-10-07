@@ -55,7 +55,7 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation"}
 variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
 variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
-variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics"] }
+variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics"], optional = true }
 variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
 
@@ -65,8 +65,9 @@ embedded-hal-async = "1.0.0"
 embedded-graphics = "0.8.1"
 embedded-graphics-core = "0.4.0"
 display-interface = "0.5.0"
-display-interface-spi = "0.5.0"
-oled_async = "0.1.0-alpha1"
+display-interface-spi = { version = "0.5.0", optional = true }
+oled_async = { version = "0.1.0-alpha1", optional = true }
+u8g2-fonts = { version = "0.7.2", optional = true }
 hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"] }
 heapless = "0.8.0"
 
@@ -83,8 +84,9 @@ default = ["rp235xb"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb"]
-dual-boiler = []
-single-boiler = []
+dual-boiler = ["tft-display"]
+single-boiler = ["dep:oled_async"]
+tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 
 [profile.dev]
 debug = true              # Enable debug info

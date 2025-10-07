@@ -5,6 +5,7 @@ pub mod settings;
 pub mod single_boiler_single_group;
 pub mod dual_boiler_single_group;
 pub mod schedule;
+mod shot_log;
 
 extern crate alloc;
 

@@ -31,11 +31,11 @@ use variegated_timekeeping::TimeKeeper;
 /// 2. Message receiving from comms processor and command forwarding
 /// 3. UART TX coordination for all outgoing data
 /// 4. Configuration monitoring and proactive broadcasting
-pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository>(
+pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
     mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
-    mut status_receiver: Subscriber<'static, M, Status, 1, 4, 1>,
-    mut configuration_receiver: Subscriber<'static, M, Configuration, 1, 4, 1>,
+    mut status_receiver: Subscriber<'static, M, Status, 1, STATUS_SUBS, 1>,
+    mut configuration_receiver: Subscriber<'static, M, Configuration, 1, CONFIG_SUBS, 1>,
     routine_repository: &'static embassy_sync::mutex::Mutex<NoopRawMutex, R>,
     command_sender: Sender<'static, M, MachineCommand, 10>,
     machine_definition: MachineDefinition

@@ -77,6 +77,9 @@ use embassy_sync::mutex::Mutex;
 mod registers;
 use registers::*;
 
+// Re-export types that users may need
+pub use registers::{Port, InterruptMode};
+
 /// Errors that can occur when communicating with the MCP23017
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -397,6 +400,35 @@ where
 
         self.write_register(gpinten_reg, gpinten).await?;
         self.write_register(intcon_reg, intcon).await?;
+
+        Ok(())
+    }
+
+    /// Configure interrupt for all pins in a port at once
+    /// This is more efficient than calling set_pin_interrupt multiple times
+    pub async fn set_port_interrupt(&mut self, port: Port, mode: InterruptMode) -> Result<(), Error<I2C::Error>> {
+        let gpinten_reg = port.gpinten_register();
+        let intcon_reg = if port == Port::A { Register::IntConA } else { Register::IntConB };
+        let defval_reg = if port == Port::A { Register::DefValA } else { Register::DefValB };
+
+        match mode {
+            InterruptMode::Disabled => {
+                // Disable interrupts for all pins in this port
+                self.write_register(gpinten_reg, 0x00).await?;
+            }
+            InterruptMode::OnChange => {
+                // Enable interrupts for all pins, compare to previous value
+                self.write_register(gpinten_reg, 0xFF).await?;
+                self.write_register(intcon_reg, 0x00).await?;
+            }
+            InterruptMode::OnDefault(default_high) => {
+                // Enable interrupts for all pins, compare to default value
+                self.write_register(gpinten_reg, 0xFF).await?;
+                self.write_register(intcon_reg, 0xFF).await?;
+                let defval = if default_high { 0xFF } else { 0x00 };
+                self.write_register(defval_reg, defval).await?;
+            }
+        }
 
         Ok(())
     }
