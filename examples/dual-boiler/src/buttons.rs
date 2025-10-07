@@ -8,28 +8,49 @@
 //! - Button 5 (Pin 4): Toggle brewing (start/stop brewing for the single group)
 //! - Button 6 (Pin 5): Toggle water dispensing (start/stop pumping to water tap)
 //!
-//! Features:
-//! - Button debouncing to prevent spurious triggers
-//! - State tracking via status subscription to determine toggle actions
+//! # Architecture
+//!
+//! The button controller is split into three main components:
+//!
+//! 1. **Event Recognition** (`ButtonEventRecognizer`): Recognizes button events from raw GPIO state
+//!    - Detects: Press, PressAndHoldStart, PressAndHoldChange, PressAndHoldStop
+//!    - 50ms settling delay to group simultaneous button presses
+//!    - 500ms threshold to distinguish press from hold
+//!    - Press events are sent immediately on release (no artificial delay)
+//!
+//! 2. **Event Handling** (`ButtonEventHandler`): Translates events to machine commands
+//!    - Maintains machine state for toggle behavior
+//!    - Maps button events to appropriate machine commands
+//!    - Supports single and multi-button combinations
+//!
+//! 3. **Main Task** (`button_controller_task`): Coordinates the components
+//!    - Interrupt-driven button state reading
+//!    - Updates recognizer with current state
+//!    - Handles events and sends commands
+//!
+//! # Features
+//!
+//! - No debouncing - relies solely on hardware interrupts
+//! - Simultaneous button press detection (50ms grouping window)
+//! - Press-and-hold detection (500ms threshold)
+//! - Button combination changes during hold
+//! - State tracking via status subscription for toggle behavior
 //! - Integration with the machine command system
-//! - Routine control with any-button cancel functionality
 
 use alloc::format;
 use core::time::Duration;
 use defmt;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+use embassy_futures::select::{select, Either};
 use embassy_rp::i2c::{Async, I2c};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{Instant, Timer};
 use variegated_controller_types::{
-    MachineCommand, SingleGroupControllerGroups, Status,
+    MachineCommand, MachineMode, SingleGroupControllerGroups, Status,
 };
-use variegated_mcp23017::Mcp23017;
+use variegated_mcp23017::{Mcp23017, Port, InterruptMode};
 use crate::StatusSubscriber;
-
-/// Button debounce time in milliseconds
-const DEBOUNCE_TIME_MS: u64 = 50;
 
 /// Number of buttons on the controller
 const NUM_BUTTONS: usize = 6;
@@ -44,33 +65,238 @@ const ROUTINE_BUTTON_3: usize = 3;    // Button 4 (Pin 3) - Triggers routine 3
 const BREWING_BUTTON: usize = 4;      // Button 5 (Pin 4)
 const WATER_TAP_BUTTON: usize = 5;    // Button 6 (Pin 5)
 
-/// Button state tracking for debouncing and toggle logic
-pub struct ButtonState {
+/// Timing constants for event recognition
+const SETTLING_DELAY_MS: u64 = 50;           // Time to group simultaneous button presses
+const PRESS_AND_HOLD_THRESHOLD_MS: u64 = 500; // Time to distinguish press from hold
+
+// ============================================================================
+// Event Types
+// ============================================================================
+
+/// Represents a set of buttons as a bit-packed u8
+/// Each bit corresponds to a button index (0-5)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub struct ButtonSet(u8);
+
+impl ButtonSet {
+    /// Create an empty button set
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// Create a button set from raw bits
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits & 0x3F) // Mask to 6 buttons
+    }
+
+    /// Create a button set from raw GPIO state (active low)
+    pub const fn from_gpio_state(state: u8) -> Self {
+        // Invert bits since buttons are active low, then mask to 6 buttons
+        Self(!state & 0x3F)
+    }
+
+    /// Check if a specific button is in the set
+    pub const fn contains(&self, button_index: usize) -> bool {
+        if button_index >= NUM_BUTTONS {
+            return false;
+        }
+        (self.0 & (1 << button_index)) != 0
+    }
+
+    /// Add a button to the set
+    pub fn insert(&mut self, button_index: usize) {
+        if button_index < NUM_BUTTONS {
+            self.0 |= 1 << button_index;
+        }
+    }
+
+    /// Remove a button from the set
+    pub fn remove(&mut self, button_index: usize) {
+        if button_index < NUM_BUTTONS {
+            self.0 &= !(1 << button_index);
+        }
+    }
+
+    /// Check if the set is empty
+    pub const fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Get the raw bits
+    pub const fn bits(&self) -> u8 {
+        self.0
+    }
+
+    /// Count the number of buttons in the set
+    pub const fn count(&self) -> u32 {
+        self.0.count_ones()
+    }
+}
+
+/// Button events recognized by the event recognizer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum ButtonEvent {
+    /// Short press of button(s) - emitted on release if held <500ms
+    Press(ButtonSet),
+    /// Started holding button(s) - emitted at 500ms mark
+    PressAndHoldStart(ButtonSet),
+    /// Changed buttons while holding
+    PressAndHoldChange { old: ButtonSet, new: ButtonSet },
+    /// Released held button(s)
+    PressAndHoldStop(ButtonSet),
+}
+
+// ============================================================================
+// Event Recognition
+// ============================================================================
+
+/// State of the button event recognizer
+#[derive(Debug, Clone, Copy)]
+enum RecognizerState {
+    /// No buttons pressed
+    Idle,
+    /// Buttons just pressed, waiting to group simultaneous presses
+    Settling { buttons: ButtonSet, since: Instant },
+    /// Tracking whether it becomes a press or hold
+    Tracking { buttons: ButtonSet, since: Instant },
+    /// Confirmed hold (≥500ms)
+    Holding { buttons: ButtonSet },
+}
+
+/// Recognizes button events from raw button state changes
+/// Separates event recognition from event handling
+pub struct ButtonEventRecognizer {
+    state: RecognizerState,
+}
+
+impl ButtonEventRecognizer {
+    /// Create a new button event recognizer
+    pub fn new() -> Self {
+        Self {
+            state: RecognizerState::Idle,
+        }
+    }
+
+    /// Update the recognizer with current button state and time
+    /// Returns an optional event if one should be emitted
+    pub fn update(&mut self, current_buttons: ButtonSet, now: Instant) -> Option<ButtonEvent> {
+        match self.state {
+            RecognizerState::Idle => {
+                if !current_buttons.is_empty() {
+                    // Buttons pressed, enter settling state
+                    self.state = RecognizerState::Settling {
+                        buttons: current_buttons,
+                        since: now,
+                    };
+                }
+                None
+            }
+
+            RecognizerState::Settling { buttons, since } => {
+                let elapsed = now.saturating_duration_since(since).as_millis();
+
+                // Check if settling period has elapsed
+                if elapsed >= SETTLING_DELAY_MS {
+                    if current_buttons.is_empty() {
+                        // Buttons were pressed and released during settling - emit Press
+                        self.state = RecognizerState::Idle;
+                        return Some(ButtonEvent::Press(buttons));
+                    } else {
+                        // Buttons still held after settling - move to tracking
+                        self.state = RecognizerState::Tracking {
+                            buttons: current_buttons,
+                            since,
+                        };
+                        return None;
+                    }
+                }
+
+                // Still within settling period
+                if current_buttons != buttons {
+                    // Button set changed during settling, restart settling period
+                    self.state = RecognizerState::Settling {
+                        buttons: current_buttons,
+                        since: now,
+                    };
+                }
+                None
+            }
+
+            RecognizerState::Tracking { buttons, since } => {
+                if current_buttons.is_empty() {
+                    // Released before hold threshold - it's a press!
+                    self.state = RecognizerState::Idle;
+                    return Some(ButtonEvent::Press(buttons));
+                }
+
+                if current_buttons != buttons {
+                    // Button set changed during tracking - restart from settling
+                    self.state = RecognizerState::Settling {
+                        buttons: current_buttons,
+                        since: now,
+                    };
+                    return None;
+                }
+
+                // Check if hold threshold has been reached
+                let total_time = now.saturating_duration_since(since).as_millis();
+                if total_time >= (SETTLING_DELAY_MS + PRESS_AND_HOLD_THRESHOLD_MS) {
+                    // It's a hold!
+                    self.state = RecognizerState::Holding { buttons };
+                    return Some(ButtonEvent::PressAndHoldStart(buttons));
+                }
+                None
+            }
+
+            RecognizerState::Holding { buttons } => {
+                if current_buttons.is_empty() {
+                    // Released from hold
+                    self.state = RecognizerState::Idle;
+                    return Some(ButtonEvent::PressAndHoldStop(buttons));
+                }
+
+                if current_buttons != buttons {
+                    // Button set changed during hold
+                    let old_buttons = buttons;
+                    self.state = RecognizerState::Holding {
+                        buttons: current_buttons,
+                    };
+                    return Some(ButtonEvent::PressAndHoldChange {
+                        old: old_buttons,
+                        new: current_buttons,
+                    });
+                }
+                None
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Event Handling
+// ============================================================================
+
+/// Button event handler - translates events to machine commands
+/// Maintains machine state for toggle behavior
+pub struct ButtonEventHandler {
     /// Current brewing state (from status subscription)
     brewing_active: bool,
     /// Current water dispensing state (from status subscription)
     water_dispensing_active: bool,
     /// Current routine execution state (from status subscription)
     routine_executing: bool,
-    /// Previous button states for edge detection (bit-packed)
-    last_button_states: u8,
-    /// Last debounce time for each button
-    last_debounce_time: [Instant; NUM_BUTTONS],
-    /// Debounced button states
-    debounced_states: [bool; NUM_BUTTONS],
+    /// Current machine mode (from status subscription)
+    machine_mode: MachineMode,
 }
 
-impl ButtonState {
-    /// Create a new button state tracker
+impl ButtonEventHandler {
+    /// Create a new button event handler
     pub fn new() -> Self {
-        let now = Instant::now();
         Self {
             brewing_active: false,
             water_dispensing_active: false,
             routine_executing: false,
-            last_button_states: 0xFF, // All buttons released (active low with pullups)
-            last_debounce_time: [now; NUM_BUTTONS],
-            debounced_states: [false; NUM_BUTTONS], // false = not pressed
+            machine_mode: MachineMode::Off,
         }
     }
 
@@ -88,76 +314,83 @@ impl ButtonState {
 
         // Update routine execution state from status
         self.routine_executing = status.routine_execution.is_some();
+
+        // Update machine mode from status
+        self.machine_mode = status.mode;
     }
 
-    /// Update button states with debouncing
-    /// Returns true if any button state changed after debouncing
-    pub fn update_buttons(&mut self, raw_button_states: u8) -> bool {
-        let now = Instant::now();
-        let mut state_changed = false;
-
-        for i in 0..NUM_BUTTONS {
-            let button_bit = 1 << i;
-            let current_pressed = (raw_button_states & button_bit) == 0; // Active low
-            let last_pressed = (self.last_button_states & button_bit) == 0;
-
-            // Check if button state has changed
-            if current_pressed != last_pressed {
-                // State changed, update debounce timer
-                self.last_debounce_time[i] = now;
+    /// Handle a button event and return the appropriate machine command
+    pub fn handle_event(&self, event: ButtonEvent) -> Option<MachineCommand> {
+        // For now, only handle Press events
+        // Press-and-hold events can be added later for additional functionality
+        match event {
+            ButtonEvent::Press(buttons) => self.handle_press(buttons),
+            ButtonEvent::PressAndHoldStart(_buttons) => {
+                // Could be used for special functions in the future
+                None
             }
+            ButtonEvent::PressAndHoldChange { .. } => {
+                // Could be used for special functions in the future
+                None
+            }
+            ButtonEvent::PressAndHoldStop(_buttons) => {
+                // Could be used for special functions in the future
+                None
+            }
+        }
+    }
 
-            // Check if enough time has passed for debouncing
-            if now.saturating_duration_since(self.last_debounce_time[i]).as_millis() >= DEBOUNCE_TIME_MS {
-                // Update debounced state if it differs
-                if self.debounced_states[i] != current_pressed {
-                    self.debounced_states[i] = current_pressed;
-                    state_changed = true;
+    /// Handle a button press event
+    fn handle_press(&self, buttons: ButtonSet) -> Option<MachineCommand> {
+        // Check if machine is Off - any button press should turn it On
+        if self.machine_mode == MachineMode::Off {
+            return Some(MachineCommand::SetMachineMode(MachineMode::On));
+        }
+
+        // Single button presses for routine control (buttons 0-3)
+        if buttons.count() == 1 {
+            for button_idx in [ROUTINE_BUTTON_0, ROUTINE_BUTTON_1, ROUTINE_BUTTON_2, ROUTINE_BUTTON_3] {
+                if buttons.contains(button_idx) {
+                    let command = if self.routine_executing {
+                        defmt::info!("Button {} pressed - cancelling routine", button_idx + 1);
+                        MachineCommand::CancelRoutine
+                    } else {
+                        defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
+                        MachineCommand::RunRoutine(button_idx, None)
+                    };
+                    return Some(command);
                 }
             }
+
+            // Button 5: Brewing toggle
+            if buttons.contains(BREWING_BUTTON) {
+                let group_index = SingleGroupControllerGroups::SingleGroup.as_index();
+                let command = if self.brewing_active {
+                    MachineCommand::StopBrewing(group_index)
+                } else {
+                    MachineCommand::StartBrewing(group_index)
+                };
+                defmt::info!("Button 5 pressed - sending brewing command: {:?}", command);
+                return Some(command);
+            }
+
+            // Button 6: Water tap toggle
+            if buttons.contains(WATER_TAP_BUTTON) {
+                let water_tap_index = 0;
+                let command = if self.water_dispensing_active {
+                    MachineCommand::StopPumpingToWaterTap(water_tap_index)
+                } else {
+                    MachineCommand::StartPumpingToWaterTap(water_tap_index)
+                };
+                defmt::info!("Button 6 pressed - sending water tap command: {:?}", command);
+                return Some(command);
+            }
         }
 
-        self.last_button_states = raw_button_states;
-        state_changed
-    }
+        // Multi-button combinations can be added here in the future
+        // For example: buttons 1+6 could trigger a specific routine or function
 
-    /// Check if a button was just pressed (rising edge after debouncing)
-    pub fn is_button_just_pressed(&self, button_index: usize) -> bool {
-        if button_index >= NUM_BUTTONS {
-            return false;
-        }
-        self.debounced_states[button_index]
-    }
-
-    /// Get the appropriate command for button 1 (brewing toggle)
-    pub fn get_brewing_toggle_command(&self) -> MachineCommand {
-        let group_index = SingleGroupControllerGroups::SingleGroup.as_index();
-        if self.brewing_active {
-            MachineCommand::StopBrewing(group_index)
-        } else {
-            MachineCommand::StartBrewing(group_index)
-        }
-    }
-
-    /// Get the appropriate command for button 6 (water tap toggle)
-    pub fn get_water_tap_toggle_command(&self) -> MachineCommand {
-        let water_tap_index = 0; // Single water tap at index 0
-        if self.water_dispensing_active {
-            MachineCommand::StopPumpingToWaterTap(water_tap_index)
-        } else {
-            MachineCommand::StartPumpingToWaterTap(water_tap_index)
-        }
-    }
-
-    /// Get the appropriate command for routine buttons (0-3)
-    /// If a routine is executing, returns CancelRoutine
-    /// Otherwise, returns RunRoutine for the specified routine index
-    pub fn get_routine_command(&self, routine_index: usize) -> MachineCommand {
-        if self.routine_executing {
-            MachineCommand::CancelRoutine
-        } else {
-            MachineCommand::RunRoutine(routine_index, None)
-        }
+        None
     }
 }
 
@@ -165,71 +398,78 @@ impl ButtonState {
 #[embassy_executor::task]
 pub async fn button_controller_task(
     mut mcp23017: Mcp23017<I2cDevice<'static, NoopRawMutex, I2c<'static, embassy_rp::peripherals::I2C1, Async>>, embassy_time::Delay>,
+    mut button_interrupt: embassy_rp::gpio::Input<'static>,
     command_sender: Sender<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, MachineCommand, 10>,
     mut status_receiver: StatusSubscriber,
 ) {
-    let mut button_state = ButtonState::new();
+    let mut recognizer = ButtonEventRecognizer::new();
+    let mut handler = ButtonEventHandler::new();
 
     defmt::info!("Button controller task started");
 
-    // Main button polling loop
+    // Configure all button pins (0-5 on Port A) for interrupt-on-change
+    if let Err(e) = mcp23017.set_port_interrupt(Port::A, InterruptMode::OnChange).await {
+        defmt::error!("Failed to configure button interrupts: {:?}", e);
+    } else {
+        defmt::info!("Button interrupts configured successfully");
+    }
+
+    // Main button event-driven loop
     loop {
         // Update status if available
         if let Some(new_status) = status_receiver.try_next_message_pure() {
-            button_state.update_status(&new_status);
+            handler.update_status(&new_status);
         }
 
-        // Read button states from MCP23017 port A
-        match mcp23017.read_port_a().await {
-            Ok(button_states) => {
-                // Update button states with debouncing
-                if button_state.update_buttons(button_states) {
-                    // Check for button presses and send appropriate commands
-
-                    // Routine buttons (0-3): Start routine or cancel if any routine is running
-                    for button_idx in [ROUTINE_BUTTON_0, ROUTINE_BUTTON_1, ROUTINE_BUTTON_2, ROUTINE_BUTTON_3] {
-                        if button_state.is_button_just_pressed(button_idx) {
-                            let command = button_state.get_routine_command(button_idx);
-
-                            if button_state.routine_executing {
-                                defmt::info!("Button {} pressed - cancelling routine", button_idx + 1);
-                            } else {
-                                defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
-                            }
-
-                            if let Err(_) = command_sender.try_send(command) {
-                                defmt::warn!("Failed to send routine command - channel full");
-                            }
-                        }
+        // Wait for either button interrupt or timeout for state machine updates
+        let button_state_opt = match select(
+            button_interrupt.wait_for_falling_edge(),
+            Timer::after(embassy_time::Duration::from_millis(10))
+        ).await {
+            Either::First(_) => {
+                // Interrupt fired - button state changed
+                // Read interrupt capture register (clears interrupt and gives captured GPIO state)
+                match mcp23017.read_interrupt_capture().await {
+                    Ok(captured) => {
+                        // Port A is in lower 8 bits (buttons are on pins 0-5 of Port A)
+                        let port_a_state = (captured & 0xFF) as u8;
+                        defmt::debug!("Button interrupt: captured state=0x{:02x}", port_a_state);
+                        Some(port_a_state)
                     }
-
-                    // Button 5: Brewing toggle
-                    if button_state.is_button_just_pressed(BREWING_BUTTON) {
-                        let command = button_state.get_brewing_toggle_command();
-                        defmt::info!("Button 5 pressed - sending brewing command: {:?}", command);
-
-                        if let Err(_) = command_sender.try_send(command) {
-                            defmt::warn!("Failed to send brewing command - channel full");
-                        }
-                    }
-
-                    // Button 6: Water tap toggle
-                    if button_state.is_button_just_pressed(WATER_TAP_BUTTON) {
-                        let command = button_state.get_water_tap_toggle_command();
-                        defmt::info!("Button 6 pressed - sending water tap command: {:?}", command);
-
-                        if let Err(_) = command_sender.try_send(command) {
-                            defmt::warn!("Failed to send water tap command - channel full");
-                        }
+                    Err(e) => {
+                        defmt::error!("Failed to read interrupt capture: {:?}", e);
+                        None
                     }
                 }
             }
-            Err(e) => {
-                defmt::error!("Failed to read button states: {:?}", e);
+            Either::Second(_) => {
+                // Timeout - periodic check for state machine updates
+                match mcp23017.read_port_a().await {
+                    Ok(state) => Some(state),
+                    Err(e) => {
+                        defmt::error!("Failed to read button states: {:?}", e);
+                        None
+                    }
+                }
+            }
+        };
+
+        // Process button state through recognizer and handler
+        if let Some(raw_state) = button_state_opt {
+            let button_set = ButtonSet::from_gpio_state(raw_state);
+            let now = Instant::now();
+
+            // Update recognizer and check for events
+            if let Some(event) = recognizer.update(button_set, now) {
+                defmt::debug!("Button event: {:?}", event);
+
+                // Handle the event and get optional command
+                if let Some(command) = handler.handle_event(event) {
+                    if let Err(_) = command_sender.try_send(command) {
+                        defmt::warn!("Failed to send command - channel full");
+                    }
+                }
             }
         }
-
-        // Poll at 20Hz (50ms intervals) for responsive button handling
-        Timer::after(embassy_time::Duration::from_millis(50)).await;
     }
 }

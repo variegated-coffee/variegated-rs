@@ -13,6 +13,8 @@ use chrono::NaiveDateTime;
 use chrono_tz::Tz;
 use defmt::{info, unwrap};
 use heapless::FnvIndexMap;
+
+#[cfg(feature = "tft-display")]
 use display_interface_spi::SPIInterface;
 use ds3231::{Config, InterruptControl, Oscillator, SquareWaveFrequency, TimeRepresentation, DS3231};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -66,10 +68,13 @@ use embedded_graphics::{
 };
 use embedded_hal::pwm::SetDutyCycle;
 use futures::future::join_all;
+
+#[cfg(feature = "tft-display")]
 use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
+
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -80,6 +85,7 @@ use hd44780_controller::controller::{Controller, config::{InitialConfig, Runtime
 use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
 use w25q32jv::W25q32jv;
 
+mod display_state;
 mod mcp23017_hd44780;
 mod display;
 mod buttons;
@@ -98,12 +104,14 @@ use variegated_hal::cap_adc::fdc1004::Fdc1004Sensor;
 use variegated_hal::gpio::gpio_binary_pump::GpioBinaryPump;
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use variegated_hal::noop::NoopOutputPin;
-use variegated_hal::scale::gravity::GravityStatusProvider;
+use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::schedule::{run_schedule, InMemoryScheduleStore, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
+use variegated_gravity_driver::Gravity;
 use variegated_hal::gpio::gpio_pio_pulse_counter::GpioPioTransformingPulseCounter;
 use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
+use variegated_hal::scale::{gravity, ScaleController};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -116,12 +124,14 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     FlowMeterPioIrq => pio::InterruptHandler<FlowMeterPeripheralsPio>;
 });
 
+pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
+
 // Embassy task wrapper for ESP transceiver (dual-boiler)
 #[embassy_executor::task]
 async fn esp_transceiver_task(
     esp_p: Esp32Peripherals,
-    status_receiver: Subscriber<'static, CriticalSectionRawMutex, Status, 1, 4, 1>,
-    configuration_receiver: Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, 4, 1>,
+    status_receiver: Subscriber<'static, CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>,
+    configuration_receiver: Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>,
     command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, MachineCommand, 10>,
     machine_definition: MachineDefinition,
     routine_repository: &'static RoutineRepositoryMutex,
@@ -144,6 +154,7 @@ async fn esp_transceiver_task(
 }
 
 
+#[cfg(feature = "tft-display")]
 #[variegated_board_cfg::board_cfg("eyespi_display_peripherals")]
 struct DisplayPeripherals {
     spi: Peri<'static, DisplayPeripheralsSpi>,
@@ -251,6 +262,11 @@ struct SettingsFlashPeripherals {
     pin_cs: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("button_mux_peripherals")]
+struct ButtonMuxPeripherals {
+    pin_interrupt: Peri<'static, ()>,
+}
+
 #[variegated_board_cfg::board_cfg("watchdog_peripherals")]
 struct WatchdogPeripherals {
     watchdog: Peri<'static, ()>,
@@ -263,12 +279,17 @@ type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
 type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
-// Display type aliases
+type GravityMutex = Mutex<NoopRawMutex, Gravity<QwiicI2CDevice>>;
+
+// Display type aliases (feature-gated)
+#[cfg(feature = "tft-display")]
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
+#[cfg(feature = "tft-display")]
 type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>, Output<'static>>;
+#[cfg(feature = "tft-display")]
 type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
 
-const STATUS_RECEIVERS: usize = 4;
+const STATUS_RECEIVERS: usize = 6;
 type StatusChannel = PubSubChannel<CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 type StatusSubscriber = Subscriber<'static, CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
@@ -281,6 +302,8 @@ type SettingsFlashType = W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, 
 type RoutineRepositoryMutex = Mutex<NoopRawMutex, SequentialStorageRoutineRepository<'static, NoopRawMutex, SettingsFlashType>>;
 type ScheduleStoreMutex = Mutex<NoopRawMutex, SequentialStorageScheduleStore<'static, NoopRawMutex, SettingsFlashType>>;
 
+const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
+type ShotLogDataPointChannel = PubSubChannel<CriticalSectionRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
 
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 #[cortex_m_rt::entry]
@@ -294,9 +317,14 @@ fn main() -> ! {
 static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
 static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
 static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
+
+#[cfg(feature = "tft-display")]
 static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
+
 static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
 static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
+static GRAVITY_MUTEX: StaticCell<GravityMutex> = StaticCell::new();
+
 static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
 static BREW_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
 static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
@@ -308,10 +336,17 @@ static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
+static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
+static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
+static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
+static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
+static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
+static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
 static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
 
@@ -435,10 +470,40 @@ async fn main_task(spawner: Spawner) -> ! {
         }
     }
 
+    let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
+    let output_flow_sig: &'static Watch<_, _, 3> = OUTPUT_FLOW_SIGNAL.init(Watch::new());
+    let gravity_connected_sig: &'static Signal<NoopRawMutex, bool> = GRAVITY_CONNECTED_SIGNAL.init(Signal::new());
+    let gravity_command_channel: &'static Channel<_, _, 3> = GRAVITY_COMMAND_CHANNEL.init(Channel::new());
+
+    // Always create the gravity device - it will handle connection retries internally
+    let i2c_dev = I2cDevice::new(qwiic_i2c_bus);
+    let gravity = Gravity::new(i2c_dev, None);
+    let gravity_mutex = GRAVITY_MUTEX.init(Mutex::new(gravity));
+
+    let mut gravity_device = Some(GravityDevice::new(
+        gravity_mutex,
+        variegated_gravity_driver::Channel::Ch1,
+        Some(output_weight_sig.sender()),
+        Some(output_flow_sig.sender()),
+        ConversionParameters::linear_conversion(0.001, 0.0),
+        ConversionParameters::linear_conversion(0.001, 0.0),
+        gravity_command_channel.receiver(),
+        Duration::from_millis(100),
+    ).with_connected_signal(gravity_connected_sig));
+
+    info!("Gravity sensor initialized - will attempt connection with retry");
+
+    let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(GravityController::new(
+        gravity_command_channel.sender()
+    )));
+
     let mut fdc1004_dev = I2cDevice::new(internal_i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
 
     let fdc1004 = FDC_MUTEX.init(Mutex::new(fdc1004));
+
+    let mut button_mux_p = button_mux_peripherals!(p);
+    let button_interrupt = Input::new(button_mux_p.pin_interrupt, Pull::Up);
 
     // Initialize MCP23017 for button control
     let mut mcp23017_dev = I2cDevice::new(internal_i2c_bus);
@@ -702,13 +767,13 @@ async fn main_task(spawner: Spawner) -> ! {
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
         None,
-        None,
+        scale_controller,
         None,
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
         Some(input_volume_sig.receiver().unwrap()),
         None,
-        None,
+        Some(output_weight_sig.receiver().unwrap()),
     );
 
     // Create water tap with dual boiler mechanism
@@ -723,6 +788,8 @@ async fn main_task(spawner: Spawner) -> ! {
 
     // Create peripheral registry and register peripherals
     let peripheral_registry = PERIPHERAL_REGISTRY.init(PeripheralRegistry::new());
+    let gravity_status_provider = GRAVITY_STATUS_PROVIDER.init(GravityStatusProvider::new(GRAVITY_PERIPHERAL_ID, gravity_connected_sig));
+    peripheral_registry.register(gravity_status_provider);
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
@@ -852,7 +919,7 @@ async fn main_task(spawner: Spawner) -> ! {
             support_calibration: true,
             via_comms_mcu: false,
         };
-        let _ = machine_definition.add_peripheral(0x5C1E, scale_def); // GRAVITY_PERIPHERAL_ID
+        let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
     }
 
     info!("Machine definition created: {:?}", machine_definition);
@@ -885,7 +952,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    unwrap!(spawner.spawn(button_controller_task(btn_mcp23017, button_command_sender, button_status_receiver)));
+    unwrap!(spawner.spawn(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver)));
 
     // Create status subscriber for LED controller and spawn the task
     let led_status_receiver = status_channel.subscriber().expect("Failed to get LED status subscriber");
@@ -901,9 +968,12 @@ async fn main_task(spawner: Spawner) -> ! {
     // Spawn the ESP transceiver task
     unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
 
-    let disp_p = eyespi_display_peripherals!(p);
-
-    unwrap!(spawner.spawn(display_task(disp_p)));
+    // Spawn the TFT display task if feature is enabled
+    #[cfg(feature = "tft-display")]
+    {
+        let disp_p = eyespi_display_peripherals!(p);
+        unwrap!(spawner.spawn(display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
+    }
 
     // Spawn the SD detect pin toggle task
     //unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
@@ -929,6 +999,10 @@ async fn main_task(spawner: Spawner) -> ! {
             Box::pin(rtc_future),
             Box::pin(scheduler),
         ];
+
+    if let Some(ref mut g) = gravity_device {
+        futures.push(Box::pin(g.task()));
+    }
 
     join_all(futures).await;
 
@@ -980,8 +1054,11 @@ async fn sd_det_toggle_task(mut sd_det_pin: Output<'static>) {
     }
 }
 */
+#[cfg(feature = "tft-display")]
 #[embassy_executor::task]
-async fn display_task(disp_p: DisplayPeripherals) {
+async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSubscriber) {
+    use crate::display::GraphicalDisplayState;
+
     info!("Initializing NV3007 display");
 
     // Allocate display buffer in PSRAM (143,808 bytes for 168x428 RGB565)
@@ -990,7 +1067,7 @@ async fn display_task(disp_p: DisplayPeripherals) {
 
     // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
     let mut spi_config = spi::Config::default();
-    spi_config.frequency = 100_000_000;
+    spi_config.frequency = 50_000_000;
     spi_config.phase = embassy_rp::spi::Phase::CaptureOnFirstTransition;
     spi_config.polarity = embassy_rp::spi::Polarity::IdleLow;
     let spi = Spi::new(
@@ -1014,8 +1091,9 @@ async fn display_task(disp_p: DisplayPeripherals) {
     let di = SPIInterface::new(spi_dev, dc);
 
     // Initialize display with user-provided buffer using 279 variant
+    // Rotate90 gives us landscape mode: 428x168 (width x height)
     let mut display = Builder::new(Nv3007_168_428 { variant: Nv3007Variant::Variant279 })
-        .with_rotation(DisplayRotation::Rotate0)
+        .with_rotation(DisplayRotation::Rotate270)
         .connect_with_buffer(di, display_buffer);
 
     // Hardware reset
@@ -1031,62 +1109,29 @@ async fn display_task(disp_p: DisplayPeripherals) {
     display.flush().await.expect("Failed to flush display");
     info!("Display cleared and ready");
 
-    // Bouncing ball state
-    let display_width = 168u16;
-    let display_height = 428u16;
-    let ball_radius = 8i32;
-
-    let mut ball_x = display_width as i32 / 2;
-    let mut ball_y = display_height as i32 / 2;
-    let mut ball_dx = 3i32; // velocity in x direction
-    let mut ball_dy = 2i32; // velocity in y direction
-
-    let ball_colors = [Rgb565::RED, Rgb565::GREEN, Rgb565::BLUE, Rgb565::MAGENTA, Rgb565::CYAN, Rgb565::YELLOW];
-    let mut color_index = 0usize;
+    // Create graphical display state
+    let mut display_state = GraphicalDisplayState::new();
 
     // Main display loop
     loop {
-        display.clear();
-
-        // Update ball position
-        ball_x += ball_dx;
-        ball_y += ball_dy;
-
-        // Collision detection and response
-        if ball_x - ball_radius <= 0 || ball_x + ball_radius >= display_width as i32 {
-            ball_dx = -ball_dx;
-            ball_x = ball_x.clamp(ball_radius, display_width as i32 - ball_radius);
-            color_index = (color_index + 1) % ball_colors.len();
+        // Update status
+        if let Some(new_status) = status_receiver.try_next_message_pure() {
+            display_state.shared_state.update_status(new_status);
         }
 
-        if ball_y - ball_radius <= 0 || ball_y + ball_radius >= display_height as i32 {
-            ball_dy = -ball_dy;
-            ball_y = ball_y.clamp(ball_radius, display_height as i32 - ball_radius);
-            color_index = (color_index + 1) % ball_colors.len();
+        // Update display at 1Hz
+        if display_state.shared_state.should_update() {
+            if let Err(_) = display_state.render(&mut *display).await {
+                defmt::error!("Failed to render to TFT display");
+            }
+
+            // Flush to display
+            if let Err(_) = display.flush().await {
+                defmt::error!("Failed to flush TFT display");
+            }
         }
 
-        // Draw the bouncing ball
-        Circle::new(Point::new(ball_x - ball_radius, ball_y - ball_radius), ball_radius as u32 * 2)
-            .into_styled(PrimitiveStyleBuilder::new()
-                .fill_color(ball_colors[color_index])
-                .build())
-            .draw(&mut *display)
-            .unwrap();
-
-        // Add some text
-        Text::with_baseline("Bouncing Ball Demo", Point::new(84, 400),
-            MonoTextStyleBuilder::new()
-                .font(&FONT_5X7)
-                .text_color(Rgb565::WHITE)
-                .build(),
-            Baseline::Top)
-            .draw(&mut *display)
-            .unwrap();
-
-        // Flush to display
-        display.flush().await.expect("Failed to flush display");
-
-        // Update at ~30 FPS for smooth animation
-//        Timer::after_millis(33).await;
+        // Small delay to prevent tight loop
+        Timer::after(Duration::from_millis(10)).await;
     }
 }

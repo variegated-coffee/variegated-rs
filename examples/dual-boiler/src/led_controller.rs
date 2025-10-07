@@ -17,7 +17,7 @@ use embassy_time::{Instant, Timer};
 use defmt;
 use num_traits::float::Float;
 use variegated_controller_types::{
-    SingleGroupControllerGroups, Status,
+    MachineMode, SingleGroupControllerGroups, Status,
 };
 use variegated_tlc59108::{LedState, Tlc59108};
 use crate::StatusSubscriber;
@@ -47,6 +47,8 @@ const PI: f32 = 3.14159265359;
 
 /// LED breathing state tracker
 pub struct LedBreathingState {
+    /// Current machine mode (Off, On, PowerSaveStandby)
+    machine_mode: MachineMode,
     /// Current brewing state (from status subscription)
     is_brewing: bool,
     /// Current water dispensing state (from status subscription)
@@ -62,6 +64,7 @@ impl LedBreathingState {
     pub fn new() -> Self {
         let now = Instant::now();
         Self {
+            machine_mode: MachineMode::Off,
             is_brewing: false,
             is_dispensing: false,
             start_time: now,
@@ -71,6 +74,9 @@ impl LedBreathingState {
 
     /// Update status from the status receiver
     pub fn update_status(&mut self, status: &Status) {
+        // Track machine mode
+        self.machine_mode = status.mode;
+
         let new_brewing_state = status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index())
             .map(|group| group.is_brewing)
             .unwrap_or(false);
@@ -138,6 +144,11 @@ impl LedBreathingState {
 
     /// Get LED brightness values for the current state
     pub fn get_led_brightness_values(&self) -> [u8; NUM_LEDS] {
+        // Fixed low brightness when machine is off or in standby
+        if matches!(self.machine_mode, MachineMode::Off | MachineMode::PowerSaveStandby) {
+            return [2; NUM_LEDS];
+        }
+
         // Start with all LEDs at idle/low brightness
         let mut brightness = [self.calculate_idle_brightness(); NUM_LEDS];
 
