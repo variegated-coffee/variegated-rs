@@ -84,7 +84,7 @@ default = ["rp235xb"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb"]
-dual-boiler = ["tft-display"]
+dual-boiler = []
 single-boiler = ["dep:oled_async"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 
