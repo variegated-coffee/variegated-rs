@@ -767,7 +767,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
         None,
-        scale_controller,
+        None, //scale_controller,
         None,
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
@@ -1001,7 +1001,7 @@ async fn main_task(spawner: Spawner) -> ! {
         ];
 
     if let Some(ref mut g) = gravity_device {
-        futures.push(Box::pin(g.task()));
+//        futures.push(Box::pin(g.task()));
     }
 
     join_all(futures).await;
@@ -1067,7 +1067,7 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
 
     // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
     let mut spi_config = spi::Config::default();
-    spi_config.frequency = 50_000_000;
+    spi_config.frequency = 10_000_000;
     spi_config.phase = embassy_rp::spi::Phase::CaptureOnFirstTransition;
     spi_config.polarity = embassy_rp::spi::Polarity::IdleLow;
     let spi = Spi::new(
@@ -1106,7 +1106,7 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
 
     // Clear and show initial screen
     display.clear();
-    display.flush().await.expect("Failed to flush display");
+    display.flush_full_force().await.expect("Failed to flush display");
     info!("Display cleared and ready");
 
     // Create graphical display state
