@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
+use embassy_time::Instant;
 use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
 use alloc::boxed::Box;
 use defmt::{info, Format};
@@ -262,11 +263,17 @@ impl<'a> DualBoilerMechanism<'a> {
 
 pub struct DualBoilerFillMechanism<'a> {
     mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>,
+    threshold_exceeded_time: Option<Instant>,
+    is_filling_cycle: bool,
 }
 
 impl<'a> DualBoilerFillMechanism<'a> {
     pub fn new(mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>) -> Self {
-        DualBoilerFillMechanism { mechanism }
+        DualBoilerFillMechanism {
+            mechanism,
+            threshold_exceeded_time: None,
+            is_filling_cycle: false,
+        }
     }
 
     pub async fn set_fill_state(&mut self, filling: bool, duty_cycle: DutyCycleType) {
@@ -275,18 +282,57 @@ impl<'a> DualBoilerFillMechanism<'a> {
     }
 
     pub async fn check_and_fill_if_needed(&mut self, current_level: WaterLevelType, threshold: Option<WaterLevelType>) {
-        let mechanism = self.mechanism.lock().await;
-
         if let Some(fill_threshold) = threshold {
-            if current_level < fill_threshold && matches!(mechanism.state, DualBoilerMechanismState::Idle) {
-                drop(mechanism);
-                self.set_fill_state(true, 100).await;
+            let mechanism = self.mechanism.lock().await;
+            let is_idle = matches!(mechanism.state, DualBoilerMechanismState::Idle);
+            drop(mechanism);
+
+            if current_level < fill_threshold {
+                // Below threshold - need to fill
+                if is_idle {
+                    // Start/continue filling cycle
+                    self.is_filling_cycle = true;
+                    self.threshold_exceeded_time = None;
+                    self.set_fill_state(true, 100).await;
+                } else {
+                    // Can't fill (not idle) - end fill cycle
+                    self.is_filling_cycle = false;
+                    self.threshold_exceeded_time = None;
+                    self.set_fill_state(false, 0).await;
+                }
             } else {
-                drop(mechanism);
-                self.set_fill_state(false, 0).await;
+                // At or above threshold
+                if self.is_filling_cycle {
+                    // We're in an active fill cycle - apply 2-second stability logic
+                    match self.threshold_exceeded_time {
+                        None => {
+                            // Just reached threshold during fill - start timing
+                            self.threshold_exceeded_time = Some(Instant::now());
+                            self.set_fill_state(true, 100).await;
+                        }
+                        Some(exceeded_time) => {
+                            // Already above threshold - check if stable for 2 seconds
+                            let stable_duration = embassy_time::Duration::from_secs(2);
+                            if exceeded_time.elapsed() >= stable_duration {
+                                // Level has been stable above threshold for 2 seconds - stop filling
+                                self.is_filling_cycle = false;
+                                self.threshold_exceeded_time = None;
+                                self.set_fill_state(false, 0).await;
+                            } else {
+                                // Not yet stable for 2 seconds - keep filling
+                                self.set_fill_state(true, 100).await;
+                            }
+                        }
+                    }
+                } else {
+                    // Not in a fill cycle and level is above threshold - do nothing (stay off)
+                    self.set_fill_state(false, 0).await;
+                }
             }
         } else {
-            drop(mechanism);
+            // No threshold set - turn off fill and end any fill cycle
+            self.is_filling_cycle = false;
+            self.threshold_exceeded_time = None;
             self.set_fill_state(false, 0).await;
         }
     }
