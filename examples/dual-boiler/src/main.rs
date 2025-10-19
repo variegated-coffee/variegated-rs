@@ -570,8 +570,8 @@ async fn main_task(spawner: Spawner) -> ! {
     // Initialize watchdog
     let watchdog_p = watchdog_peripherals!(p);
     let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
-    watchdog.start(Duration::from_secs(16)); // 5 second timeout
-    info!("Watchdog initialized with 16 second timeout");
+    watchdog.start(Duration::from_secs(5)); // 5 second timeout
+    info!("Watchdog initialized with 5 second timeout");
 
     let mut settings_storage: SequentialStorageSettingsStorage<NoopRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();

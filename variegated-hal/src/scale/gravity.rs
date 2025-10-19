@@ -106,6 +106,10 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'
                     }
                     Err(e) => {
                         error!("Failed to connect to Gravity scale: {:?}", e);
+
+                        // Drop any pending commands to avoid stale commands being executed after reconnect
+                        self.command_signal.clear();
+
                         // Exponential backoff
                         Timer::after(current_retry_delay).await;
                         current_retry_delay = (current_retry_delay * 2).min(self.max_retry_delay);
@@ -247,9 +251,7 @@ impl <'a, const N: usize> GravityController<'a, N> {
 #[async_trait]
 impl <'a, const N: usize> ScaleController for GravityController<'a, N> {
     async fn tare(&mut self) -> Result<(), ScaleError> {
-        self.command_sender.send(GravityCommand::Tare).await;
-
-        Ok(())
+        self.command_sender.try_send(GravityCommand::Tare).map_err(|_| ScaleError::TareFailed)
     }
 
     async fn set_configuration(&mut self, config: &crate::scale::ScaleConfiguration) -> Result<(), ScaleError> {
@@ -263,9 +265,9 @@ impl <'a, const N: usize> ScaleController for GravityController<'a, N> {
             gravity_config.smoothing = smoothing;
         }
 
-        self.command_sender.send(GravityCommand::SetWeighingConfig(gravity_config)).await;
-
-        Ok(())
+        self.command_sender
+            .try_send(GravityCommand::SetWeighingConfig(gravity_config))
+            .map_err(|_| ScaleError::ConfigurationFailed)
     }
 
     fn get_supported_configuration(&mut self) -> crate::scale::SupportedConfigurationOptions {
@@ -275,20 +277,18 @@ impl <'a, const N: usize> ScaleController for GravityController<'a, N> {
         }
     }
 
-    async fn zero_calibration(&mut self) -> Result<(), crate::scale::ScaleError> {
-        self.command_sender.send(GravityCommand::ZeroCalibration).await;
-        Ok(())
+    async fn zero_calibration(&mut self) -> Result<(), ScaleError> {
+        self.command_sender.try_send(GravityCommand::ZeroCalibration).map_err(|_| ScaleError::CalibrationFailed)
     }
 
-    async fn reference_weight_calibration(&mut self, weight_grams: u32) -> Result<(), crate::scale::ScaleError> {
+    async fn reference_weight_calibration(&mut self, weight_grams: u32) -> Result<(), ScaleError> {
         // Check if the weight is supported
         let capabilities = self.get_capabilities();
         if !capabilities.supported_reference_weights.contains(&weight_grams) {
-            return Err(crate::scale::ScaleError::CalibrationNotSupported);
+            return Err(ScaleError::CalibrationNotSupported);
         }
 
-        self.command_sender.send(GravityCommand::ReferenceWeightCalibration(weight_grams)).await;
-        Ok(())
+        self.command_sender.try_send(GravityCommand::ReferenceWeightCalibration(weight_grams)).map_err(|_| ScaleError::CalibrationFailed)
     }
 
     fn get_capabilities(&self) -> crate::scale::ScaleCapabilities {
