@@ -55,7 +55,7 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation"}
 variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
 variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
-variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics"], optional = true }
+variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics", "delta-updates"], optional = true, default-features = false }
 variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
 
@@ -80,7 +80,7 @@ postcard = { version = "1.1.1", features = ["alloc"] }
 futures = { version = "0.3.30", default-features = false, features = ["alloc"] }
 
 [features]
-default = ["rp235xb"]
+default = ["rp235xb", "tft-display"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb"]

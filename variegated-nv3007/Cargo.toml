@@ -13,8 +13,9 @@ test = false
 bench = false
 
 [features]
-default = ["graphics"]
+default = ["graphics", "delta-updates"]
 graphics = ["embedded-graphics-core"]
+delta-updates = []
 defmt = ["dep:defmt"]
 
 [dependencies]
@@ -23,6 +24,7 @@ embedded-hal-async = "1.0"
 display-interface = "0.5"
 embassy-time = "0.4"
 embassy-sync = "0.7"
+heapless = "0.8"
 defmt = { version = "0.3", optional = true }
 embedded-graphics-core = { version = "0.4", optional = true }
 
