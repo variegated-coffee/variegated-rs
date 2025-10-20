@@ -57,6 +57,11 @@ impl<DM> DisplayMode<DM> {
         }
     }
 
+    /// Create display mode from an already-constructed mode
+    pub(crate) fn new_from_mode(mode: DM) -> Self {
+        Self { mode }
+    }
+
     /// Release the display mode
     pub fn release<DV, DI>(self) -> DisplayProperties<DV, DI>
     where
