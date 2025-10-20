@@ -9,13 +9,13 @@ bench = false
 
 [dependencies]
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
-embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
-embassy-sync = { version = "0.7.0", features = ["defmt"] }
+embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
+embassy-sync = { version = "0.7.2", features = ["defmt"] }
 embassy-futures = { version = "0.1.1" }
-embassy-rp = { version = "0.6.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-rp = { version = "0.8.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08" }
 variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
 variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", features = ["defmt"] }

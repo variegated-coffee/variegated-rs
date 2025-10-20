@@ -13,13 +13,13 @@ bench = false
 [dependencies]
 heapless = "0.8.0"
 async-trait = "0.1.80"
-embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
-embassy-sync = { version = "0.7.0", features = ["defmt"] }
+embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
+embassy-sync = { version = "0.7.2", features = ["defmt"] }
 embassy-futures = { version = "0.1.1" }
-embassy-rp = { version = "0.6.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+embassy-rp = { version = "0.8.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
 movavg = { version = "2.1.0", default-features = false }
