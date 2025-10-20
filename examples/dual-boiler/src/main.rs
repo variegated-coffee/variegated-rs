@@ -22,7 +22,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{adc, i2c, pio, pwm, spi, uart, watchdog, Peri};
+use embassy_rp::{adc, i2c, pio, pwm, spi, uart, watchdog, Peri, Peripherals};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -56,6 +56,7 @@ use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMec
 use variegated_timekeeping::TimeKeeper;
 use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::I2c;
+use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::pio::Pio;
 use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::priority_channel::Min;
@@ -104,14 +105,19 @@ use variegated_hal::cap_adc::fdc1004::Fdc1004Sensor;
 use variegated_hal::gpio::gpio_binary_pump::GpioBinaryPump;
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use variegated_hal::noop::NoopOutputPin;
+#[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::schedule::{run_schedule, InMemoryScheduleStore, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
+#[cfg(feature = "gravity")]
 use variegated_gravity_driver::Gravity;
 use variegated_hal::gpio::gpio_pio_pulse_counter::GpioPioTransformingPulseCounter;
 use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
-use variegated_hal::scale::{gravity, ScaleController};
+use variegated_hal::scale::ScaleController;
+#[cfg(feature = "gravity")]
+use variegated_hal::scale::gravity;
+use variegated_instrumentation::{async_task_loop, instrumented_section};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -124,6 +130,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     FlowMeterPioIrq => pio::InterruptHandler<FlowMeterPeripheralsPio>;
 });
 
+#[cfg(feature = "gravity")]
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 
 // Embassy task wrapper for ESP transceiver (dual-boiler)
@@ -279,6 +286,7 @@ type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
 type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
+#[cfg(feature = "gravity")]
 type GravityMutex = Mutex<NoopRawMutex, Gravity<QwiicI2CDevice>>;
 
 // Display type aliases (feature-gated)
@@ -305,63 +313,16 @@ type ScheduleStoreMutex = Mutex<NoopRawMutex, SequentialStorageScheduleStore<'st
 const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
 type ShotLogDataPointChannel = PubSubChannel<CriticalSectionRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
 
+const CORE1_STACK_LENGTH: usize = 4096;
+
+static mut CORE1_STACK: Stack<CORE1_STACK_LENGTH> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
+static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    let executor0 = EXECUTOR0.init(Executor::new());
-    executor0.run(|spawner| {
-        unwrap!(spawner.spawn(main_task(spawner)))
-    });
-}
-
-static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
-static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
-static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
-
-#[cfg(feature = "tft-display")]
-static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
-
-static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
-static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
-static GRAVITY_MUTEX: StaticCell<GravityMutex> = StaticCell::new();
-
-static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
-static BREW_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
-static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
-static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
-static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
-static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
-static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
-static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
-static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
-static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
-static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
-static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
-static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
-static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
-static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
-static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
-
-static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
-static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
-static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
-static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
-static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
-static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
-static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
-
-
-static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
-static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
-
-
-
-#[embassy_executor::task]
-async fn main_task(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
 
-    Timer::after_millis(1000).await;
-    defmt::info!("Starting!");
     let psram_config = embassy_rp::psram::Config::aps6404l();
     defmt::info!("Initing!");
 
@@ -372,9 +333,6 @@ async fn main_task(spawner: Spawner) -> ! {
 
         #[allow(static_mut_refs)]
         {
-            use core::mem::MaybeUninit;
-            const HEAP_SIZE: usize = 1024;
-            static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
             unsafe {
                 const PSRAM_ADDRESS: usize = 0x11000000;
                 let ptr = PSRAM_ADDRESS as *mut u8; // Using u8 for byte array
@@ -397,14 +355,137 @@ async fn main_task(spawner: Spawner) -> ! {
         }
     }
 
+    let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
+
+    // Spawn the TFT display task if feature is enabled
+    #[cfg(feature = "tft-display")]
+    {
+        let disp_p = eyespi_display_peripherals!(p);
+
+        spawn_core1(
+            p.CORE1,
+            unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+            move || {
+                let executor1 = EXECUTOR1.init(Executor::new());
+                executor1.run(|spawner| {
+                    info!("Spawning display task on core 1");
+
+                    unwrap!(spawner.spawn(display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))))
+                });
+            },
+        );
+    }
+
+
+    let spi_p = internal_spi_bus_peripherals!(p);
+    let ads_p = ads124s08_peripherals!(p);
+    let rotary_p = rotary_pump_peripherals!(p);
+    let mechanism_p = mechanism_peripherals!(p);
+    let sd_card_p = sd_card_peripherals!(p);
+    let internal_i2c_p = internal_i2c_bus_peripherals!(p);
+    let qwiic_i2c_p = qwiic_i2c_bus_peripherals!(p);
+    let button_mux_p = button_mux_peripherals!(p);
+    let flash_p = settings_flash_peripherals!(p);
+    let watchdog_p = watchdog_peripherals!(p);
+    let flow_meter_p = flow_meter_peripherals!(p);
+    let esp_p = esp32_peripherals!(p);
+
+
+
+    let executor0 = EXECUTOR0.init(Executor::new());
+    executor0.run(|spawner| {
+        unwrap!(spawner.spawn(main_task(
+            spawner,
+            spi_p,
+            ads_p,
+            rotary_p,
+            mechanism_p,
+            sd_card_p,
+            internal_i2c_p,
+            qwiic_i2c_p,
+            button_mux_p,
+            flash_p,
+            watchdog_p,
+            flow_meter_p,
+            esp_p,
+            status_channel,
+        )))
+    });
+}
+
+static INTERNAL_SPI_BUS: StaticCell<InternalSPIBus> = StaticCell::new();
+static INTERNAL_I2C_BUS: StaticCell<InternalI2CBus> = StaticCell::new();
+static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
+
+#[cfg(feature = "tft-display")]
+static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
+
+static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
+static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
+#[cfg(feature = "gravity")]
+static GRAVITY_MUTEX: StaticCell<GravityMutex> = StaticCell::new();
+
+static BREW_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+static BREW_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
+static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
+static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
+static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
+static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
+static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
+static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
+static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
+static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
+#[cfg(feature = "gravity")]
+static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
+#[cfg(feature = "gravity")]
+static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
+#[cfg(feature = "gravity")]
+static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
+#[cfg(feature = "gravity")]
+static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
+#[cfg(feature = "gravity")]
+static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+
+static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
+static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
+static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
+static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
+static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
+static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
+static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
+
+
+static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
+static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
+
+
+
+#[embassy_executor::task]
+async fn main_task(
+    spawner: Spawner,
+    spi_p: InternalSpiBusPeripherals,
+    ads_p: Ads124S08Peripherals,
+    rotary_p: RotaryPumpPeripherals,
+    mechanism_p: MechanismPeripherals,
+    sd_card_p: SdCardPeripherals,
+    internal_i2c_p: InternalI2cBusPeripherals,
+    qwiic_i2c_p: QwiicI2cBusPeripherals,
+    button_mux_p: ButtonMuxPeripherals,
+    flash_p: SettingsFlashPeripherals,
+    watchdog_p: WatchdogPeripherals,
+    flow_meter_p: FlowMeterPeripherals,
+    esp_p: Esp32Peripherals,
+    status_channel: &'static StatusChannel
+) -> ! {
+
+    Timer::after_millis(1000).await;
+    defmt::info!("Starting!");
     // Shared SPI bus
     let mut spi_config = spi::Config::default();
     spi_config.frequency = 281_000;
     spi_config.phase = Phase::CaptureOnSecondTransition;
     spi_config.polarity = Polarity::IdleLow;
-
-    let spi_p = internal_spi_bus_peripherals!(p);
-    let ads_p = ads124s08_peripherals!(p);
 
     let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, spi_config);
     let spi_bus = INTERNAL_SPI_BUS.init(Mutex::new(spi));
@@ -423,10 +504,6 @@ async fn main_task(spawner: Spawner) -> ! {
 
     info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
 
-    let rotary_p = rotary_pump_peripherals!(p);
-    let mechanism_p = mechanism_peripherals!(p);
-    let sd_card_p = sd_card_peripherals!(p);
-
     let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
 
     // Create SD detect pin output for toggling
@@ -438,11 +515,9 @@ async fn main_task(spawner: Spawner) -> ! {
     let fill_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_fill_solenoid, Low)));
     let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
 
-    let internal_i2c_p = internal_i2c_bus_peripherals!(p);
     let internal_i2c_bus = embassy_rp::i2c::I2c::new_async(internal_i2c_p.i2c, internal_i2c_p.scl_pin, internal_i2c_p.sda_pin, Irqs, i2c::Config::default());
     let internal_i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(internal_i2c_bus));
 
-    let qwiic_i2c_p = qwiic_i2c_bus_peripherals!(p);
     let qwiic_i2c_bus = embassy_rp::i2c::I2c::new_async(qwiic_i2c_p.i2c, qwiic_i2c_p.scl_pin, qwiic_i2c_p.sda_pin, Irqs, i2c::Config::default());
     let qwiic_i2c_bus = QWIIC_I2C_BUS.init(Mutex::new(qwiic_i2c_bus));
 
@@ -470,16 +545,24 @@ async fn main_task(spawner: Spawner) -> ! {
         }
     }
 
+    #[cfg(feature = "gravity")]
     let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
+    #[cfg(feature = "gravity")]
     let output_flow_sig: &'static Watch<_, _, 3> = OUTPUT_FLOW_SIGNAL.init(Watch::new());
+    #[cfg(feature = "gravity")]
     let gravity_connected_sig: &'static Signal<NoopRawMutex, bool> = GRAVITY_CONNECTED_SIGNAL.init(Signal::new());
+    #[cfg(feature = "gravity")]
     let gravity_command_channel: &'static Channel<_, _, 3> = GRAVITY_COMMAND_CHANNEL.init(Channel::new());
 
     // Always create the gravity device - it will handle connection retries internally
+    #[cfg(feature = "gravity")]
     let i2c_dev = I2cDevice::new(qwiic_i2c_bus);
+    #[cfg(feature = "gravity")]
     let gravity = Gravity::new(i2c_dev, None);
+    #[cfg(feature = "gravity")]
     let gravity_mutex = GRAVITY_MUTEX.init(Mutex::new(gravity));
 
+    #[cfg(feature = "gravity")]
     let mut gravity_device = Some(GravityDevice::new(
         gravity_mutex,
         variegated_gravity_driver::Channel::Ch1,
@@ -491,18 +574,23 @@ async fn main_task(spawner: Spawner) -> ! {
         Duration::from_millis(100),
     ).with_connected_signal(gravity_connected_sig));
 
+    #[cfg(feature = "gravity")]
     info!("Gravity sensor initialized - will attempt connection with retry");
 
+    #[cfg(feature = "gravity")]
     let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(GravityController::new(
         gravity_command_channel.sender()
     )));
+
+    #[cfg(not(feature = "gravity"))]
+    let scale_controller: Option<Box<dyn ScaleController>> = None;
 
     let mut fdc1004_dev = I2cDevice::new(internal_i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
 
     let fdc1004 = FDC_MUTEX.init(Mutex::new(fdc1004));
 
-    let mut button_mux_p = button_mux_peripherals!(p);
+
     let button_interrupt = Input::new(button_mux_p.pin_interrupt, Pull::Up);
 
     // Initialize MCP23017 for button control
@@ -557,7 +645,6 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut lcd_device = Mcp23017HD44780Device::new(lcd_mcp23017);
     lcd_device.init_pins().await.unwrap();
 
-    let flash_p = settings_flash_peripherals!(p);
     let flash_spi_dev = SpiDevice::new(spi_bus, Output::new(flash_p.pin_cs, High));
 
     let hold = NoopOutputPin {};
@@ -568,7 +655,6 @@ async fn main_task(spawner: Spawner) -> ! {
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
     // Initialize watchdog
-    let watchdog_p = watchdog_peripherals!(p);
     let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
     watchdog.start(Duration::from_secs(5)); // 5 second timeout
     info!("Watchdog initialized with 5 second timeout");
@@ -739,11 +825,6 @@ async fn main_task(spawner: Spawner) -> ! {
 
     info!("Dual boiler mechanism initialized");
 
-    let flow_meter_p = flow_meter_peripherals!(p);
-
-    // Extract ESP32 peripherals for communication
-    let esp_p = esp32_peripherals!(p);
-
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
     let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
 
@@ -773,7 +854,10 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(flow_meter_sig.receiver().unwrap()),
         Some(input_volume_sig.receiver().unwrap()),
         None,
+        #[cfg(feature = "gravity")]
         Some(output_weight_sig.receiver().unwrap()),
+        #[cfg(not(feature = "gravity"))]
+        None,
     );
 
     // Create water tap with dual boiler mechanism
@@ -788,11 +872,13 @@ async fn main_task(spawner: Spawner) -> ! {
 
     // Create peripheral registry and register peripherals
     let peripheral_registry = PERIPHERAL_REGISTRY.init(PeripheralRegistry::new());
-    let gravity_status_provider = GRAVITY_STATUS_PROVIDER.init(GravityStatusProvider::new(GRAVITY_PERIPHERAL_ID, gravity_connected_sig));
-    peripheral_registry.register(gravity_status_provider);
+    #[cfg(feature = "gravity")]
+    {
+        let gravity_status_provider = GRAVITY_STATUS_PROVIDER.init(GravityStatusProvider::new(GRAVITY_PERIPHERAL_ID, gravity_connected_sig));
+        peripheral_registry.register(gravity_status_provider);
+    }
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
-    let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
     let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
 
     // Create the MachineDefinition for a dual boiler single group machine
@@ -908,6 +994,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let _ = machine_definition.add_tank(0, tank_def);
 
     // Add scale peripheral if present
+    #[cfg(feature = "gravity")]
     if let Some(scale_controller) = &group.scale_controller {
         let mut scale_capabilities = heapless::Vec::new();
         let _ = scale_capabilities.push(SensorCapability::Weight);
@@ -968,13 +1055,6 @@ async fn main_task(spawner: Spawner) -> ! {
     // Spawn the ESP transceiver task
     unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
 
-    // Spawn the TFT display task if feature is enabled
-    #[cfg(feature = "tft-display")]
-    {
-        let disp_p = eyespi_display_peripherals!(p);
-        unwrap!(spawner.spawn(display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
-    }
-
     // Spawn the SD detect pin toggle task
     //unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
 
@@ -1000,6 +1080,7 @@ async fn main_task(spawner: Spawner) -> ! {
             Box::pin(scheduler),
         ];
 
+    #[cfg(feature = "gravity")]
     if let Some(ref mut g) = gravity_device {
 //        futures.push(Box::pin(g.task()));
     }
@@ -1061,15 +1142,20 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
 
     info!("Initializing NV3007 display");
 
-    // Allocate display buffer in PSRAM (143,808 bytes for 168x428 RGB565)
-    let display_buffer = Box::leak(Box::new([0u8; 143_808]));
-    info!("Display buffer allocated at: 0x{:x}", display_buffer.as_ptr() as usize);
+    // Allocate double buffers in PSRAM for delta updates (143,808 bytes each for 168x428 RGB565)
+    // Current buffer: user draws to this
+    // Previous buffer: used for change detection
+    let current_buffer = Box::leak(Box::new([0u8; 143_808]));
+    let previous_buffer = Box::leak(Box::new([0u8; 143_808]));
+    info!("Display buffers allocated:");
+    info!("  Current:  0x{:x}", current_buffer.as_ptr() as usize);
+    info!("  Previous: 0x{:x}", previous_buffer.as_ptr() as usize);
 
     // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
     let mut spi_config = spi::Config::default();
     spi_config.frequency = 10_000_000;
-    spi_config.phase = embassy_rp::spi::Phase::CaptureOnFirstTransition;
-    spi_config.polarity = embassy_rp::spi::Polarity::IdleLow;
+    spi_config.phase = Phase::CaptureOnFirstTransition;
+    spi_config.polarity = Polarity::IdleLow;
     let spi = Spi::new(
         disp_p.spi,
         disp_p.sclk_pin,
@@ -1090,11 +1176,12 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
     // Create display interface
     let di = SPIInterface::new(spi_dev, dc);
 
-    // Initialize display with user-provided buffer using 279 variant
-    // Rotate90 gives us landscape mode: 428x168 (width x height)
+    // Initialize display with double buffering for delta updates using 279 variant
+    // Rotate270 gives us landscape mode: 428x168 (width x height)
     let mut display = Builder::new(Nv3007_168_428 { variant: Nv3007Variant::Variant279 })
         .with_rotation(DisplayRotation::Rotate270)
-        .connect_with_buffer(di, display_buffer);
+        //.connect_with_buffer(di, current_buffer);
+        .connect_with_double_buffer(di, current_buffer, previous_buffer);
 
     // Hardware reset
     display.reset(&mut reset, &mut embassy_time::Delay).expect("Failed to reset display");
@@ -1105,33 +1192,34 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
     info!("Display initialized successfully with 279 variant");
 
     // Clear and show initial screen
+    // Use flush_full() for initial screen - only 3 SPI transactions!
     display.clear();
-    display.flush_full_force().await.expect("Failed to flush display");
+    display.flush_full().await.expect("Failed to flush display");
     info!("Display cleared and ready");
 
     // Create graphical display state
     let mut display_state = GraphicalDisplayState::new();
 
     // Main display loop
-    loop {
+    async_task_loop!("Display task", Some(Duration::from_millis(10)), {
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);
         }
 
-        // Update display at 1Hz
-        if display_state.shared_state.should_update() {
-            if let Err(_) = display_state.render(&mut *display).await {
+        instrumented_section!("Display update", {
+            if let Err(_) = display_state.render(&mut *display) {
                 defmt::error!("Failed to render to TFT display");
             }
+        });
 
-            // Flush to display
+        instrumented_section!("Display flush", {
+            // Flush to display with delta updates
+            // With double buffering, only changed regions are sent (typically 50-100 transactions)
+            // Falls back to full update if >70% changed (~3 transactions)
             if let Err(_) = display.flush().await {
                 defmt::error!("Failed to flush TFT display");
             }
-        }
-
-        // Small delay to prevent tight loop
-        Timer::after(Duration::from_millis(10)).await;
-    }
+        });
+    });
 }

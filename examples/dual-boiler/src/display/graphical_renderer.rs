@@ -25,7 +25,7 @@ use u8g2_fonts::{
 };
 
 use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, Output as ControllerOutput};
-
+use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
 use crate::GRAVITY_PERIPHERAL_ID;
 
@@ -66,12 +66,14 @@ impl GraphicalDisplayState {
     }
 
     /// Render the current display state to a graphics target
-    pub async fn render<D>(&mut self, display: &mut D) -> Result<(), D::Error>
+    pub fn render<D>(&mut self, display: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        // Clear display
-        display.clear(Rgb565::BLACK).ok();
+        instrumented_section!("Clear Display", {
+            // Clear display
+            display.clear(Rgb565::BLACK).ok();
+        });
 
         // === Effective area ===
         Rectangle::new(Point::new(10, 20), Size::new(390, 115))

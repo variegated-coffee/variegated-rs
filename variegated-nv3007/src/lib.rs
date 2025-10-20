@@ -8,16 +8,16 @@
 //! - Async/await interface using embassy
 //! - Optional embedded-graphics integration
 //! - **Delta updates** (enabled by default via `delta-updates` feature):
-//!   - Tile-based dirty tracking reduces SPI transfers by 50-100x for typical UI updates
-//!   - Tile-major framebuffer layout optimized for PSRAM and DMA
-//!   - Configurable tile size via const generics (default 8×8 pixels)
-//!   - Smart clear() that only updates modified regions
-//!   - Automatic fallback to full updates when needed
-//!   - Adds ~160 bytes RAM overhead
+//!   - Double-buffering with pixel-accurate change detection
+//!   - Smart region building reduces SPI transfers by 100-1500x for partial updates
+//!   - Row-major framebuffer layout for optimal memory access patterns
+//!   - Automatic fallback to full updates when >70% of screen changes
+//!   - Full-width region optimization (single contiguous transfer)
+//!   - Requires ~140KB additional RAM for previous frame buffer
 //! - **Without delta-updates** (disable with `default-features = false, features = ["graphics"]`):
 //!   - Simple row-major framebuffer layout
-//!   - Minimal memory footprint (no dirty tracking overhead)
-//!   - Optimal for full-screen updates
+//!   - Minimal memory footprint (single buffer only)
+//!   - Ultra-fast full-screen updates (3 SPI transactions total)
 //! - Flexible buffer management (user-provided or driver-managed)
 //! - SPI interface support
 //! - Display rotation support (set via Builder before initialization; runtime changes not supported with delta-updates)
@@ -60,7 +60,7 @@ pub enum Error<CommE, PinE> {
 pub mod builder;
 pub mod command;
 #[cfg(feature = "delta-updates")]
-pub mod dirty_tracker;
+pub mod region_tracker;
 pub mod display;
 pub mod displayrotation;
 pub mod displays;

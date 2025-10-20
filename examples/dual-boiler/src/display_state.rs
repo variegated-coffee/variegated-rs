@@ -164,9 +164,9 @@ impl DisplayState {
     pub fn format_brew_time(&self, brew_time: Option<Duration>) -> String {
         match brew_time {
             Some(duration) => {
-                let secs = duration.as_secs();
-                if secs < 100 {
-                    format!("{}s", secs)
+                let secs = duration.as_millis() as f32 / 1000.0;
+                if secs < 100.0 {
+                    format!("{:.1}s", secs)
                 } else {
                     "99s".to_string() // Cap at 99s for display
                 }

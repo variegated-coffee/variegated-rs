@@ -61,6 +61,44 @@ where
             buffer,
         )
     }
+
+    /// Connect the display with double buffering for delta updates (requires delta-updates feature)
+    ///
+    /// This enables pixel-accurate change detection and optimized region-based updates.
+    /// Requires two buffers: current (for drawing) and previous (for comparison).
+    ///
+    /// # Arguments
+    /// * `interface` - Display interface (SPI)
+    /// * `current_buffer` - Current framebuffer (user draws to this)
+    /// * `previous_buffer` - Previous framebuffer (used for comparison)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let current = Box::leak(Box::new([0u8; 143_808]));
+    /// let previous = Box::leak(Box::new([0u8; 143_808]));
+    /// let display = Builder::new(Nv3007_168_428::default())
+    ///     .with_rotation(DisplayRotation::Rotate270)
+    ///     .connect_with_double_buffer(interface, current, previous);
+    /// ```
+    #[cfg(feature = "delta-updates")]
+    pub fn connect_with_double_buffer<'a, DI>(
+        self,
+        interface: DI,
+        current_buffer: &'a mut [u8],
+        previous_buffer: &'a mut [u8],
+    ) -> DisplayMode<crate::mode::graphics::GraphicsMode<'a, DV, DI>>
+    where
+        DI: AsyncWriteOnlyDataCommand,
+    {
+        let properties = DisplayProperties::new(self.variant, interface, self.rotation);
+        DisplayMode::new_from_mode(
+            crate::mode::graphics::GraphicsMode::new_with_double_buffer(
+                properties,
+                current_buffer,
+                previous_buffer,
+            )
+        )
+    }
 }
 
 impl Builder<Nv3007_168_428> {
