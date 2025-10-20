@@ -33,6 +33,5 @@ lto = true              # Disable link-time optimization
 debug = true             # Keep debug info in release builds too
 
 [patch.crates-io]
-embassy-rp = { path = "../../embassy/embassy-rp", version = "0.6.0" }
-#embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "rp-0.4.0" }
+embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "psram-0.8.0" }
 #variegate-board-cfg = { path = "../variegated-board/variegated-board-cfg", version = "0.2.1" }

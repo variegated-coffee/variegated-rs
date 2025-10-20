@@ -11,7 +11,7 @@ categories = ["embedded"]
 [dependencies]
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
-embassy-futures = { version = "0.1.0" }
+embassy-futures = { version = "0.1.1" }
 
 defmt = { version = "0.3", optional = true }
 

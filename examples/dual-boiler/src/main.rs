@@ -498,8 +498,12 @@ async fn main_task(
         info!("Error resetting ADS124S08: {:?}", e);
     }
     info!("Done");
-    let dr = ads.read_datarate_reg().await.unwrap();
-    info!("Data rate: {:?}", dr);
+    let dr = ads.read_datarate_reg().await;
+    if let Ok(dr) = dr {
+        info!("Data rate: {:?}", dr);
+    } else {
+        info!("Error reading data rate");
+    }
     let ads = ADS_MUTEX.init(Mutex::new(ads));
 
     info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());

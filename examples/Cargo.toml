@@ -19,11 +19,11 @@ test = false
 bench = false
 
 [dependencies]
-embassy-executor = { version = "0.7.0", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "task-arena-size-65536"] }
-embassy-rp = { version = "0.6.0", path = "../../../embassy/embassy-rp", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
-embassy-sync = { version = "0.7.0", features = ["defmt"] }
-embassy-embedded-hal = { version = "0.3.0", features = ["defmt"] }
-embassy-time = { version = "0.4.0", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-rp = { version = "0.8.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
+embassy-sync = { version = "0.7.2", features = ["defmt"] }
+embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
+embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-futures = "0.1.1"
 
 w25q32jv = { version = "0.5.1", features = ["defmt", "async", "megabits64"] }
