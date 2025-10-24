@@ -2,7 +2,8 @@ use alloc::vec::Vec;
 use alloc::vec;
 use alloc::{string::{String, ToString}};
 use defmt::Format;
-use variegated_controller_types::Status;
+use variegated_controller_types::{Status, RoutineIndex};
+use variegated_controller_lib::routine::RoutineRepository as RoutineRepositoryTrait;
 use crate::RoutineRepository;
 
 #[derive(Debug, Clone, Copy, PartialEq, Format)]
@@ -38,7 +39,7 @@ pub enum PidComponentType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Format)]
 pub enum MenuItemId {
-    Routine(usize),
+    Routine(RoutineIndex),
     SettingsInformation,
     SettingsScaleSettings,
     SettingsManualBrew,
@@ -194,11 +195,11 @@ impl ListMenuType {
             ListMenuType::Settings => crate::rotary::UIState::Idle(crate::rotary::IdleSubState::SettingsMenuSelected),
             ListMenuType::PidConfig(_) => {
                 // Go back to Settings menu
-                crate::rotary::UIState::ListMenu(ListMenuType::Settings, ListMenuState::new(), None)
+                crate::rotary::UIState::ListMenu(ListMenuType::Settings, ListMenuState::new(), None, None)
             },
             ListMenuType::PidTermConfig(pid_type, _) => {
                 // Go back to PID Config menu for this PID type
-                crate::rotary::UIState::ListMenu(ListMenuType::PidConfig(*pid_type), ListMenuState::new(), None)
+                crate::rotary::UIState::ListMenu(ListMenuType::PidConfig(*pid_type), ListMenuState::new(), None, None)
             },
         }
     }
@@ -207,12 +208,11 @@ impl ListMenuType {
         match self {
             ListMenuType::Routines => {
                 if let Some(rr) = routine_repository {
-                    let repo = rr.lock().await;
-                    repo.iterate_routines()
-                        .enumerate()
-                        .map(|(index, routine)| ListMenuItem {
+                    let mut repo = rr.lock().await;
+                    repo.iterate_routines_with_indices().await
+                        .map(|(routine_index, routine)| ListMenuItem {
                             label: routine.name().to_string(),
-                            id: MenuItemId::Routine(index),
+                            id: MenuItemId::Routine(routine_index),
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -251,8 +251,8 @@ impl ListMenuType {
         match self {
             ListMenuType::Routines => {
                 if let Some(rr) = routine_repository {
-                    let repo = rr.lock().await;
-                    repo.get_routine_count()
+                    let mut repo = rr.lock().await;
+                    repo.get_routine_count().await
                 } else {
                     0
                 }
@@ -266,7 +266,9 @@ impl ListMenuType {
     pub fn get_menu_item_id(&self, item_index: usize) -> Option<MenuItemId> {
         match self {
             ListMenuType::Routines => {
-                Some(MenuItemId::Routine(item_index))
+                // Cannot determine RoutineIndex from item position alone
+                // Caller should use cached menu items instead
+                None
             }
             ListMenuType::Settings => {
                 SETTINGS_MENU_ITEMS.get(item_index).map(|item| item.id)

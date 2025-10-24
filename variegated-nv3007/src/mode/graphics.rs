@@ -209,8 +209,8 @@ where
         // Detect changes and decide on update strategy
         let (do_full, regions) = if let (Some(ref tracker), Some(ref prev)) =
             (&self.double_buffer_tracker, &self.previous_buffer) {
-            let regions = tracker.detect_changes(self.buffer, prev);
-            let do_full = tracker.should_full_update(&regions);
+            let regions = instrumented_section!("Determine Regions", { tracker.detect_changes(self.buffer, prev) });
+            let do_full = instrumented_section!("Determine full", { tracker.should_full_update(&regions) });
             (do_full, Some(regions))
         } else {
             (true, None)
@@ -218,9 +218,13 @@ where
 
         // Perform the update
         if do_full {
-            self.flush_full().await?;
+            instrumented_section!("Full Flush", {
+                self.flush_full().await?;
+            });
         } else if let Some(regions) = regions {
-            self.flush_regions(&regions).await?;
+            instrumented_section!("Region flush", {
+                self.flush_regions(&regions).await?;
+            });
         }
 
         // Swap buffers after successful update
@@ -240,7 +244,6 @@ where
 
     /// Force full screen update (single contiguous transfer)
     pub async fn flush_full(&mut self) -> Result<(), DisplayError> {
-        //debug!("Flushing full screen");
         let (width, height) = self.effective_dimensions();
 
         // Set address window to full screen
@@ -265,8 +268,6 @@ where
         &mut self,
         regions: &[crate::region_tracker::Region],
     ) -> Result<(), DisplayError> {
-        //debug!("Flushing {} regions", regions.len());
-
         let (width, _) = self.effective_dimensions();
 
         for region in regions {
@@ -459,6 +460,7 @@ use embedded_graphics_core::{
     prelude::*,
     Pixel,
 };
+use variegated_instrumentation::instrumented_section;
 
 #[cfg(feature = "graphics")]
 impl<'a, DV, DI> DrawTarget for GraphicsMode<'a, DV, DI>

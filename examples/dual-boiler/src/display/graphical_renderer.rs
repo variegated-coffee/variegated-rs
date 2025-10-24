@@ -24,18 +24,20 @@ use u8g2_fonts::{
     types::{FontColor, HorizontalAlignment, VerticalPosition}
 };
 
-use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, Output as ControllerOutput};
+use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue};
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
 use crate::GRAVITY_PERIPHERAL_ID;
+use variegated_timekeeping::DateTimeInZone;
+use core::time::Duration;
 
 // Display dimensions in landscape mode
 const DISPLAY_WIDTH: i32 = 428;
 const DISPLAY_HEIGHT: i32 = 168;
 
 // Effective display area (accounting for bezel)
-const EFFECTIVE_X: i32 = 10;
-const EFFECTIVE_Y: i32 = 20;
+const EFFECTIVE_X: i32 = 25;
+const EFFECTIVE_Y: i32 = 34;
 const EFFECTIVE_WIDTH: i32 = 390;
 const EFFECTIVE_HEIGHT: i32 = 115;
 const EFFECTIVE_CENTER_X: i32 = EFFECTIVE_X + EFFECTIVE_WIDTH / 2;
@@ -54,6 +56,10 @@ pub struct GraphicalDisplayState {
     pub shared_state: DisplayState,
     /// Animation state for status indicator
     animation_state: bool,
+    /// Cached next scheduled event
+    pub next_schedule: Option<(ScheduleItem, DateTimeInZone)>,
+    /// Cached current routine being executed
+    pub current_routine: Option<Routine>,
 }
 
 impl GraphicalDisplayState {
@@ -62,6 +68,75 @@ impl GraphicalDisplayState {
         Self {
             shared_state: DisplayState::new(),
             animation_state: false,
+            next_schedule: None,
+            current_routine: None,
+        }
+    }
+
+    /// Format the next schedule trigger time relative to now
+    fn format_schedule_time(&self, trigger_time: &DateTimeInZone) -> String {
+        use variegated_timekeeping::TimeKeeper;
+
+        let local_dt = trigger_time.naive_local();
+
+        if let Some(now) = TimeKeeper::now_local() {
+            let trigger_date = trigger_time.date_naive();
+            let now_date = now.date_naive();
+
+            // Calculate difference in calendar days (not duration)
+            let days_diff = trigger_date.signed_duration_since(now_date).num_days();
+
+            if days_diff == 0 {
+                // Today - show time only
+                format!("Today {}", local_dt.format("%H:%M"))
+            } else if days_diff == 1 {
+                // Tomorrow
+                format!("Tomorrow {}", local_dt.format("%H:%M"))
+            } else if days_diff < 7 {
+                // This week - show day name
+                format!("{} {}", local_dt.format("%a"), local_dt.format("%H:%M"))
+            } else {
+                // Show full date
+                format!("{}", local_dt.format("%m/%d %H:%M"))
+            }
+        } else {
+            // Fallback if we can't get current time
+            format!("{}", local_dt.format("%m/%d %H:%M"))
+        }
+    }
+
+    /// Format schedule commands as a brief summary
+    fn format_schedule_commands(&self, schedule: &ScheduleItem) -> String {
+        use variegated_controller_types::MachineCommand;
+
+        if schedule.commands.is_empty() {
+            return "No actions".to_string();
+        }
+
+        // Show first command as representative
+        match &schedule.commands[0] {
+            MachineCommand::SetMachineMode(mode) => {
+                format!("{:?}", mode)
+            }
+            MachineCommand::RunRoutine(idx, _) => {
+                format!("Run Routine {}", idx)
+            }
+            MachineCommand::StartBrewing(_) => {
+                "Start Brewing".to_string()
+            }
+            MachineCommand::EnableBoiler(_) => {
+                "Enable Boiler".to_string()
+            }
+            MachineCommand::DisableBoiler(_) => {
+                "Disable Boiler".to_string()
+            }
+            _ => {
+                if schedule.commands.len() > 1 {
+                    format!("{} actions", schedule.commands.len())
+                } else {
+                    "1 action".to_string()
+                }
+            }
         }
     }
 
@@ -76,12 +151,12 @@ impl GraphicalDisplayState {
         });
 
         // === Effective area ===
-        Rectangle::new(Point::new(10, 20), Size::new(390, 115))
+/*        Rectangle::new(Point::new(EFFECTIVE_X, EFFECTIVE_Y), Size::new(EFFECTIVE_WIDTH as u32, EFFECTIVE_HEIGHT as u32))
             .into_styled(PrimitiveStyleBuilder::new()
                 .stroke_color(Rgb565::WHITE)
                 .stroke_width(2)
                 .build())
-            .draw(display).ok();
+            .draw(display).ok();*/
 
         // Render status animation
         self.render_status_animation(display).ok();
@@ -230,15 +305,44 @@ impl GraphicalDisplayState {
         self.render_time_date(display)?;
         self.render_status_icons(display)?;
 
-        let font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
-        font.render_aligned(
+        let medium_font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
+        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+
+        // Title
+        medium_font.render_aligned(
             format_args!("Machine Off"),
-            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y),
+            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y - 20),
             VerticalPosition::Center,
             HorizontalAlignment::Center,
             FontColor::Transparent(Rgb565::WHITE),
             display
         ).ok();
+
+        // Show next scheduled event if available
+        if let Some((schedule, trigger_time)) = &self.next_schedule {
+            let time_str = self.format_schedule_time(trigger_time);
+            let command_str = self.format_schedule_commands(schedule);
+
+            // "Next:" label
+            small_font.render_aligned(
+                format_args!("Next: {}", time_str),
+                Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y + 10),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::CSS_GRAY),
+                display
+            ).ok();
+
+            // Command description
+            small_font.render_aligned(
+                format_args!("{}", command_str),
+                Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y + 25),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::CSS_GRAY),
+                display
+            ).ok();
+        }
 
         Ok(())
     }
@@ -251,15 +355,44 @@ impl GraphicalDisplayState {
         self.render_time_date(display)?;
         self.render_status_icons(display)?;
 
-        let font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
-        font.render_aligned(
+        let medium_font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
+        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+
+        // Title
+        medium_font.render_aligned(
             format_args!("Standby"),
-            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y),
+            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y - 20),
             VerticalPosition::Center,
             HorizontalAlignment::Center,
             FontColor::Transparent(Rgb565::WHITE),
             display
         ).ok();
+
+        // Show next scheduled event if available
+        if let Some((schedule, trigger_time)) = &self.next_schedule {
+            let time_str = self.format_schedule_time(trigger_time);
+            let command_str = self.format_schedule_commands(schedule);
+
+            // "Next:" label
+            small_font.render_aligned(
+                format_args!("Next: {}", time_str),
+                Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y + 10),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::CSS_GRAY),
+                display
+            ).ok();
+
+            // Command description
+            small_font.render_aligned(
+                format_args!("{}", command_str),
+                Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y + 25),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::CSS_GRAY),
+                display
+            ).ok();
+        }
 
         Ok(())
     }
@@ -607,6 +740,78 @@ impl GraphicalDisplayState {
         Ok(())
     }
 
+    /// Format an exit condition for display with target value
+    fn format_exit_condition(&self, condition: &RoutineExitCondition, resolved_params: &heapless::FnvIndexMap<u8, f32, 8>) -> Option<(String, String, f32)> {
+        match condition {
+            RoutineExitCondition::After(pv) => {
+                let duration_secs = self.resolve_parameter_value(pv, resolved_params);
+                Some(("Time".into(), "s".into(), duration_secs))
+            }
+            RoutineExitCondition::StateConditionMet(state_cond) => {
+                match state_cond {
+                    StateCondition::OutputWeightAbove(_, pv) | StateCondition::OutputWeightBelow(_, pv) => {
+                        let target = self.resolve_parameter_value(pv, resolved_params);
+                        Some(("Weight".into(), "g".into(), target))
+                    }
+                    StateCondition::InputVolumeAboveRelativeToStart(_, pv) => {
+                        let target = self.resolve_parameter_value(pv, resolved_params);
+                        Some(("Volume".into(), "ml".into(), target))
+                    }
+                    StateCondition::GroupPressureAbove(_, pv) | StateCondition::GroupPressureBelow(_, pv) => {
+                        let target = self.resolve_parameter_value(pv, resolved_params);
+                        Some(("Pressure".into(), "bar".into(), target))
+                    }
+                    StateCondition::GroupInputFlowRateAbove(_, pv) | StateCondition::GroupInputFlowRateBelow(_, pv) => {
+                        let target = self.resolve_parameter_value(pv, resolved_params);
+                        Some(("Flow".into(), "ml/s".into(), target))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a parameter value to f32
+    fn resolve_parameter_value(&self, pv: &ParameterValue, resolved_params: &heapless::FnvIndexMap<u8, f32, 8>) -> f32 {
+        match pv {
+            ParameterValue::Static(val) => *val,
+            ParameterValue::Parameter(idx) => resolved_params.get(idx).copied().unwrap_or(0.0),
+            ParameterValue::DerivedParameter(idx) => resolved_params.get(idx).copied().unwrap_or(0.0),
+        }
+    }
+
+    /// Get current process value for an exit condition
+    fn get_process_value_for_condition(&self, condition: &RoutineExitCondition, step_elapsed: Option<Duration>) -> Option<f32> {
+        let group_status = self.shared_state.status.get_group_status(
+            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
+        )?;
+
+        match condition {
+            RoutineExitCondition::After(_) => {
+                step_elapsed.map(|d| d.as_secs_f32())
+            }
+            RoutineExitCondition::StateConditionMet(state_cond) => {
+                match state_cond {
+                    StateCondition::OutputWeightAbove(_, _) | StateCondition::OutputWeightBelow(_, _) => {
+                        group_status.output_weight
+                    }
+                    StateCondition::InputVolumeAboveRelativeToStart(_, _) => {
+                        group_status.input_volume.map(|v| v as f32)
+                    }
+                    StateCondition::GroupPressureAbove(_, _) | StateCondition::GroupPressureBelow(_, _) => {
+                        group_status.pressure
+                    }
+                    StateCondition::GroupInputFlowRateAbove(_, _) | StateCondition::GroupInputFlowRateBelow(_, _) => {
+                        group_status.input_flow_rate
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Render routine execution mode
     fn render_routine_mode<D>(&self, display: &mut D) -> Result<(), D::Error>
     where
@@ -629,41 +834,76 @@ impl GraphicalDisplayState {
         ).ok();
 
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
-            if let Some(current_step) = routine_execution.current_step {
-                small_font.render_aligned(
-                    format_args!("Step {}", current_step + 1),
-                    Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 35),
-                    VerticalPosition::Top,
-                    HorizontalAlignment::Center,
-                    FontColor::Transparent(Rgb565::WHITE),
-                    display
-                ).ok();
-            }
-        }
+            if let Some(current_step_idx) = routine_execution.current_step {
+                // Get routine and step info
+                if let Some(routine) = &self.current_routine {
+                    let total_steps = routine.steps.len();
 
-        // Show brewing info if active
-        let group_status = self.shared_state.status.get_group_status(variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index());
-
-        if let Some(group) = group_status {
-            if group.is_brewing {
-                let mut y = EFFECTIVE_Y + 55;
-                let mut metrics = Vec::new();
-
-                if let Some(flow) = group.input_flow_rate {
-                    metrics.push(format!("{:.1}ml/s", flow));
-                }
-                if let Some(weight) = group.output_weight {
-                    metrics.push(format!("{:.1}g", weight));
-                }
-                if let Some(brew_time) = group.brew_time {
-                    metrics.push(self.shared_state.format_brew_time(Some(brew_time)));
-                }
-
-                if !metrics.is_empty() {
-                    let metrics_text = metrics.join(" ");
+                    // Show step number and total
                     small_font.render_aligned(
-                        format_args!("{}", metrics_text),
-                        Point::new(EFFECTIVE_CENTER_X, y),
+                        format_args!("Step {} / {}", current_step_idx + 1, total_steps),
+                        Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 35),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Center,
+                        FontColor::Transparent(Rgb565::WHITE),
+                        display
+                    ).ok();
+
+                    // Get current step
+                    if let Some(step) = routine.steps.get(current_step_idx) {
+                        let mut y_offset = EFFECTIVE_Y + 55;
+
+                        // Display exit conditions with progress
+                        for exit in &step.exits {
+                            if let Some((label, unit, target)) = self.format_exit_condition(&exit.condition, &routine_execution.resolved_parameters) {
+                                if let Some(current) = self.get_process_value_for_condition(&exit.condition, routine_execution.step_elapsed_time) {
+                                    // Show "Label: current / target unit"
+                                    small_font.render_aligned(
+                                        format_args!("{}: {:.1} / {:.1}{}", label, current, target, unit),
+                                        Point::new(EFFECTIVE_CENTER_X, y_offset),
+                                        VerticalPosition::Top,
+                                        HorizontalAlignment::Center,
+                                        FontColor::Transparent(Rgb565::WHITE),
+                                        display
+                                    ).ok();
+                                    y_offset += 18;
+                                }
+                            }
+                        }
+
+                        // Show additional metrics below exit conditions
+                        let group_status = self.shared_state.status.get_group_status(
+                            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
+                        );
+
+                        if let Some(group) = group_status {
+                            let mut metrics = Vec::new();
+
+                            if let Some(flow) = group.input_flow_rate {
+                                metrics.push(format!("{:.1}ml/s", flow));
+                            }
+                            if let Some(volume) = group.input_volume {
+                                metrics.push(format!("{:.0}ml", volume));
+                            }
+
+                            if !metrics.is_empty() && y_offset < EFFECTIVE_Y + EFFECTIVE_HEIGHT - 15 {
+                                let metrics_text = metrics.join("  ");
+                                small_font.render_aligned(
+                                    format_args!("{}", metrics_text),
+                                    Point::new(EFFECTIVE_CENTER_X, y_offset),
+                                    VerticalPosition::Top,
+                                    HorizontalAlignment::Center,
+                                    FontColor::Transparent(Rgb565::CSS_GRAY),
+                                    display
+                                ).ok();
+                            }
+                        }
+                    }
+                } else {
+                    // Fallback if routine not loaded yet
+                    small_font.render_aligned(
+                        format_args!("Step {}", current_step_idx + 1),
+                        Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 35),
                         VerticalPosition::Top,
                         HorizontalAlignment::Center,
                         FontColor::Transparent(Rgb565::WHITE),

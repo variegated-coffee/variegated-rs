@@ -28,7 +28,7 @@ use variegated_controller_types::{BoilerControlMode, BoilerControlState, GroupBr
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
-use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit};
+use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit, RoutineRepository as RoutineRepositoryTrait};
 use crate::rotary::{RoutineParameterEditState};
 use variegated_instrumentation::async_task_loop;
 
@@ -150,7 +150,7 @@ impl DisplayController {
             UIState::Idle(substate) => {
                 self.render_idle_state(substate).await;
             }
-            UIState::ListMenu(menu_type, menu_state, _) => {
+            UIState::ListMenu(menu_type, menu_state, _, _) => {
                 self.render_list_menu(menu_type, menu_state).await;
             }
             UIState::SettingsInformation => {
@@ -383,8 +383,9 @@ impl DisplayController {
     }
 
     fn is_routine_shown(routine: RoutineIndex, scroll_offset: usize) -> bool {
-        let routine_idx = routine as usize;
-        routine_idx >= scroll_offset && routine_idx < scroll_offset + 5
+        // This function is no longer meaningful with non-contiguous RoutineIndex
+        // We'll always return true for now
+        true
     }
 
     async fn render_idle_state(&mut self, substate: IdleSubState) {
@@ -813,8 +814,8 @@ impl DisplayController {
             let routine_index = routine_execution.routine_index;
             if let Some(current_step) = routine_execution.current_step {
             // Get routine from repository
-            let routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_index as usize) {
+            let mut routine_repo = self.routine_repository.lock().await;
+            if let Some(routine) = routine_repo.get_routine(routine_index).await {
                 // Routine name at top
                 Text::with_text_style(
                     routine.name(), 
@@ -1342,8 +1343,8 @@ impl DisplayController {
         self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
 
         // Get routine to display parameters
-        let repo = self.routine_repository.lock().await;
-        if let Some(routine) = repo.get_routine(routine_index) {
+        let mut repo = self.routine_repository.lock().await;
+        if let Some(routine) = repo.get_routine(routine_index).await {
             // Main content area starts at y=12 (same as list menu)
             let visible_items = RoutineParameterEditState::VISIBLE_ITEMS;
             

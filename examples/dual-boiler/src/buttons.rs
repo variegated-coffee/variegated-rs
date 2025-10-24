@@ -47,7 +47,7 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{Instant, Timer};
 use variegated_controller_types::{
-    MachineCommand, MachineMode, SingleGroupControllerGroups, Status,
+    MachineCommand, MachineMode, RoutineIndex, SingleGroupControllerGroups, Status,
 };
 use variegated_mcp23017::{Mcp23017, Port, InterruptMode};
 use crate::StatusSubscriber;
@@ -356,7 +356,7 @@ impl ButtonEventHandler {
                         MachineCommand::CancelRoutine
                     } else {
                         defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
-                        MachineCommand::RunRoutine(button_idx, None)
+                        MachineCommand::RunRoutine(RoutineIndex::Function(button_idx), None)
                     };
                     return Some(command);
                 }

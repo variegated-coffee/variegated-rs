@@ -152,7 +152,7 @@ impl LcdDisplayState {
     /// Format time as "HH:MM" (5 chars) from Unix timestamp
     fn format_current_time(&self) -> String {
         if let Some(now) = TimeKeeper::now_local() {
-            format!("{:02}:{:02}", now.time().hour(), now.time().minute())
+            format!("{:02}:{:02}", now.hour(), now.minute())
         } else {
             "--:--".to_string()
         }
@@ -302,7 +302,7 @@ impl LcdDisplayState {
     pub async fn format_routine_row1(&self) -> String {
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
             let mut routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index as usize).await {
+            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
                 if let Some(current_step_idx) = routine_execution.current_step {
                     let total_steps = routine.steps().len();
                     let step_num = current_step_idx + 1;
@@ -342,7 +342,7 @@ impl LcdDisplayState {
     pub async fn format_routine_row2(&self) -> String {
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
             let mut routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index as usize).await {
+            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
                 if let Some(current_step_idx) = routine_execution.current_step {
                     if let Some(step) = routine.steps().get(current_step_idx) {
                         // Get first exit condition

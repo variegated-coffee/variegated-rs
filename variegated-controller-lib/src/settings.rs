@@ -14,6 +14,7 @@ use sequential_storage::map::{fetch_item, store_item, Key, SerializationError, V
 pub trait SettingsStorage<SettingsT: Default> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
     async fn save_settings(&mut self, data: &SettingsT) -> Result<(), &'static str>;
+    async fn optimize_storage(&mut self) -> Result<(), &'static str>;
 }
 
 pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> {
@@ -130,6 +131,35 @@ impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clon
 
         info!("Settings stored successfully");
 
+        Ok(())
+    }
+
+    async fn optimize_storage(&mut self) -> Result<(), &'static str> {
+        info!("Optimizing configuration storage");
+
+        // Ensure we have loaded/cached the current settings
+        if self.cached_value.is_none() {
+            self.load_settings().await?;
+        }
+
+        // Clone the current settings from cache
+        let current_settings = self.cached_value.as_ref()
+            .ok_or("Failed to load settings for optimization")?
+            .clone();
+
+        // Erase the entire flash range
+        {
+            let mut flash = self.flash.lock().await;
+            info!("Erasing configuration storage range");
+            flash.erase(self.range.start, self.range.end).await
+                .map_err(|_| "Failed to erase flash range")?;
+        }
+
+        // Write the current settings back
+        info!("Rewriting optimized configuration");
+        self.save_settings(&current_settings).await?;
+
+        info!("Configuration storage optimization complete");
         Ok(())
     }
 }

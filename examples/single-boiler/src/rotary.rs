@@ -11,11 +11,12 @@ use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupConfiguration, MachineCommand, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
-use crate::list_menu::{ListMenuType, ListMenuState, MenuItemId, PidConfigType, PidTermType, PidComponentType};
+use crate::list_menu::{ListMenuType, ListMenuState, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use alloc::boxed::Box;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
-use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameters};
+use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameters, RoutineRepository as RoutineRepositoryTrait};
 use alloc::string::String;
 
 #[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
@@ -123,7 +124,7 @@ pub(crate) enum UIState {
     ManualBrew(ControlMode),
     DispensingWater,
     RoutineExecution,
-    ListMenu(ListMenuType, ListMenuState, Option<Box<(ListMenuType, ListMenuState)>>),
+    ListMenu(ListMenuType, ListMenuState, Option<Box<(ListMenuType, ListMenuState)>>, Option<Vec<ListMenuItem>>),
     SettingsInformation,
     SettingsDebugInfo,
     ScaleSettings(ScaleSettingsSubState),
@@ -361,8 +362,8 @@ pub async fn handle_menu_item_activation(
     let new_state = match item_id {
         MenuItemId::Routine(index) => {
             // Load routine definition and transition to parameter view
-            let repo = routine_repository.lock().await;
-            if let Some(routine) = repo.get_routine(index) {
+            let mut repo = routine_repository.lock().await;
+            if let Some(routine) = repo.get_routine(index).await {
                 let edit_state = RoutineParameterEditState::new(routine);
                 Some(UIState::RoutineParameters(index as RoutineIndex, edit_state))
             } else {
@@ -380,19 +381,19 @@ pub async fn handle_menu_item_activation(
         },
         MenuItemId::SettingsBoilerTemperaturePID => {
             let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), menu_state, None))
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), menu_state, None, None))
         },
         MenuItemId::SettingsPumpFlowRatePID => {
             let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), menu_state, None))
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), menu_state, None, None))
         },
         MenuItemId::SettingsPumpOutputFlowRatePID => {
             let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), menu_state, None))
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), menu_state, None, None))
         },
         MenuItemId::SettingsPumpPressurePID => {
             let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpPressure), menu_state, None))
+            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpPressure), menu_state, None, None))
         },
         MenuItemId::PidTerm(_term) => {
             // This will be called from PID config menu, need to get the PID type from context
@@ -482,7 +483,7 @@ where
                             Direction::CounterClockwise => substate.rotate_clockwise(),
                         };
                     }
-                    UIState::ListMenu(menu_type, menu_state, _) => {
+                    UIState::ListMenu(menu_type, menu_state, _, _) => {
                         // Get total items count from centralized location
                         let item_count = menu_type.get_item_count(Some(self.routine_repository)).await;
                         let total_items = item_count + (if menu_type.has_back_button() { 1 } else { 0 });
@@ -515,8 +516,8 @@ where
                     }
                     UIState::RoutineParameters(routine_index, edit_state) => {
                         // Navigate through parameter list (same logic as ListMenu)
-                        let repo = self.routine_repository.lock().await;
-                        if let Some(routine) = repo.get_routine(*routine_index) {
+                        let mut repo = self.routine_repository.lock().await;
+                        if let Some(routine) = repo.get_routine(*routine_index).await {
                             let total_items = edit_state.get_total_items(routine);
                             match direction {
                                 Direction::Clockwise => edit_state.navigate_up(),
@@ -570,16 +571,16 @@ where
                         match substate {
                             IdleSubState::RoutineMenuSelected => {
                                 let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None);
+                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None, None);
                             }
                             IdleSubState::SettingsMenuSelected => {
                                 let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None);
+                                self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
                             }
                             _ => {}
                         }
                     }
-                    UIState::ListMenu(menu_type, menu_state, parent_state) => {
+                    UIState::ListMenu(menu_type, menu_state, parent_state, _) => {
                         let menu_type = *menu_type;
                         let has_back_button = menu_type.has_back_button();
                         
@@ -588,7 +589,7 @@ where
                             // Use stored parent state if available, otherwise use default back state
                             if let Some(parent) = parent_state {
                                 let (parent_menu_type, parent_menu_state) = *parent.clone();
-                                self.status.state = UIState::ListMenu(parent_menu_type, parent_menu_state, None);
+                                self.status.state = UIState::ListMenu(parent_menu_type, parent_menu_state, None, None);
                             } else {
                                 self.status.state = menu_type.get_back_state();
                             }
@@ -626,9 +627,10 @@ where
                                         // Store parent menu state
                                         let parent_state = Some(Box::new((menu_type, *menu_state)));
                                         self.status.state = UIState::ListMenu(
-                                            ListMenuType::PidTermConfig(pid_type, term), 
+                                            ListMenuType::PidTermConfig(pid_type, term),
                                             new_menu_state,
-                                            parent_state
+                                            parent_state,
+                                            None
                                         );
                                     }
                                 },
@@ -741,7 +743,7 @@ where
                             }
                             ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
                                 // Go back to Settings menu
-                                self.status.state = UIState::ListMenu(ListMenuType::Settings, ListMenuState::default(), None);
+                                self.status.state = UIState::ListMenu(ListMenuType::Settings, ListMenuState::default(), None, None);
                             }
                         }
                     }
@@ -764,7 +766,7 @@ where
                     UIState::SettingsInformation | UIState::SettingsDebugInfo => {
                         // Go back to settings menu
                         let menu_state = ListMenuState::new();
-                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None);
+                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
                     }
                     UIState::RoutineExecution => {
                         // Cancel the currently running routine
@@ -773,12 +775,12 @@ where
                     }
                     UIState::RoutineParameters(routine_index, edit_state) => {
                         let routine_index = *routine_index;
-                        let repo = self.routine_repository.lock().await;
-                        if let Some(routine) = repo.get_routine(routine_index) {
+                        let mut repo = self.routine_repository.lock().await;
+                        if let Some(routine) = repo.get_routine(routine_index).await {
                             if edit_state.is_back_button_selected() {
                                 // Back button selected - return to routine menu
                                 let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None);
+                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None, None);
                             } else if edit_state.is_execute_selected(routine) {
                                 // Execute button selected - run routine with current parameters
                                 let runtime_params = if edit_state.parameter_values.is_empty() {
@@ -903,7 +905,7 @@ where
                         }
                         
                         // Return to previous menu
-                        self.status.state = UIState::ListMenu(*previous_menu_type, *previous_menu_state, None);
+                        self.status.state = UIState::ListMenu(*previous_menu_type, *previous_menu_state, None, None);
                     }
                     _ => {
                         self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);

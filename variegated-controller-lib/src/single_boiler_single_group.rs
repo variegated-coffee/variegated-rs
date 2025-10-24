@@ -831,6 +831,18 @@ impl<
             MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
                 warn!("Ignoring unsupported command in finally block: {:?}", command);
             }
+            MachineCommand::OptimizeConfigurationStorage => {
+                info!("Optimizing configuration storage");
+                if let Err(e) = self.configuration_store.optimize_storage().await {
+                    warn!("Failed to optimize configuration storage: {}", e);
+                }
+            }
+            MachineCommand::OptimizeRoutineStorage => {
+                warn!("OptimizeRoutineStorage not supported for single boiler controller (no routine repository)");
+            }
+            MachineCommand::OptimizeScheduleStorage => {
+                warn!("OptimizeScheduleStorage not supported for single boiler controller (no schedule store)");
+            }
             _ => {}
         }
     }

@@ -27,6 +27,7 @@ embassy-sync = "0.7.2"
 heapless = "0.8"
 defmt = { version = "0.3", optional = true }
 embedded-graphics-core = { version = "0.4", optional = true }
+variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
 
 [dev-dependencies]
 embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"] }

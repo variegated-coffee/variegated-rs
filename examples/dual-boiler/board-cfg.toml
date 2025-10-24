@@ -85,6 +85,10 @@ pin_cs = "embassy_rp::peripherals::PIN_27"
 [watchdog_peripherals]
 watchdog = "embassy_rp::peripherals::WATCHDOG"
 
+[backlight_peripherals]
+pwm = "embassy_rp::peripherals::PWM_SLICE0"
+pin = "embassy_rp::peripherals::PIN_1"
+
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 AdcIrq = "ADC_IRQ_FIFO"
