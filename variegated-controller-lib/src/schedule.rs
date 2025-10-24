@@ -13,6 +13,65 @@ use sequential_storage::map::{fetch_all_items, store_item};
 use variegated_controller_types::{MachineCommand, ScheduleItem};
 use variegated_timekeeping::TimeKeeper;
 
+/// Calculate when a schedule will next trigger
+fn calculate_next_trigger(trigger: &variegated_controller_types::ScheduleTrigger, now: variegated_timekeeping::DateTimeInZone) -> Option<variegated_timekeeping::DateTimeInZone> {
+    use variegated_timekeeping::TimeKeeper;
+
+    let timezone = TimeKeeper::timezone();
+
+    // If there's a specific date, the schedule ONLY triggers on that date
+    // (for recurring schedules, use on_days instead of on_date)
+    if let Some(target_date) = trigger.on_date {
+        // Create a datetime for the target date at the specified time
+        let target_datetime = target_date.and_hms_opt(trigger.on_hour as u32, trigger.on_minute as u32, 0)?;
+        let target_with_tz = timezone.from_local(&target_datetime)?;
+
+        // Only return this schedule if it's in the future
+        // Once the time passes, this schedule is done (regardless of 'once' flag)
+        if target_with_tz > now {
+            return Some(target_with_tz);
+        } else {
+            return None;
+        }
+    }
+
+    // Calculate next occurrence based on time and optional days
+    // Start with today
+    let mut candidate_date = now.date_naive();
+    let mut days_checked = 0;
+
+    loop {
+        if days_checked > 7 {
+            // Prevent infinite loop - checked a full week
+            return None;
+        }
+
+        let candidate_weekday = candidate_date.weekday();
+
+        // Check if this day matches the day filter (if specified)
+        let day_matches = if let Some(ref days) = trigger.on_days {
+            days.contains(&candidate_weekday)
+        } else {
+            true // No day filter, all days match
+        };
+
+        if day_matches {
+            // Check if we can trigger today or need to wait until this day at the specified time
+            let target_time = chrono::NaiveTime::from_hms_opt(trigger.on_hour as u32, trigger.on_minute as u32, 0)?;
+            let candidate_datetime = candidate_date.and_time(target_time);
+            let candidate_with_tz = timezone.from_local(&candidate_datetime)?;
+
+            if candidate_with_tz > now {
+                return Some(candidate_with_tz);
+            }
+        }
+
+        // Move to next day
+        candidate_date = candidate_date.succ_opt()?;
+        days_checked += 1;
+    }
+}
+
 pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleStore, const CH_N: usize>(store: &Mutex<M1, ScheduleStoreT>, command_channel: Sender<'static, M2, MachineCommand, CH_N>) -> () {
     loop {
         info!("Running schedule task");
@@ -55,8 +114,38 @@ pub trait ScheduleStore {
     async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem>;
     async fn update_schedule(&mut self, index: usize, item: ScheduleItem) -> Result<(), &'static str>;
     async fn get_schedule_count(&mut self) -> usize;
+    async fn optimize_storage(&mut self) -> Result<(), &'static str>;
 
-    async fn schedules_triggering_at<Tz: TimeZone>(&mut self, time: DateTime<Tz>) -> impl Iterator<Item = &ScheduleItem> {
+    /// Get the next scheduled event and when it will trigger
+    async fn get_next_schedule(&mut self) -> Option<(ScheduleItem, variegated_timekeeping::DateTimeInZone)> {
+        let now = TimeKeeper::now_local()?;
+
+        let schedules = self.get_schedules().await;
+
+        let mut next_schedule: Option<(ScheduleItem, variegated_timekeeping::DateTimeInZone)> = None;
+
+        for schedule in schedules {
+            if !schedule.trigger_at.enabled {
+                continue;
+            }
+
+            if let Some(next_trigger) = calculate_next_trigger(&schedule.trigger_at, now) {
+                match &mut next_schedule {
+                    None => {
+                        next_schedule = Some((schedule.clone(), next_trigger));
+                    }
+                    Some((_, current_next)) if next_trigger < *current_next => {
+                        next_schedule = Some((schedule.clone(), next_trigger));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        next_schedule
+    }
+
+    async fn schedules_triggering_at(&mut self, time: variegated_timekeeping::DateTimeInZone) -> impl Iterator<Item = &ScheduleItem> {
         let hour = time.hour() as u8;
         let minute = time.minute() as u8;
         let weekday = time.weekday();
@@ -97,37 +186,45 @@ pub trait ScheduleStore {
 }
 
 pub struct InMemoryScheduleStore {
-    schedules: Vec<ScheduleItem>,
+    schedules: BTreeMap<usize, ScheduleItem>,
+    next_index: usize,
 }
 
 impl InMemoryScheduleStore {
     pub fn new() -> Self {
         Self {
-            schedules: Vec::new(),
+            schedules: BTreeMap::new(),
+            next_index: 0,
         }
     }
 }
 
 impl ScheduleStore for InMemoryScheduleStore {
     async fn add_schedule(&mut self, item: ScheduleItem) {
-        self.schedules.push(item);
+        // Find the first available index (hole-filling strategy)
+        let index = (0..self.next_index)
+            .find(|&i| !self.schedules.contains_key(&i))
+            .unwrap_or_else(|| {
+                // No holes found, use next_index and increment it
+                let idx = self.next_index;
+                self.next_index += 1;
+                idx
+            });
+
+        self.schedules.insert(index, item);
     }
 
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem> {
-        self.schedules.iter()
+        self.schedules.values()
     }
 
     async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem> {
-        if index < self.schedules.len() {
-            Some(self.schedules.remove(index))
-        } else {
-            None
-        }
+        self.schedules.remove(&index)
     }
 
     async fn update_schedule(&mut self, index: usize, item: ScheduleItem) -> Result<(), &'static str> {
-        if index < self.schedules.len() {
-            self.schedules[index] = item;
+        if self.schedules.contains_key(&index) {
+            self.schedules.insert(index, item);
             Ok(())
         } else {
             Err("Index out of bounds")
@@ -137,6 +234,21 @@ impl ScheduleStore for InMemoryScheduleStore {
     async fn get_schedule_count(&mut self) -> usize {
         self.schedules.len()
     }
+
+    async fn optimize_storage(&mut self) -> Result<(), &'static str> {
+        // Compact indices to be consecutive (0, 1, 2, ...)
+        let schedules: Vec<ScheduleItem> = self.schedules.values().cloned().collect();
+        self.schedules.clear();
+
+        for (new_index, schedule) in schedules.into_iter().enumerate() {
+            self.schedules.insert(new_index, schedule);
+        }
+
+        // Reset next_index to the number of schedules
+        self.next_index = self.schedules.len();
+
+        Ok(())
+    }
 }
 
 pub struct SequentialStorageScheduleStore<'a, M: RawMutex, T: NorFlash> {
@@ -144,7 +256,8 @@ pub struct SequentialStorageScheduleStore<'a, M: RawMutex, T: NorFlash> {
     range: Range<u32>,
     deserialization_buffer: [u8; 2048],
     cache: BTreeMap<usize, ScheduleItem>,
-    cache_initialized: bool
+    cache_initialized: bool,
+    next_index: usize,
 }
 
 impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
@@ -154,7 +267,8 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
             range,
             deserialization_buffer: [0u8; 2048],
             cache: BTreeMap::new(),
-            cache_initialized: false
+            cache_initialized: false,
+            next_index: 0,
         }
     }
 
@@ -180,17 +294,32 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
         .await
         .unwrap();
 
+        let mut max_index = 0usize;
         while let Some((key, value)) = iterator
             .next::<Option<ScheduleItem>>(&mut self.deserialization_buffer)
             .await
             .unwrap()
         {
             info!("Loaded schedule at index {}", key);
-            if let Some(schedule) = value {
-                self.cache.insert(key as usize, schedule);
-            } else {
-                self.cache.remove(&(key as usize));
+            let index = key as usize;
+            if index > max_index {
+                max_index = index;
             }
+
+            if let Some(schedule) = value {
+                self.cache.insert(index, schedule);
+            } else {
+                self.cache.remove(&index);
+            }
+        }
+
+        // Set next_index to one past the highest loaded index
+        // If no schedules were loaded, max_index is 0, so next_index will be 0
+        // If schedules exist, next_index will be max_index + 1
+        if !self.cache.is_empty() {
+            self.next_index = max_index + 1;
+        } else {
+            self.next_index = 0;
         }
 
         self.cache_initialized = true;
@@ -227,7 +356,17 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
 impl <'a, M: RawMutex, T: NorFlash> ScheduleStore for SequentialStorageScheduleStore<'a, M, T> {
     async fn add_schedule(&mut self, item: ScheduleItem) {
         self.load_from_flash().await.ok().unwrap();
-        let index = self.cache.len();
+
+        // Find the first available index (hole-filling strategy)
+        let index = (0..self.next_index)
+            .find(|&i| !self.cache.contains_key(&i))
+            .unwrap_or_else(|| {
+                // No holes found, use next_index and increment it
+                let idx = self.next_index;
+                self.next_index += 1;
+                idx
+            });
+
         let opt = Some(item);
         self.store_in_flash(index, &opt).await.expect("Failed to store schedule in flash");
         self.cache.insert(index, opt.unwrap());
@@ -272,5 +411,42 @@ impl <'a, M: RawMutex, T: NorFlash> ScheduleStore for SequentialStorageScheduleS
         }
 
         self.cache.len()
+    }
+
+    async fn optimize_storage(&mut self) -> Result<(), &'static str> {
+        info!("Optimizing schedule storage");
+
+        // Load all schedules into cache if not already loaded
+        self.load_from_flash().await?;
+
+        // Collect schedules and reassign to consecutive indices (0, 1, 2, ...)
+        let schedules_to_store: Vec<ScheduleItem> = self.cache.values()
+            .cloned()
+            .collect();
+
+        // Clear the cache as we'll rebuild it with new indices
+        self.cache.clear();
+
+        // Erase the entire flash range
+        {
+            let mut flash = self.flash.lock().await;
+            info!("Erasing schedule storage range");
+            flash.erase(self.range.start, self.range.end).await
+                .map_err(|_| "Failed to erase flash range")?;
+        }
+
+        // Re-store all schedules with consecutive indices starting from 0
+        info!("Rewriting {} schedules with compacted indices", schedules_to_store.len());
+        for (new_index, schedule) in schedules_to_store.iter().enumerate() {
+            let opt = Some(schedule.clone());
+            self.store_in_flash(new_index, &opt).await?;
+            self.cache.insert(new_index, schedule.clone());
+        }
+
+        // Reset next_index to the number of schedules
+        self.next_index = schedules_to_store.len();
+
+        info!("Schedule storage optimization complete, next_index reset to {}", self.next_index);
+        Ok(())
     }
 }

@@ -9,9 +9,8 @@ use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::pin::Pin;
-use chrono::NaiveDateTime;
-use chrono_tz::Tz;
-use defmt::{info, unwrap};
+use chrono::{FixedOffset, NaiveDateTime};
+use defmt::{error, info, unwrap};
 use heapless::FnvIndexMap;
 
 #[cfg(feature = "tft-display")]
@@ -279,6 +278,12 @@ struct WatchdogPeripherals {
     watchdog: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("backlight_peripherals")]
+struct BacklightPeripherals {
+    pwm: Peri<'static, ()>,
+    pin: Peri<'static, ()>,
+}
+
 type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
 type QwiicI2CDevice = I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
@@ -297,7 +302,7 @@ type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'stati
 #[cfg(feature = "tft-display")]
 type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
 
-const STATUS_RECEIVERS: usize = 6;
+const STATUS_RECEIVERS: usize = 7; // Includes: display, LCD, button controller, LED controller, ESP transceiver, and backlight
 type StatusChannel = PubSubChannel<CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 type StatusSubscriber = Subscriber<'static, CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
@@ -313,7 +318,7 @@ type ScheduleStoreMutex = Mutex<NoopRawMutex, SequentialStorageScheduleStore<'st
 const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
 type ShotLogDataPointChannel = PubSubChannel<CriticalSectionRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
 
-const CORE1_STACK_LENGTH: usize = 4096;
+const CORE1_STACK_LENGTH: usize = 32*1024;
 
 static mut CORE1_STACK: Stack<CORE1_STACK_LENGTH> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
@@ -361,6 +366,7 @@ fn main() -> ! {
     #[cfg(feature = "tft-display")]
     {
         let disp_p = eyespi_display_peripherals!(p);
+        let backlight_p = backlight_peripherals!(p);
 
         spawn_core1(
             p.CORE1,
@@ -369,8 +375,10 @@ fn main() -> ! {
                 let executor1 = EXECUTOR1.init(Executor::new());
                 executor1.run(|spawner| {
                     info!("Spawning display task on core 1");
+                    unwrap!(spawner.spawn(display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
 
-                    unwrap!(spawner.spawn(display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))))
+                    info!("Spawning backlight task on core 1");
+                    unwrap!(spawner.spawn(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
                 });
             },
         );
@@ -459,6 +467,24 @@ static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
 
+// Wrapper type for schedule store pointer that's explicitly Send/Sync (safe because the pointer is stable after initialization)
+#[derive(Clone, Copy)]
+struct ScheduleStorePtr(*const ScheduleStoreMutex);
+unsafe impl Send for ScheduleStorePtr {}
+unsafe impl Sync for ScheduleStorePtr {}
+
+// Global reference to schedule store for access from display task (using raw pointer for cross-core access)
+static SCHEDULE_STORE_PTR: Mutex<CriticalSectionRawMutex, Option<ScheduleStorePtr>> = Mutex::new(None);
+
+// Wrapper type for routine repository pointer that's explicitly Send/Sync (safe because the pointer is stable after initialization)
+#[derive(Clone, Copy)]
+struct RoutineRepositoryPtr(*const RoutineRepositoryMutex);
+unsafe impl Send for RoutineRepositoryPtr {}
+unsafe impl Sync for RoutineRepositoryPtr {}
+
+// Global reference to routine repository for access from display task (using raw pointer for cross-core access)
+static ROUTINE_REPOSITORY_PTR: Mutex<CriticalSectionRawMutex, Option<RoutineRepositoryPtr>> = Mutex::new(None);
+
 
 
 #[embassy_executor::task]
@@ -495,7 +521,11 @@ async fn main_task(
     info!("Resetting ADS124S08");
     let res = ads.reset().await;
     if let Err(e) = res {
-        info!("Error resetting ADS124S08: {:?}", e);
+        match e {
+            variegated_ads124s08::ADS124S08Error::SPIError(e) => error!("SPI error during ADS124S08 reset: {:?}", e),
+            variegated_ads124s08::ADS124S08Error::PinError(e) => error!("Pin error during ADS124S08 reset: {:?}", e),
+            _ => error!("Other error during ADS124S08 reset: {:?}", e),
+        }
     }
     info!("Done");
     let dr = ads.read_datarate_reg().await;
@@ -537,7 +567,8 @@ async fn main_task(
     rtc.configure(&config).await.unwrap();
 
     // Initialize TimeKeeper with timezone
-    TimeKeeper::init(Tz::Europe__Stockholm);
+    //TimeKeeper::init(Tz::Europe__Stockholm);
+    TimeKeeper::init(FixedOffset::east(0));
 
     let res = rtc.datetime().await;
     match res {
@@ -680,6 +711,8 @@ async fn main_task(
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
+    // Make routine repository reference available globally for display task (via raw pointer for cross-core access)
+    *ROUTINE_REPOSITORY_PTR.lock().await = Some(RoutineRepositoryPtr(routine_repository_ref as *const _));
 
     let mut schedule_store = SequentialStorageScheduleStore::new(
         flash,
@@ -698,6 +731,9 @@ async fn main_task(
     }).await;*/
     schedule_store.load_from_flash().await.unwrap();
     let schedule_store_ref = SCHEDULE_STORE.init(Mutex::new(schedule_store));
+
+    // Make schedule store reference available globally for display task (via raw pointer for cross-core access)
+    *SCHEDULE_STORE_PTR.lock().await = Some(ScheduleStorePtr(schedule_store_ref as *const _));
 
     info!("Configuration loaded");
 
@@ -895,6 +931,7 @@ async fn main_task(
         steam_wands: FnvIndexMap::new(),
         environmental_sensors: FnvIndexMap::new(),
         peripherals: FnvIndexMap::new(),
+        function_routines: FnvIndexMap::new(),
     };
 
     // Define the brew boiler
@@ -1012,6 +1049,12 @@ async fn main_task(
         };
         let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
     }
+
+    // Add function routine descriptions (for the 4 routine buttons)
+    let _ = machine_definition.add_function_routine_description(0, "Button 1");
+    let _ = machine_definition.add_function_routine_description(1, "Button 2");
+    let _ = machine_definition.add_function_routine_description(2, "Button 3");
+    let _ = machine_definition.add_function_routine_description(3, "Button 4");
 
     info!("Machine definition created: {:?}", machine_definition);
 
@@ -1204,11 +1247,54 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
     // Create graphical display state
     let mut display_state = GraphicalDisplayState::new();
 
+    // Counter to throttle schedule queries (query every ~1 second)
+    let mut schedule_query_counter = 0u32;
+
     // Main display loop
     async_task_loop!("Display task", Some(Duration::from_millis(10)), {
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);
+        }
+
+        // Query schedule store periodically (every ~1 second = 100 * 10ms)
+        schedule_query_counter = schedule_query_counter.wrapping_add(1);
+        if schedule_query_counter % 100 == 0 {
+            // Try to access the schedule store if it's initialized (safe because pointer is stable after init)
+            let schedule_store_ptr_opt = SCHEDULE_STORE_PTR.lock().await.clone();
+            if let Some(ScheduleStorePtr(ptr)) = schedule_store_ptr_opt {
+                unsafe {
+                    let schedule_store = &*ptr;
+                    let mut store_guard = schedule_store.lock().await;
+                    // Always update the cache, even if None (to clear stale data)
+                    display_state.next_schedule = store_guard.get_next_schedule().await;
+                }
+            } else {
+                // Clear cache if schedule store isn't available
+                display_state.next_schedule = None;
+            }
+
+            // Query routine repository when routine is executing
+            if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
+                let routine_repository_ptr_opt = ROUTINE_REPOSITORY_PTR.lock().await.clone();
+                if let Some(RoutineRepositoryPtr(ptr)) = routine_repository_ptr_opt {
+                    unsafe {
+                        let routine_repository = &*ptr;
+                        let mut repo_guard = routine_repository.lock().await;
+                        // Fetch the current routine
+                        if let Some(routine) = repo_guard.get_routine(routine_execution.routine_index).await {
+                            display_state.current_routine = Some(routine.clone());
+                        } else {
+                            display_state.current_routine = None;
+                        }
+                    }
+                } else {
+                    display_state.current_routine = None;
+                }
+            } else {
+                // Clear routine cache when not executing
+                display_state.current_routine = None;
+            }
         }
 
         instrumented_section!("Display update", {
@@ -1226,4 +1312,58 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
             }
         });
     });
+}
+
+#[cfg(feature = "tft-display")]
+#[embassy_executor::task]
+async fn backlight_task(backlight_p: BacklightPeripherals, mut status_receiver: StatusSubscriber) {
+    use embassy_rp::pwm::{Config as PwmConfig, Pwm};
+    use embedded_hal::pwm::SetDutyCycle;
+    use variegated_controller_types::MachineMode;
+
+    info!("Initializing TFT backlight control");
+
+    // Configure PWM for backlight control
+    // Using ~1kHz frequency (suitable for LED backlights to avoid flicker)
+    // Assuming 150 MHz system clock: 150MHz / 125 = 1.2MHz, / 1200 = 1kHz
+    let mut pwm_config = PwmConfig::default();
+    pwm_config.divider = 125.into(); // Divide system clock by 125
+    pwm_config.top = 1200; // Period count for ~1kHz
+    pwm_config.compare_b = 1200; // Start at 100% duty cycle
+
+    let (_, pwm_ch_b_opt) = Pwm::new_output_b(backlight_p.pwm, backlight_p.pin, pwm_config.clone()).split();
+    let mut pwm_ch_b = pwm_ch_b_opt.unwrap();
+
+    // Track current duty cycle percentage
+    let mut current_duty_pct = 100u8; // 100% duty cycle
+
+    info!("Backlight initialized at 100% brightness");
+
+    // Main backlight control loop
+    loop {
+        // Check for status updates
+        if let Some(new_status) = status_receiver.try_next_message_pure() {
+            // Calculate target duty cycle percentage based on machine mode
+            let target_duty_pct = match new_status.mode {
+                MachineMode::On => 100u8,              // 100% brightness when active
+                MachineMode::Off |
+                MachineMode::PowerSaveStandby => 10u8, // 50% brightness when off/standby
+            };
+
+            // Update PWM duty cycle if it changed
+            if target_duty_pct != current_duty_pct {
+                current_duty_pct = target_duty_pct;
+
+                if let Err(_) = pwm_ch_b.set_duty_cycle_percent(current_duty_pct) {
+                    error!("Failed to set backlight duty cycle");
+                } else {
+                    info!("Backlight brightness adjusted to {}% (mode: {:?})",
+                          current_duty_pct, new_status.mode);
+                }
+            }
+        }
+
+        // Small delay to prevent tight loop
+        Timer::after(Duration::from_millis(100)).await;
+    }
 }

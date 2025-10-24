@@ -1218,6 +1218,24 @@ impl<
                     }
                 }
             }
+            MachineCommand::OptimizeConfigurationStorage => {
+                info!("Optimizing configuration storage");
+                if let Err(e) = self.configuration_store.optimize_storage().await {
+                    warn!("Failed to optimize configuration storage: {}", e);
+                }
+            }
+            MachineCommand::OptimizeRoutineStorage => {
+                info!("Optimizing routine storage");
+                if let Err(e) = self.routine_repository.lock().await.optimize_storage().await {
+                    warn!("Failed to optimize routine storage: {}", e);
+                }
+            }
+            MachineCommand::OptimizeScheduleStorage => {
+                info!("Optimizing schedule storage");
+                if let Err(e) = self.schedule_store.lock().await.optimize_storage().await {
+                    warn!("Failed to optimize schedule storage: {}", e);
+                }
+            }
         }
     }
 

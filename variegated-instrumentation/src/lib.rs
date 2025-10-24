@@ -20,7 +20,7 @@ macro_rules! async_task_loop {
                 // Only log if at least 1 second has passed since last log
                 let now = ::embassy_time::Instant::now();
                 if now.duration_since(last_log_time).as_secs() >= 1 {
-                    ::defmt::debug!("{} loop: {} ms", $name, elapsed.as_millis());
+                    //::defmt::debug!("{} loop: {} ms", $name, elapsed.as_millis());
                     last_log_time = now;
                 }
                 
@@ -39,10 +39,12 @@ macro_rules! instrumented_section {
         {
             let start_time = ::embassy_time::Instant::now();
 
-            $body
+            let foo = $body;
 
             let elapsed = start_time.elapsed();
-            ::defmt::debug!("{} section: {} ms", $name, elapsed.as_millis());
+            // ::defmt::debug!("{} section: {} ms", $name, elapsed.as_millis());
+
+            foo
         }
     };
 }

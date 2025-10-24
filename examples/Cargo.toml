@@ -22,7 +22,7 @@ bench = false
 embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-rp = { version = "0.8.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
 embassy-sync = { version = "0.7.2", features = ["defmt"] }
-embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt", "time"] }
 embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-futures = "0.1.1"
 
@@ -85,14 +85,14 @@ rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb"]
 dual-boiler = ["tft-display", "gravity"]
-single-boiler = ["dep:oled_async"]
+single-boiler = ["dep:oled_async", "dep:display-interface-spi", "gravity"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 gravity = ["dep:variegated-gravity-driver"]
 
 [profile.dev]
 debug = true              # Enable debug info
-opt-level = 2            # Light optimization for better debugging
-lto = false              # Disable link-time optimization
+opt-level = 3            # Light optimization for better debugging
+lto = true              # Disable link-time optimization
 codegen-units = 1        # Better debug info
 
 [profile.release]

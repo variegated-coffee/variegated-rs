@@ -62,9 +62,9 @@ use embedded_hal::pwm::SetDutyCycle;
 use futures::future::join_all;
 use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
-use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository};
+use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
+use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
@@ -91,7 +91,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition) {
     let mut config = uart::Config::default();
     config.baudrate = 115200;
 
@@ -106,7 +106,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, command_sender, machine_definition).await;
+    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -528,6 +528,7 @@ async fn main_task(spawner: Spawner) -> ! {
         steam_wands: FnvIndexMap::new(),
         environmental_sensors: FnvIndexMap::new(),
         peripherals: FnvIndexMap::new(),
+        function_routines: FnvIndexMap::new(),
     };
 
     // Define the brew boiler (main boiler for single boiler machines)
@@ -657,7 +658,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Input::new(button_p.pin_steam, Pull::Up),
         command_channel.sender(),
         Some(MachineCommand::CancelRoutine),
-        Some(MachineCommand::RunRoutine(2, None)),
+        Some(MachineCommand::RunRoutine(RoutineIndex::Internal(2), None)),
     );
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
@@ -690,7 +691,7 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), command_channel.sender(), machine_definition)).unwrap();
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition)).unwrap();
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task()).unwrap();

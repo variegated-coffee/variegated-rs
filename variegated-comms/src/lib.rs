@@ -1,6 +1,7 @@
 #![no_std]
 
 extern crate alloc;
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use core::cell::RefCell;
@@ -141,10 +142,12 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     info!("Routines requested by ESP32");
 
                                     let mut repo_locked = routine_repository.lock().await;
-                                    // Fetch routines from repository
-                                    let routines = repo_locked.iterate_routines().await;
+                                    // Fetch routines from repository with their indices
+                                    let routines_with_indices = repo_locked.iterate_routines_with_indices().await;
 
-                                    let routines = routines.cloned().collect::<Vec<_>>();
+                                    let routines = routines_with_indices
+                                        .map(|(idx, r)| (idx, r.clone()))
+                                        .collect::<BTreeMap<_, _>>();
                                     let routine_list = variegated_controller_types::RoutineList { routines };
 
                                     // Send the routines

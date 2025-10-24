@@ -4,25 +4,37 @@
 //!
 //! This crate provides a `TimeKeeper` singleton that maintains a mapping between
 //! `embassy_time::Instant` (monotonic system time) and real-world date/time
-//! with timezone support.
+//! with flexible timezone support.
 //!
 //! ## Features
 //!
 //! - `no_std` compatible with `alloc`
-//! - Timezone and DST support via `chrono-tz`
+//! - Multiple timezone types supported:
+//!   - Fixed UTC offsets via `chrono::FixedOffset` (e.g., `+05:00`)
+//!   - UTC timezone
+//!   - Named timezones with DST support via `chrono-tz` (requires `named-timezones` feature)
 //! - Thread-safe singleton pattern
 //! - Static API similar to `embassy_time::Instant::now()`
 //!
+//! ## Cargo Features
+//!
+//! - `named-timezones` - Enable support for named timezones (e.g., `America/New_York`) with DST support via `chrono-tz`.
+//!   Without this feature, only `FixedOffset` and `Utc` are available, reducing dependency size.
+//! - `defmt` - Enable defmt logging support
+//! - `serde` - Enable serde support for chrono types
+//!
 //! ## Usage
+//!
+//! ### Basic usage with FixedOffset (no extra features required)
 //!
 //! ```rust,ignore
 //! use variegated_timekeeping::TimeKeeper;
-//! use chrono_tz::America::Los_Angeles;
+//! use chrono::FixedOffset;
 //!
 //! #[embassy_executor::main]
 //! async fn main(_spawner: Spawner) {
-//!     // Initialize with timezone
-//!     TimeKeeper::init(Los_Angeles);
+//!     // Initialize with fixed offset (e.g., +5 hours)
+//!     TimeKeeper::init(FixedOffset::east_opt(5 * 3600).unwrap());
 //!
 //!     // Set the current time
 //!     let datetime = NaiveDate::from_ymd_opt(2025, 9, 30)
@@ -37,6 +49,21 @@
 //!     let now_local = TimeKeeper::now_local().unwrap();
 //! }
 //! ```
+//!
+//! ### With named timezones (requires `named-timezones` feature)
+//!
+//! ```rust,ignore
+//! use variegated_timekeeping::TimeKeeper;
+//! use chrono_tz::America::Los_Angeles;
+//!
+//! #[embassy_executor::main]
+//! async fn main(_spawner: Spawner) {
+//!     // Initialize with named timezone (with DST support)
+//!     TimeKeeper::init(Los_Angeles);
+//!
+//!     // ... rest is the same
+//! }
+//! ```
 
 #![no_std]
 #![warn(missing_docs)]
@@ -44,7 +71,8 @@
 extern crate alloc;
 
 use core::cell::RefCell;
-use chrono::{DateTime, Datelike, TimeZone, Utc, Weekday};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
+#[cfg(feature = "named-timezones")]
 use chrono_tz::Tz;
 use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 use embassy_time::Instant;
@@ -53,6 +81,200 @@ pub mod error;
 
 pub use error::{Error, Result};
 
+/// Wrapper enum that supports multiple timezone types from chrono.
+///
+/// This allows TimeKeeper to work with different timezone implementations:
+/// - Named timezones with DST support (via chrono-tz, requires `named-timezones` feature)
+/// - Fixed UTC offsets without DST
+/// - UTC timezone
+#[derive(Debug, Clone, Copy)]
+pub enum TimeZoneWrapper {
+    /// A named timezone with DST support (e.g., America/New_York, Europe/London)
+    ///
+    /// Only available with the `named-timezones` feature enabled.
+    #[cfg(feature = "named-timezones")]
+    Named(Tz),
+    /// A fixed UTC offset (e.g., +05:00, -08:00)
+    Fixed(FixedOffset),
+    /// UTC timezone
+    Utc,
+}
+
+/// DateTime in a specific timezone, supporting multiple timezone types.
+///
+/// This enum wraps different DateTime types to allow working with various
+/// timezone implementations while maintaining type safety.
+#[derive(Debug, Clone, Copy)]
+pub enum DateTimeInZone {
+    /// DateTime in a named timezone (with DST support)
+    ///
+    /// Only available with the `named-timezones` feature enabled.
+    #[cfg(feature = "named-timezones")]
+    Named(DateTime<Tz>),
+    /// DateTime with a fixed UTC offset
+    Fixed(DateTime<FixedOffset>),
+    /// DateTime in UTC
+    Utc(DateTime<Utc>),
+}
+
+impl DateTimeInZone {
+    /// Get the underlying datetime as UTC
+    pub fn to_utc(&self) -> DateTime<Utc> {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.with_timezone(&Utc),
+            DateTimeInZone::Fixed(dt) => dt.with_timezone(&Utc),
+            DateTimeInZone::Utc(dt) => *dt,
+        }
+    }
+
+    /// Get the naive local datetime (without timezone info)
+    pub fn naive_local(&self) -> NaiveDateTime {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.naive_local(),
+            DateTimeInZone::Fixed(dt) => dt.naive_local(),
+            DateTimeInZone::Utc(dt) => dt.naive_utc(),
+        }
+    }
+
+    /// Get the naive date
+    pub fn date_naive(&self) -> chrono::NaiveDate {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.date_naive(),
+            DateTimeInZone::Fixed(dt) => dt.date_naive(),
+            DateTimeInZone::Utc(dt) => dt.date_naive(),
+        }
+    }
+
+    /// Get the weekday
+    pub fn weekday(&self) -> Weekday {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.weekday(),
+            DateTimeInZone::Fixed(dt) => dt.weekday(),
+            DateTimeInZone::Utc(dt) => dt.weekday(),
+        }
+    }
+
+    /// Get the hour component (0-23)
+    pub fn hour(&self) -> u32 {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.hour(),
+            DateTimeInZone::Fixed(dt) => dt.hour(),
+            DateTimeInZone::Utc(dt) => dt.hour(),
+        }
+    }
+
+    /// Get the minute component (0-59)
+    pub fn minute(&self) -> u32 {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.minute(),
+            DateTimeInZone::Fixed(dt) => dt.minute(),
+            DateTimeInZone::Utc(dt) => dt.minute(),
+        }
+    }
+
+    /// Get the second component (0-59)
+    pub fn second(&self) -> u32 {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => dt.second(),
+            DateTimeInZone::Fixed(dt) => dt.second(),
+            DateTimeInZone::Utc(dt) => dt.second(),
+        }
+    }
+
+    /// Calculate signed duration since another DateTimeInZone
+    pub fn signed_duration_since(&self, other: &DateTimeInZone) -> chrono::Duration {
+        self.to_utc().signed_duration_since(other.to_utc())
+    }
+}
+
+impl PartialEq for DateTimeInZone {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_utc() == other.to_utc()
+    }
+}
+
+impl Eq for DateTimeInZone {}
+
+impl PartialOrd for DateTimeInZone {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DateTimeInZone {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.to_utc().cmp(&other.to_utc())
+    }
+}
+
+impl core::ops::Add<chrono::Duration> for DateTimeInZone {
+    type Output = DateTimeInZone;
+
+    fn add(self, rhs: chrono::Duration) -> Self::Output {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            DateTimeInZone::Named(dt) => DateTimeInZone::Named(dt + rhs),
+            DateTimeInZone::Fixed(dt) => DateTimeInZone::Fixed(dt + rhs),
+            DateTimeInZone::Utc(dt) => DateTimeInZone::Utc(dt + rhs),
+        }
+    }
+}
+
+impl TimeZoneWrapper {
+    /// Convert a UTC datetime to local time in this timezone
+    pub fn to_local(&self, utc: DateTime<Utc>) -> DateTimeInZone {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            TimeZoneWrapper::Named(tz) => DateTimeInZone::Named(utc.with_timezone(tz)),
+            TimeZoneWrapper::Fixed(offset) => DateTimeInZone::Fixed(utc.with_timezone(offset)),
+            TimeZoneWrapper::Utc => DateTimeInZone::Utc(utc),
+        }
+    }
+
+    /// Convert a local datetime to this timezone, returning the earliest match
+    /// in case of DST ambiguity
+    pub fn from_local(&self, local: &NaiveDateTime) -> Option<DateTimeInZone> {
+        match self {
+            #[cfg(feature = "named-timezones")]
+            TimeZoneWrapper::Named(tz) => {
+                tz.from_local_datetime(local).earliest().map(DateTimeInZone::Named)
+            }
+            TimeZoneWrapper::Fixed(offset) => {
+                offset.from_local_datetime(local).earliest().map(DateTimeInZone::Fixed)
+            }
+            TimeZoneWrapper::Utc => {
+                Utc.from_local_datetime(local).earliest().map(DateTimeInZone::Utc)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "named-timezones")]
+impl From<Tz> for TimeZoneWrapper {
+    fn from(tz: Tz) -> Self {
+        TimeZoneWrapper::Named(tz)
+    }
+}
+
+impl From<FixedOffset> for TimeZoneWrapper {
+    fn from(offset: FixedOffset) -> Self {
+        TimeZoneWrapper::Fixed(offset)
+    }
+}
+
+impl From<Utc> for TimeZoneWrapper {
+    fn from(_: Utc) -> Self {
+        TimeZoneWrapper::Utc
+    }
+}
+
 /// Internal state of the TimeKeeper
 struct TimeKeeperState {
     /// Anchor point: embassy_time::Instant when the time was set
@@ -60,7 +282,7 @@ struct TimeKeeperState {
     /// Anchor point: UTC DateTime when the time was set
     anchor_datetime: Option<DateTime<Utc>>,
     /// Current timezone
-    timezone: Tz,
+    timezone: TimeZoneWrapper,
 }
 
 /// Global storage for TimeKeeper state
@@ -79,14 +301,30 @@ impl TimeKeeper {
     /// This must be called exactly once before any other TimeKeeper methods.
     /// Calling this multiple times will panic.
     ///
+    /// Accepts any timezone type that can be converted to `TimeZoneWrapper`:
+    /// - `chrono::FixedOffset` for fixed UTC offsets
+    /// - `chrono::Utc` for UTC timezone
+    /// - `chrono_tz::Tz` for named timezones with DST support (requires `named-timezones` feature)
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// use variegated_timekeeping::{TimeKeeper, chrono_tz::America::Los_Angeles};
+    /// use variegated_timekeeping::TimeKeeper;
+    /// use chrono::FixedOffset;
     ///
+    /// // With fixed offset
+    /// TimeKeeper::init(FixedOffset::east_opt(5 * 3600).unwrap());
+    /// ```
+    ///
+    /// With the `named-timezones` feature enabled:
+    ///
+    /// ```ignore
+    /// use chrono_tz::America::Los_Angeles;
+    ///
+    /// // With named timezone
     /// TimeKeeper::init(Los_Angeles);
     /// ```
-    pub fn init(timezone: Tz) {
+    pub fn init(timezone: impl Into<TimeZoneWrapper>) {
         STATE.lock(|cell| {
             let mut opt = cell.borrow_mut();
             if opt.is_some() {
@@ -95,7 +333,7 @@ impl TimeKeeper {
             *opt = Some(TimeKeeperState {
                 anchor_instant: None,
                 anchor_datetime: None,
-                timezone,
+                timezone: timezone.into(),
             });
         });
     }
@@ -126,18 +364,34 @@ impl TimeKeeper {
 
     /// Set the timezone.
     ///
+    /// Accepts any timezone type that can be converted to `TimeZoneWrapper`:
+    /// - `chrono::FixedOffset` for fixed UTC offsets
+    /// - `chrono::Utc` for UTC timezone
+    /// - `chrono_tz::Tz` for named timezones with DST support (requires `named-timezones` feature)
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// use variegated_timekeeping::{TimeKeeper, chrono_tz::America::New_York};
+    /// use variegated_timekeeping::TimeKeeper;
+    /// use chrono::FixedOffset;
     ///
+    /// // With fixed offset
+    /// TimeKeeper::set_timezone(FixedOffset::east_opt(-5 * 3600).unwrap()).unwrap();
+    /// ```
+    ///
+    /// With the `named-timezones` feature enabled:
+    ///
+    /// ```ignore
+    /// use chrono_tz::America::New_York;
+    ///
+    /// // With named timezone
     /// TimeKeeper::set_timezone(New_York).unwrap();
     /// ```
-    pub fn set_timezone(timezone: Tz) -> Result<()> {
+    pub fn set_timezone(timezone: impl Into<TimeZoneWrapper>) -> Result<()> {
         STATE.lock(|cell| {
             let mut opt = cell.borrow_mut();
             let s = opt.as_mut().ok_or(Error::Uninitialized)?;
-            s.timezone = timezone;
+            s.timezone = timezone.into();
             Ok(())
         })
     }
@@ -179,10 +433,10 @@ impl TimeKeeper {
     /// use variegated_timekeeping::TimeKeeper;
     ///
     /// if let Some(local) = TimeKeeper::now_local() {
-    ///     println!("Local time: {}", local);
+    ///     println!("Local time: {:?}", local);
     /// }
     /// ```
-    pub fn now_local() -> Option<DateTime<Tz>> {
+    pub fn now_local() -> Option<DateTimeInZone> {
         STATE.lock(|cell| {
             let opt = cell.borrow();
             let s = opt.as_ref()?;
@@ -194,7 +448,7 @@ impl TimeKeeper {
             let duration = chrono::Duration::microseconds(elapsed.as_micros() as i64);
 
             let utc_time = anchor_datetime.checked_add_signed(duration)?;
-            Some(utc_time.with_timezone(&timezone))
+            Some(timezone.to_local(utc_time))
         })
     }
 
@@ -242,6 +496,9 @@ impl TimeKeeper {
         })
     }
 
+    /// Create a timer that will fire when the given UTC datetime is reached
+    ///
+    /// Returns `None` if the datetime is in the past or if microsecond conversion overflows
     pub fn timer_until(datetime: DateTime<Utc>) -> Option<embassy_time::Timer> {
         let now = Self::now_utc()?;
         if datetime <= now {
@@ -252,22 +509,28 @@ impl TimeKeeper {
         Some(embassy_time::Timer::after(embassy_time::Duration::from_micros(micros)))
     }
 
-    pub fn timer_until_local(datetime: DateTime<Tz>) -> Option<embassy_time::Timer> {
+    /// Create a timer that will fire when the given local datetime is reached
+    ///
+    /// Returns `None` if the datetime is in the past or if microsecond conversion overflows
+    pub fn timer_until_local(datetime: DateTimeInZone) -> Option<embassy_time::Timer> {
         let now = Self::now_local()?;
         if datetime <= now {
             return None;
         }
-        let duration = datetime.signed_duration_since(now);
+        let duration = datetime.signed_duration_since(&now);
         let micros = duration.num_microseconds()? as u64;
         Some(embassy_time::Timer::after(embassy_time::Duration::from_micros(micros)))
     }
 
+    /// Create a timer that will fire at the next occurrence of a specific time
+    ///
+    /// Returns `None` if the TimeKeeper is not initialized
     pub fn timer_until_next_local(second: u8, minute: u8, hour: u8, day_of_week: Option<Weekday>) -> Option<embassy_time::Timer> {
         let now = Self::now_local()?;
         let timezone = Self::timezone();
 
         let next = now.date_naive().and_hms_opt(hour as u32, minute as u32, second as u32)?;
-        let mut next = timezone.from_local_datetime(&next).earliest()?;
+        let mut next = timezone.from_local(&next)?;
 
         if let Some(dow) = day_of_week {
             while next.weekday() != dow {
@@ -288,10 +551,10 @@ impl TimeKeeper {
     }
 
     /// Get the configured timezone.
-    pub fn timezone() -> Tz {
+    pub fn timezone() -> TimeZoneWrapper {
         STATE.lock(|cell| {
             let opt = cell.borrow();
-            opt.as_ref().map(|s| s.timezone).unwrap_or(Tz::UTC)
+            opt.as_ref().map(|s| s.timezone).unwrap_or(TimeZoneWrapper::Utc)
         })
     }
 

@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -19,6 +20,7 @@ pub const MAX_STEAM_WANDS: usize = 4;
 pub const MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS: usize = 2;
 pub const MAX_TANKS: usize = 2;
 pub const MAX_PERIPHERALS: usize = 16;
+pub const MAX_FUNCTION_ROUTINES: usize = 16;
 
 pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
@@ -39,7 +41,67 @@ pub type WaterTapIndex = u8;
 pub type TankIndex = u8;
 pub type SteamWandIndex = u8;
 
-pub type RoutineIndex = usize;
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RoutineIndex {
+    Internal(usize),
+    Function(usize),
+    Custom(usize)
+}
+
+impl RoutineIndex {
+    /// Convert RoutineIndex to a bit-packed u16 storage index
+    /// Bits 15-14: Type (00=Internal, 01=Function, 10=Custom)
+    /// Bits 13-0: Index (0-16383)
+    pub fn to_storage_index(&self) -> u16 {
+        match self {
+            RoutineIndex::Internal(n) => {
+                debug_assert!(*n < 0x4000, "Internal routine index too large");
+                (*n as u16) & 0x3FFF
+            }
+            RoutineIndex::Function(n) => {
+                debug_assert!(*n < 0x4000, "Function routine index too large");
+                0x4000 | ((*n as u16) & 0x3FFF)
+            }
+            RoutineIndex::Custom(n) => {
+                debug_assert!(*n < 0x4000, "Custom routine index too large");
+                0x8000 | ((*n as u16) & 0x3FFF)
+            }
+        }
+    }
+
+    /// Convert a bit-packed u16 storage index to RoutineIndex
+    pub fn from_storage_index(storage_index: u16) -> Option<Self> {
+        let type_bits = (storage_index >> 14) & 0x03;
+        let index = (storage_index & 0x3FFF) as usize;
+
+        match type_bits {
+            0b00 => Some(RoutineIndex::Internal(index)),
+            0b01 => Some(RoutineIndex::Function(index)),
+            0b10 => Some(RoutineIndex::Custom(index)),
+            _ => None, // 0b11 is reserved
+        }
+    }
+
+    /// Get the inner index value
+    pub fn inner(&self) -> usize {
+        match self {
+            RoutineIndex::Internal(n) | RoutineIndex::Function(n) | RoutineIndex::Custom(n) => *n,
+        }
+    }
+}
+
+impl core::fmt::Display for RoutineIndex {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            RoutineIndex::Internal(n) => write!(f, "Internal({})", n),
+            RoutineIndex::Function(n) => write!(f, "Function({})", n),
+            RoutineIndex::Custom(n) => write!(f, "Custom({})", n),
+        }
+    }
+}
 
 pub type PidParameters = variegated_control_algorithm::pid::PidParameters<f32>;
 pub type PidTerm = variegated_control_algorithm::pid::PidTerm<f32>;
@@ -150,9 +212,12 @@ pub enum MachineCommand {
     RemoveScheduleItem(usize),
     UpdateScheduleItem(usize, ScheduleItem),
     AddRoutine(Routine),
-    RemoveRoutine(usize),
-    UpdateRoutine(usize, Routine),
+    RemoveRoutine(RoutineIndex),
+    UpdateRoutine(RoutineIndex, Routine),
     SetMachineMode(MachineMode),
+    OptimizeConfigurationStorage,
+    OptimizeRoutineStorage,
+    OptimizeScheduleStorage,
 }
 
 #[cfg(feature = "defmt")]
@@ -183,6 +248,9 @@ impl defmt::Format for MachineCommand {
             MachineCommand::RemoveRoutine(idx) => defmt::write!(f, "RemoveRoutine({})", idx),
             MachineCommand::UpdateRoutine(idx, routine) => defmt::write!(f, "UpdateRoutine({})", idx),
             MachineCommand::SetMachineMode(mode) => defmt::write!(f, "SetMachineMode({:?})", mode),
+            MachineCommand::OptimizeConfigurationStorage => defmt::write!(f, "OptimizeConfigurationStorage"),
+            MachineCommand::OptimizeRoutineStorage => defmt::write!(f, "OptimizeRoutineStorage"),
+            MachineCommand::OptimizeScheduleStorage => defmt::write!(f, "OptimizeScheduleStorage"),
         }
     }
 }
@@ -506,7 +574,7 @@ pub trait PeripheralStatusProvider {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
     pub current_step: Option<usize>,
@@ -1303,6 +1371,8 @@ pub struct MachineDefinition {
     pub environmental_sensors: FnvIndexMap<EnvironmentalSensorId, EnvironmentalSensorDefinition, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>,
     #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<PeripheralId, PeripheralDefinition>"))]
     pub peripherals: FnvIndexMap<PeripheralId, PeripheralDefinition, MAX_PERIPHERALS>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<usize, String>"))]
+    pub function_routines: FnvIndexMap<usize, heapless::String<32>, MAX_FUNCTION_ROUTINES>,
 }
 
  impl MachineDefinition {
@@ -1333,12 +1403,21 @@ pub struct MachineDefinition {
     pub fn add_environmental_sensor(&mut self, id: EnvironmentalSensorId, definition: EnvironmentalSensorDefinition) -> Result<(), ()> {
         self.environmental_sensors.insert(id, definition).map(|_| ()).map_err(|_| ())
     }
+
+    pub fn add_function_routine_description(&mut self, index: usize, description: &str) -> Result<(), ()> {
+        let s = heapless::String::try_from(description).map_err(|_| ())?;
+        self.function_routines.insert(index, s).map(|_| ()).map_err(|_| ())
+    }
+
+    pub fn get_function_routine_description(&self, index: usize) -> Option<&str> {
+        self.function_routines.get(&index).map(|s| s.as_str())
+    }
 }
 
 #[cfg(feature = "defmt")]
 impl defmt::Format for MachineDefinition {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "MachineDefinition {{ boilers: {} boilers, groups: {} groups, water_taps: {} water_taps, tanks: {} tanks, steam_wands: {} wands, env_sensors: {} sensors, peripherals: {} peripherals }}",
+        defmt::write!(f, "MachineDefinition {{ boilers: {} boilers, groups: {} groups, water_taps: {} water_taps, tanks: {} tanks, steam_wands: {} wands, env_sensors: {} sensors, peripherals: {} peripherals, function_routines: {} function routines }}",
             self.boilers.len(),
             self.groups.len(),
             self.water_taps.len(),
@@ -1346,6 +1425,7 @@ impl defmt::Format for MachineDefinition {
             self.steam_wands.len(),
             self.environmental_sensors.len(),
             self.peripherals.len(),
+            self.function_routines.len()
         );
     }
 }
@@ -1354,18 +1434,21 @@ impl defmt::Format for MachineDefinition {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone)]
 pub struct RoutineList {
-    pub routines: Vec<Routine>,
+    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<RoutineIndex, Routine>"))]
+    pub routines: BTreeMap<RoutineIndex, Routine>,
 }
 
 #[cfg(feature = "defmt")]
 impl defmt::Format for RoutineList {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(f, "RoutineList {{ routines: [");
-        for (i, routine) in self.routines.iter().enumerate() {
-            if i > 0 {
+        let mut first = true;
+        for (index, routine) in self.routines.iter() {
+            if !first {
                 defmt::write!(f, ", ");
             }
-            defmt::write!(f, "{}", routine.name.as_str());
+            defmt::write!(f, "{}:{}", index, routine.name.as_str());
+            first = false;
         }
         defmt::write!(f, "] }}");
     }
