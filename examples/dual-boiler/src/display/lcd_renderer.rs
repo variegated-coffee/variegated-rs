@@ -8,7 +8,7 @@ use alloc::format;
 use chrono::Timelike;
 use core::time::Duration;
 use hd44780_controller::controller::{Controller, state::Init};
-use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, RoutineExitCondition, SingleGroupControllerGroups, StateCondition};
+use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition};
 use variegated_timekeeping::TimeKeeper;
 use variegated_controller_lib::routine::RoutineRepository;
 
@@ -25,6 +25,8 @@ pub struct LcdDisplayState {
     display_initialized: bool,
     /// Routine repository for looking up routine details
     routine_repository: &'static RoutineRepositoryMutex,
+    /// Cached current routine being executed (fetched once per execution)
+    pub current_routine: Option<Routine>,
 }
 
 impl LcdDisplayState {
@@ -35,6 +37,7 @@ impl LcdDisplayState {
             display_buffer: [[' '; 16]; 2],
             display_initialized: false,
             routine_repository,
+            current_routine: None,
         }
     }
 
@@ -301,8 +304,8 @@ impl LcdDisplayState {
     /// Format routine execution mode row 1: "X/Y StepDesc"
     pub async fn format_routine_row1(&self) -> String {
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
-            let mut routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
+            // Use cached routine if available
+            if let Some(routine) = &self.current_routine {
                 if let Some(current_step_idx) = routine_execution.current_step {
                     let total_steps = routine.steps().len();
                     let step_num = current_step_idx + 1;
@@ -331,7 +334,19 @@ impl LcdDisplayState {
                     "Routine starting".to_string()
                 }
             } else {
-                "Unknown routine".to_string()
+                // Fallback: query repository if cache is empty (shouldn't normally happen)
+                let mut routine_repo = self.routine_repository.lock().await;
+                if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
+                    if let Some(current_step_idx) = routine_execution.current_step {
+                        let step_num = current_step_idx + 1;
+                        let total_steps = routine.steps().len();
+                        format!("{}/{}", step_num, total_steps)
+                    } else {
+                        "Routine starting".to_string()
+                    }
+                } else {
+                    "Unknown routine".to_string()
+                }
             }
         } else {
             "No routine".to_string()
@@ -341,13 +356,26 @@ impl LcdDisplayState {
     /// Format routine execution mode row 2: Shows first exit condition with current value
     pub async fn format_routine_row2(&self) -> String {
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
-            let mut routine_repo = self.routine_repository.lock().await;
-            if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
+            // Use cached routine if available
+            if let Some(routine) = &self.current_routine {
                 if let Some(current_step_idx) = routine_execution.current_step {
                     if let Some(step) = routine.steps().get(current_step_idx) {
                         // Get first exit condition
                         if let Some(exit) = step.exits().first() {
                             return self.format_exit_condition_with_value(&exit.condition, &routine_execution);
+                        }
+                    }
+                }
+            } else {
+                // Fallback: query repository if cache is empty (shouldn't normally happen)
+                let mut routine_repo = self.routine_repository.lock().await;
+                if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
+                    if let Some(current_step_idx) = routine_execution.current_step {
+                        if let Some(step) = routine.steps().get(current_step_idx) {
+                            // Get first exit condition
+                            if let Some(exit) = step.exits().first() {
+                                return self.format_exit_condition_with_value(&exit.condition, &routine_execution);
+                            }
                         }
                     }
                 }

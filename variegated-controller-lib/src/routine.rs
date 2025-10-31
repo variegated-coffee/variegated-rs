@@ -8,7 +8,7 @@ use core::ops::{DerefMut, Range};
 use defmt::{info, Format};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_storage_async::nor_flash::NorFlash;
 use heapless::FnvIndexMap;
 use sequential_storage::cache::NoCache;
@@ -645,9 +645,9 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T>
         }
     }
 
-    pub async fn load_from_flash(&mut self) -> Result<(), &'static str> {
+    async fn load_from_flash(&mut self) -> Result<(), &'static str> {
         if self.cache_initialized {
-            info!("Cache already initialized, skipping load");
+            //info!("Cache already initialized, skipping load");
             return Ok(());
         }
 
@@ -713,12 +713,14 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T>
 
 impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRoutineRepository<'a, M, T> {
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine> {
+        info!("Getting routine at index {:?}", index);
         self.load_from_flash().await.ok()?;
         let storage_index = index.to_storage_index();
         self.cache.get(&storage_index)
     }
 
     async fn add_routine(&mut self, routine: Routine) {
+        //info!("Adding new routine");
         self.load_from_flash().await.ok().unwrap();
 
         // Find first available Custom index
@@ -751,6 +753,7 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
     }
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
+        //info!("Updating routine at index {:?}", index);
         self.load_from_flash().await?;
 
         let storage_index = index.to_storage_index();
@@ -762,6 +765,7 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
     }
 
     async fn iterate_routines(&mut self) -> impl Iterator<Item = &Routine> {
+        //info!("Iterating over all routines");
         let res = self.load_from_flash().await;
         if res.is_err() {
             info!("Error loading routines from flash: {:?}", res.err());
@@ -771,6 +775,7 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
     }
 
     async fn iterate_routines_with_indices(&mut self) -> impl Iterator<Item = (RoutineIndex, &Routine)> {
+        //info!("Iterating over all routines with indices");
         let res = self.load_from_flash().await;
         if res.is_err() {
             info!("Error loading routines from flash: {:?}", res.err());
@@ -782,6 +787,7 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
     }
 
     async fn get_routine_count(&mut self) -> usize {
+        //info!("Getting routine count");
         if let Err(e) = self.load_from_flash().await {
             info!("Error loading routines from flash: {:?}", e);
             return 0;
@@ -809,11 +815,16 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
                 .map_err(|_| "Failed to erase flash range")?;
         }
 
+        // Yield to allow other tasks (like watchdog feeding) to run after long erase operation
+        Timer::after_millis(1).await;
+
         // Re-store all routines from the collected Vec
         info!("Rewriting {} routines", routines_to_store.len());
         for (storage_index, routine) in routines_to_store {
             let opt = Some(routine);
             self.store_in_flash(storage_index, &opt).await?;
+            // Yield after each routine to prevent watchdog timeout
+            Timer::after_millis(1).await;
         }
 
         info!("Routine storage optimization complete");

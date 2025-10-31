@@ -7,11 +7,11 @@ use defmt::{debug, error, info, warn, Format};
 use embassy_rp::adc::Config;
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
-use embassy_sync::channel::Receiver;
+use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_sync::watch;
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::FnvIndexMap;
 use movavg::MovAvg;
 use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
@@ -19,7 +19,7 @@ use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -253,7 +253,7 @@ pub struct DualBoilerSingleGroupController<
     'a,
     ChannelM: RawMutex,
     M: RawMutex,
-    SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>,
+    SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration> + 'static,
     RoutineRepoT: RoutineRepository + 'static,
     ScheduleStoreT: ScheduleStore + 'static,
     const N_CHANNEL: usize,
@@ -264,6 +264,7 @@ pub struct DualBoilerSingleGroupController<
     command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
     status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
     configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
+    storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
 
     // Hardware components
     brew_boiler: Boiler<'a, M, N_WATCH>,
@@ -281,7 +282,7 @@ pub struct DualBoilerSingleGroupController<
     last_steam_boiler_output: f32,
 
     // Configuration and storage
-    configuration_store: SettingsStoreT,
+    configuration_store: &'static Mutex<NoopRawMutex, SettingsStoreT>,
     configuration: DualBoilerSingleGroupConfiguration,
 //    persistent_configuration: DualBoilerSingleGroupPersistentConfiguration,
 //    ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration,
@@ -336,13 +337,14 @@ impl<
         command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
         status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
         configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
+        storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
         brew_boiler: Boiler<'a, M, N_WATCH>,
         steam_boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
         water_tap: WaterTap<'a, M, N_WATCH>,
         tank: Option<Tank<'a, M, N_WATCH>>,
         fill_mechanism: Option<DualBoilerFillMechanism<'a>>,
-        settings_store: SettingsStoreT,
+        settings_store: &'static Mutex<NoopRawMutex, SettingsStoreT>,
         routine_repository: &'static Mutex<NoopRawMutex, RoutineRepoT>,
         schedule_store: &'static Mutex<NoopRawMutex, ScheduleStoreT>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -352,6 +354,7 @@ impl<
             command_channel_receiver,
             status_channel_sender,
             configuration_channel_sender,
+            storage_command_sender,
             brew_boiler,
             steam_boiler,
             group,
@@ -452,7 +455,14 @@ impl<
         };
         configuration.insert_tank_configuration(0, tank_config);
 
-        configuration.schedules = self.schedule_store.lock().await.get_schedules().await.cloned().collect();
+        // Try to get schedules with timeout to avoid blocking if optimization is running
+        configuration.schedules = match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
+            Ok(mut store) => store.get_schedules().await.cloned().collect(),
+            Err(_) => {
+                warn!("Failed to acquire schedule_store lock for configuration (timeout)");
+                Vec::new()
+            }
+        };
 
         configuration
     }
@@ -464,7 +474,14 @@ impl<
         let mut last_configuration_publish = Instant::now();
 
         loop {
-            self.configuration.persistent = self.configuration_store.load_settings().await.unwrap_or_default();
+            // Try to load settings with timeout to avoid blocking if optimization is running
+            self.configuration.persistent = match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                Ok(mut store) => store.load_settings().await.unwrap_or_default(),
+                Err(_) => {
+                    // If we can't acquire the lock, keep current configuration
+                    self.configuration.persistent.clone()
+                }
+            };
 
             last_published_configuration = self.publish_configuration_if_changed(last_published_configuration).await;
 
@@ -506,7 +523,7 @@ impl<
 
             // Debug print status every 10 seconds
             let now = Instant::now();
-            if now.saturating_duration_since(last_debug_print).as_secs() >= 10 {
+            if now.saturating_duration_since(last_debug_print).as_secs() >= 1 {
                 if let Some(ref status) = self.previous_status {
                     debug!("Status: {:?}", status);
                 }
@@ -956,7 +973,10 @@ impl<
                                 self.configuration.persistent.brew_boiler_control_state.values.target_pressure = pressure;
                             }
                         }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        }
                     },
                     1 => {
                         self.configuration.persistent.steam_boiler_control_state.mode = mode;
@@ -968,7 +988,10 @@ impl<
                                 self.configuration.persistent.steam_boiler_control_state.values.target_pressure = pressure;
                             }
                         }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        }
                     },
                     _ => {
                         error!("Invalid boiler index: {}", boiler_index);
@@ -985,7 +1008,10 @@ impl<
                         if let Some(pressure) = update.pressure {
                             self.configuration.persistent.brew_boiler_control_state.values.target_pressure = pressure;
                         }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        }
                     },
                     1 => {
                         if let Some(temp) = update.temperature {
@@ -994,7 +1020,10 @@ impl<
                         if let Some(pressure) = update.pressure {
                             self.configuration.persistent.steam_boiler_control_state.values.target_pressure = pressure;
                         }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        }
                     },
                     _ => {
                         error!("Invalid boiler index: {}", boiler_index);
@@ -1107,7 +1136,10 @@ impl<
                     }
                 }
                 // Save after updating PID parameters
-                self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                }
             }
             MachineCommand::EnableBoiler(boiler_index) => {
                 match boiler_index {
@@ -1173,36 +1205,62 @@ impl<
             }
             MachineCommand::RemoveScheduleItem(idx) => {
                 info!("Removing schedule item at index {}", idx);
-                let res = self.schedule_store.lock().await.remove_schedule(idx).await;
-                if res.is_none() {
-                    warn!("Failed to remove schedule at index {}: index out of bounds", idx);
+                match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
+                    Ok(mut store) => {
+                        let res = store.remove_schedule(idx).await;
+                        if res.is_none() {
+                            warn!("Failed to remove schedule at index {}: index out of bounds", idx);
+                        }
+                    }
+                    Err(_) => warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::AddScheduleItem(item) => {
                 info!("Adding new schedule item");
-                self.schedule_store.lock().await.add_schedule(item).await;
+                match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
+                    Ok(mut store) => store.add_schedule(item).await,
+                    Err(_) => warn!("Failed to acquire schedule_store lock (timeout)"),
+                }
             }
             MachineCommand::UpdateScheduleItem(idx, item) => {
                 info!("Updating schedule item at index {}", idx);
-                let res = self.schedule_store.lock().await.update_schedule(idx, item).await;
-                if res.is_err() {
-                    warn!("Failed to update schedule at index {}: index out of bounds", idx);
+                match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
+                    Ok(mut store) => {
+                        let res = store.update_schedule(idx, item).await;
+                        if res.is_err() {
+                            warn!("Failed to update schedule at index {}: index out of bounds", idx);
+                        }
+                    }
+                    Err(_) => warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::AddRoutine(routine) => {
                 info!("Adding new routine");
-                self.routine_repository.lock().await.add_routine(routine).await;
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => repo.add_routine(routine).await,
+                    Err(_) => warn!("Failed to acquire routine_repository lock (timeout)"),
+                }
             }
             MachineCommand::RemoveRoutine(idx) => {
-                let res = self.routine_repository.lock().await.remove_routine(idx).await;
-                if res.is_none() {
-                    warn!("Failed to remove routine at index {}: index out of bounds", idx);
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => {
+                        let res = repo.remove_routine(idx).await;
+                        if res.is_none() {
+                            warn!("Failed to remove routine at index {}: index out of bounds", idx);
+                        }
+                    }
+                    Err(_) => warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
             MachineCommand::UpdateRoutine(idx, Routine) => {
-                let res = self.routine_repository.lock().await.update_routine(idx, Routine).await;
-                if res.is_err() {
-                    warn!("Failed to update routine at index {}: index out of bounds", idx);
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => {
+                        let res = repo.update_routine(idx, Routine).await;
+                        if res.is_err() {
+                            warn!("Failed to update routine at index {}: index out of bounds", idx);
+                        }
+                    }
+                    Err(_) => warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
             MachineCommand::SetMachineMode(mode) => {
@@ -1219,21 +1277,21 @@ impl<
                 }
             }
             MachineCommand::OptimizeConfigurationStorage => {
-                info!("Optimizing configuration storage");
-                if let Err(e) = self.configuration_store.optimize_storage().await {
-                    warn!("Failed to optimize configuration storage: {}", e);
+                info!("Sending OptimizeConfiguration to storage task");
+                if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeConfiguration) {
+                    warn!("Failed to send OptimizeConfiguration command: channel full");
                 }
             }
             MachineCommand::OptimizeRoutineStorage => {
-                info!("Optimizing routine storage");
-                if let Err(e) = self.routine_repository.lock().await.optimize_storage().await {
-                    warn!("Failed to optimize routine storage: {}", e);
+                info!("Sending OptimizeRoutines to storage task");
+                if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeRoutines) {
+                    warn!("Failed to send OptimizeRoutines command: channel full");
                 }
             }
             MachineCommand::OptimizeScheduleStorage => {
-                info!("Optimizing schedule storage");
-                if let Err(e) = self.schedule_store.lock().await.optimize_storage().await {
-                    warn!("Failed to optimize schedule storage: {}", e);
+                info!("Sending OptimizeSchedules to storage task");
+                if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeSchedules) {
+                    warn!("Failed to send OptimizeSchedules command: channel full");
                 }
             }
         }
@@ -1241,10 +1299,12 @@ impl<
 
     async fn start_brewing(&mut self) {
         if !self.group_brewing {
-            info!("Starting brewing");
+            let current_volume = self.group.get_input_volume();
+            info!("Starting brewing - capturing baseline volume: {:?}", current_volume);
             self.group_brewing = true;
             self.brew_start_time = Some(Instant::now());
-            self.brew_start_input_volume = self.group.get_input_volume();
+            self.brew_start_input_volume = current_volume;
+            info!("brew_start_input_volume set to: {:?}", self.brew_start_input_volume);
             self.group.set_brewing_state(true, 0).await;
 
             // Give initial PID boost for temperature drop compensation
@@ -1255,12 +1315,16 @@ impl<
                 smoothing: Some(true)
             }).await;
             let _ = self.group.scale_tare().await;
+        } else {
+            info!("start_brewing() called but group_brewing already true - skipping baseline capture");
         }
     }
 
     async fn stop_brewing(&mut self) {
         if self.group_brewing {
-            info!("Stopping brewing");
+            let current_volume = self.group.get_input_volume();
+            info!("Stopping brewing - current volume: {:?}, brew_start_input_volume: {:?}",
+                  current_volume, self.brew_start_input_volume);
 
             // Capture previous brew data before clearing
             if let Some(started_at) = self.brew_start_time {
@@ -1271,6 +1335,8 @@ impl<
                 );
                 let output_weight = self.group.get_output_weight();
 
+                info!("Final brew_input_volume: {:?}", brew_input_volume);
+
                 self.previous_brew = Some(crate::PreviousBrewInfo {
                     brew_time,
                     brew_input_volume,
@@ -1280,10 +1346,12 @@ impl<
                 });
             }
 
+            info!("Clearing brew_start_input_volume (was: {:?})", self.brew_start_input_volume);
             self.group_brewing = false;
             self.brew_start_time = None;
             self.brew_start_input_volume = None;
             self.curve_start_time = None;
+            info!("brew_start_input_volume now: {:?}", self.brew_start_input_volume);
             self.group.set_brewing_state(false, 0).await;
 
             let _ = self.group.scale_set_configuration(ScaleConfiguration {
@@ -1350,7 +1418,10 @@ impl<
             self.configuration = routine.saved_configuration.clone();
 
             // Save the restored persistent configuration
-            self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+            match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+            }
             self.curve_start_time = None;
 
             // Execute finally commands

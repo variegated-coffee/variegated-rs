@@ -74,7 +74,7 @@ use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, 
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -204,6 +204,7 @@ struct Ads124S08Peripherals {
     pin_cs: Peri<'static, ()>,
 }
 
+#[cfg(feature = "gear-pump")]
 #[variegated_board_cfg::board_cfg("gear_pump_peripherals")]
 struct PumpPeripherals {
     pwm_speed: Peri<'static, ()>,
@@ -312,8 +313,14 @@ type ConfigurationSubscriber = Subscriber<'static, CriticalSectionRawMutex, Conf
 
 type SettingsFlashType = W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>;
 
-type RoutineRepositoryMutex = Mutex<NoopRawMutex, SequentialStorageRoutineRepository<'static, NoopRawMutex, SettingsFlashType>>;
-type ScheduleStoreMutex = Mutex<NoopRawMutex, SequentialStorageScheduleStore<'static, NoopRawMutex, SettingsFlashType>>;
+type RoutineRepositoryType = SequentialStorageRoutineRepository<'static, NoopRawMutex, SettingsFlashType>;
+type ScheduleStoreType = SequentialStorageScheduleStore<'static, NoopRawMutex, SettingsFlashType>;
+type SettingsStorageType = SequentialStorageSettingsStorage<'static, NoopRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration>;
+
+type RoutineRepositoryMutex = Mutex<NoopRawMutex, RoutineRepositoryType>;
+type ScheduleStoreMutex = Mutex<NoopRawMutex, ScheduleStoreType>;
+type SettingsStorageMutex = Mutex<NoopRawMutex, SettingsStorageType>;
+type StorageCommandChannel = Channel<CriticalSectionRawMutex, StorageCommand, 4>;
 
 const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
 type ShotLogDataPointChannel = PubSubChannel<CriticalSectionRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
@@ -387,6 +394,8 @@ fn main() -> ! {
 
     let spi_p = internal_spi_bus_peripherals!(p);
     let ads_p = ads124s08_peripherals!(p);
+    #[cfg(feature = "gear-pump")]
+    let pump_p = gear_pump_peripherals!(p);
     let rotary_p = rotary_pump_peripherals!(p);
     let mechanism_p = mechanism_peripherals!(p);
     let sd_card_p = sd_card_peripherals!(p);
@@ -406,6 +415,8 @@ fn main() -> ! {
             spawner,
             spi_p,
             ads_p,
+            #[cfg(feature = "gear-pump")]
+            pump_p,
             rotary_p,
             mechanism_p,
             sd_card_p,
@@ -441,7 +452,8 @@ static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorRead
 static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
 static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
-static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, RPMType, 3>> = StaticCell::new();
+#[cfg(feature = "gear-pump")]
+static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 #[cfg(feature = "gravity")]
@@ -462,7 +474,8 @@ static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new
 static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
 static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
-
+static SETTINGS_STORAGE: StaticCell<SettingsStorageMutex> = StaticCell::new();
+static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
@@ -485,13 +498,57 @@ unsafe impl Sync for RoutineRepositoryPtr {}
 // Global reference to routine repository for access from display task (using raw pointer for cross-core access)
 static ROUTINE_REPOSITORY_PTR: Mutex<CriticalSectionRawMutex, Option<RoutineRepositoryPtr>> = Mutex::new(None);
 
+/// Background task for handling long-running storage operations
+/// This task processes optimize commands without blocking the main control loop
+#[embassy_executor::task]
+async fn storage_task(
+    mut storage_command_receiver: Receiver<'static, CriticalSectionRawMutex, StorageCommand, 4>,
+    routine_repository: &'static Mutex<NoopRawMutex, RoutineRepositoryType>,
+    schedule_store: &'static Mutex<NoopRawMutex, ScheduleStoreType>,
+    configuration_store: &'static Mutex<NoopRawMutex, SettingsStorageType>,
+) {
+    use defmt::info;
+    use variegated_controller_types::StorageCommand;
 
+    info!("Storage task started");
+
+    loop {
+        let cmd = storage_command_receiver.receive().await;
+        info!("Storage task received command: {:?}", cmd);
+
+        match cmd {
+            StorageCommand::OptimizeRoutines => {
+                info!("Starting routine storage optimization");
+                match routine_repository.lock().await.optimize_storage().await {
+                    Ok(_) => info!("Routine storage optimization complete"),
+                    Err(e) => error!("Routine storage optimization failed: {}", e),
+                }
+            }
+            StorageCommand::OptimizeSchedules => {
+                info!("Starting schedule storage optimization");
+                match schedule_store.lock().await.optimize_storage().await {
+                    Ok(_) => info!("Schedule storage optimization complete"),
+                    Err(e) => error!("Schedule storage optimization failed: {}", e),
+                }
+            }
+            StorageCommand::OptimizeConfiguration => {
+                info!("Starting configuration storage optimization");
+                match configuration_store.lock().await.optimize_storage().await {
+                    Ok(_) => info!("Configuration storage optimization complete"),
+                    Err(e) => error!("Configuration storage optimization failed: {}", e),
+                }
+            }
+        }
+    }
+}
 
 #[embassy_executor::task]
 async fn main_task(
     spawner: Spawner,
     spi_p: InternalSpiBusPeripherals,
     ads_p: Ads124S08Peripherals,
+    #[cfg(feature = "gear-pump")]
+    pump_p: PumpPeripherals,
     rotary_p: RotaryPumpPeripherals,
     mechanism_p: MechanismPeripherals,
     sd_card_p: SdCardPeripherals,
@@ -544,7 +601,43 @@ async fn main_task(
     let sd_det_pin = Output::new(sd_card_p.pin_det, Low);
 
     // Create pump and solenoids for dual boiler mechanism
-    let pump_output = GpioBinaryPump::new(Output::new(rotary_p.pin_rotary_pump_enable, Low));
+    #[cfg(not(feature = "gear-pump"))]
+    let pump_output = variegated_hal::gpio::gpio_binary_pump::GpioBinaryPump::new(Output::new(rotary_p.pin_rotary_pump_enable, Low));
+
+    #[cfg(feature = "gear-pump")]
+    let (pump_output, mut pump_rpm_counter) = {
+        use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
+        use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
+
+        let _pump_dir = Output::new(pump_p.pin_dir, Low);
+        // Safety: Ensure rotary pump is explicitly disabled when using gear pump
+        let _rotary_pump_disable = Output::new(rotary_p.pin_rotary_pump_enable, Low);
+
+        // Configure PWM for pump speed control (10 KHz, assuming 150 MHz system clock)
+        let mut pwm_config = pwm::Config::default();
+        pwm_config.divider = 1.into();
+        pwm_config.top = 14999;
+        let (pump_pwm, _) = pwm::Pwm::new_output_a(pump_p.pwm_speed, pump_p.pin_speed, pwm_config).split();
+        let pump_pwm = pump_pwm.unwrap();
+
+        // Configure PWM input for tachometer
+        let mut pwm_input_config = pwm::Config::default();
+        pwm_input_config.divider = 1.into();
+        let pump_input = pwm::Pwm::new_input(pump_p.pwm_tacho_out, pump_p.pin_tacho_out, Pull::Up, InputMode::FallingEdge, pwm_input_config);
+
+        // Create RPM signal and frequency counter
+        let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
+        let pump_frequency_counter = GpioTransformingFrequencyCounter::new(
+            pump_input,
+            pump_rpm_sig.sender(),
+            None,
+            |v| (v * 60.0 / 32.0) as RPMType,
+            |v| v
+        );
+
+        (GpioPwmPump::new(pump_pwm), pump_frequency_counter)
+    };
+
     let group_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_group_solenoid, Low)));
     let fill_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_fill_solenoid, Low)));
     let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
@@ -691,13 +784,16 @@ async fn main_task(
 
     // Initialize watchdog
     let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
-    watchdog.start(Duration::from_secs(5)); // 5 second timeout
+    watchdog.start(Duration::from_secs(15)); // 5 second timeout
     info!("Watchdog initialized with 5 second timeout");
 
-    let mut settings_storage: SequentialStorageSettingsStorage<NoopRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
-    let configuration = settings_storage.load_settings().await.unwrap_or_default();
+    let settings_storage: SequentialStorageSettingsStorage<NoopRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    let settings_storage_ref = SETTINGS_STORAGE.init(Mutex::new(settings_storage));
+
+    // Load initial configuration
+    let configuration = settings_storage_ref.lock().await.load_settings().await.unwrap_or_default();
 //    let configuration = DualBoilerSingleGroupPersistentConfiguration::default();
-//    settings_storage.save_settings(&configuration).await.unwrap();
+//    settings_storage_ref.lock().await.save_settings(&configuration).await.unwrap();
 
     let mut routine_repository = SequentialStorageRoutineRepository::new(
         flash,
@@ -736,6 +832,19 @@ async fn main_task(
     *SCHEDULE_STORE_PTR.lock().await = Some(ScheduleStorePtr(schedule_store_ref as *const _));
 
     info!("Configuration loaded");
+
+    // Create storage command channel for async storage operations
+    let storage_command_channel = STORAGE_COMMAND_CHANNEL.init(Channel::new());
+    let storage_command_sender = storage_command_channel.sender();
+    let storage_command_receiver = storage_command_channel.receiver();
+
+    // Spawn storage task to handle optimize operations without blocking main loop
+    unwrap!(spawner.spawn(storage_task(
+        storage_command_receiver,
+        routine_repository_ref,
+        schedule_store_ref,
+        settings_storage_ref,
+    )));
 
     let brew_boiler_temp_watch: &'static Watch<_, _, 3>  = BREW_BOILER_TEMP_WATCH.init(Watch::new());
     let mut brew_temp_sensor = Ads124S08Sensor::new(
@@ -1062,13 +1171,14 @@ async fn main_task(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
         configuration_channel.publisher().expect("Failed to get configuration channel publisher"),
+        storage_command_sender,
         brew_boiler,
         steam_boiler,
         group,
         water_tap,
         Some(tank),
         Some(fill_mechanism),
-        settings_storage,
+        settings_storage_ref,
         routine_repository_ref,
         schedule_store_ref,
         peripheral_registry,
@@ -1126,6 +1236,9 @@ async fn main_task(
             Box::pin(rtc_future),
             Box::pin(scheduler),
         ];
+
+    #[cfg(feature = "gear-pump")]
+    futures.push(Box::pin(pump_rpm_counter.task()));
 
     #[cfg(feature = "gravity")]
     if let Some(ref mut g) = gravity_device {
@@ -1250,6 +1363,9 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
     // Counter to throttle schedule queries (query every ~1 second)
     let mut schedule_query_counter = 0u32;
 
+    // Track current routine execution to detect changes (fetch routine once per execution)
+    let mut current_routine_index: Option<variegated_controller_types::RoutineIndex> = None;
+
     // Main display loop
     async_task_loop!("Display task", Some(Duration::from_millis(10)), {
         // Update status
@@ -1273,27 +1389,36 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
                 // Clear cache if schedule store isn't available
                 display_state.next_schedule = None;
             }
+        }
 
-            // Query routine repository when routine is executing
-            if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
+        // Update cached routine when routine execution changes (fetch once per execution, not every iteration)
+        if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
+            // Check if routine has changed or cache is empty
+            if current_routine_index != Some(routine_execution.routine_index) {
                 let routine_repository_ptr_opt = ROUTINE_REPOSITORY_PTR.lock().await.clone();
                 if let Some(RoutineRepositoryPtr(ptr)) = routine_repository_ptr_opt {
                     unsafe {
                         let routine_repository = &*ptr;
                         let mut repo_guard = routine_repository.lock().await;
-                        // Fetch the current routine
+                        // Fetch the current routine once
                         if let Some(routine) = repo_guard.get_routine(routine_execution.routine_index).await {
                             display_state.current_routine = Some(routine.clone());
+                            current_routine_index = Some(routine_execution.routine_index);
                         } else {
                             display_state.current_routine = None;
+                            current_routine_index = None;
                         }
                     }
                 } else {
                     display_state.current_routine = None;
+                    current_routine_index = None;
                 }
-            } else {
-                // Clear routine cache when not executing
+            }
+        } else {
+            // Clear routine cache when not executing
+            if display_state.current_routine.is_some() {
                 display_state.current_routine = None;
+                current_routine_index = None;
             }
         }
 
