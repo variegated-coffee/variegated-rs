@@ -107,35 +107,28 @@ impl GraphicalDisplayState {
 
     /// Format schedule commands as a brief summary
     fn format_schedule_commands(&self, schedule: &ScheduleItem) -> String {
-        use variegated_controller_types::MachineCommand;
+        use variegated_controller_types::ScheduleAction;
 
         if schedule.commands.is_empty() {
             return "No actions".to_string();
         }
 
-        // Show first command as representative
+        // Show first action as representative
         match &schedule.commands[0] {
-            MachineCommand::SetMachineMode(mode) => {
+            ScheduleAction::SetMachineMode(mode) => {
                 format!("{:?}", mode)
             }
-            MachineCommand::RunRoutine(idx, _) => {
+            ScheduleAction::RunRoutine(idx, _) => {
                 format!("Run Routine {}", idx)
             }
-            MachineCommand::StartBrewing(_) => {
-                "Start Brewing".to_string()
+            ScheduleAction::CancelRoutine => {
+                "Cancel Routine".to_string()
             }
-            MachineCommand::EnableBoiler(_) => {
-                "Enable Boiler".to_string()
+            ScheduleAction::SetBoilerControlTarget(idx, mode, _) => {
+                format!("Boiler {} {:?}", idx, mode)
             }
-            MachineCommand::DisableBoiler(_) => {
-                "Disable Boiler".to_string()
-            }
-            _ => {
-                if schedule.commands.len() > 1 {
-                    format!("{} actions", schedule.commands.len())
-                } else {
-                    "1 action".to_string()
-                }
+            ScheduleAction::SetBoilerControlTargetValues(idx, _) => {
+                format!("Boiler {} values", idx)
             }
         }
     }
@@ -797,7 +790,8 @@ impl GraphicalDisplayState {
                         group_status.output_weight
                     }
                     StateCondition::InputVolumeAboveRelativeToStart(_, _) => {
-                        group_status.input_volume.map(|v| v as f32)
+                        // Use brew_input_volume (relative to brew start), not input_volume (absolute)
+                        group_status.brew_input_volume.map(|v| v as f32)
                     }
                     StateCondition::GroupPressureAbove(_, _) | StateCondition::GroupPressureBelow(_, _) => {
                         group_status.pressure

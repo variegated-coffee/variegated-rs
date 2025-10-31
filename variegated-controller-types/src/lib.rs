@@ -166,6 +166,16 @@ pub enum PidParameterTarget {
     GroupPressure(GroupIndex),
 }
 
+/// Commands for storage operations that may take a long time
+/// These are handled by a separate task to avoid blocking the main control loop
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug)]
+pub enum StorageCommand {
+    OptimizeRoutines,
+    OptimizeSchedules,
+    OptimizeConfiguration,
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone)]
@@ -706,6 +716,12 @@ impl defmt::Format for Status {
             if let Some(volume) = group_status.input_volume {
                 defmt::write!(f, " volume:{}ml", volume);
             }
+            // IMPORTANT: brew_input_volume is the volume relative to brew start
+            if let Some(brew_volume) = group_status.brew_input_volume {
+                defmt::write!(f, " brew_vol:{}ml", brew_volume);
+            } else {
+                defmt::write!(f, " brew_vol:None");
+            }
             if let Some(out_flow) = group_status.output_flow_rate {
                 defmt::write!(f, " out_flow:{}", out_flow);
             }
@@ -894,12 +910,57 @@ impl defmt::Format for ScheduleTrigger {
     }
 }
 
+/// Actions that can be scheduled to run at specific times.
+/// This is a subset of MachineCommand that excludes meta-commands like
+/// adding/removing schedules or routines, which don't make sense in a schedule.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone)]
+pub enum ScheduleAction {
+    /// Run a routine with optional parameters
+    RunRoutine(RoutineIndex, #[cfg_attr(feature = "schemars", schemars(with = "Option<std::collections::HashMap<u8, f32>>"))] Option<FnvIndexMap<u8, f32, 8>>),
+    /// Cancel the currently running routine
+    CancelRoutine,
+    /// Set the machine mode (On, Off, PowerSave)
+    SetMachineMode(MachineMode),
+    /// Set boiler control mode and optionally update target values
+    SetBoilerControlTarget(BoilerIndex, BoilerControlMode, Option<BoilerControlTargetValuesUpdate>),
+    /// Update boiler target values without changing mode
+    SetBoilerControlTargetValues(BoilerIndex, BoilerControlTargetValuesUpdate),
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for ScheduleAction {
+    fn format(&self, f: defmt::Formatter) {
+        match self {
+            ScheduleAction::RunRoutine(idx, params) => defmt::write!(f, "RunRoutine({}, {} params)", idx, params.as_ref().map(|p| p.len()).unwrap_or(0)),
+            ScheduleAction::CancelRoutine => defmt::write!(f, "CancelRoutine"),
+            ScheduleAction::SetMachineMode(mode) => defmt::write!(f, "SetMachineMode({:?})", mode),
+            ScheduleAction::SetBoilerControlTarget(idx, mode, values) => defmt::write!(f, "SetBoilerControlTarget({}, {:?}, {:?})", idx, mode, values),
+            ScheduleAction::SetBoilerControlTargetValues(idx, values) => defmt::write!(f, "SetBoilerControlTargetValues({}, {:?})", idx, values),
+        }
+    }
+}
+
+impl ScheduleAction {
+    /// Convert a ScheduleAction to the corresponding MachineCommand
+    pub fn to_machine_command(&self) -> MachineCommand {
+        match self {
+            ScheduleAction::RunRoutine(idx, params) => MachineCommand::RunRoutine(*idx, params.clone()),
+            ScheduleAction::CancelRoutine => MachineCommand::CancelRoutine,
+            ScheduleAction::SetMachineMode(mode) => MachineCommand::SetMachineMode(*mode),
+            ScheduleAction::SetBoilerControlTarget(idx, mode, values) => MachineCommand::SetBoilerControlTarget(*idx, *mode, *values),
+            ScheduleAction::SetBoilerControlTargetValues(idx, values) => MachineCommand::SetBoilerControlTargetValues(*idx, *values),
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Default)]
 pub struct ScheduleItem {
     pub trigger_at: ScheduleTrigger,
-    pub commands: Vec<MachineCommand>,
+    pub commands: Vec<ScheduleAction>,
 }
 
 #[cfg(feature = "defmt")]

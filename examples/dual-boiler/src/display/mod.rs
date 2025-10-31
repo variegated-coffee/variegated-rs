@@ -23,6 +23,8 @@ pub mod lcd_renderer;
 pub mod graphical_renderer;
 
 use crate::{StatusSubscriber, mcp23017_hd44780::Mcp23017HD44780Device};
+use variegated_controller_lib::routine::RoutineRepository;
+use variegated_controller_types::RoutineIndex;
 
 pub use lcd_renderer::LcdDisplayState;
 
@@ -78,11 +80,36 @@ pub async fn lcd_display_task(
 
     defmt::info!("LCD display initialized successfully");
 
+    // Track current routine execution to detect changes
+    let mut current_routine_index: Option<RoutineIndex> = None;
+
     // Main display loop
     loop {
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);
+        }
+
+        // Update cached routine when routine execution changes
+        if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
+            // Check if routine has changed or cache is empty
+            if current_routine_index != Some(routine_execution.routine_index) {
+                // Fetch routine once per execution
+                let mut routine_repo = routine_repository.lock().await;
+                if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
+                    display_state.current_routine = Some(routine.clone());
+                    current_routine_index = Some(routine_execution.routine_index);
+                } else {
+                    display_state.current_routine = None;
+                    current_routine_index = None;
+                }
+            }
+        } else {
+            // Clear cached routine when not executing
+            if display_state.current_routine.is_some() {
+                display_state.current_routine = None;
+                current_routine_index = None;
+            }
         }
 
         // Update display at 1Hz

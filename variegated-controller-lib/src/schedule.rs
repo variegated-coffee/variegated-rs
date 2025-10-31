@@ -2,7 +2,7 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::vec::Vec;
 use core::ops::{DerefMut, Range};
 use chrono::{DateTime, Datelike, Duration, Timelike, TimeZone};
-use defmt::info;
+use defmt::{info, warn};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
@@ -83,9 +83,10 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
 
             for schedule in schedules {
                 info!("Schedule triggered: {:?}", schedule);
-                for command in &schedule.commands {
-                    command_channel.send(command.clone()).await;
-                    info!("Sent scheduled command: {:?}", command);
+                for action in &schedule.commands {
+                    let command = action.to_machine_command();
+                    command_channel.send(command).await;
+                    info!("Sent scheduled action: {:?}", action);
                 }
             }
         }
@@ -295,11 +296,20 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
         .unwrap();
 
         let mut max_index = 0usize;
-        while let Some((key, value)) = iterator
+        while let item = iterator
             .next::<Option<ScheduleItem>>(&mut self.deserialization_buffer)
             .await
-            .unwrap()
         {
+            let Ok(item) = item else {
+                warn!("Invalid schedule item encountered in flash, stopping load");
+                break;
+            };
+
+            let Some((key, value)) = item else {
+                info!("Skipping invalid schedule item in flash");
+                break;
+            };
+
             info!("Loaded schedule at index {}", key);
             let index = key as usize;
             if index > max_index {
