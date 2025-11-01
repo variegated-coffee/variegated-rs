@@ -318,6 +318,13 @@ pub struct DualBoilerSingleGroupController<
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
     watchdog: Option<Watchdog>,
+
+    // Shot state tracking
+    current_shot_state: Option<variegated_controller_types::ShotState>,
+    flow_rate_history: MovAvg<f32, f32, 10>,
+    pressure_history: MovAvg<f32, f32, 10>,
+    saturation_start_time: Option<Instant>,
+    last_shot_state_sample_time: Option<Instant>,
 }
 
 impl<
@@ -394,6 +401,13 @@ impl<
             comms_status_received_instant: None,
             peripheral_registry,
             watchdog,
+
+            // Shot state tracking initialization
+            current_shot_state: None,
+            flow_rate_history: MovAvg::default(),
+            pressure_history: MovAvg::default(),
+            saturation_start_time: None,
+            last_shot_state_sample_time: None,
         }
     }
 
@@ -524,6 +538,9 @@ impl<
 
             // Update filling logic
             self.update_service_boiler_filling().await;
+
+            // Update shot state tracking
+            self.update_shot_state();
 
             self.send_status(brew_boiler_output, steam_boiler_output, pump_output).await;
 
@@ -902,6 +919,7 @@ impl<
             pump_output: pump_output.clone(),
             control_state: self.configuration.ephemeral.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
+            shot_state: self.current_shot_state,
         };
 
         // Calculate current timestamp if we have comms_status
@@ -1406,6 +1424,15 @@ impl<
             self.brew_start_time = Some(Instant::now());
             self.brew_start_input_volume = current_volume;
             info!("brew_start_input_volume set to: {:?}", self.brew_start_input_volume);
+
+            // Initialize shot state tracking
+            self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
+            self.flow_rate_history = MovAvg::default(); // Reset history
+            self.pressure_history = MovAvg::default(); // Reset history
+            self.saturation_start_time = None;
+            self.last_shot_state_sample_time = None; // Reset sampling timer
+            info!("Shot state initialized to HeadspaceFill");
+
             self.group.set_brewing_state(true, 0).await;
 
             // Give initial PID boost for temperature drop compensation
@@ -1452,6 +1479,12 @@ impl<
             self.brew_start_time = None;
             self.brew_start_input_volume = None;
             self.curve_start_time = None;
+
+            // Clear shot state tracking
+            self.current_shot_state = None;
+            self.saturation_start_time = None;
+            info!("Shot state cleared");
+
             info!("brew_start_input_volume now: {:?}", self.brew_start_input_volume);
             self.group.set_brewing_state(false, 0).await;
 
@@ -1459,6 +1492,77 @@ impl<
                 zero_tracking: Some(true),
                 smoothing: Some(false)
             }).await;
+        }
+    }
+
+    fn update_shot_state(&mut self) {
+        // Constants for shot state detection
+        const FIRST_DROP_WEIGHT_THRESHOLD: f32 = 1.0; // grams
+        const FLOW_DECREASE_THRESHOLD: f32 = 3.0; // ml/s below average (dramatic change at saturation)
+        const PRESSURE_INCREASE_THRESHOLD: f32 = 3.0; // bar above average (dramatic change at saturation)
+        const SAMPLE_INTERVAL_MS: u64 = 333; // Sample every 333ms (3 samples/sec, 10 samples = 3.33 seconds history)
+
+        if !self.group_brewing {
+            // Not brewing, no shot state
+            return;
+        }
+
+        // Check if it's time to sample (every 500ms)
+        let now = Instant::now();
+        let should_sample = match self.last_shot_state_sample_time {
+            None => true, // First sample
+            Some(last_time) => now.saturating_duration_since(last_time).as_millis() >= SAMPLE_INTERVAL_MS,
+        };
+
+        if !should_sample {
+            return; // Skip this update, not time to sample yet
+        }
+
+        // Update sample time
+        self.last_shot_state_sample_time = Some(now);
+
+        let current_flow = self.group.get_input_flow_rate().unwrap_or(0.0);
+        let current_pressure = self.group.get_pressure().unwrap_or(0.0);
+
+        // Update histories and get averaged values (sampling at 3 Hz for 3.33s history window)
+        let flow_avg = self.flow_rate_history.try_feed(current_flow).unwrap_or(current_flow);
+        let pressure_avg = self.pressure_history.try_feed(current_pressure).unwrap_or(current_pressure);
+
+        match self.current_shot_state {
+            Some(variegated_controller_types::ShotState::HeadspaceFill) => {
+                // Check for transition to Saturation
+                // We need to detect when flow is decreasing AND pressure is increasing
+
+                // Simple slope approximation: compare current reading to average
+                // If current < average, flow is decreasing
+                // If current > average, pressure is increasing
+                let flow_decreasing = current_flow < flow_avg && (flow_avg - current_flow) > FLOW_DECREASE_THRESHOLD;
+                let pressure_increasing = current_pressure > pressure_avg && (current_pressure - pressure_avg) > PRESSURE_INCREASE_THRESHOLD;
+
+                if flow_decreasing && pressure_increasing {
+                    info!("Shot state transition: HeadspaceFill -> Saturation (flow: {}->{}, pressure: {}->{})",
+                          flow_avg, current_flow, pressure_avg, current_pressure);
+                    self.current_shot_state = Some(variegated_controller_types::ShotState::Saturation);
+                    self.saturation_start_time = Some(Instant::now());
+                }
+            }
+            Some(variegated_controller_types::ShotState::Saturation) => {
+                // Check for transition to PostFirstDrop
+                if let Some(output_weight) = self.group.get_output_weight() {
+                    if output_weight > FIRST_DROP_WEIGHT_THRESHOLD {
+                        info!("Shot state transition: Saturation -> PostFirstDrop (weight: {}g)", output_weight);
+                        self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
+                    }
+                }
+            }
+            Some(variegated_controller_types::ShotState::PostFirstDrop) => {
+                // Final state, no more transitions
+            }
+            None => {
+                // Should not happen during brewing, but handle gracefully
+                warn!("Shot state is None while brewing - resetting to HeadspaceFill");
+                self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
+            }
         }
     }
 

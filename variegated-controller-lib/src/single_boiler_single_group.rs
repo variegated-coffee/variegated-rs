@@ -526,6 +526,7 @@ impl<
             pump_output: pump_output.clone(),
             control_state: self.ephemeral_configuration.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
+            shot_state: None, // Not yet implemented for single boiler controller
         };
 
         // Calculate current timestamp if we have comms_status
