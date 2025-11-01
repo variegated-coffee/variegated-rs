@@ -50,6 +50,9 @@ pub struct DualBoilerSingleGroupPersistentConfiguration {
     pub flow_sensor_pulses_per_liter: Option<f32>,
     pub service_boiler_fill_threshold: Option<WaterLevelType>,
     pub water_dispersal_pump_strategy: WaterDispersalPumpStrategy,
+    pub group_pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
+    pub water_tap_pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
+    pub fill_pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -236,6 +239,9 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             flow_sensor_pulses_per_liter: None,
             service_boiler_fill_threshold: Some(20), // Fill when below 20%
             water_dispersal_pump_strategy: WaterDispersalPumpStrategy::AlwaysPump,
+            group_pump_configuration: None,
+            water_tap_pump_configuration: None,
+            fill_pump_configuration: None,
         }
     }
 }
@@ -418,7 +424,7 @@ impl<
             pressure_sensor_kalman_parameters: None,
             fill_config: Some(FillConfiguration {
                 fill_threshold: self.configuration.persistent.service_boiler_fill_threshold,
-                pump_configuration: None,
+                pump_configuration: self.configuration.persistent.fill_pump_configuration.clone(),
             }),
         };
         configuration.insert_boiler_configuration(SteamBoiler.as_index(), steam_boiler_config);
@@ -431,7 +437,7 @@ impl<
             brew_control_state: self.configuration.ephemeral.group_brew_control_state,
             max_brew_time_seconds: None,
             auto_tare_enabled: true,
-            pump_configuration: None,
+            pump_configuration: self.configuration.persistent.group_pump_configuration.clone(),
             pressure_sensor_kalman_parameters: None,
             flow_sensor_pulses_per_liter: None,
         };
@@ -442,7 +448,7 @@ impl<
             temperature_target: None,
             max_dispense_time_seconds: None,
             flow_rate_limit: None,
-            pump_configuration: None,
+            pump_configuration: self.configuration.persistent.water_tap_pump_configuration.clone(),
         };
         configuration.insert_water_tap_configuration(0, water_tap_config);
 
@@ -689,6 +695,32 @@ impl<
         }
     }
 
+    fn apply_pump_configuration_limits(&self, duty_cycle: u8, is_off: bool) -> u8 {
+        // If pump is off, always return 0 regardless of min_duty_cycle
+        if is_off {
+            return 0;
+        }
+
+        // Apply pump configuration limits if configured
+        if let Some(ref config) = self.configuration.persistent.group_pump_configuration {
+            let mut limited_duty = duty_cycle;
+
+            // Apply minimum duty cycle limit
+            if let Some(min_duty) = config.min_duty_cycle {
+                limited_duty = limited_duty.max(min_duty);
+            }
+
+            // Apply maximum duty cycle limit
+            if let Some(max_duty) = config.max_duty_cycle {
+                limited_duty = limited_duty.min(max_duty);
+            }
+
+            limited_duty
+        } else {
+            duty_cycle
+        }
+    }
+
     async fn update_group_pump(&mut self, delta_t: f32) -> Output {
         // Calculate elapsed time for curve evaluation if needed
         let elapsed_seconds = self.curve_start_time
@@ -747,45 +779,77 @@ impl<
 
         match control_state.mode {
             GroupBrewControlMode::Off => {
-                self.group.set_brewing_state(false, 0).await;
+                let duty_cycle = self.apply_pump_configuration_limits(0, true);
+                self.group.set_brewing_state(false, duty_cycle).await;
                 Output::Off
             },
             GroupBrewControlMode::FullOn => {
-                self.group.set_brewing_state(true, 100).await;
-                Output::FixedDutyCycle(100)
+                let duty_cycle = self.apply_pump_configuration_limits(100, false);
+                self.group.set_brewing_state(true, duty_cycle).await;
+                Output::FixedDutyCycle(duty_cycle)
             },
             GroupBrewControlMode::FixedDutyCycle => {
-                let duty_cycle = control_state.values.duty_cycle;
+                let duty_cycle = self.apply_pump_configuration_limits(control_state.values.duty_cycle, false);
                 self.group.set_brewing_state(true, duty_cycle).await;
                 //info!("Fixed duty cycle target: {}", duty_cycle);
                 Output::FixedDutyCycle(duty_cycle)
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
                 let target_duty_cycle = control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
-                //info!("Fixed duty cycle curve target: {}", target_duty_cycle);
+                let duty_cycle = self.apply_pump_configuration_limits(target_duty_cycle, false);
+                //info!("Fixed duty cycle curve target: {}", duty_cycle);
                 //info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
-                self.group.set_brewing_state(true, target_duty_cycle).await;
-                Output::FixedDutyCycle(target_duty_cycle)
+                self.group.set_brewing_state(true, duty_cycle).await;
+                Output::FixedDutyCycle(duty_cycle)
             }
             _ => {
-                info!("PID target: {}", pump_pid_out.out);
-                self.group.set_brewing_state(true, pump_pid_out.out as u8).await;
-                Output::PidOutput(pump_pid_out)
+                let duty_cycle = self.apply_pump_configuration_limits(pump_pid_out.out as u8, false);
+                info!("PID target: {}", duty_cycle);
+                self.group.set_brewing_state(true, duty_cycle).await;
+                Output::PidOutput(PidOut { out: duty_cycle as f32, ..pump_pid_out })
             },
+        }
+    }
+
+    fn apply_water_tap_pump_configuration_limits(&self, duty_cycle: u8, is_off: bool) -> u8 {
+        // If pump is off, always return 0 regardless of min_duty_cycle
+        if is_off {
+            return 0;
+        }
+
+        // Apply pump configuration limits if configured
+        if let Some(ref config) = self.configuration.persistent.water_tap_pump_configuration {
+            let mut limited_duty = duty_cycle;
+
+            // Apply minimum duty cycle limit
+            if let Some(min_duty) = config.min_duty_cycle {
+                limited_duty = limited_duty.max(min_duty);
+            }
+
+            // Apply maximum duty cycle limit
+            if let Some(max_duty) = config.max_duty_cycle {
+                limited_duty = limited_duty.min(max_duty);
+            }
+
+            limited_duty
+        } else {
+            duty_cycle
         }
     }
 
     async fn update_water_tap(&mut self, _delta_t: f32) -> Output {
         if self.water_tap_dispensing {
             // Apply water dispersal pump strategy
-            let duty_cycle = match self.configuration.persistent.water_dispersal_pump_strategy {
+            let base_duty_cycle = match self.configuration.persistent.water_dispersal_pump_strategy {
                 WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
                 _ => 100, // Normal pumping
             };
+            let duty_cycle = self.apply_water_tap_pump_configuration_limits(base_duty_cycle, false);
             self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
             Output::FixedDutyCycle(duty_cycle)
         } else {
-            self.water_tap.set_water_dispensing_state(false, 0).await;
+            let duty_cycle = self.apply_water_tap_pump_configuration_limits(0, true);
+            self.water_tap.set_water_dispensing_state(false, duty_cycle).await;
             Output::Off
         }
     }
@@ -1294,6 +1358,43 @@ impl<
                     warn!("Failed to send OptimizeSchedules command: channel full");
                 }
             }
+            MachineCommand::SetGroupPumpConfiguration(group_index, config) => {
+                if group_index == 0 {
+                    info!("Setting group pump configuration: {:?}", config);
+                    self.configuration.persistent.group_pump_configuration = Some(config);
+                    match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                        Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                        Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    }
+                } else {
+                    error!("Invalid group index for pump configuration: {}", group_index);
+                }
+            }
+            MachineCommand::SetWaterTapPumpConfiguration(water_tap_index, config) => {
+                if water_tap_index == 0 {
+                    info!("Setting water tap pump configuration: {:?}", config);
+                    self.configuration.persistent.water_tap_pump_configuration = Some(config);
+                    match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                        Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                        Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    }
+                } else {
+                    error!("Invalid water tap index for pump configuration: {}", water_tap_index);
+                }
+            }
+            MachineCommand::SetFillPumpConfiguration(boiler_index, config) => {
+                // For dual boiler, we only support fill pump configuration for the steam/service boiler (index 1)
+                if boiler_index == 1 {
+                    info!("Setting fill pump configuration: {:?}", config);
+                    self.configuration.persistent.fill_pump_configuration = Some(config);
+                    match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                        Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                        Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    }
+                } else {
+                    error!("Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)", boiler_index);
+                }
+            }
         }
     }
 
@@ -1366,10 +1467,11 @@ impl<
             info!("Starting water tap dispensing");
             self.water_tap_dispensing = true;
             // Apply water dispersal pump strategy
-            let duty_cycle = match self.configuration.persistent.water_dispersal_pump_strategy {
+            let base_duty_cycle = match self.configuration.persistent.water_dispersal_pump_strategy {
                 WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
                 _ => 100, // Normal pumping
             };
+            let duty_cycle = self.apply_water_tap_pump_configuration_limits(base_duty_cycle, false);
             self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
         }
     }
