@@ -1,0 +1,104 @@
+use crate::*;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum RoutineExitCondition {
+    Always,
+    Never,
+    After(ParameterValue), // seconds as f32, converted to Duration at runtime
+    AfterDurationRelativeToStart(ParameterValue),
+    StateConditionMet(StateCondition),
+    UserAction(UserActionIndex),
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Copy, Debug)]
+pub enum RoutineStepExitType {
+    NextStep,
+    JumpToStep(usize),
+    Finished,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub enum RoutineCommand {
+    // Direct pass-through for non-parameterizable commands
+    StartBrewing(GroupIndex),
+    StopBrewing(GroupIndex),
+    TareGroupScale(GroupIndex),
+
+    // Parameterizable commands
+    SetBoilerTemperature(BoilerIndex, ParameterValue),
+    SetBoilerPressure(BoilerIndex, ParameterValue),
+    SetGroupFlowRate(GroupIndex, ParameterValue),
+    SetGroupPressure(GroupIndex, ParameterValue),
+    SetGroupOutputFlowRate(GroupIndex, ParameterValue),
+    SetGroupFixedDutyCycle(GroupIndex, ParameterValue),
+    SetGroupFullOn(GroupIndex),
+    SetGroupOff(GroupIndex),
+    SetBoilerOff(BoilerIndex),
+
+    // Transition-enabled commands (only for groups since only they support curves)
+    SetGroupFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub struct RoutineExit {
+    pub condition: RoutineExitCondition,
+    pub then: RoutineStepExitType,
+    pub description: Option<String>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Clone, Debug)]
+pub struct RoutineStep {
+    pub entry_command: Option<RoutineCommand>,
+    pub exits: Vec<RoutineExit>,
+    pub description: Option<String>,
+}
+
+impl RoutineExit {
+    pub fn new(condition: RoutineExitCondition, then: RoutineStepExitType) -> Self {
+        Self {
+            condition,
+            then,
+            description: None,
+        }
+    }
+
+    pub fn with_description(condition: RoutineExitCondition, then: RoutineStepExitType, description: String) -> Self {
+        Self {
+            condition,
+            then,
+            description: Some(description),
+        }
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+}
+
+impl RoutineStep {
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn exits(&self) -> &[RoutineExit] {
+        &self.exits
+    }
+}
