@@ -13,7 +13,7 @@ use embedded_storage_async::nor_flash::NorFlash;
 use heapless::FnvIndexMap;
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType};
 
 // Re-export types that are commonly used by consumers of this module
 pub use variegated_controller_types::{
@@ -46,7 +46,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
         steps: vec![
             // Step 0: Tare group scale
             RoutineStep {
-                entry_command: Some(RoutineCommand::TareGroupScale(group)),
+                entry_command: vec![RoutineCommand::TareGroupScale(group)],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightBelow(group, ParameterValue::Static(0.1))),
                     RoutineStepExitType::NextStep
@@ -55,8 +55,8 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
             },
             // Step 1: Set target to flow rate
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupFixedDutyCycleWithTransition(group, ParameterValue::Static(50.0), ParameterValue::Static(5.0))),
-//                entry_command: Some(RoutineCommand::SetGroupOutputFlowRateWithTransition(group, ParameterValue::Parameter(0), ParameterValue::Static(8.0))),
+                entry_command: vec![RoutineCommand::SetGroupFixedDutyCycleWithTransition(group, ParameterValue::Static(50.0), ParameterValue::Static(5.0))],
+//                entry_command: vec![RoutineCommand::SetGroupOutputFlowRateWithTransition(group, ParameterValue::Parameter(0), ParameterValue::Static(8.0))],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
                     RoutineStepExitType::NextStep,
@@ -65,7 +65,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
             },
             // Step 2: Start brewing, wait for the group to reach output weight above the specified amount
             RoutineStep {
-                entry_command: Some(RoutineCommand::StartBrewing(group)),
+                entry_command: vec![RoutineCommand::StartBrewing(group)],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
                     RoutineStepExitType::NextStep
@@ -74,7 +74,7 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
             },
             // Step 3: Stop brewing, then finish the routine
             RoutineStep {
-                entry_command: Some(RoutineCommand::StopBrewing(group)),
+                entry_command: vec![RoutineCommand::StopBrewing(group)],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
                     RoutineStepExitType::Finished
@@ -451,6 +451,17 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         }))
                 }
             }
+
+            // Bumpless transfer commands
+            RoutineCommand::InferGroupPressureIntegral(idx, pv) => {
+                MachineCommand::InferGroupPressureIntegral(*idx, self.resolve_value(pv))
+            }
+            RoutineCommand::InferGroupFlowRateIntegral(idx, pv) => {
+                MachineCommand::InferGroupFlowRateIntegral(*idx, self.resolve_value(pv))
+            }
+            RoutineCommand::InferGroupOutputFlowRateIntegral(idx, pv) => {
+                MachineCommand::InferGroupOutputFlowRateIntegral(*idx, self.resolve_value(pv))
+            }
         }
     }
 
@@ -462,9 +473,9 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             .collect()
     }
 
-    pub fn step(&mut self, status: &Status, user_action: Option<UserActionIndex>) -> Option<MachineCommand> {
+    pub fn step(&mut self, status: &Status, user_action: Option<UserActionIndex>) -> Vec<MachineCommand> {
         if self.finished_executing {
-            return None; // Routine has finished executing
+            return vec![]; // Routine has finished executing
         }
 
         if self.current_step.is_none() {
@@ -511,10 +522,10 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
 
         }
 
-        None
+        vec![]
     }
 
-    fn handle_exit(&mut self, exit: &RoutineExit, status: &Status) -> Option<MachineCommand> {
+    fn handle_exit(&mut self, exit: &RoutineExit, status: &Status) -> Vec<MachineCommand> {
         match exit.then {
             RoutineStepExitType::NextStep => {
                 self.transition_to(self.current_step.unwrap() + 1, status)
@@ -529,17 +540,18 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 self.execution_start_time = None;
                 self.step_start_time = None;
 
-                None
+                vec![]
             }
         }
     }
 
-    pub fn transition_to(&mut self, step: usize, status: &Status) -> Option<MachineCommand> {
+    pub fn transition_to(&mut self, step: usize, status: &Status) -> Vec<MachineCommand> {
         info!("Transitioning to step {}", step);
         self.current_step = Some(step);
         self.step_start_time = Some(Instant::now());
-        self.routine.steps[step].entry_command.as_ref()
+        self.routine.steps[step].entry_command.iter()
             .map(|cmd| self.resolve_command(cmd, status))
+            .collect()
     }
 
     fn state_condition_met(&self, state_condition: StateCondition, status: &Status) -> bool {
@@ -607,6 +619,10 @@ pub trait RoutineRepository {
     /// Add a new routine. Always assigns a Custom variant index, using the first available slot.
     async fn add_routine(&mut self, routine: Routine);
 
+    /// Add an internal routine at a specific Internal index. Internal routines are never persisted to flash.
+    /// Returns an error if the index is not an Internal variant.
+    async fn add_internal_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str>;
+
     /// Remove a routine by its index. Returns the removed routine, or None if it doesn't exist.
     async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine>;
 
@@ -672,6 +688,14 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T>
             .await
             .unwrap()
         {
+            // Skip Internal routines - they are never persisted to flash
+            if let Some(idx) = RoutineIndex::from_storage_index(key) {
+                if matches!(idx, RoutineIndex::Internal(_)) {
+                    info!("Skipping internal routine at storage index {} during flash load", key);
+                    continue;
+                }
+            }
+
             info!("Loaded routine at index {}: {:?}", key, value);
             if let Some(routine) = value {
                 self.cache.insert(key, routine);
@@ -741,7 +765,28 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
         self.cache.insert(storage_index, opt.unwrap());
     }
 
+    async fn add_internal_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
+        // Validate that the index is Internal variant
+        if !matches!(index, RoutineIndex::Internal(_)) {
+            return Err("add_internal_routine requires an Internal variant index");
+        }
+
+        let storage_index = index.to_storage_index();
+
+        // Add to cache only, never write to flash
+        self.cache.insert(storage_index, routine);
+
+        info!("Added internal routine at index {:?} (not persisted to flash)", index);
+        Ok(())
+    }
+
     async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine> {
+        // Prevent removal of Internal routines (they are read-only)
+        if matches!(index, RoutineIndex::Internal(_)) {
+            info!("Cannot remove internal routine at index {:?}", index);
+            return None;
+        }
+
         let storage_index = index.to_storage_index();
         let routine = self.cache.remove(&storage_index);
         if routine.is_some() {
@@ -754,6 +799,12 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
         //info!("Updating routine at index {:?}", index);
+
+        // Prevent updating Internal routines (they are read-only)
+        if matches!(index, RoutineIndex::Internal(_)) {
+            return Err("Cannot update internal routine - they are read-only");
+        }
+
         self.load_from_flash().await?;
 
         let storage_index = index.to_storage_index();
@@ -802,8 +853,16 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
         // Load all routines into cache if not already loaded
         self.load_from_flash().await?;
 
-        // Collect routines to re-store (to avoid borrowing issues)
+        // Collect routines to re-store, excluding Internal routines (to avoid borrowing issues)
         let routines_to_store: Vec<(u16, Routine)> = self.cache.iter()
+            .filter(|(storage_index, _)| {
+                // Filter out Internal routines - they should never be written to flash
+                if let Some(idx) = RoutineIndex::from_storage_index(**storage_index) {
+                    !matches!(idx, RoutineIndex::Internal(_))
+                } else {
+                    true // Keep routines that can't be decoded (shouldn't happen)
+                }
+            })
             .map(|(index, routine)| (*index, routine.clone()))
             .collect();
 
@@ -818,8 +877,8 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
         // Yield to allow other tasks (like watchdog feeding) to run after long erase operation
         Timer::after_millis(1).await;
 
-        // Re-store all routines from the collected Vec
-        info!("Rewriting {} routines", routines_to_store.len());
+        // Re-store all routines from the collected Vec (Internal routines already filtered out)
+        info!("Rewriting {} routines (excluding internal routines)", routines_to_store.len());
         for (storage_index, routine) in routines_to_store {
             let opt = Some(routine);
             self.store_in_flash(storage_index, &opt).await?;
@@ -867,12 +926,33 @@ impl RoutineRepository for InMemoryRoutineRepository {
         self.routines.insert(storage_index, routine);
     }
 
+    async fn add_internal_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
+        // Validate that the index is Internal variant
+        if !matches!(index, RoutineIndex::Internal(_)) {
+            return Err("add_internal_routine requires an Internal variant index");
+        }
+
+        let storage_index = index.to_storage_index();
+        self.routines.insert(storage_index, routine);
+        Ok(())
+    }
+
     async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine> {
+        // Prevent removal of Internal routines (they are read-only)
+        if matches!(index, RoutineIndex::Internal(_)) {
+            return None;
+        }
+
         let storage_index = index.to_storage_index();
         self.routines.remove(&storage_index)
     }
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
+        // Prevent updating Internal routines (they are read-only)
+        if matches!(index, RoutineIndex::Internal(_)) {
+            return Err("Cannot update internal routine - they are read-only");
+        }
+
         let storage_index = index.to_storage_index();
         // For update, we allow creating new routines (not just updating existing ones)
         self.routines.insert(storage_index, routine);
@@ -940,7 +1020,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
         steps: vec![
             // Step 0
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
+                entry_command: vec![RoutineCommand::SetGroupFullOn(group)],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
                     RoutineStepExitType::NextStep
@@ -949,7 +1029,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
             },
             // Step 1/2: Start filling at FullOn for 1 second (to avoid swings), then until pressure is above 2.0 bar (where the grouphead is filled)
             RoutineStep {
-                entry_command: Some(RoutineCommand::StartBrewing(group)),
+                entry_command: vec![RoutineCommand::StartBrewing(group)],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::After(ParameterValue::Static(1.0)),
                     RoutineStepExitType::NextStep
@@ -957,7 +1037,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 description: Some("Fast fill".try_into().unwrap()),
             },
             RoutineStep {
-                entry_command: None,
+                entry_command: vec![],
                 exits: vec![RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerPressureAbove(group, ParameterValue::Static(2.0))),
                     RoutineStepExitType::NextStep,
@@ -967,7 +1047,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
             },
             // Step 3: Set pump to Off, then wait for preinfusion time
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupOff(group)),
+                entry_command: vec![RoutineCommand::SetGroupOff(group)],
                 exits: vec![RoutineExit::with_description(
                     RoutineExitCondition::After(ParameterValue::Parameter(0)),
                     RoutineStepExitType::NextStep,
@@ -977,7 +1057,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
             },
             // Step 4: Set pressure target to pressure, keep going for 4 seconds (to allow the pressure and flow to stabilize)
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupPressure(group, ParameterValue::Parameter(2))),
+                entry_command: vec![RoutineCommand::SetGroupPressure(group, ParameterValue::Parameter(2))],
                 exits: vec![
                     RoutineExit::with_description(
                         RoutineExitCondition::After(ParameterValue::Static(2.0)),
@@ -989,7 +1069,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
             },
             // Step 5/6: Keep going at pressure for a total of total_brew_time seconds. If the flow rate is above rescue_trigger, switch to control by flow rate at rescue_flow_rate.
             RoutineStep {
-                entry_command: None,
+                entry_command: vec![],
                 exits: vec![
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
@@ -1005,7 +1085,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 description: Some("Brewing".try_into().unwrap()),
             },
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetGroupFlowRate(group, ParameterValue::Parameter(4))),
+                entry_command: vec![RoutineCommand::SetGroupFlowRate(group, ParameterValue::Parameter(4))],
                 exits: vec![
                     RoutineExit::with_description(
                         RoutineExitCondition::StateConditionMet(StateCondition::OutputWeightAbove(group, ParameterValue::Parameter(1))),
@@ -1017,7 +1097,7 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
             },
             // Step 7: Stop brewing, then finish the routine
             RoutineStep {
-                entry_command: Some(RoutineCommand::StopBrewing(group)),
+                entry_command: vec![RoutineCommand::StopBrewing(group)],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::Never,
                     RoutineStepExitType::Finished,
@@ -1040,7 +1120,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
         derived_parameters: vec![], // No derived parameters for this routine
         steps: vec![
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(0))),
+                entry_command: vec![RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Parameter(0))],
                 exits: vec![ RoutineExit::new(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureAbove(boiler_index, ParameterValue::Static(120.0))),
                     RoutineStepExitType::NextStep,
@@ -1048,7 +1128,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
                 description: Some("Heating to overshoot".try_into().unwrap()),
             },
             RoutineStep {
-                entry_command: None,
+                entry_command: vec![],
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::After(ParameterValue::Static(300.0)),
                     RoutineStepExitType::NextStep,
@@ -1057,7 +1137,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
                 description: Some("Stabilizing temperature".try_into().unwrap()),
             },
             RoutineStep {
-                entry_command: Some(RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Static(95.0))),
+                entry_command: vec![RoutineCommand::SetBoilerTemperature(boiler_index, ParameterValue::Static(95.0))],
                 exits: vec![ RoutineExit::with_description(
                     RoutineExitCondition::StateConditionMet(StateCondition::BoilerTemperatureBelow(boiler_index, ParameterValue::Static(96.0))),
                     RoutineStepExitType::Finished,
@@ -1073,7 +1153,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
 pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom_after: Option<Duration>, bloom_time: Option<Duration>, name: Option<String>) -> Routine {
     let mut steps = vec![
         RoutineStep {
-            entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
+            entry_command: vec![RoutineCommand::SetGroupFullOn(group)],
             exits: vec![RoutineExit::new(
                 RoutineExitCondition::Always,
                 RoutineStepExitType::NextStep
@@ -1081,7 +1161,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
             description: None,
         },
         RoutineStep {
-            entry_command: Some(RoutineCommand::StartBrewing(group)),
+            entry_command: vec![RoutineCommand::StartBrewing(group)],
             exits: vec![RoutineExit::new(
                 RoutineExitCondition::Always,
                 RoutineStepExitType::NextStep
@@ -1092,7 +1172,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
 
     if let (Some(bloom_after), Some(bloom_time)) = (bloom_after, bloom_time) {
         steps.push(RoutineStep {
-            entry_command: None,
+            entry_command: vec![],
             exits: vec![RoutineExit::new(
                 RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
                 RoutineStepExitType::NextStep
@@ -1100,7 +1180,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
             description: Some("Filling".try_into().unwrap()),
         });
         steps.push(RoutineStep {
-            entry_command: Some(RoutineCommand::SetGroupOff(group)),
+            entry_command: vec![RoutineCommand::SetGroupOff(group)],
             exits: vec![RoutineExit::with_description(
                 RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
                 RoutineStepExitType::NextStep,
@@ -1109,7 +1189,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
             description: Some("Blooming".try_into().unwrap()),
         });
         steps.push(RoutineStep {
-            entry_command: Some(RoutineCommand::SetGroupFullOn(group)),
+            entry_command: vec![RoutineCommand::SetGroupFullOn(group)],
             exits: vec![RoutineExit::new(
                 RoutineExitCondition::Always,
                 RoutineStepExitType::NextStep
@@ -1119,7 +1199,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
     }
 
     steps.push(RoutineStep {
-        entry_command: None,
+        entry_command: vec![],
         exits: vec![RoutineExit::with_description(
             RoutineExitCondition::StateConditionMet(StateCondition::InputVolumeAboveRelativeToStart(group, ParameterValue::Static(milliliters))),
             RoutineStepExitType::NextStep,
@@ -1129,7 +1209,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
     });
 
     steps.push(RoutineStep {
-        entry_command: Some(RoutineCommand::StopBrewing(group)),
+        entry_command: vec![RoutineCommand::StopBrewing(group)],
         exits: vec![RoutineExit::with_description(
             RoutineExitCondition::Always,
             RoutineStepExitType::Finished,
@@ -1147,5 +1227,63 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
         derived_parameters: vec![], // No derived parameters for this routine
         steps,
         finally: vec![],
+    }
+}
+
+pub fn create_backflush_routine(group: GroupIndex, pump_duty_cycle: DutyCycleType) -> Routine {
+    const PUMP_ON_TIME: f32 = 2.5; // seconds
+    const PUMP_OFF_TIME: f32 = 5.0; // seconds
+    const NUM_CYCLES: usize = 5;
+
+    let mut steps = vec![
+        // Step 0: Initialize - set group to full power
+        RoutineStep {
+            entry_command: vec![RoutineCommand::SetGroupFixedDutyCycle(group, ParameterValue::Static(pump_duty_cycle.into()))],
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::Always,
+                RoutineStepExitType::NextStep
+            )],
+            description: Some("Initializing".try_into().unwrap()),
+        },
+    ];
+
+    // Generate 10 cycles of pump on/off
+    for cycle in 0..NUM_CYCLES {
+        let is_last_cycle = cycle == NUM_CYCLES - 1;
+
+        // Pump ON step
+        steps.push(RoutineStep {
+            entry_command: vec![RoutineCommand::StartBrewing(group)],
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::After(ParameterValue::Static(PUMP_ON_TIME)),
+                RoutineStepExitType::NextStep
+            )],
+            description: Some(format!("Backflush cycle {} - pump on", cycle + 1).try_into().unwrap()),
+        });
+
+        // Pump OFF step
+        let exit_type = if is_last_cycle {
+            RoutineStepExitType::Finished
+        } else {
+            RoutineStepExitType::NextStep
+        };
+
+        steps.push(RoutineStep {
+            entry_command: vec![RoutineCommand::StopBrewing(group)],
+            exits: vec![RoutineExit::new(
+                RoutineExitCondition::After(ParameterValue::Static(PUMP_OFF_TIME)),
+                exit_type
+            )],
+            description: Some(format!("Backflush cycle {} - pump off", cycle + 1).try_into().unwrap()),
+        });
+    }
+
+    Routine {
+        routine_type: RoutineType::Cleaning,
+        name: "Backflush".try_into().unwrap(),
+        parameters: vec![],
+        derived_parameters: vec![],
+        steps,
+        finally: vec![RoutineCommand::StopBrewing(group)],
     }
 }

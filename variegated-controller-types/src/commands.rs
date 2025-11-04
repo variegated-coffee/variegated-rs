@@ -12,7 +12,6 @@ pub enum StorageCommand {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone)]
 pub enum MachineCommand {
     StartBrewing(GroupIndex),
@@ -45,7 +44,7 @@ pub enum MachineCommand {
     SetGroupBrewControlTargetValues(GroupIndex, GroupBrewControlTargetValuesUpdate),
 
     SetPidParameters(PidParameterTarget, PidParameters),
-    RunRoutine(RoutineIndex, #[cfg_attr(feature = "schemars", schemars(with = "Option<std::collections::HashMap<u8, f32>>"))] Option<FnvIndexMap<u8, f32, 8>>),
+    RunRoutine(RoutineIndex, Option<RoutineParameters>),
     CancelRoutine,
     EnableBoiler(BoilerIndex),
     DisableBoiler(BoilerIndex),
@@ -66,6 +65,18 @@ pub enum MachineCommand {
     SetGroupPumpConfiguration(GroupIndex, PumpConfiguration),
     SetWaterTapPumpConfiguration(WaterTapIndex, PumpConfiguration),
     SetFillPumpConfiguration(BoilerIndex, PumpConfiguration),
+
+    /// Infer and set the group pressure PID integral term for bumpless transfer
+    /// Takes target pressure and calculates integral based on current duty cycle and measurement
+    InferGroupPressureIntegral(GroupIndex, PressureType),
+
+    /// Infer and set the group flow rate PID integral term for bumpless transfer
+    /// Takes target flow rate and calculates integral based on current duty cycle and measurement
+    InferGroupFlowRateIntegral(GroupIndex, FlowRateType),
+
+    /// Infer and set the group output flow rate PID integral term for bumpless transfer
+    /// Takes target output flow rate and calculates integral based on current duty cycle and measurement
+    InferGroupOutputFlowRateIntegral(GroupIndex, FlowRateType),
 }
 
 #[cfg(feature = "defmt")]
@@ -102,6 +113,9 @@ impl defmt::Format for MachineCommand {
             MachineCommand::SetGroupPumpConfiguration(idx, config) => defmt::write!(f, "SetGroupPumpConfiguration({}, {:?})", idx, config),
             MachineCommand::SetWaterTapPumpConfiguration(idx, config) => defmt::write!(f, "SetWaterTapPumpConfiguration({}, {:?})", idx, config),
             MachineCommand::SetFillPumpConfiguration(idx, config) => defmt::write!(f, "SetFillPumpConfiguration({}, {:?})", idx, config),
+            MachineCommand::InferGroupPressureIntegral(idx, pressure) => defmt::write!(f, "InferGroupPressureIntegral({}, {})", idx, pressure),
+            MachineCommand::InferGroupFlowRateIntegral(idx, flow_rate) => defmt::write!(f, "InferGroupFlowRateIntegral({}, {})", idx, flow_rate),
+            MachineCommand::InferGroupOutputFlowRateIntegral(idx, flow_rate) => defmt::write!(f, "InferGroupOutputFlowRateIntegral({}, {})", idx, flow_rate),
         }
     }
 }
@@ -110,11 +124,10 @@ impl defmt::Format for MachineCommand {
 /// This is a subset of MachineCommand that excludes meta-commands like
 /// adding/removing schedules or routines, which don't make sense in a schedule.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone)]
 pub enum ScheduleAction {
     /// Run a routine with optional parameters
-    RunRoutine(RoutineIndex, #[cfg_attr(feature = "schemars", schemars(with = "Option<std::collections::HashMap<u8, f32>>"))] Option<FnvIndexMap<u8, f32, 8>>),
+    RunRoutine(RoutineIndex, Option<RoutineParameters>),
     /// Cancel the currently running routine
     CancelRoutine,
     /// Set the machine mode (On, Off, PowerSave)

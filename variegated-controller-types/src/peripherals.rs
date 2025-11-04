@@ -2,7 +2,6 @@ use crate::*;
 use heapless::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum PeripheralType {
@@ -15,7 +14,6 @@ pub enum PeripheralType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PeripheralInfo {
     pub peripheral_type: PeripheralType,
@@ -23,10 +21,8 @@ pub struct PeripheralInfo {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct PeripheralStatus {
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<PeripheralId, PeripheralInfo>"))]
     pub peripherals: FnvIndexMap<PeripheralId, PeripheralInfo, MAX_PERIPHERALS>,
 }
 

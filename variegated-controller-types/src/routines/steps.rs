@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub enum RoutineExitCondition {
     Always,
@@ -17,7 +16,6 @@ pub enum RoutineExitCondition {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub enum RoutineStepExitType {
     NextStep,
@@ -27,7 +25,6 @@ pub enum RoutineStepExitType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub enum RoutineCommand {
     // Direct pass-through for non-parameterizable commands
@@ -51,10 +48,14 @@ pub enum RoutineCommand {
     SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
     SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
     SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+
+    // Bumpless transfer commands - infer PID integral for smooth mode transitions
+    InferGroupPressureIntegral(GroupIndex, ParameterValue),
+    InferGroupFlowRateIntegral(GroupIndex, ParameterValue),
+    InferGroupOutputFlowRateIntegral(GroupIndex, ParameterValue),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct RoutineExit {
     pub condition: RoutineExitCondition,
@@ -63,10 +64,9 @@ pub struct RoutineExit {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct RoutineStep {
-    pub entry_command: Option<RoutineCommand>,
+    pub entry_command: Vec<RoutineCommand>,
     pub exits: Vec<RoutineExit>,
     pub description: Option<String>,
 }

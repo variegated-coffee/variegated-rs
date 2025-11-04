@@ -3,7 +3,6 @@ use variegated_control_algorithm::pid::PidOut;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlCurve {
     pub a: f32,  // coefficient for T^2
@@ -23,7 +22,6 @@ impl ControlCurve {
 /// The control mode for group brewing
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum GroupBrewControlMode {
     GroupFlowRate,        // Control pump to achieve flow rate at group
@@ -42,7 +40,6 @@ pub enum GroupBrewControlMode {
 /// All stored target values for group brew control
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupBrewControlTargetValues {
     pub flow_rate: FlowRateType,
@@ -73,7 +70,6 @@ impl Default for GroupBrewControlTargetValues {
 /// Update structure for changing group brew target values
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GroupBrewControlTargetValuesUpdate {
     pub flow_rate: Option<FlowRateType>,
@@ -89,7 +85,6 @@ pub struct GroupBrewControlTargetValuesUpdate {
 /// Complete group brew control state
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupBrewControlState {
     pub mode: GroupBrewControlMode,
@@ -106,7 +101,6 @@ impl Default for GroupBrewControlState {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default)]
 pub enum Output {
@@ -128,7 +122,6 @@ impl Output {
 
 /// Shot state during espresso extraction
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ShotState {

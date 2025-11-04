@@ -303,6 +303,10 @@ pub struct DualBoilerSingleGroupController<
     routine_repository: &'static Mutex<NoopRawMutex, RoutineRepoT>,
     current_routine: Option<RoutineExecutionContext<u8, DualBoilerSingleGroupConfiguration>>,
 
+    // Shot logging
+    shot_logger: crate::shot_log::ShotLogger,
+    previous_routine_step: Option<usize>,
+
     // Schedule store
     schedule_store: &'static Mutex<NoopRawMutex, ScheduleStoreT>,
 
@@ -390,6 +394,8 @@ impl<
             routine_repository,
             schedule_store,
             current_routine: None,
+            shot_logger: crate::shot_log::ShotLogger::new(),
+            previous_routine_step: None,
             previous_status: None,
             brew_temperature_movavg: MovAvg::default(),
             steam_temperature_movavg: MovAvg::default(),
@@ -520,7 +526,31 @@ impl<
                     info!("Routine finished executing");
                     self.handle_routine_exit().await;
                 } else if let Some(status) = self.previous_status.as_ref() {
-                    if let Some(command) = routine.step(status, None) {
+                    // Record shot log sample
+                    self.shot_logger.record_sample(status);
+
+                    // Detect and record step transitions
+                    if routine.current_step != self.previous_routine_step {
+                        if let Some(current_step) = routine.current_step {
+                            use variegated_controller_types::RoutineEvent;
+                            let event = RoutineEvent {
+                                timestamp_millis: self.shot_logger.current_log()
+                                    .and_then(|log| log.samples.last())
+                                    .map(|s| s.timestamp_millis)
+                                    .unwrap_or(0),
+                                from_step: self.previous_routine_step,
+                                to_step: current_step,
+                                exit_condition_description: None,
+                                step_description: routine.routine.steps.get(current_step)
+                                    .and_then(|s| s.description.clone()),
+                            };
+                            self.shot_logger.record_routine_event(event);
+                            self.previous_routine_step = Some(current_step);
+                        }
+                    }
+
+                    // Execute routine step commands
+                    for command in routine.step(status, None) {
                         self.handle_command(command).await;
                     }
                 }
@@ -933,6 +963,7 @@ impl<
             Some(CommsStatus {
                 timestamp: current_timestamp,
                 wifi_connected: status.wifi_connected,
+                wifi_rssi: status.wifi_rssi,
             })
         } else {
             self.comms_status.clone()
@@ -1413,6 +1444,66 @@ impl<
                     error!("Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)", boiler_index);
                 }
             }
+            MachineCommand::InferGroupPressureIntegral(group_index, target_pressure) => {
+                if group_index == 0 {
+                    info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
+
+                    // Get current duty cycle from the control state configuration
+                    let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
+                    let current_pressure = self.group.get_pressure().unwrap_or(0.0);
+
+                    // Set up PID for pressure control
+                    self.pump_pid.setpoint = target_pressure as f32;
+                    self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_pressure_params);
+
+                    // Infer and set the integral
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_pressure as f32);
+
+                    info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
+                } else {
+                    error!("Invalid group index: {}", group_index);
+                }
+            }
+            MachineCommand::InferGroupFlowRateIntegral(group_index, target_flow_rate) => {
+                if group_index == 0 {
+                    info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
+
+                    // Get current duty cycle from the control state configuration
+                    let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
+                    let current_flow_rate = self.group.get_input_flow_rate().unwrap_or(0.0);
+
+                    // Set up PID for flow rate control
+                    self.pump_pid.setpoint = target_flow_rate as f32;
+                    self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_flow_rate_params);
+
+                    // Infer and set the integral
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_flow_rate as f32);
+
+                    info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
+                } else {
+                    error!("Invalid group index: {}", group_index);
+                }
+            }
+            MachineCommand::InferGroupOutputFlowRateIntegral(group_index, target_output_flow_rate) => {
+                if group_index == 0 {
+                    info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
+
+                    // Get current duty cycle from the control state configuration
+                    let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
+                    let current_output_flow_rate = self.group.get_output_flow_rate().unwrap_or(0.0);
+
+                    // Set up PID for output flow rate control
+                    self.pump_pid.setpoint = target_output_flow_rate as f32;
+                    self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_output_flow_rate_params);
+
+                    // Infer and set the integral
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_output_flow_rate as f32);
+
+                    info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
+                } else {
+                    error!("Invalid group index: {}", group_index);
+                }
+            }
         }
     }
 
@@ -1597,7 +1688,35 @@ impl<
 
         if let Some(routine) = routine {
             info!("Running routine");
-            self.current_routine = Some(RoutineExecutionContext::new(routine_index, routine.clone(), 0u8, self.configuration.clone(), runtime_params));
+
+            // Create routine execution context
+            let routine_execution_context = RoutineExecutionContext::new(
+                routine_index,
+                routine.clone(),
+                0u8,
+                self.configuration.clone(),
+                runtime_params.clone()
+            );
+
+            // Start shot logging
+            use variegated_controller_types::{ShotLogMetadata, ShotType, ShotStatus, RoutineExecutionMetadata};
+            let metadata = ShotLogMetadata {
+                shot_type: ShotType::Routine,
+                group_index: SingleGroup.as_index(),
+                routine_metadata: Some(RoutineExecutionMetadata {
+                    routine_index,
+                    routine_name: routine.name.clone(),
+                    routine_type: routine.routine_type,
+                    resolved_parameters: routine_execution_context.parameters.clone(),
+                }),
+                start_time_millis: embassy_time::Instant::now().as_millis(),
+                end_time_millis: None,
+                final_status: ShotStatus::Running,
+            };
+            self.shot_logger.start_shot(metadata);
+            self.previous_routine_step = None;
+
+            self.current_routine = Some(routine_execution_context);
             info!("Routine started");
         } else {
             error!("Routine not found: {}", routine_index);
@@ -1634,6 +1753,11 @@ impl<
             for cmd in finally_commands {
                 self.handle_routine_finally_commands(cmd).await;
             }
+
+            // Finish shot logging
+            use variegated_controller_types::ShotStatus;
+            self.shot_logger.finish_shot(ShotStatus::Completed);
+            self.previous_routine_step = None;
         } else {
             warn!("No routine to exit");
         }

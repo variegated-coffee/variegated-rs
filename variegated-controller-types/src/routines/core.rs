@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub enum RoutineType {
     HeatUp,
@@ -16,7 +15,6 @@ pub enum RoutineType {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone)]
 pub struct Routine {
     pub routine_type: RoutineType,
@@ -78,10 +76,8 @@ impl Routine {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone)]
 pub struct RoutineList {
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<RoutineIndex, Routine>"))]
     pub routines: BTreeMap<RoutineIndex, Routine>,
 }
 

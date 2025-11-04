@@ -4,19 +4,13 @@ use alloc::vec::Vec;
 use heapless::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Default)]
 pub struct Configuration {
     pub machine_config: MachineConfiguration,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<BoilerIndex, BoilerConfiguration>"))]
     pub boiler_configurations: FnvIndexMap<BoilerIndex, BoilerConfiguration, MAX_BOILERS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<GroupIndex, GroupConfiguration>"))]
     pub group_configurations: FnvIndexMap<GroupIndex, GroupConfiguration, MAX_GROUPS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<WaterTapIndex, WaterTapConfiguration>"))]
     pub water_tap_configurations: FnvIndexMap<WaterTapIndex, WaterTapConfiguration, MAX_WATER_TAPS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<TankIndex, TankConfiguration>"))]
     pub tank_configurations: FnvIndexMap<TankIndex, TankConfiguration, MAX_TANKS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<SteamWandIndex, SteamWandConfiguration>"))]
     pub steam_wand_configurations: FnvIndexMap<SteamWandIndex, SteamWandConfiguration, MAX_STEAM_WANDS>,
     pub schedules: Vec<ScheduleItem>,
 }
@@ -104,13 +98,54 @@ impl Configuration {
 #[cfg(feature = "defmt")]
 impl defmt::Format for Configuration {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "Configuration {{ }}",
-            /*self.boiler_configuration, self.group_configuration*/);
+        defmt::write!(f, "Configuration {{");
+
+        // Machine configuration
+        defmt::write!(f, " machine_config: {:?}", self.machine_config);
+
+        // Boiler configurations
+        defmt::write!(f, ", boilers: [");
+        for (index, config) in self.boiler_configurations.iter() {
+            defmt::write!(f, " B{}={:?}", index, config);
+        }
+        defmt::write!(f, " ]");
+
+        // Group configurations
+        defmt::write!(f, ", groups: [");
+        for (index, config) in self.group_configurations.iter() {
+            defmt::write!(f, " G{}={:?}", index, config);
+        }
+        defmt::write!(f, " ]");
+
+        // Water tap configurations
+        defmt::write!(f, ", water_taps: [");
+        for (index, config) in self.water_tap_configurations.iter() {
+            defmt::write!(f, " WT{}={:?}", index, config);
+        }
+        defmt::write!(f, " ]");
+
+        // Tank configurations
+        defmt::write!(f, ", tanks: [");
+        for (index, config) in self.tank_configurations.iter() {
+            defmt::write!(f, " T{}={:?}", index, config);
+        }
+        defmt::write!(f, " ]");
+
+        // Steam wand configurations
+        defmt::write!(f, ", steam_wands: [");
+        for (index, config) in self.steam_wand_configurations.iter() {
+            defmt::write!(f, " SW{}={:?}", index, config);
+        }
+        defmt::write!(f, " ]");
+
+        // Schedule count
+        defmt::write!(f, ", schedules: {} items", self.schedules.len());
+
+        defmt::write!(f, " }}");
     }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PumpConfiguration {
@@ -122,7 +157,6 @@ pub struct PumpConfiguration {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct FillConfiguration {
@@ -131,7 +165,6 @@ pub struct FillConfiguration {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct BoilerConfiguration {
@@ -147,7 +180,6 @@ pub struct BoilerConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct KalmanParameters {
     pub process_noise: f32,
@@ -157,7 +189,6 @@ pub struct KalmanParameters {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct GroupConfiguration {
@@ -174,14 +205,26 @@ pub struct GroupConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct MachineConfiguration {
     pub heating_element_interlock: bool,
+    /// Maximum number of shot logs to keep in history
+    pub max_shot_logs: usize,
+    /// Sample every Nth control loop tick (1 = every tick, 2 = every other tick, etc.)
+    pub log_sample_decimation: u8,
+}
+
+impl Default for MachineConfiguration {
+    fn default() -> Self {
+        Self {
+            heating_element_interlock: false,
+            max_shot_logs: 10,
+            log_sample_decimation: 1,
+        }
+    }
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct WaterTapConfiguration {
@@ -194,7 +237,6 @@ pub struct WaterTapConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct SteamWandConfiguration {
     pub temperature_target: Option<TemperatureType>,
@@ -206,7 +248,6 @@ pub struct SteamWandConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct TankConfiguration {
     pub low_level_warning_threshold: Option<WaterLevelType>,

@@ -4,14 +4,11 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use heapless::FnvIndexSet;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleTrigger {
     pub on_minute: u8,
     pub on_hour: u8,
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<std::vec::Vec<String>>"))]
     pub on_days: Option<FnvIndexSet<Weekday, 8>>, // If None, trigger every day
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub on_date: Option<NaiveDate>,
     pub enabled: bool,
     pub once: bool, // If true, remove schedule item after triggering
@@ -56,7 +53,6 @@ impl defmt::Format for ScheduleTrigger {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Default)]
 pub struct ScheduleItem {
     pub trigger_at: ScheduleTrigger,

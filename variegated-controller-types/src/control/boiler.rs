@@ -2,7 +2,6 @@ use crate::*;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub enum PidParameterTarget {
     BoilerTemperature(BoilerIndex),
@@ -15,7 +14,6 @@ pub enum PidParameterTarget {
 /// The control mode for a boiler - what type of control is active
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BoilerControlMode {
     Temperature,  // Control based on temperature
@@ -28,7 +26,6 @@ pub enum BoilerControlMode {
 /// These values persist regardless of current mode
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoilerControlTargetValues {
     pub target_temperature: TemperatureType,
@@ -48,7 +45,6 @@ impl Default for BoilerControlTargetValues {
 /// Only specified fields will be updated
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoilerControlTargetValuesUpdate {
     pub temperature: Option<TemperatureType>,
@@ -58,7 +54,6 @@ pub struct BoilerControlTargetValuesUpdate {
 /// Complete boiler control state
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoilerControlState {
     pub mode: BoilerControlMode,
@@ -76,7 +71,6 @@ impl Default for BoilerControlState {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaterDispersalPumpStrategy {
     AlwaysPump,
