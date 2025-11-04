@@ -105,6 +105,7 @@ fn map_type_to_ts(type_ref: &str) -> String {
         "f64" => "f64()".to_string(),
         "bool" => "bool()".to_string(),
         "String" | "str" => "string()".to_string(),
+        "unit" | "()" => "struct({})".to_string(),  // Unit type maps to empty struct
         _ => {
             // Handle generic types
             if type_ref.starts_with("Option<") {

@@ -56,6 +56,20 @@ impl PostcardTsType for str {
     }
 }
 
+// Implement for unit type ()
+impl PostcardTsType for () {
+    fn ts_name() -> String {
+        "unit".to_string()
+    }
+
+    fn generate_schema() -> SchemaDefinition {
+        SchemaDefinition {
+            name: "unit".to_string(),
+            kind: SchemaKind::Unit,
+        }
+    }
+}
+
 // Implement for Option<T>
 impl<T: PostcardTsType> PostcardTsType for Option<T> {
     fn ts_name() -> String {
