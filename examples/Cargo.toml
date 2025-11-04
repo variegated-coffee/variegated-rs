@@ -41,7 +41,7 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
-variegated-board-cfg = { version = "0.2.1", path = "../../variegated-board/variegated-board-cfg" }
+variegated-board-cfg = "0.2.1"
 
 variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb"] }
 

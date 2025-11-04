@@ -24,6 +24,9 @@ members = [
 resolver = "2"
 package = { rust-version = "1.85.0" }
 
+[workspace.dependencies]
+hashbrown = "0.15.1"
+
 [profile.dev]
 debug = true              # Enable debug info
 opt-level = 1           # Light optimization for better debugging
