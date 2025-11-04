@@ -287,6 +287,8 @@ pub struct ButtonEventHandler {
     routine_executing: bool,
     /// Current machine mode (from status subscription)
     machine_mode: MachineMode,
+    /// Tracks when button 5 hold started (for 3-second hold to turn off)
+    button_5_hold_start: Option<Instant>,
 }
 
 impl ButtonEventHandler {
@@ -297,6 +299,7 @@ impl ButtonEventHandler {
             water_dispensing_active: false,
             routine_executing: false,
             machine_mode: MachineMode::Off,
+            button_5_hold_start: None,
         }
     }
 
@@ -320,21 +323,27 @@ impl ButtonEventHandler {
     }
 
     /// Handle a button event and return the appropriate machine command
-    pub fn handle_event(&self, event: ButtonEvent) -> Option<MachineCommand> {
-        // For now, only handle Press events
-        // Press-and-hold events can be added later for additional functionality
+    pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Option<MachineCommand> {
         match event {
             ButtonEvent::Press(buttons) => self.handle_press(buttons),
-            ButtonEvent::PressAndHoldStart(_buttons) => {
-                // Could be used for special functions in the future
+            ButtonEvent::PressAndHoldStart(buttons) => {
+                // Track button 5 hold for 3-second turn-off feature
+                if buttons.contains(BREWING_BUTTON) {
+                    self.button_5_hold_start = Some(now);
+                    defmt::debug!("Button 5 hold started at {:?}", now);
+                }
                 None
             }
             ButtonEvent::PressAndHoldChange { .. } => {
                 // Could be used for special functions in the future
                 None
             }
-            ButtonEvent::PressAndHoldStop(_buttons) => {
-                // Could be used for special functions in the future
+            ButtonEvent::PressAndHoldStop(buttons) => {
+                // Clear button 5 hold tracking when released
+                if buttons.contains(BREWING_BUTTON) {
+                    self.button_5_hold_start = None;
+                    defmt::debug!("Button 5 hold stopped");
+                }
                 None
             }
         }
@@ -389,6 +398,25 @@ impl ButtonEventHandler {
 
         // Multi-button combinations can be added here in the future
         // For example: buttons 1+6 could trigger a specific routine or function
+
+        None
+    }
+
+    /// Check for long hold conditions and return appropriate command
+    /// Currently checks for button 5 held >= 3 seconds to turn machine off
+    pub fn check_long_hold(&mut self, now: Instant) -> Option<MachineCommand> {
+        const LONG_HOLD_THRESHOLD_MS: u64 = 3000; // 3 seconds
+
+        if let Some(hold_start) = self.button_5_hold_start {
+            let elapsed = now.saturating_duration_since(hold_start).as_millis();
+
+            if elapsed >= LONG_HOLD_THRESHOLD_MS {
+                // Clear the tracking to avoid repeated commands
+                self.button_5_hold_start = None;
+                defmt::info!("Button 5 held for {}ms - turning machine off", elapsed);
+                return Some(MachineCommand::SetMachineMode(MachineMode::Off));
+            }
+        }
 
         None
     }
@@ -464,10 +492,17 @@ pub async fn button_controller_task(
                 defmt::debug!("Button event: {:?}", event);
 
                 // Handle the event and get optional command
-                if let Some(command) = handler.handle_event(event) {
+                if let Some(command) = handler.handle_event(event, now) {
                     if let Err(_) = command_sender.try_send(command) {
                         defmt::warn!("Failed to send command - channel full");
                     }
+                }
+            }
+
+            // Check for long hold conditions (e.g., button 5 held for 3 seconds)
+            if let Some(command) = handler.check_long_hold(now) {
+                if let Err(_) = command_sender.try_send(command) {
+                    defmt::warn!("Failed to send long hold command - channel full");
                 }
             }
         }

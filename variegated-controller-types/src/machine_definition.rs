@@ -2,7 +2,6 @@ use crate::*;
 use heapless::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub struct ProtocolVersion {
@@ -13,7 +12,6 @@ pub struct ProtocolVersion {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub struct ProtocolConfig {
@@ -33,7 +31,6 @@ pub struct ProtocolConfig {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MachineType {
     SingleBoilerSingleGroup,
@@ -49,7 +46,6 @@ impl Default for MachineType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SensorCapability {
     Temperature,
@@ -61,7 +57,6 @@ pub enum SensorCapability {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ActuatorCapability {
@@ -75,7 +70,6 @@ pub enum ActuatorCapability {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ControlModeCapability {
     TemperaturePid,
@@ -88,7 +82,6 @@ pub enum ControlModeCapability {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BoilerType {
@@ -105,86 +98,60 @@ impl Default for BoilerType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct BoilerDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
     pub boiler_type: BoilerType,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
     pub has_fill_mechanism: bool,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct GroupDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct WaterTapDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct SteamWandDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ActuatorCapability>"))]
     pub actuators: heapless::Vec<ActuatorCapability, 8>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<ControlModeCapability>"))]
     pub control_modes: heapless::Vec<ControlModeCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct TankDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub sensors: heapless::Vec<SensorCapability, 8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct PeripheralDefinition {
     pub peripheral_type: PeripheralType,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub location: heapless::String<32>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::vec::Vec<SensorCapability>"))]
     pub capabilities: heapless::Vec<SensorCapability, 8>,
     pub support_calibration: bool,
     pub via_comms_mcu: bool,
@@ -192,7 +159,6 @@ pub struct PeripheralDefinition {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EnvironmentalSensorType {
     AmbientTemperature,
@@ -203,36 +169,24 @@ pub enum EnvironmentalSensorType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct EnvironmentalSensorDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
     pub sensor_type: EnvironmentalSensorType,
     pub measurement_range: Option<(f32, f32)>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct MachineDefinition {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub name: heapless::String<32>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<BoilerIndex, BoilerDefinition>"))]
     pub boilers: FnvIndexMap<BoilerIndex, BoilerDefinition, MAX_BOILERS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<GroupIndex, GroupDefinition>"))]
     pub groups: FnvIndexMap<GroupIndex, GroupDefinition, MAX_GROUPS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<WaterTapIndex, WaterTapDefinition>"))]
     pub water_taps: FnvIndexMap<WaterTapIndex, WaterTapDefinition, MAX_WATER_TAPS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<TankIndex, TankDefinition>"))]
     pub tanks: FnvIndexMap<TankIndex, TankDefinition, MAX_TANKS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<SteamWandIndex, SteamWandDefinition>"))]
     pub steam_wands: FnvIndexMap<SteamWandIndex, SteamWandDefinition, 4>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<EnvironmentalSensorId, EnvironmentalSensorDefinition>"))]
     pub environmental_sensors: FnvIndexMap<EnvironmentalSensorId, EnvironmentalSensorDefinition, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<PeripheralId, PeripheralDefinition>"))]
     pub peripherals: FnvIndexMap<PeripheralId, PeripheralDefinition, MAX_PERIPHERALS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<usize, String>"))]
     pub function_routines: FnvIndexMap<usize, heapless::String<32>, MAX_FUNCTION_ROUTINES>,
 }
 

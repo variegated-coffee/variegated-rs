@@ -74,7 +74,7 @@ use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, 
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -95,7 +95,7 @@ use display::lcd_display_task;
 use buttons::button_controller_task;
 use led_controller::led_controller_task;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
-use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
+use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -543,6 +543,27 @@ async fn storage_task(
 }
 
 #[embassy_executor::task]
+async fn configuration_debug_logger(mut configuration_receiver: ConfigurationSubscriber) {
+    let mut last_config: Option<Configuration> = None;
+
+    loop {
+        // Try to get the latest configuration (non-blocking)
+        while let Some(config) = configuration_receiver.try_next_message_pure() {
+            last_config = Some(config.clone());
+        }
+
+        // Log the current configuration every 10 seconds
+        if let Some(ref config) = last_config {
+            defmt::debug!("=== Current Configuration ===");
+            defmt::debug!("{:?}", config);
+            defmt::debug!("============================");
+        }
+
+        Timer::after_secs(10).await;
+    }
+}
+
+#[embassy_executor::task]
 async fn main_task(
     spawner: Spawner,
     spi_p: InternalSpiBusPeripherals,
@@ -804,6 +825,12 @@ async fn main_task(
     routine_repository.add_routine(create_volumetric_shot_routine(0, 68.0, None, None, Some("Button 3".into()))).await;
     routine_repository.add_routine(create_volumetric_shot_routine(0, 84.5, None, None, Some("Button 4".into()))).await;*/
     //routine_repository.load_from_flash().await.unwrap();
+
+    // Add internal routines (never persisted to flash)
+    routine_repository.add_internal_routine(
+        RoutineIndex::Internal(0),
+        create_backflush_routine(SingleGroup.as_index(), 50)
+    ).await.unwrap();
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
@@ -1212,6 +1239,12 @@ async fn main_task(
     // Spawn the ESP transceiver task
     unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
 
+    // Create configuration subscriber for debug logger and spawn the task
+    let debug_configuration_receiver = configuration_channel.subscriber().expect("Failed to get debug configuration subscriber");
+
+    // Spawn the configuration debug logger task
+    unwrap!(spawner.spawn(configuration_debug_logger(debug_configuration_receiver)));
+
     // Spawn the SD detect pin toggle task
     //unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
 
@@ -1242,7 +1275,7 @@ async fn main_task(
 
     #[cfg(feature = "gravity")]
     if let Some(ref mut g) = gravity_device {
-//        futures.push(Box::pin(g.task()));
+        futures.push(Box::pin(g.task()));
     }
 
     join_all(futures).await;

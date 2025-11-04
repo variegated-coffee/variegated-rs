@@ -7,6 +7,8 @@ pub mod dual_boiler_single_group;
 pub mod schedule;
 mod shot_log;
 
+pub use shot_log::{ShotLogger, ShotLoggerConfig};
+
 extern crate alloc;
 
 use core::time::Duration;

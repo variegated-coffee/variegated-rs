@@ -8,7 +8,6 @@ pub type UserActionIndex = u8;
 pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RoutineIndex {
@@ -71,7 +70,6 @@ impl core::fmt::Display for RoutineIndex {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub enum ParameterValue {
     Static(f32),
@@ -102,7 +100,6 @@ impl ParameterValue {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ParameterUnit {
     Seconds,
@@ -114,7 +111,6 @@ pub enum ParameterUnit {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct RoutineParameter {
     pub index: u8,
@@ -124,7 +120,6 @@ pub struct RoutineParameter {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct DerivedParameter {
     pub index: u8,  // Separate index space from regular parameters
@@ -134,7 +129,6 @@ pub struct DerivedParameter {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub enum DerivedFormula {
     Linear {
@@ -156,7 +150,6 @@ pub enum DerivedFormula {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 pub enum StateCondition {
     Brewing(GroupIndex),

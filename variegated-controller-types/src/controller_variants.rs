@@ -2,7 +2,6 @@ use crate::*;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub enum SingleBoilerSingleGroupControllerState {
     #[default]
@@ -15,7 +14,6 @@ pub enum SingleBoilerSingleGroupControllerState {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum SingleBoilerSingleGroupControllerBoilers {
@@ -42,7 +40,6 @@ impl SingleBoilerSingleGroupControllerBoilers {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub enum DualBoilerSingleGroupControllerBoilers {

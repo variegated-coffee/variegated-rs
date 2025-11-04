@@ -4,14 +4,12 @@ use core::time::Duration;
 use heapless::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
     pub current_step: Option<usize>,
     pub step_elapsed_time: Option<Duration>,
     pub total_elapsed_time: Option<Duration>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<u8, f32>"))]
     pub resolved_parameters: FnvIndexMap<u8, f32, 8>, // resolved parameter values for display
 }
 
@@ -29,22 +27,16 @@ impl defmt::Format for RoutineExecutionStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct Status {
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<BoilerIndex, BoilerStatus>"))]
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<GroupIndex, GroupStatus>"))]
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<WaterTapIndex, WaterTapStatus>"))]
     pub water_tap_statuses: FnvIndexMap<WaterTapIndex, WaterTapStatus, MAX_WATER_TAPS>,
-    #[cfg_attr(feature = "schemars", schemars(with = "std::collections::HashMap<TankIndex, TankStatus>"))]
     pub tank_statuses: FnvIndexMap<TankIndex, TankStatus, MAX_TANKS>,
     pub mode: MachineMode,
     pub routine_execution: Option<RoutineExecutionStatus>,
     pub comms_status: Option<CommsStatus>,
     pub peripheral_status: PeripheralStatus,
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub current_local_time: Option<NaiveDateTime>
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
@@ -202,7 +194,6 @@ impl defmt::Format for Status {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct BoilerStatus {
@@ -215,7 +206,6 @@ pub struct BoilerStatus {
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PreviousBrewInfo {
     pub brew_time: Duration,
@@ -226,7 +216,6 @@ pub struct PreviousBrewInfo {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct GroupStatus {
@@ -247,7 +236,6 @@ pub struct GroupStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct WaterTapStatus {
@@ -256,7 +244,6 @@ pub struct WaterTapStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct TankStatus {
     pub water_level: Option<WaterLevelType>,

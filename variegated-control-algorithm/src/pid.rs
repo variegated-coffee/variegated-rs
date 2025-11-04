@@ -11,7 +11,6 @@ pub enum PidError {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct PidTerm<T: FloatCore + Default> {
@@ -39,7 +38,6 @@ impl <T: FloatCore + Default> PidTerm<T> {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct PidParameters<T: FloatCore + core::default::Default> {
@@ -50,7 +48,6 @@ pub struct PidParameters<T: FloatCore + core::default::Default> {
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Hash, Debug)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Limits<T: FloatCore + core::default::Default> {
     lower: T,
@@ -139,14 +136,14 @@ impl<T:FloatCore + core::default::Default> KPTerm<T> {
         self.negative_scale = negative;
         self
     }
-    pub fn step(&self, offset: T) -> T {
+    pub fn step(&self, offset: T) -> (T, T) {
         let scale = if offset >= T::zero() {
             self.positive_scale
         } else {
             self.negative_scale
         };
 
-        self.limits.clamp(scale * offset)
+        (self.limits.clamp(scale * offset), scale)
     }
 }
 
@@ -176,7 +173,7 @@ impl<T:FloatCore + core::default::Default> KITerm<T> {
         self
     }
 
-    pub fn step(&mut self, offset: T, tdelta: T) -> T {
+    pub fn step(&mut self, offset: T, tdelta: T) -> (T, T) {
         let scale = if offset >= T::zero() {
             self.positive_scale
         } else {
@@ -185,7 +182,7 @@ impl<T:FloatCore + core::default::Default> KITerm<T> {
 
         let i = self.limits.clamp(scale * offset * tdelta + self.accumulate);
         self.accumulate = i;
-        i
+        (i, scale)
     }
 }
 
@@ -213,7 +210,7 @@ impl<T:FloatCore + core::default::Default> KDTerm<T> {
         self.negative_scale = negative;
         self
     }
-    pub fn step(&mut self, offset: T, measurement: T, tdelta: T) -> T {
+    pub fn step(&mut self, offset: T, measurement: T, tdelta: T) -> (T, T) {
         let scale = if offset >= T::zero() {
             self.positive_scale
         } else {
@@ -222,7 +219,7 @@ impl<T:FloatCore + core::default::Default> KDTerm<T> {
 
         let d = self.limits.clamp(scale * (self.prev_measurement - measurement) / tdelta);
         self.prev_measurement = measurement;
-        d
+        (d, scale)
     }
 }
 
@@ -261,16 +258,35 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
 
     pub fn step(&mut self, input: PidIn<T>) -> PidOut<T> {
         let offset = self.setpoint - input.measurement;
-        let p = self.kp.step(offset);
-        let i = self.ki.step(offset, input.tdelta);
-        let d = self.kd.step(offset, input.measurement, input.tdelta);
-        PidOut::new(p, i, d, self.limits.clamp(p + i + d))
+        let (p, acting_kp) = self.kp.step(offset);
+        let (i, acting_ki) = self.ki.step(offset, input.tdelta);
+        let (d, acting_kd) = self.kd.step(offset, input.measurement, input.tdelta);
+        PidOut::new(p, i, d, self.limits.clamp(p + i + d), acting_kp, acting_ki, acting_kd)
     }
     
     pub fn reset(&mut self) {
         self.ki.accumulate = T::zero();
         self.kd.prev_measurement = T::zero();
     }
+
+    /// Infer and set the integral term based on a desired output and current measurement.
+    /// This is useful for "bumpless transfer" when switching from open-loop to closed-loop control.
+    ///
+    /// Given a target output (e.g., current duty cycle) and the current measurement,
+    /// this calculates what the integral term should be to produce that output,
+    /// assuming the derivative term is zero.
+    ///
+    /// The calculation: I = target_output - P_term
+    /// Also sets D term's previous measurement to zero the derivative.
+    pub fn infer_and_set_integral(&mut self, target_output: T, current_measurement: T) -> &mut Self {
+        let offset = self.setpoint - current_measurement;
+        let (p_term, _) = self.kp.step(offset);
+        let inferred_integral = target_output - p_term;
+        self.ki.accumulate = inferred_integral;
+        self.kd.prev_measurement = current_measurement;
+        self
+    }
+
     pub fn set_parameters(&mut self, parameters: PidParameters<T>) -> &mut Self {
         self.kp.set_asymmetric_scale(parameters.kp.positive_scale, parameters.kp.negative_scale);
         self.kp.limits = parameters.kp.limits;
@@ -299,18 +315,20 @@ impl<T: FloatCore + core::default::Default> PidIn<T> {
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Hash, Debug, Default)]
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct PidOut<T: FloatCore + core::default::Default> {
     pub p: T,
     pub i: T,
     pub d: T,
     pub out: T,
+    pub acting_kp: T,
+    pub acting_ki: T,
+    pub acting_kd: T,
 }
 
 impl<T: FloatCore + core::default::Default> PidOut<T> {
-    pub fn new(p:T, i:T, d:T, out:T) -> Self {
-        Self{p, i, d, out}
+    pub fn new(p: T, i: T, d: T, out: T, acting_kp: T, acting_ki: T, acting_kd: T) -> Self {
+        Self { p, i, d, out, acting_kp, acting_ki, acting_kd }
     }
 }
 

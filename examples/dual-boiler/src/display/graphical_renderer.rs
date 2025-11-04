@@ -24,7 +24,7 @@ use u8g2_fonts::{
     types::{FontColor, HorizontalAlignment, VerticalPosition}
 };
 
-use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue};
+use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState};
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
 use crate::GRAVITY_PERIPHERAL_ID;
@@ -130,6 +130,38 @@ impl GraphicalDisplayState {
             ScheduleAction::SetBoilerControlTargetValues(idx, _) => {
                 format!("Boiler {} values", idx)
             }
+        }
+    }
+
+    /// Format shot state for display with appropriate color
+    fn format_shot_state(&self) -> (&str, Rgb565) {
+        let group_status = self.shared_state.status.get_group_status(
+            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
+        );
+
+        match group_status.and_then(|g| g.shot_state) {
+            Some(ShotState::HeadspaceFill) => ("HEADSPACE FILL", Rgb565::CSS_LIGHT_BLUE),
+            Some(ShotState::Saturation) => ("SATURATION", Rgb565::CSS_ORANGE),
+            Some(ShotState::PostFirstDrop) => ("POST FIRST DROP", Rgb565::CSS_GREEN),
+            None => ("READY", Rgb565::WHITE),
+        }
+    }
+
+    /// Format a value to 2 significant figures
+    fn format_sig_figs(value: f32) -> String {
+        if value == 0.0 {
+            return String::from("0");
+        }
+
+        let abs_value = if value < 0.0 { -value } else { value };
+
+        // Determine precision based on magnitude for ~2 significant figures
+        if abs_value >= 10.0 {
+            format!("{:.0}", value)  // 12.3 -> "12"
+        } else if abs_value >= 1.0 {
+            format!("{:.1}", value)  // 1.23 -> "1.2"
+        } else {
+            format!("{:.2}", value)  // 0.123 -> "0.12", 0.0123 -> "0.01"
         }
     }
 
@@ -284,6 +316,51 @@ impl GraphicalDisplayState {
             VerticalPosition::Top,
             HorizontalAlignment::Left,
             FontColor::Transparent(tank_color),
+            display
+        ).ok();
+
+        Ok(())
+    }
+
+    /// Render PID information (P, I, D, output, and acting kP, kI, kD)
+    fn render_pid_info<D>(&self, p: f32, i: f32, d: f32, out: f32, acting_kp: f32, acting_ki: f32, acting_kd: f32, x: i32, y: i32, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+
+        // Line 1: P, I, D, Output values
+        let line1 = format!(
+            "P:{} I:{} D:{} O:{}",
+            Self::format_sig_figs(p),
+            Self::format_sig_figs(i),
+            Self::format_sig_figs(d),
+            Self::format_sig_figs(out)
+        );
+
+        small_font.render_aligned(
+            format_args!("{}", line1),
+            Point::new(x, y),
+            VerticalPosition::Top,
+            HorizontalAlignment::Left,
+            FontColor::Transparent(Rgb565::CSS_CYAN),
+            display
+        ).ok();
+
+        // Line 2: Acting kP, kI, kD values
+        let line2 = format!(
+            "kP:{} kI:{} kD:{}",
+            Self::format_sig_figs(acting_kp),
+            Self::format_sig_figs(acting_ki),
+            Self::format_sig_figs(acting_kd)
+        );
+
+        small_font.render_aligned(
+            format_args!("{}", line2),
+            Point::new(x, y + 14),
+            VerticalPosition::Top,
+            HorizontalAlignment::Left,
+            FontColor::Transparent(Rgb565::CSS_YELLOW),
             display
         ).ok();
 
@@ -542,7 +619,7 @@ impl GraphicalDisplayState {
         Ok(())
     }
 
-    /// Render brewing mode (brew metrics on left, steam status on right)
+    /// Render brewing mode (full screen with 3-column horizontal layout)
     fn render_brewing_mode<D>(&self, display: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
@@ -554,111 +631,134 @@ impl GraphicalDisplayState {
         let medium_font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
         let large_font = FontRenderer::new::<u8g2_font_logisoso32_tr>();
 
-        // === LEFT PANEL: BREWING METRICS ===
-        small_font.render_aligned(
-            format_args!("BREWING"),
-            Point::new(LEFT_PANEL_X + LEFT_PANEL_WIDTH / 2, EFFECTIVE_Y + 18),
+        // === HEADER: SHOT STATE ===
+        let (shot_state_text, shot_state_color) = self.format_shot_state();
+        medium_font.render_aligned(
+            format_args!("{}", shot_state_text),
+            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 2),
             VerticalPosition::Top,
             HorizontalAlignment::Center,
-            FontColor::Transparent(Rgb565::WHITE),
+            FontColor::Transparent(shot_state_color),
             display
         ).ok();
 
-        let group_status = self.shared_state.status.get_group_status(variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index());
+        let group_status = self.shared_state.status.get_group_status(
+            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
+        );
 
         if let Some(group) = group_status {
-            let mut y = EFFECTIVE_Y + 35;
+            // === COLUMN 1: BREW TIME (Left) ===
+            let col1_x = LEFT_PANEL_X + 60;
+            if let Some(brew_time) = group.brew_time {
+                let secs = brew_time.as_secs_f32();
+                large_font.render_aligned(
+                    format_args!("{:.1}", secs),
+                    Point::new(col1_x, EFFECTIVE_Y + 22),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
 
-            // Flow rate (large, 32pt)
+                small_font.render_aligned(
+                    format_args!("s"),
+                    Point::new(col1_x, EFFECTIVE_Y + 50),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+            }
+
+            // === COLUMN 2: FLOW & PRESSURE (Center) ===
+            let col2_x = EFFECTIVE_CENTER_X - 30;
+
+            // Input flow rate
             if let Some(flow) = group.input_flow_rate {
                 large_font.render_aligned(
                     format_args!("{:.1}", flow),
-                    Point::new(LEFT_PANEL_X + LEFT_PANEL_WIDTH / 2, y),
+                    Point::new(col2_x, EFFECTIVE_Y + 22),
                     VerticalPosition::Top,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Rgb565::WHITE),
                     display
                 ).ok();
-                y += 36;
 
                 small_font.render_aligned(
                     format_args!("ml/s"),
-                    Point::new(LEFT_PANEL_X + LEFT_PANEL_WIDTH / 2, y),
+                    Point::new(col2_x, EFFECTIVE_Y + 50),
                     VerticalPosition::Top,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Rgb565::WHITE),
                     display
                 ).ok();
-                y += 14;
             }
 
-            // Weight and time (medium, 18pt)
-            let mut metrics = Vec::new();
+            // Brew pressure
+            if let Some(pressure) = group.pressure {
+                medium_font.render_aligned(
+                    format_args!("{:.1}", pressure),
+                    Point::new(col2_x, EFFECTIVE_Y + 66),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Center,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+
+                small_font.render_aligned(
+                    format_args!("bar"),
+                    Point::new(col2_x + 35, EFFECTIVE_Y + 66),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Left,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+            }
+
+            // === COLUMN 3: VOLUME & WEIGHT (Right) ===
+            let col3_x = EFFECTIVE_CENTER_X + 110;
+
+            // Brew input volume and output weight on same line
+            let mut top_line = String::new();
+            if let Some(volume) = group.brew_input_volume {
+                top_line.push_str(&format!("{:.0}ml", volume));
+            }
             if let Some(weight) = group.output_weight {
-                metrics.push(format!("{:.1}g", weight));
-            }
-            if let Some(brew_time) = group.brew_time {
-                metrics.push(self.shared_state.format_brew_time(Some(brew_time)));
+                if !top_line.is_empty() {
+                    top_line.push_str("  ");
+                }
+                top_line.push_str(&format!("{:.1}g", weight));
             }
 
-            if !metrics.is_empty() {
-                let metrics_text = metrics.join(" ");
+            if !top_line.is_empty() {
                 medium_font.render_aligned(
-                    format_args!("{}", metrics_text),
-                    Point::new(LEFT_PANEL_X + LEFT_PANEL_WIDTH / 2, y),
+                    format_args!("{}", top_line),
+                    Point::new(col3_x, EFFECTIVE_Y + 26),
                     VerticalPosition::Top,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Rgb565::WHITE),
                     display
                 ).ok();
             }
-        }
 
-        // === CENTER DIVIDER ===
-        Line::new(Point::new(DIVIDER_X, EFFECTIVE_Y), Point::new(DIVIDER_X, EFFECTIVE_Y + EFFECTIVE_HEIGHT))
-            .into_styled(PrimitiveStyleBuilder::new()
-                .stroke_color(Rgb565::WHITE)
-                .stroke_width(1)
-                .build())
-            .draw(display).ok();
-
-        // === RIGHT PANEL: STEAM BOILER STATUS ===
-        small_font.render_aligned(
-            format_args!("STEAM BOILER"),
-            Point::new(RIGHT_PANEL_X + RIGHT_PANEL_WIDTH / 2, EFFECTIVE_Y + 18),
-            VerticalPosition::Top,
-            HorizontalAlignment::Center,
-            FontColor::Transparent(Rgb565::WHITE),
-            display
-        ).ok();
-
-        let steam_boiler = self.shared_state.status.get_boiler_status(DualBoilerSingleGroupControllerBoilers::SteamBoiler.as_index());
-
-        if let Some(boiler) = steam_boiler {
-            let mut y = EFFECTIVE_Y + 35;
-
-            // Temperature (large, 32pt)
-            if let Some(temp) = boiler.temperature {
-                large_font.render_aligned(
-                    format_args!("{:.1}C", temp),
-                    Point::new(RIGHT_PANEL_X + RIGHT_PANEL_WIDTH / 2, y),
+            // Output flow rate
+            if let Some(out_flow) = group.output_flow_rate {
+                small_font.render_aligned(
+                    format_args!("Out: {:.1}ml/s", out_flow),
+                    Point::new(col3_x, EFFECTIVE_Y + 46),
                     VerticalPosition::Top,
                     HorizontalAlignment::Center,
                     FontColor::Transparent(Rgb565::WHITE),
                     display
                 ).ok();
-                y += 36;
             }
 
-            // Pressure (medium, 18pt)
-            if let Some(pressure) = boiler.pressure {
-                medium_font.render_aligned(
-                    format_args!("{:.1}b", pressure),
-                    Point::new(RIGHT_PANEL_X + RIGHT_PANEL_WIDTH / 2, y),
-                    VerticalPosition::Top,
-                    HorizontalAlignment::Center,
-                    FontColor::Transparent(Rgb565::WHITE),
-                    display
+            // === PID INFO (at bottom if using PID control) ===
+            if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
+                self.render_pid_info(
+                    pid_out.p, pid_out.i, pid_out.d, pid_out.out,
+                    pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
+                    EFFECTIVE_X + 10, EFFECTIVE_Y + 84, display
                 ).ok();
             }
         }
@@ -806,7 +906,7 @@ impl GraphicalDisplayState {
         }
     }
 
-    /// Render routine execution mode
+    /// Render routine execution mode (2-column layout with exit conditions and brewing metrics)
     fn render_routine_mode<D>(&self, display: &mut D) -> Result<(), D::Error>
     where
         D: DrawTarget<Color = Rgb565>,
@@ -817,46 +917,65 @@ impl GraphicalDisplayState {
         let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
         let medium_font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
 
-        // Title
-        medium_font.render_aligned(
-            format_args!("ROUTINE"),
-            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 8),
-            VerticalPosition::Top,
-            HorizontalAlignment::Center,
-            FontColor::Transparent(Rgb565::WHITE),
-            display
-        ).ok();
-
+        // Title with step counter (left-aligned for room)
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
             if let Some(current_step_idx) = routine_execution.current_step {
-                // Get routine and step info
                 if let Some(routine) = &self.current_routine {
                     let total_steps = routine.steps.len();
-
-                    // Show step number and total
-                    small_font.render_aligned(
-                        format_args!("Step {} / {}", current_step_idx + 1, total_steps),
-                        Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 35),
+                    medium_font.render_aligned(
+                        format_args!("ROUTINE - Step {}/{}", current_step_idx + 1, total_steps),
+                        Point::new(EFFECTIVE_X + 80, EFFECTIVE_Y + 8),
                         VerticalPosition::Top,
-                        HorizontalAlignment::Center,
+                        HorizontalAlignment::Left,
                         FontColor::Transparent(Rgb565::WHITE),
                         display
                     ).ok();
+                } else {
+                    medium_font.render_aligned(
+                        format_args!("ROUTINE - Step {}", current_step_idx + 1),
+                        Point::new(EFFECTIVE_X + 80, EFFECTIVE_Y + 8),
+                        VerticalPosition::Top,
+                        HorizontalAlignment::Left,
+                        FontColor::Transparent(Rgb565::WHITE),
+                        display
+                    ).ok();
+                }
+            } else {
+                medium_font.render_aligned(
+                    format_args!("ROUTINE"),
+                    Point::new(EFFECTIVE_X + 80, EFFECTIVE_Y + 8),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Left,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+            }
+        }
 
-                    // Get current step
+        // === CENTER DIVIDER ===
+        Line::new(Point::new(DIVIDER_X, EFFECTIVE_Y), Point::new(DIVIDER_X, EFFECTIVE_Y + EFFECTIVE_HEIGHT))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(Rgb565::WHITE)
+                .stroke_width(1)
+                .build())
+            .draw(display).ok();
+
+        // === LEFT COLUMN: EXIT CONDITIONS ===
+        if let Some(routine_execution) = &self.shared_state.status.routine_execution {
+            if let Some(current_step_idx) = routine_execution.current_step {
+                if let Some(routine) = &self.current_routine {
                     if let Some(step) = routine.steps.get(current_step_idx) {
-                        let mut y_offset = EFFECTIVE_Y + 55;
+                        let mut y_offset = EFFECTIVE_Y + 35;
 
                         // Display exit conditions with progress
                         for exit in &step.exits {
                             if let Some((label, unit, target)) = self.format_exit_condition(&exit.condition, &routine_execution.resolved_parameters) {
                                 if let Some(current) = self.get_process_value_for_condition(&exit.condition, routine_execution.step_elapsed_time) {
-                                    // Show "Label: current / target unit"
                                     small_font.render_aligned(
-                                        format_args!("{}: {:.1} / {:.1}{}", label, current, target, unit),
-                                        Point::new(EFFECTIVE_CENTER_X, y_offset),
+                                        format_args!("{}: {:.1}/{:.1}{}", label, current, target, unit),
+                                        Point::new(LEFT_PANEL_X + 5, y_offset),
                                         VerticalPosition::Top,
-                                        HorizontalAlignment::Center,
+                                        HorizontalAlignment::Left,
                                         FontColor::Transparent(Rgb565::WHITE),
                                         display
                                     ).ok();
@@ -864,44 +983,115 @@ impl GraphicalDisplayState {
                                 }
                             }
                         }
-
-                        // Show additional metrics below exit conditions
-                        let group_status = self.shared_state.status.get_group_status(
-                            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
-                        );
-
-                        if let Some(group) = group_status {
-                            let mut metrics = Vec::new();
-
-                            if let Some(flow) = group.input_flow_rate {
-                                metrics.push(format!("{:.1}ml/s", flow));
-                            }
-                            if let Some(volume) = group.input_volume {
-                                metrics.push(format!("{:.0}ml", volume));
-                            }
-
-                            if !metrics.is_empty() && y_offset < EFFECTIVE_Y + EFFECTIVE_HEIGHT - 15 {
-                                let metrics_text = metrics.join("  ");
-                                small_font.render_aligned(
-                                    format_args!("{}", metrics_text),
-                                    Point::new(EFFECTIVE_CENTER_X, y_offset),
-                                    VerticalPosition::Top,
-                                    HorizontalAlignment::Center,
-                                    FontColor::Transparent(Rgb565::CSS_GRAY),
-                                    display
-                                ).ok();
-                            }
-                        }
                     }
-                } else {
-                    // Fallback if routine not loaded yet
-                    small_font.render_aligned(
-                        format_args!("Step {}", current_step_idx + 1),
-                        Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + 35),
-                        VerticalPosition::Top,
-                        HorizontalAlignment::Center,
-                        FontColor::Transparent(Rgb565::WHITE),
-                        display
+                }
+            }
+        }
+
+        // === RIGHT COLUMN: BREWING METRICS ===
+        let group_status = self.shared_state.status.get_group_status(
+            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
+        );
+
+        if let Some(group) = group_status {
+            let mut y_offset = EFFECTIVE_Y + 35;
+
+            // Shot state
+            let (shot_state_text, shot_state_color) = self.format_shot_state();
+            small_font.render_aligned(
+                format_args!("State: {}", shot_state_text),
+                Point::new(RIGHT_PANEL_X + 5, y_offset),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(shot_state_color),
+                display
+            ).ok();
+            y_offset += 12;
+
+            // Time elapsed
+            if let Some(brew_time) = group.brew_time {
+                let secs = brew_time.as_secs_f32();
+                small_font.render_aligned(
+                    format_args!("Time: {:.1}s", secs),
+                    Point::new(RIGHT_PANEL_X + 5, y_offset),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Left,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+                y_offset += 12;
+            }
+
+            // Flow and pressure on same line
+            let mut flow_pressure = String::new();
+            if let Some(flow) = group.input_flow_rate {
+                flow_pressure.push_str(&format!("Flow: {:.1}ml/s", flow));
+            }
+            if let Some(pressure) = group.pressure {
+                if !flow_pressure.is_empty() {
+                    flow_pressure.push_str("  ");
+                }
+                flow_pressure.push_str(&format!("P: {:.1}b", pressure));
+            }
+            if !flow_pressure.is_empty() {
+                small_font.render_aligned(
+                    format_args!("{}", flow_pressure),
+                    Point::new(RIGHT_PANEL_X + 5, y_offset),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Left,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+                y_offset += 12;
+            }
+
+            // Volume and weight on same line
+            let mut vol_weight = String::new();
+            if let Some(volume) = group.brew_input_volume {
+                vol_weight.push_str(&format!("Vol: {:.0}ml", volume));
+            }
+            if let Some(weight) = group.output_weight {
+                if !vol_weight.is_empty() {
+                    vol_weight.push_str("  ");
+                }
+                vol_weight.push_str(&format!("Wt: {:.1}g", weight));
+            }
+            if !vol_weight.is_empty() {
+                small_font.render_aligned(
+                    format_args!("{}", vol_weight),
+                    Point::new(RIGHT_PANEL_X + 5, y_offset),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Left,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+                y_offset += 12;
+            }
+
+            // Output flow
+            if let Some(out_flow) = group.output_flow_rate {
+                small_font.render_aligned(
+                    format_args!("Out: {:.1}ml/s", out_flow),
+                    Point::new(RIGHT_PANEL_X + 5, y_offset),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Left,
+                    FontColor::Transparent(Rgb565::WHITE),
+                    display
+                ).ok();
+                y_offset += 12;
+            }
+
+            // PID info if using PID control (only if there's space)
+            if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
+                // Render PID with tighter spacing to fit with more metrics
+                // EFFECTIVE_Y = 34, EFFECTIVE_HEIGHT = 115, so bottom is at 149
+                // We need y_offset + 3 + 28 (2 lines * 14) <= 149
+                // So y_offset <= 118
+                if y_offset <= EFFECTIVE_Y + 84 {
+                    self.render_pid_info(
+                        pid_out.p, pid_out.i, pid_out.d, pid_out.out,
+                        pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
+                        RIGHT_PANEL_X + 5, y_offset + 3, display
                     ).ok();
                 }
             }
