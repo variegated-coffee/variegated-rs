@@ -4,7 +4,6 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use heapless::FnvIndexSet;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "ts-typegen", derive(variegated_postcard_ts_typegen::PostcardTsTypegen))]
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleTrigger {
     pub on_minute: u8,

@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use heapless::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "ts-typegen", derive(variegated_postcard_ts_typegen::PostcardTsTypegen))]
 #[derive(Clone, Default)]
 pub struct Configuration {
     pub machine_config: MachineConfiguration,

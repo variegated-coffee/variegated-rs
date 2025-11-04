@@ -135,8 +135,22 @@ impl PostcardTsType for Duration {
     }
 }
 
-// Note: heapless types will need to be handled specially since they're external
-// For now, we'll treat FnvIndexMap the same as HashMap in terms of TypeScript output
+// Implement for heapless::FnvIndexMap - treat it like a BTreeMap for TypeScript purposes
+#[cfg(feature = "heapless")]
+impl<K: PostcardTsType, V: PostcardTsType, const N: usize> PostcardTsType
+    for heapless::FnvIndexMap<K, V, N>
+{
+    fn ts_name() -> String {
+        format!("FnvIndexMap<{}, {}>", K::ts_name(), V::ts_name())
+    }
+
+    fn generate_schema() -> SchemaDefinition {
+        SchemaDefinition {
+            name: format!("FnvIndexMap<{}, {}>", K::ts_name(), V::ts_name()),
+            kind: SchemaKind::Unit,
+        }
+    }
+}
 
 /// Helper macro to implement PostcardTsType for concrete generic instantiations.
 /// This is useful for third-party generic types where we want to generate schemas

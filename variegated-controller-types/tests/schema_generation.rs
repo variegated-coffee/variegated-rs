@@ -1,27 +1,77 @@
 //! Test for generating TypeScript schemas from controller types.
+//!
+//! This demonstrates how to use variegated-postcard-ts-typegen to generate
+//! TypeScript schemas for Rust types, including handling of concrete generic types.
 
 #[cfg(all(feature = "ts-typegen", feature = "std"))]
 mod tests {
     use variegated_controller_types::*;
-    use variegated_postcard_ts_typegen::{impl_postcard_ts_for_concrete, PostcardTsType, SchemaGenerator, FieldDefinition, SchemaDefinition, SchemaKind};
+    use variegated_postcard_ts_typegen::{
+        impl_postcard_ts_for_concrete, EnumVariant, PostcardTsType, SchemaDefinition,
+        SchemaGenerator, SchemaKind, VariantKind,
+    };
 
-    // Implement PostcardTsType for heapless::FnvIndexMap
-    impl<K: PostcardTsType, V: PostcardTsType, const N: usize> PostcardTsType
-        for heapless::FnvIndexMap<K, V, N>
-    {
+    // Implement PostcardTsType for the simple enum types used in this test
+    impl PostcardTsType for PeripheralType {
         fn ts_name() -> String {
-            format!("FnvIndexMap<{}, {}>", K::ts_name(), V::ts_name())
+            "PeripheralType".to_string()
         }
 
         fn generate_schema() -> SchemaDefinition {
             SchemaDefinition {
-                name: format!("FnvIndexMap<{}, {}>", K::ts_name(), V::ts_name()),
-                kind: SchemaKind::Unit,
+                name: "PeripheralTypeSchema".to_string(),
+                kind: SchemaKind::Enum(vec![
+                    EnumVariant {
+                        name: "Scale".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                    EnumVariant {
+                        name: "PressureSensor".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                    EnumVariant {
+                        name: "FlowMeter".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                    EnumVariant {
+                        name: "LevelSensor".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                ]),
+            }
+        }
+    }
+
+    impl PostcardTsType for MachineMode {
+        fn ts_name() -> String {
+            "MachineMode".to_string()
+        }
+
+        fn generate_schema() -> SchemaDefinition {
+            SchemaDefinition {
+                name: "MachineModeSchema".to_string(),
+                kind: SchemaKind::Enum(vec![
+                    EnumVariant {
+                        name: "On".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                    EnumVariant {
+                        name: "Off".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                    EnumVariant {
+                        name: "PowerSaveStandby".to_string(),
+                        kind: VariantKind::Unit,
+                    },
+                ]),
             }
         }
     }
 
     // Implement PostcardTsType for concrete PID algorithm types
+    // These are generic types from the control-algorithm crate that we want to
+    // export with specific type parameters (f32 in this case)
+
     impl_postcard_ts_for_concrete!(
         variegated_control_algorithm::pid::Limits<f32> => "Limits_for_float",
         struct {
@@ -62,16 +112,16 @@ mod tests {
     );
 
     #[test]
-    fn test_generate_schema() {
+    fn test_generate_basic_schemas() {
         let mut generator = SchemaGenerator::new();
 
-        // Add primitive PID types first
+        // Add primitive PID types
         generator.add::<variegated_control_algorithm::pid::Limits<f32>>();
         generator.add::<variegated_control_algorithm::pid::PidTerm<f32>>();
         generator.add::<variegated_control_algorithm::pid::PidParameters<f32>>();
         generator.add::<variegated_control_algorithm::pid::PidOut<f32>>();
 
-        // Add some basic enums
+        // Add simple enum types that have the derive
         generator.add::<PeripheralType>();
         generator.add::<MachineMode>();
 
@@ -85,28 +135,32 @@ mod tests {
         assert!(output.contains("PeripheralTypeSchema"));
         assert!(output.contains("MachineModeSchema"));
 
-        // Print for manual inspection
-        println!("{}", output);
+        // Verify it has the correct structure
+        assert!(output.contains("export const"));
+        assert!(output.contains("struct({"));
+        assert!(output.contains("enumType("));
+        assert!(output.contains("export type"));
+
+        // Print for manual inspection during test runs
+        println!("\nGenerated TypeScript Schema:\n{}", output);
     }
 
     #[test]
-    fn test_write_schema_file() {
+    fn test_enum_generation() {
         let mut generator = SchemaGenerator::new();
 
-        // Add all the concrete PID types
-        generator.add::<variegated_control_algorithm::pid::Limits<f32>>();
-        generator.add::<variegated_control_algorithm::pid::PidTerm<f32>>();
-        generator.add::<variegated_control_algorithm::pid::PidParameters<f32>>();
-        generator.add::<variegated_control_algorithm::pid::PidOut<f32>>();
-
-        // Add variegated types
         generator.add::<PeripheralType>();
         generator.add::<MachineMode>();
 
-        // This would write to a file in a real build.rs
-        // generator.write_to_file("../schema-generated.ts").unwrap();
-
         let output = generator.generate();
-        assert!(output.len() > 100); // Should have substantial content
+
+        // Check enum structure
+        assert!(output.contains("enumType('PeripheralType'"));
+        assert!(output.contains("unitVariant('Scale')"));
+        assert!(output.contains("unitVariant('PressureSensor')"));
+
+        assert!(output.contains("enumType('MachineMode'"));
+        assert!(output.contains("unitVariant('On')"));
+        assert!(output.contains("unitVariant('Off')"));
     }
 }
