@@ -1,0 +1,25 @@
+[package]
+authors = ["twitchyliquid64"]
+categories = ["embedded", "no-std"]
+description = "Internal crate: contains procedural macros for HID descriptors. Use the `usbd-hid` crate instead, these macros are re-exported there."
+keywords = ["no-std", "usb-device"]
+license = "MIT OR Apache-2.0"
+name = "usbd-hid-macros"
+version = "0.8.2"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+byteorder = { version = "1.5", default-features = false }
+proc-macro2 = "1.0"
+quote = "1.0"
+serde = { version = "1.0", default-features = false }
+usbd-hid-descriptors = { path = "../descriptors", version = "0.8.2" }
+hashbrown = "0.15"
+log = "0.4"
+
+[dependencies.syn]
+features = ["extra-traits", "full", "visit"]
+version = "1.0"

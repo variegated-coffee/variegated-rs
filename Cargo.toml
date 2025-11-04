@@ -34,4 +34,5 @@ debug = true             # Keep debug info in release builds too
 
 [patch.crates-io]
 embassy-rp = { git = "https://github.com/variegated-coffee/embassy", branch = "psram-0.8.0" }
+usbd-hid-macros = { path = "usbd-hid-fork/macros" }
 #variegate-board-cfg = { path = "../variegated-board/variegated-board-cfg", version = "0.2.1" }
