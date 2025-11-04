@@ -118,18 +118,18 @@ checksum = "2d7e60934ceec538daadb9d8432424ed043a904d8e0243f3c6446bce549a46ac"
 
 [[package]]
 name = "bitfield"
-version = "0.19.2"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62a3a774b2fcac1b726922b921ebba5e9fe36ad37659c822cf8ff2c1e0819892"
+checksum = "6bf79f42d21f18b5926a959280215903e659760da994835d27c3a0c5ff4f898f"
 dependencies = [
  "bitfield-macros",
 ]
 
 [[package]]
 name = "bitfield-macros"
-version = "0.19.2"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52511b09931f7d5fe3a14f23adefbc23e5725b184013e96c8419febb61f14734"
+checksum = "6115af052c7914c0cbb97195e5c72cb61c511527250074f5c041d1048b0d8b16"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -451,7 +451,7 @@ version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06092da010fc293e78440557ff06ec633e06204d93a11e120c69be9a40745931"
 dependencies = [
- "bitfield 0.19.2",
+ "bitfield 0.19.3",
  "cfg-if",
  "chrono",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -750,7 +750,7 @@ checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 [[package]]
 name = "embedded-hal"
 version = "1.0.0"
-source = "git+https://github.com/rust-embedded/embedded-hal?branch=master#ba020960dbe4dca076de999fa087edde021ef5df"
+source = "git+https://github.com/rust-embedded/embedded-hal?branch=master#4e653a793782ecd495d3ef23800270fb8322acf6"
 
 [[package]]
 name = "embedded-hal-async"
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "embedded-hal-async"
 version = "1.0.0"
-source = "git+https://github.com/rust-embedded/embedded-hal?branch=master#ba020960dbe4dca076de999fa087edde021ef5df"
+source = "git+https://github.com/rust-embedded/embedded-hal?branch=master#4e653a793782ecd495d3ef23800270fb8322acf6"
 dependencies = [
  "embedded-hal 1.0.0 (git+https://github.com/rust-embedded/embedded-hal?branch=master)",
 ]
@@ -1715,9 +1715,9 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "sequential-storage"
-version = "5.0.0"
+version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56a82250c179995d4aba246dfbebc817c1a093816dbb36c3a458d9074ed77968"
+checksum = "0779e7aa11fe1e0a6a0bfb6abcdcc8852c6b74e3946d2ce93d24963dafc4a271"
 dependencies = [
  "defmt 0.3.100",
  "embedded-storage-async",
