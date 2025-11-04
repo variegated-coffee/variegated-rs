@@ -41,7 +41,7 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
 
-variegated-board-cfg = { version = "0.2.1", path = "../../variegated-board/variegated-board-cfg" }
+variegated-board-cfg = { version = "0.2.1" }
 
 variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb"] }
 
@@ -89,12 +89,3 @@ single-boiler = ["dep:oled_async", "dep:display-interface-spi", "gravity"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 gravity = ["dep:variegated-gravity-driver"]
 gear-pump = []
-
-[profile.dev]
-debug = true              # Enable debug info
-opt-level = 3            # Light optimization for better debugging
-lto = true              # Disable link-time optimization
-codegen-units = 1        # Better debug info
-
-[profile.release]
-debug = true             # Keep debug info in release builds too

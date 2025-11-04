@@ -982,7 +982,7 @@ async fn main_task(
 
     // Initialize dual boiler mechanism
     let dual_boiler_config = DualBoilerConfig {
-        heating_element_interlock: false, // Prevent both heating elements running simultaneously
+        heating_element_interlock: false, // Note: This field is currently unused in the implementation
         allow_simultaneous_operations: true, // Allow brewing and steaming simultaneously
     };
 
