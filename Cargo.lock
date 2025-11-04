@@ -2098,6 +2098,8 @@ dependencies = [
 [[package]]
 name = "variegated-board-cfg"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d4b0e1a9ca01f0bce746530962b3684a484e53c52f0335cccaf882915999a4e"
 dependencies = [
  "Inflector",
  "either",
@@ -2179,6 +2181,7 @@ dependencies = [
  "sequential-storage",
  "serde",
  "variegated-control-algorithm",
+ "variegated-postcard-ts-typegen",
 ]
 
 [[package]]
@@ -2342,6 +2345,26 @@ dependencies = [
  "heapless 0.8.0",
  "panic-probe",
  "variegated-instrumentation",
+]
+
+[[package]]
+name = "variegated-postcard-ts-typegen"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn 2.0.106",
+ "variegated-postcard-ts-typegen-derive",
+]
+
+[[package]]
+name = "variegated-postcard-ts-typegen-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
 ]
 
 [[package]]

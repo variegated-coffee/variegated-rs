@@ -4,6 +4,7 @@ use core::time::Duration;
 use heapless::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts-typegen", derive(variegated_postcard_ts_typegen::PostcardTsTypegen))]
 #[derive(Clone, Debug)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,

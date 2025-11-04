@@ -12,6 +12,7 @@ pub enum StorageCommand {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "ts-typegen", derive(variegated_postcard_ts_typegen::PostcardTsTypegen))]
 #[derive(Clone)]
 pub enum MachineCommand {
     StartBrewing(GroupIndex),

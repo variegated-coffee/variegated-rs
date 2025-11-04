@@ -20,6 +20,8 @@ members = [
     "variegated-nv3007",
     "variegated-comms",
     "variegated-timekeeping",
+    "variegated-postcard-ts-typegen",
+    "variegated-postcard-ts-typegen-derive",
 ]
 resolver = "2"
 package = { rust-version = "1.85.0" }
