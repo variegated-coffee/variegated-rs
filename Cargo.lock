@@ -2098,6 +2098,8 @@ dependencies = [
 [[package]]
 name = "variegated-board-cfg"
 version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d4b0e1a9ca01f0bce746530962b3684a484e53c52f0335cccaf882915999a4e"
 dependencies = [
  "Inflector",
  "either",
