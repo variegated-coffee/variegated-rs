@@ -1,6 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DataEnum, Fields, Ident};
+use syn::{DataEnum, Fields, Ident, Type};
+use std::collections::HashSet;
 
 pub fn generate_struct_schema(name: &Ident, fields: &Fields) -> TokenStream {
     let ts_name = format!("{}Schema", name);
@@ -154,6 +155,110 @@ pub fn generate_enum_schema(name: &Ident, data_enum: &DataEnum) -> TokenStream {
             kind: ::variegated_postcard_ts_typegen::SchemaKind::Enum(
                 vec![#(#variant_schemas),*]
             ),
+        }
+    }
+}
+
+/// Extracts all unique field types from struct fields.
+fn extract_types_from_fields(fields: &Fields) -> Vec<&Type> {
+    match fields {
+        Fields::Named(fields_named) => {
+            fields_named.named.iter().map(|f| &f.ty).collect()
+        }
+        Fields::Unnamed(fields_unnamed) => {
+            fields_unnamed.unnamed.iter().map(|f| &f.ty).collect()
+        }
+        Fields::Unit => Vec::new(),
+    }
+}
+
+/// Extracts all unique field types from enum variants.
+fn extract_types_from_enum(data_enum: &DataEnum) -> Vec<&Type> {
+    let mut types = Vec::new();
+
+    for variant in &data_enum.variants {
+        types.extend(extract_types_from_fields(&variant.fields));
+    }
+
+    types
+}
+
+/// Checks if a type is a primitive or standard library type that shouldn't be added as a dependency.
+fn is_primitive_or_std_type(ty: &Type) -> bool {
+    let ty_str = quote! { #ty }.to_string();
+
+    // Remove whitespace for comparison
+    let ty_str = ty_str.replace(" ", "");
+
+    // Primitive types
+    if matches!(ty_str.as_str(),
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" |
+        "i8" | "i16" | "i32" | "i64" | "i128" | "isize" |
+        "f32" | "f64" | "bool" | "char" | "str" | "()"
+    ) {
+        return true;
+    }
+
+    // Check for common std types (String, Vec, Option, BTreeMap, HashMap, etc.)
+    // These are handled specially by the type system
+    if ty_str.starts_with("String") ||
+       ty_str.starts_with("Vec<") ||
+       ty_str.starts_with("Option<") ||
+       ty_str.starts_with("BTreeMap<") ||
+       ty_str.starts_with("HashMap<") ||
+       ty_str.starts_with("Box<") ||
+       ty_str.starts_with("std::") ||
+       ty_str.starts_with("alloc::") ||
+       ty_str.starts_with("core::") {
+        return true;
+    }
+
+    false
+}
+
+/// Generates the add_dependencies method implementation.
+pub fn generate_add_dependencies(fields: Option<&Fields>, data_enum: Option<&DataEnum>) -> TokenStream {
+    let types: Vec<&Type> = if let Some(fields) = fields {
+        extract_types_from_fields(fields)
+    } else if let Some(data_enum) = data_enum {
+        extract_types_from_enum(data_enum)
+    } else {
+        Vec::new()
+    };
+
+    // Filter out primitive and std types, and deduplicate
+    let mut seen = HashSet::new();
+    let unique_types: Vec<_> = types
+        .into_iter()
+        .filter(|ty| {
+            // Skip primitive/std types
+            if is_primitive_or_std_type(ty) {
+                return false;
+            }
+
+            // Deduplicate
+            let ty_str = quote! { #ty }.to_string();
+            seen.insert(ty_str)
+        })
+        .collect();
+
+    if unique_types.is_empty() {
+        // No dependencies - use default implementation
+        return quote! {};
+    }
+
+    let add_calls: Vec<_> = unique_types
+        .iter()
+        .map(|ty| {
+            quote! {
+                generator.add::<#ty>();
+            }
+        })
+        .collect();
+
+    quote! {
+        fn add_dependencies(generator: &mut ::variegated_postcard_ts_typegen::SchemaGenerator) {
+            #(#add_calls)*
         }
     }
 }

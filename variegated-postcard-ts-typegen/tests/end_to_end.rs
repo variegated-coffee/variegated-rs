@@ -127,6 +127,43 @@ export type Container = InferType<typeof ContainerSchema>;
 }
 
 #[test]
+fn test_automatic_dependency_resolution() {
+    // Test that adding a root type automatically adds all its dependencies
+    use std::collections::BTreeMap;
+
+    #[derive(PostcardTsTypegen)]
+    struct Inner {
+        value: u32,
+    }
+
+    #[derive(PostcardTsTypegen)]
+    struct Outer {
+        inner: Inner,
+        map_field: BTreeMap<String, Inner>,
+    }
+
+    let mut generator = SchemaGenerator::new();
+
+    // Only add the outer type - Inner should be added automatically
+    generator.add::<Outer>();
+
+    let output = generator.generate();
+
+    // Both Inner and Outer schemas should be present
+    assert!(output.contains("export const InnerSchema"));
+    assert!(output.contains("export const OuterSchema"));
+
+    // Verify Inner is defined before Outer (dependency ordering)
+    let inner_pos = output.find("export const InnerSchema").unwrap();
+    let outer_pos = output.find("export const OuterSchema").unwrap();
+    assert!(inner_pos < outer_pos, "Inner should be defined before Outer");
+
+    // Verify both type exports are present
+    assert!(output.contains("export type Inner ="));
+    assert!(output.contains("export type Outer ="));
+}
+
+#[test]
 fn test_field_order_preservation() {
     #[derive(PostcardTsTypegen)]
     struct OrderedFields {

@@ -1,5 +1,8 @@
 //! Schema definition types for TypeScript Postcard schemas.
 
+// Forward declare SchemaGenerator to avoid circular dependency
+use crate::SchemaGenerator;
+
 /// Trait implemented by types that can be exported to TypeScript.
 pub trait PostcardTsType {
     /// Returns the TypeScript schema name (e.g., "MyTypeSchema").
@@ -7,6 +10,17 @@ pub trait PostcardTsType {
 
     /// Generates the schema definition for this type.
     fn generate_schema() -> SchemaDefinition;
+
+    /// Adds this type's dependencies to the generator.
+    ///
+    /// This is called automatically by `SchemaGenerator::add()` to ensure
+    /// all dependent types are registered. The default implementation does nothing.
+    ///
+    /// The derive macro generates an implementation that adds all field types
+    /// as dependencies, enabling automatic dependency resolution.
+    fn add_dependencies(_generator: &mut SchemaGenerator) {
+        // Default implementation: no dependencies
+    }
 }
 
 /// A complete schema definition for a type.

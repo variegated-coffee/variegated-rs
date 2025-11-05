@@ -26,13 +26,17 @@ pub fn derive_postcard_ts_typegen(input: TokenStream) -> TokenStream {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    // Generate the schema based on the type structure
-    let schema_gen = match &input.data {
+    // Generate the schema and dependencies based on the type structure
+    let (schema_gen, deps_gen) = match &input.data {
         Data::Struct(data_struct) => {
-            generator::generate_struct_schema(name, &data_struct.fields)
+            let schema = generator::generate_struct_schema(name, &data_struct.fields);
+            let deps = generator::generate_add_dependencies(Some(&data_struct.fields), None);
+            (schema, deps)
         }
         Data::Enum(data_enum) => {
-            generator::generate_enum_schema(name, data_enum)
+            let schema = generator::generate_enum_schema(name, data_enum);
+            let deps = generator::generate_add_dependencies(None, Some(data_enum));
+            (schema, deps)
         }
         Data::Union(_) => {
             return syn::Error::new_spanned(
@@ -53,6 +57,8 @@ pub fn derive_postcard_ts_typegen(input: TokenStream) -> TokenStream {
             fn generate_schema() -> ::variegated_postcard_ts_typegen::SchemaDefinition {
                 #schema_gen
             }
+
+            #deps_gen
         }
     };
 
