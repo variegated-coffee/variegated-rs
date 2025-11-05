@@ -11,11 +11,12 @@ bench = false
 defmt = { version = "0.3", optional = true }
 heapless = "0.8.0"
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
-serde = { version = "1.0.219", default-features = false, features = ["derive"], optional = true }
+serde = { version = "1.0.219", default-features = false, features = ["derive", "alloc"], optional = true }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
 sequential-storage = { version = "5.0.0", optional = true, features = ["defmt-03"] }
 postcard = { version = "1.1.1", optional = true, features = ["alloc", "use-crc"] }
 crc = { version = "3.3.0", optional = true }
+variegated-postcard-ts-typegen = { version = "0.1.0", path = "../variegated-postcard-ts-typegen", optional = true }
 
 [features]
 serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "heapless/serde"]
@@ -25,4 +26,5 @@ double_boiler = []
 single_boiler = []
 single_group = []
 sequential-storage = ["dep:sequential-storage", "dep:postcard", "dep:crc", "serde"]
+ts-typegen = ["dep:variegated-postcard-ts-typegen", "variegated-postcard-ts-typegen/heapless", "serde", "std"]
 default = ["serde", "defmt", "double_boiler", "single_group"]

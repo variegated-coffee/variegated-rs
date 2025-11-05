@@ -2,6 +2,9 @@
 
 extern crate alloc;
 
+#[cfg(feature = "ts-typegen")]
+pub use variegated_postcard_ts_typegen;
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
