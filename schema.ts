@@ -380,6 +380,237 @@ export const OutputSchema = enumType('Output', {
     PidOutput: newtypeVariant('PidOutput', PidOut_for_floatSchema)
 });
 
+export const StateConditionSchema = enumType('StateCondition', {
+    Brewing: newtypeVariant('Brewing', u8()),
+    NotBrewing: newtypeVariant('NotBrewing', u8()),
+    BoilerTemperatureAbove: tupleVariant('BoilerTemperatureAbove', u8(), ParameterValueSchema),
+    BoilerTemperatureBelow: tupleVariant('BoilerTemperatureBelow', u8(), ParameterValueSchema),
+    BoilerPressureAbove: tupleVariant('BoilerPressureAbove', u8(), ParameterValueSchema),
+    BoilerPressureBelow: tupleVariant('BoilerPressureBelow', u8(), ParameterValueSchema),
+    GroupInputFlowRateAbove: tupleVariant('GroupInputFlowRateAbove', u8(), ParameterValueSchema),
+    GroupInputFlowRateBelow: tupleVariant('GroupInputFlowRateBelow', u8(), ParameterValueSchema),
+    GroupPressureAbove: tupleVariant('GroupPressureAbove', u8(), ParameterValueSchema),
+    GroupPressureBelow: tupleVariant('GroupPressureBelow', u8(), ParameterValueSchema),
+    WaterTapFlowRateAbove: tupleVariant('WaterTapFlowRateAbove', u8(), ParameterValueSchema),
+    WaterTapFlowRateBelow: tupleVariant('WaterTapFlowRateBelow', u8(), ParameterValueSchema),
+    OutputWeightAbove: tupleVariant('OutputWeightAbove', u8(), ParameterValueSchema),
+    OutputWeightBelow: tupleVariant('OutputWeightBelow', u8(), ParameterValueSchema),
+    InputVolumeAboveRelativeToStart: tupleVariant('InputVolumeAboveRelativeToStart', u8(), ParameterValueSchema)
+});
+
+export const RoutineCommandSchema = enumType('RoutineCommand', {
+    StartBrewing: newtypeVariant('StartBrewing', u8()),
+    StopBrewing: newtypeVariant('StopBrewing', u8()),
+    TareGroupScale: newtypeVariant('TareGroupScale', u8()),
+    SetBoilerTemperature: tupleVariant('SetBoilerTemperature', u8(), ParameterValueSchema),
+    SetBoilerPressure: tupleVariant('SetBoilerPressure', u8(), ParameterValueSchema),
+    SetGroupFlowRate: tupleVariant('SetGroupFlowRate', u8(), ParameterValueSchema),
+    SetGroupPressure: tupleVariant('SetGroupPressure', u8(), ParameterValueSchema),
+    SetGroupOutputFlowRate: tupleVariant('SetGroupOutputFlowRate', u8(), ParameterValueSchema),
+    SetGroupFixedDutyCycle: tupleVariant('SetGroupFixedDutyCycle', u8(), ParameterValueSchema),
+    SetGroupFullOn: newtypeVariant('SetGroupFullOn', u8()),
+    SetGroupOff: newtypeVariant('SetGroupOff', u8()),
+    SetBoilerOff: newtypeVariant('SetBoilerOff', u8()),
+    SetGroupFlowRateWithTransition: tupleVariant('SetGroupFlowRateWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
+    SetGroupPressureWithTransition: tupleVariant('SetGroupPressureWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
+    SetGroupOutputFlowRateWithTransition: tupleVariant('SetGroupOutputFlowRateWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
+    SetGroupFixedDutyCycleWithTransition: tupleVariant('SetGroupFixedDutyCycleWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
+    InferGroupPressureIntegral: tupleVariant('InferGroupPressureIntegral', u8(), ParameterValueSchema),
+    InferGroupFlowRateIntegral: tupleVariant('InferGroupFlowRateIntegral', u8(), ParameterValueSchema),
+    InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), ParameterValueSchema)
+});
+
+export const ScheduleActionSchema = enumType('ScheduleAction', {
+    RunRoutine: tupleVariant('RunRoutine', RoutineIndexSchema, option(map(u8(), f32()))),
+    CancelRoutine: unitVariant('CancelRoutine'),
+    SetMachineMode: newtypeVariant('SetMachineMode', MachineModeSchema),
+    SetBoilerControlTarget: tupleVariant('SetBoilerControlTarget', u8(), BoilerControlModeSchema, option(BoilerControlTargetValuesUpdateSchema)),
+    SetBoilerControlTargetValues: tupleVariant('SetBoilerControlTargetValues', u8(), BoilerControlTargetValuesUpdateSchema)
+});
+
+export const RoutineExitConditionSchema = enumType('RoutineExitCondition', {
+    Always: unitVariant('Always'),
+    Never: unitVariant('Never'),
+    After: newtypeVariant('After', ParameterValueSchema),
+    AfterDurationRelativeToStart: newtypeVariant('AfterDurationRelativeToStart', ParameterValueSchema),
+    StateConditionMet: newtypeVariant('StateConditionMet', StateConditionSchema),
+    UserAction: newtypeVariant('UserAction', u8())
+});
+
+export const DerivedParameterSchema = struct({
+    index: u8(),
+    name: string(),
+    unit: option(ParameterUnitSchema),
+    formula: DerivedFormulaSchema
+});
+
+export const PeripheralStatusSchema = struct({
+    peripherals: map(u16(), PeripheralInfoSchema)
+});
+
+export const RoutineExecutionStatusSchema = struct({
+    routine_index: RoutineIndexSchema,
+    current_step: option(u32()),
+    step_elapsed_time: option(DurationSchema),
+    total_elapsed_time: option(DurationSchema),
+    resolved_parameters: map(u8(), f32())
+});
+
+export const ScheduleItemSchema = struct({
+    trigger_at: ScheduleTriggerSchema,
+    commands: seq(ScheduleActionSchema)
+});
+
+export const RoutineExitSchema = struct({
+    condition: RoutineExitConditionSchema,
+    then: RoutineStepExitTypeSchema,
+    description: option(string())
+});
+
+export const RoutineStepSchema = struct({
+    entry_command: seq(RoutineCommandSchema),
+    exits: seq(RoutineExitSchema),
+    description: option(string())
+});
+
+export const RoutineSchema = struct({
+    routine_type: RoutineTypeSchema,
+    name: string(),
+    parameters: seq(RoutineParameterSchema),
+    derived_parameters: seq(DerivedParameterSchema),
+    steps: seq(RoutineStepSchema),
+    finally: seq(RoutineCommandSchema)
+});
+
+export const BoilerStatusSchema = struct({
+    temperature: option(f32()),
+    pressure: option(f32()),
+    water_level: option(u8()),
+    output: OutputSchema,
+    control_state: BoilerControlStateSchema
+});
+
+export const BoilerConfigurationSchema = struct({
+    temperature_pid_parameters: PidParameters_for_floatSchema,
+    pressure_pid_parameters: PidParameters_for_floatSchema,
+    control_state: BoilerControlStateSchema,
+    max_temperature: option(f32()),
+    max_pressure: option(f32()),
+    temperature_sensor_kalman_parameters: option(KalmanParametersSchema),
+    pressure_sensor_kalman_parameters: option(KalmanParametersSchema),
+    fill_config: option(FillConfigurationSchema)
+});
+
+export const GroupStatusSchema = struct({
+    is_brewing: bool(),
+    three_way_valve_open: option(bool()),
+    brew_time: option(DurationSchema),
+    brew_input_volume: option(f64()),
+    input_flow_rate: option(f32()),
+    input_volume: option(f64()),
+    output_flow_rate: option(f32()),
+    output_weight: option(f32()),
+    pressure: option(f32()),
+    temperature: option(f32()),
+    pump_output: OutputSchema,
+    control_state: GroupBrewControlStateSchema,
+    previous_brew: option(PreviousBrewInfoSchema),
+    shot_state: option(ShotStateSchema)
+});
+
+export const GroupConfigurationSchema = struct({
+    flow_rate_pid_parameters: PidParameters_for_floatSchema,
+    output_flow_rate_pid_parameters: PidParameters_for_floatSchema,
+    pressure_pid_parameters: PidParameters_for_floatSchema,
+    brew_control_state: GroupBrewControlStateSchema,
+    max_brew_time_seconds: option(u32()),
+    auto_tare_enabled: bool(),
+    pump_configuration: option(PumpConfigurationSchema),
+    pressure_sensor_kalman_parameters: option(KalmanParametersSchema),
+    flow_sensor_pulses_per_liter: option(f32())
+});
+
+export const StatusSchema = struct({
+    boiler_statuses: map(u8(), BoilerStatusSchema),
+    group_statuses: map(u8(), GroupStatusSchema),
+    water_tap_statuses: map(u8(), WaterTapStatusSchema),
+    tank_statuses: map(u8(), TankStatusSchema),
+    mode: MachineModeSchema,
+    routine_execution: option(RoutineExecutionStatusSchema),
+    comms_status: option(CommsStatusSchema),
+    peripheral_status: PeripheralStatusSchema,
+    current_local_time: option(string())
+});
+
+export const ConfigurationSchema = struct({
+    machine_config: MachineConfigurationSchema,
+    boiler_configurations: map(u8(), BoilerConfigurationSchema),
+    group_configurations: map(u8(), GroupConfigurationSchema),
+    water_tap_configurations: map(u8(), WaterTapConfigurationSchema),
+    tank_configurations: map(u8(), TankConfigurationSchema),
+    steam_wand_configurations: map(u8(), SteamWandConfigurationSchema),
+    schedules: seq(ScheduleItemSchema)
+});
+
+export const MachineDefinitionSchema = struct({
+    name: string(),
+    boilers: map(u8(), BoilerDefinitionSchema),
+    groups: map(u8(), GroupDefinitionSchema),
+    water_taps: map(u8(), WaterTapDefinitionSchema),
+    tanks: map(u8(), TankDefinitionSchema),
+    steam_wands: map(u8(), SteamWandDefinitionSchema),
+    environmental_sensors: map(u8(), EnvironmentalSensorDefinitionSchema),
+    peripherals: map(u16(), PeripheralDefinitionSchema),
+    function_routines: map(u32(), string())
+});
+
+export const RoutineStorageSchema = struct({
+    internal: map(u32(), RoutineSchema),
+    function: map(u32(), RoutineSchema),
+    custom: map(u32(), RoutineSchema)
+});
+
+export const SetBoilerControlRequestSchema = struct({
+    boiler_index: u8(),
+    mode: BoilerControlModeSchema,
+    target_temperature: option(f32()),
+    target_pressure: option(f32())
+});
+
+export const SetGroupControlRequestSchema = struct({
+    group_index: u8(),
+    mode: GroupBrewControlModeSchema,
+    duty_cycle: option(u8()),
+    flow_rate: option(f32()),
+    pressure: option(f32()),
+    output_flow_rate: option(f32()),
+    duty_cycle_curve: option(ControlCurveSchema),
+    flow_rate_curve: option(ControlCurveSchema),
+    pressure_curve: option(ControlCurveSchema),
+    output_flow_rate_curve: option(ControlCurveSchema)
+});
+
+export const SetPidParametersRequestSchema = struct({
+    target_type: string(),
+    index: u32(),
+    pid_parameters: PidParameters_for_floatSchema
+});
+
+export const SetGroupPumpConfigurationRequestSchema = struct({
+    group_index: u8(),
+    pump_configuration: PumpConfigurationSchema
+});
+
+export const SetWaterTapPumpConfigurationRequestSchema = struct({
+    water_tap_index: u8(),
+    pump_configuration: PumpConfigurationSchema
+});
+
+export const SetFillPumpConfigurationRequestSchema = struct({
+    boiler_index: u8(),
+    pump_configuration: PumpConfigurationSchema
+});
+
 // Type exports
 export type Limits_for_float = InferType<typeof Limits_for_floatSchema>;
 export type PidTerm_for_float = InferType<typeof PidTerm_for_floatSchema>;
@@ -431,3 +662,28 @@ export type RoutineStepExitType = InferType<typeof RoutineStepExitTypeSchema>;
 export type ParameterValue = InferType<typeof ParameterValueSchema>;
 export type DerivedFormula = InferType<typeof DerivedFormulaSchema>;
 export type Output = InferType<typeof OutputSchema>;
+export type StateCondition = InferType<typeof StateConditionSchema>;
+export type RoutineCommand = InferType<typeof RoutineCommandSchema>;
+export type ScheduleAction = InferType<typeof ScheduleActionSchema>;
+export type RoutineExitCondition = InferType<typeof RoutineExitConditionSchema>;
+export type DerivedParameter = InferType<typeof DerivedParameterSchema>;
+export type PeripheralStatus = InferType<typeof PeripheralStatusSchema>;
+export type RoutineExecutionStatus = InferType<typeof RoutineExecutionStatusSchema>;
+export type ScheduleItem = InferType<typeof ScheduleItemSchema>;
+export type RoutineExit = InferType<typeof RoutineExitSchema>;
+export type RoutineStep = InferType<typeof RoutineStepSchema>;
+export type Routine = InferType<typeof RoutineSchema>;
+export type BoilerStatus = InferType<typeof BoilerStatusSchema>;
+export type BoilerConfiguration = InferType<typeof BoilerConfigurationSchema>;
+export type GroupStatus = InferType<typeof GroupStatusSchema>;
+export type GroupConfiguration = InferType<typeof GroupConfigurationSchema>;
+export type Status = InferType<typeof StatusSchema>;
+export type Configuration = InferType<typeof ConfigurationSchema>;
+export type MachineDefinition = InferType<typeof MachineDefinitionSchema>;
+export type RoutineStorage = InferType<typeof RoutineStorageSchema>;
+export type SetBoilerControlRequest = InferType<typeof SetBoilerControlRequestSchema>;
+export type SetGroupControlRequest = InferType<typeof SetGroupControlRequestSchema>;
+export type SetPidParametersRequest = InferType<typeof SetPidParametersRequestSchema>;
+export type SetGroupPumpConfigurationRequest = InferType<typeof SetGroupPumpConfigurationRequestSchema>;
+export type SetWaterTapPumpConfigurationRequest = InferType<typeof SetWaterTapPumpConfigurationRequestSchema>;
+export type SetFillPumpConfigurationRequest = InferType<typeof SetFillPumpConfigurationRequestSchema>;

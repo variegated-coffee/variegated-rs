@@ -382,6 +382,270 @@ enum Output {
 }
 
 // ============================================================================
+// Additional complex enums
+// ============================================================================
+
+#[derive(PostcardTsTypegen)]
+enum StateCondition {
+    Brewing(u8),
+    NotBrewing(u8),
+    BoilerTemperatureAbove(u8, ParameterValue),
+    BoilerTemperatureBelow(u8, ParameterValue),
+    BoilerPressureAbove(u8, ParameterValue),
+    BoilerPressureBelow(u8, ParameterValue),
+    GroupInputFlowRateAbove(u8, ParameterValue),
+    GroupInputFlowRateBelow(u8, ParameterValue),
+    GroupPressureAbove(u8, ParameterValue),
+    GroupPressureBelow(u8, ParameterValue),
+    WaterTapFlowRateAbove(u8, ParameterValue),
+    WaterTapFlowRateBelow(u8, ParameterValue),
+    OutputWeightAbove(u8, ParameterValue),
+    OutputWeightBelow(u8, ParameterValue),
+    InputVolumeAboveRelativeToStart(u8, ParameterValue),
+}
+
+#[derive(PostcardTsTypegen)]
+enum RoutineCommand {
+    StartBrewing(u8),
+    StopBrewing(u8),
+    TareGroupScale(u8),
+    SetBoilerTemperature(u8, ParameterValue),
+    SetBoilerPressure(u8, ParameterValue),
+    SetGroupFlowRate(u8, ParameterValue),
+    SetGroupPressure(u8, ParameterValue),
+    SetGroupOutputFlowRate(u8, ParameterValue),
+    SetGroupFixedDutyCycle(u8, ParameterValue),
+    SetGroupFullOn(u8),
+    SetGroupOff(u8),
+    SetBoilerOff(u8),
+    SetGroupFlowRateWithTransition(u8, ParameterValue, ParameterValue),
+    SetGroupPressureWithTransition(u8, ParameterValue, ParameterValue),
+    SetGroupOutputFlowRateWithTransition(u8, ParameterValue, ParameterValue),
+    SetGroupFixedDutyCycleWithTransition(u8, ParameterValue, ParameterValue),
+    InferGroupPressureIntegral(u8, ParameterValue),
+    InferGroupFlowRateIntegral(u8, ParameterValue),
+    InferGroupOutputFlowRateIntegral(u8, ParameterValue),
+}
+
+#[derive(PostcardTsTypegen)]
+enum ScheduleAction {
+    RunRoutine(RoutineIndex, Option<std::collections::BTreeMap<u8, f32>>),
+    CancelRoutine,
+    SetMachineMode(MachineMode),
+    SetBoilerControlTarget(u8, BoilerControlMode, Option<BoilerControlTargetValuesUpdate>),
+    SetBoilerControlTargetValues(u8, BoilerControlTargetValuesUpdate),
+}
+
+#[derive(PostcardTsTypegen)]
+enum RoutineExitCondition {
+    Always,
+    Never,
+    After(ParameterValue),
+    AfterDurationRelativeToStart(ParameterValue),
+    StateConditionMet(StateCondition),
+    UserAction(u8),
+}
+
+// ============================================================================
+// Additional complex structs
+// ============================================================================
+
+#[derive(PostcardTsTypegen)]
+struct DerivedParameter {
+    index: u8,
+    name: String,
+    unit: Option<ParameterUnit>,
+    formula: DerivedFormula,
+}
+
+#[derive(PostcardTsTypegen)]
+struct PeripheralStatus {
+    peripherals: std::collections::BTreeMap<u16, PeripheralInfo>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct RoutineExecutionStatus {
+    routine_index: RoutineIndex,
+    current_step: Option<u32>,
+    step_elapsed_time: Option<Duration>,
+    total_elapsed_time: Option<Duration>,
+    resolved_parameters: std::collections::BTreeMap<u8, f32>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct ScheduleItem {
+    trigger_at: ScheduleTrigger,
+    commands: Vec<ScheduleAction>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct RoutineExit {
+    condition: RoutineExitCondition,
+    then: RoutineStepExitType,
+    description: Option<String>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct RoutineStep {
+    entry_command: Vec<RoutineCommand>,
+    exits: Vec<RoutineExit>,
+    description: Option<String>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct Routine {
+    routine_type: RoutineType,
+    name: String,
+    parameters: Vec<RoutineParameter>,
+    derived_parameters: Vec<DerivedParameter>,
+    steps: Vec<RoutineStep>,
+    finally: Vec<RoutineCommand>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct BoilerStatus {
+    temperature: Option<f32>,
+    pressure: Option<f32>,
+    water_level: Option<u8>,
+    output: Output,
+    control_state: BoilerControlState,
+}
+
+#[derive(PostcardTsTypegen)]
+struct BoilerConfiguration {
+    temperature_pid_parameters: PidParameters<f32>,
+    pressure_pid_parameters: PidParameters<f32>,
+    control_state: BoilerControlState,
+    max_temperature: Option<f32>,
+    max_pressure: Option<f32>,
+    temperature_sensor_kalman_parameters: Option<KalmanParameters>,
+    pressure_sensor_kalman_parameters: Option<KalmanParameters>,
+    fill_config: Option<FillConfiguration>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct GroupStatus {
+    is_brewing: bool,
+    three_way_valve_open: Option<bool>,
+    brew_time: Option<Duration>,
+    brew_input_volume: Option<f64>,
+    input_flow_rate: Option<f32>,
+    input_volume: Option<f64>,
+    output_flow_rate: Option<f32>,
+    output_weight: Option<f32>,
+    pressure: Option<f32>,
+    temperature: Option<f32>,
+    pump_output: Output,
+    control_state: GroupBrewControlState,
+    previous_brew: Option<PreviousBrewInfo>,
+    shot_state: Option<ShotState>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct GroupConfiguration {
+    flow_rate_pid_parameters: PidParameters<f32>,
+    output_flow_rate_pid_parameters: PidParameters<f32>,
+    pressure_pid_parameters: PidParameters<f32>,
+    brew_control_state: GroupBrewControlState,
+    max_brew_time_seconds: Option<u32>,
+    auto_tare_enabled: bool,
+    pump_configuration: Option<PumpConfiguration>,
+    pressure_sensor_kalman_parameters: Option<KalmanParameters>,
+    flow_sensor_pulses_per_liter: Option<f32>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct Status {
+    boiler_statuses: std::collections::BTreeMap<u8, BoilerStatus>,
+    group_statuses: std::collections::BTreeMap<u8, GroupStatus>,
+    water_tap_statuses: std::collections::BTreeMap<u8, WaterTapStatus>,
+    tank_statuses: std::collections::BTreeMap<u8, TankStatus>,
+    mode: MachineMode,
+    routine_execution: Option<RoutineExecutionStatus>,
+    comms_status: Option<CommsStatus>,
+    peripheral_status: PeripheralStatus,
+    current_local_time: Option<String>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct Configuration {
+    machine_config: MachineConfiguration,
+    boiler_configurations: std::collections::BTreeMap<u8, BoilerConfiguration>,
+    group_configurations: std::collections::BTreeMap<u8, GroupConfiguration>,
+    water_tap_configurations: std::collections::BTreeMap<u8, WaterTapConfiguration>,
+    tank_configurations: std::collections::BTreeMap<u8, TankConfiguration>,
+    steam_wand_configurations: std::collections::BTreeMap<u8, SteamWandConfiguration>,
+    schedules: Vec<ScheduleItem>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct MachineDefinition {
+    name: String,
+    boilers: std::collections::BTreeMap<u8, BoilerDefinition>,
+    groups: std::collections::BTreeMap<u8, GroupDefinition>,
+    water_taps: std::collections::BTreeMap<u8, WaterTapDefinition>,
+    tanks: std::collections::BTreeMap<u8, TankDefinition>,
+    steam_wands: std::collections::BTreeMap<u8, SteamWandDefinition>,
+    environmental_sensors: std::collections::BTreeMap<u8, EnvironmentalSensorDefinition>,
+    peripherals: std::collections::BTreeMap<u16, PeripheralDefinition>,
+    function_routines: std::collections::BTreeMap<u32, String>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct RoutineStorage {
+    internal: std::collections::BTreeMap<u32, Routine>,
+    function: std::collections::BTreeMap<u32, Routine>,
+    custom: std::collections::BTreeMap<u32, Routine>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct SetBoilerControlRequest {
+    boiler_index: u8,
+    mode: BoilerControlMode,
+    target_temperature: Option<f32>,
+    target_pressure: Option<f32>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct SetGroupControlRequest {
+    group_index: u8,
+    mode: GroupBrewControlMode,
+    duty_cycle: Option<u8>,
+    flow_rate: Option<f32>,
+    pressure: Option<f32>,
+    output_flow_rate: Option<f32>,
+    duty_cycle_curve: Option<ControlCurve>,
+    flow_rate_curve: Option<ControlCurve>,
+    pressure_curve: Option<ControlCurve>,
+    output_flow_rate_curve: Option<ControlCurve>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct SetPidParametersRequest {
+    target_type: String,
+    index: u32,
+    pid_parameters: PidParameters<f32>,
+}
+
+#[derive(PostcardTsTypegen)]
+struct SetGroupPumpConfigurationRequest {
+    group_index: u8,
+    pump_configuration: PumpConfiguration,
+}
+
+#[derive(PostcardTsTypegen)]
+struct SetWaterTapPumpConfigurationRequest {
+    water_tap_index: u8,
+    pump_configuration: PumpConfiguration,
+}
+
+#[derive(PostcardTsTypegen)]
+struct SetFillPumpConfigurationRequest {
+    boiler_index: u8,
+    pump_configuration: PumpConfiguration,
+}
+
+// ============================================================================
 // PID-related types (concretized generics)
 // ============================================================================
 
@@ -525,6 +789,33 @@ fn test_generate_full_schema() {
     generator.add::<ParameterValue>();
     generator.add::<DerivedFormula>();
     generator.add::<Output>();
+    generator.add::<StateCondition>();
+    generator.add::<RoutineCommand>();
+    generator.add::<ScheduleAction>();
+    generator.add::<RoutineExitCondition>();
+
+    // Add additional complex structs
+    generator.add::<DerivedParameter>();
+    generator.add::<PeripheralStatus>();
+    generator.add::<RoutineExecutionStatus>();
+    generator.add::<ScheduleItem>();
+    generator.add::<RoutineExit>();
+    generator.add::<RoutineStep>();
+    generator.add::<Routine>();
+    generator.add::<BoilerStatus>();
+    generator.add::<BoilerConfiguration>();
+    generator.add::<GroupStatus>();
+    generator.add::<GroupConfiguration>();
+    generator.add::<Status>();
+    generator.add::<Configuration>();
+    generator.add::<MachineDefinition>();
+    generator.add::<RoutineStorage>();
+    generator.add::<SetBoilerControlRequest>();
+    generator.add::<SetGroupControlRequest>();
+    generator.add::<SetPidParametersRequest>();
+    generator.add::<SetGroupPumpConfigurationRequest>();
+    generator.add::<SetWaterTapPumpConfigurationRequest>();
+    generator.add::<SetFillPumpConfigurationRequest>();
 
     let output = generator.generate();
 
