@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DataEnum, Fields, Ident, Type};
+use syn::{DataEnum, Fields, Ident, Type, GenericArgument, PathArguments};
 use std::collections::HashSet;
 
 pub fn generate_struct_schema(name: &Ident, fields: &Fields) -> TokenStream {
@@ -159,30 +159,6 @@ pub fn generate_enum_schema(name: &Ident, data_enum: &DataEnum) -> TokenStream {
     }
 }
 
-/// Extracts all unique field types from struct fields.
-fn extract_types_from_fields(fields: &Fields) -> Vec<&Type> {
-    match fields {
-        Fields::Named(fields_named) => {
-            fields_named.named.iter().map(|f| &f.ty).collect()
-        }
-        Fields::Unnamed(fields_unnamed) => {
-            fields_unnamed.unnamed.iter().map(|f| &f.ty).collect()
-        }
-        Fields::Unit => Vec::new(),
-    }
-}
-
-/// Extracts all unique field types from enum variants.
-fn extract_types_from_enum(data_enum: &DataEnum) -> Vec<&Type> {
-    let mut types = Vec::new();
-
-    for variant in &data_enum.variants {
-        types.extend(extract_types_from_fields(&variant.fields));
-    }
-
-    types
-}
-
 /// Checks if a type is a primitive or standard library type that shouldn't be added as a dependency.
 fn is_primitive_or_std_type(ty: &Type) -> bool {
     let ty_str = quote! { #ty }.to_string();
@@ -216,9 +192,83 @@ fn is_primitive_or_std_type(ty: &Type) -> bool {
     false
 }
 
+/// Recursively extracts all non-primitive types from a Type, including from generic parameters.
+/// For example, from `Option<Vec<MyType>>`, extracts `MyType`.
+fn extract_custom_types_recursively(ty: &Type, types: &mut Vec<Type>) {
+    match ty {
+        Type::Path(type_path) => {
+            // First, check if this whole type is a custom type (not a primitive/std type)
+            if !is_primitive_or_std_type(ty) {
+                types.push(ty.clone());
+            }
+
+            // Then recursively extract from generic parameters
+            if let Some(segment) = type_path.path.segments.last() {
+                if let PathArguments::AngleBracketed(args) = &segment.arguments {
+                    for arg in &args.args {
+                        if let GenericArgument::Type(inner_ty) = arg {
+                            extract_custom_types_recursively(inner_ty, types);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(type_ref) => {
+            extract_custom_types_recursively(&type_ref.elem, types);
+        }
+        Type::Tuple(type_tuple) => {
+            for elem in &type_tuple.elems {
+                extract_custom_types_recursively(elem, types);
+            }
+        }
+        Type::Array(type_array) => {
+            extract_custom_types_recursively(&type_array.elem, types);
+        }
+        Type::Ptr(type_ptr) => {
+            extract_custom_types_recursively(&type_ptr.elem, types);
+        }
+        Type::Slice(type_slice) => {
+            extract_custom_types_recursively(&type_slice.elem, types);
+        }
+        _ => {}
+    }
+}
+
+/// Extracts all unique field types from struct fields, including types within generics.
+fn extract_types_from_fields(fields: &Fields) -> Vec<Type> {
+    let mut types = Vec::new();
+
+    let field_types: Vec<_> = match fields {
+        Fields::Named(fields_named) => {
+            fields_named.named.iter().map(|f| &f.ty).collect()
+        }
+        Fields::Unnamed(fields_unnamed) => {
+            fields_unnamed.unnamed.iter().map(|f| &f.ty).collect()
+        }
+        Fields::Unit => Vec::new(),
+    };
+
+    for ty in field_types {
+        extract_custom_types_recursively(ty, &mut types);
+    }
+
+    types
+}
+
+/// Extracts all unique field types from enum variants, including types within generics.
+fn extract_types_from_enum(data_enum: &DataEnum) -> Vec<Type> {
+    let mut types = Vec::new();
+
+    for variant in &data_enum.variants {
+        types.extend(extract_types_from_fields(&variant.fields));
+    }
+
+    types
+}
+
 /// Generates the add_dependencies method implementation.
 pub fn generate_add_dependencies(fields: Option<&Fields>, data_enum: Option<&DataEnum>) -> TokenStream {
-    let types: Vec<&Type> = if let Some(fields) = fields {
+    let types: Vec<Type> = if let Some(fields) = fields {
         extract_types_from_fields(fields)
     } else if let Some(data_enum) = data_enum {
         extract_types_from_enum(data_enum)
@@ -226,17 +276,11 @@ pub fn generate_add_dependencies(fields: Option<&Fields>, data_enum: Option<&Dat
         Vec::new()
     };
 
-    // Filter out primitive and std types, and deduplicate
+    // Deduplicate by type string representation
     let mut seen = HashSet::new();
     let unique_types: Vec<_> = types
         .into_iter()
         .filter(|ty| {
-            // Skip primitive/std types
-            if is_primitive_or_std_type(ty) {
-                return false;
-            }
-
-            // Deduplicate
             let ty_str = quote! { #ty }.to_string();
             seen.insert(ty_str)
         })

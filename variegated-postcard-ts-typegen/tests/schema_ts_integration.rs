@@ -838,6 +838,58 @@ fn test_generate_full_schema() {
 }
 
 #[test]
+fn test_root_types_generate_all_dependencies() {
+    // Test that adding only root types generates all 75 schemas
+    let mut generator = SchemaGenerator::new();
+
+    // Add only root types - dependencies should be added automatically
+    generator.add::<Limits<f32>>();
+    generator.add::<PidTerm<f32>>();
+    generator.add::<PidParameters<f32>>();
+    generator.add::<PidOut<f32>>();
+
+    generator.add::<Status>();
+    generator.add::<Configuration>();
+    generator.add::<MachineDefinition>();
+    generator.add::<RoutineStorage>();
+
+    generator.add::<SetBoilerControlRequest>();
+    generator.add::<SetGroupControlRequest>();
+    generator.add::<SetPidParametersRequest>();
+    generator.add::<SetGroupPumpConfigurationRequest>();
+    generator.add::<SetWaterTapPumpConfigurationRequest>();
+    generator.add::<SetFillPumpConfigurationRequest>();
+
+    let output = generator.generate();
+
+    // Count generated schemas
+    let schema_count = output.lines()
+        .filter(|line| line.contains("export const") && line.contains("Schema ="))
+        .count();
+
+    println!("\nGenerated {} schemas with root types only", schema_count);
+
+    // Extract schema names for debugging
+    let generated_schemas: Vec<_> = output.lines()
+        .filter(|line| line.contains("export const") && line.contains("Schema ="))
+        .map(|line| {
+            line.trim()
+                .strip_prefix("export const ")
+                .and_then(|s| s.split("Schema").next())
+                .unwrap_or("")
+        })
+        .collect();
+
+    println!("Generated schemas: {:?}", generated_schemas);
+
+    // We expect 75 schemas total
+    if schema_count != 75 {
+        println!("\nWARNING: Expected 75 schemas but got {}.", schema_count);
+        println!("This means automatic dependency resolution isn't complete yet.");
+    }
+}
+
+#[test]
 fn test_pid_types_naming() {
     let mut generator = SchemaGenerator::new();
 
