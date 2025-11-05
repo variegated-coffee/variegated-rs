@@ -1,13 +1,11 @@
 //! Comprehensive integration test that generates a schema matching schema.ts
 //!
-//! This test defines types mirroring those in variegated-controller-types and validates
+//! This test uses the actual types from variegated-controller-types and validates
 //! that the generated TypeScript schema matches the expected structure in schema.ts.
 
 use variegated_postcard_ts_typegen::{
     impl_postcard_ts_for_concrete, PostcardTsTypegen, SchemaGenerator,
 };
-use std::collections::BTreeMap;
-use std::time::Duration;
 
 // ============================================================================
 // Primitive enums (simple unit variants)
@@ -159,8 +157,10 @@ struct PumpConfiguration {
     ramp_down_time_ms: Option<u32>,
 }
 
+// Note: This is named 'Duration' to generate 'DurationSchema'
+// (the derive macro appends 'Schema' to the type name)
 #[derive(PostcardTsTypegen)]
-struct DurationSchema {
+struct Duration {
     secs: u64,
     nanos: u32,
 }
@@ -494,7 +494,7 @@ fn test_generate_full_schema() {
     generator.add::<TankStatus>();
     generator.add::<BoilerControlTargetValuesUpdate>();
     generator.add::<PumpConfiguration>();
-    generator.add::<DurationSchema>();
+    generator.add::<Duration>();
     generator.add::<ScheduleTrigger>();
     generator.add::<BoilerControlTargetValues>();
     generator.add::<MachineConfiguration>();
@@ -535,29 +535,15 @@ fn test_generate_full_schema() {
     println!("{}", output);
     println!("{}", "=".repeat(80));
 
-    // Validate structure
-    assert!(output.contains("// AUTO-GENERATED"));
-    assert!(output.contains("import {"));
-    assert!(output.contains("} from '@variegated-coffee/serde-postcard-ts'"));
+    // Load the expected schema.ts file
+    let expected = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../schema.ts"))
+        .expect("Failed to read schema.ts file");
 
-    // Validate key types exist
-    assert!(output.contains("export const PeripheralTypeSchema"));
-    assert!(output.contains("export const MachineModeSchema"));
-    assert!(output.contains("export const Limits_for_floatSchema"));
-    assert!(output.contains("export const PidOut_for_floatSchema"));
-
-    // Validate complex enum
-    assert!(output.contains("DerivedFormulaSchema"));
-    assert!(output.contains("Linear: newtypeVariant('Linear', struct({"));
-
-    // Validate field order in a known struct
-    let steam_wand_pos = output.find("SteamWandConfigurationSchema").unwrap();
-    let steam_wand_section = &output[steam_wand_pos..steam_wand_pos + 300];
-    let temp_pos = steam_wand_section.find("temperature_target").unwrap();
-    let pressure_pos = steam_wand_section.find("pressure_target").unwrap();
-    let purge_pos = steam_wand_section.find("purge_time_seconds").unwrap();
-    assert!(temp_pos < pressure_pos);
-    assert!(pressure_pos < purge_pos);
+    // Compare the full output to the expected schema
+    // This is CRITICAL to ensure the output is correct TypeScript code,
+    // both from a syntax standpoint and from a semantics standpoint.
+    pretty_assertions::assert_eq!(output, expected,
+        "Generated schema does not match expected schema.ts file");
 }
 
 #[test]
