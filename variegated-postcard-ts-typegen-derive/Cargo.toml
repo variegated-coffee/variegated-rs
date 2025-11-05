@@ -1,0 +1,16 @@
+[package]
+name = "variegated-postcard-ts-typegen-derive"
+version = "0.1.0"
+edition = "2024"
+authors = ["Variegated Coffee <support@variegated.coffee>"]
+license = "MIT OR Apache-2.0"
+description = "Derive macro for variegated-postcard-ts-typegen"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+proc-macro2 = "1.0"
