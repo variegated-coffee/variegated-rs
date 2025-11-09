@@ -249,12 +249,7 @@ struct Esp32Peripherals {
 
 #[variegated_board_cfg::board_cfg("sd_card_peripherals")]
 struct SdCardPeripherals {
-    pin_clk: Peri<'static, ()>,
-    pin_cmd: Peri<'static, ()>,
-    pin_d0: Peri<'static, ()>,
-    pin_d1: Peri<'static, ()>,
-    pin_d2: Peri<'static, ()>,
-    pin_d3: Peri<'static, ()>,
+    pin_cs: Peri<'static, ()>,
     pin_det: Peri<'static, ()>,
 }
 

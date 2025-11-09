@@ -29,14 +29,14 @@ adc = "embassy_rp::peripherals::ADC"
 pin_linear_encoder_a = "embassy_rp::peripherals::PIN_47"
 
 [gear_pump_peripherals]
-pwm_speed = "embassy_rp::peripherals::PWM_SLICE9"
-pin_speed = "embassy_rp::peripherals::PIN_34"
-pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE8"
-pin_tacho_out = "embassy_rp::peripherals::PIN_33"
+pwm_speed = "embassy_rp::peripherals::PWM_SLICE10"
+pin_speed = "embassy_rp::peripherals::PIN_44"
+pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE4"
+pin_tacho_out = "embassy_rp::peripherals::PIN_25"
 pin_dir = "embassy_rp::peripherals::PIN_35"
 
 [rotary_pump_peripherals]
-pin_rotary_pump_enable = "embassy_rp::peripherals::PIN_40"
+pin_rotary_pump_enable = "embassy_rp::peripherals::PIN_34"
 
 [flow_meter_peripherals]
 pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE3"
@@ -48,17 +48,12 @@ dma = "embassy_rp::peripherals::DMA_CH8"
 pin_brew_he = "embassy_rp::peripherals::PIN_37"
 pin_service_he = "embassy_rp::peripherals::PIN_36"
 pin_group_solenoid = "embassy_rp::peripherals::PIN_26"
-pin_fill_solenoid = "embassy_rp::peripherals::PIN_25"
+pin_fill_solenoid = "embassy_rp::peripherals::PIN_33"
 pin_water_dispersal_solenoid = "embassy_rp::peripherals::PIN_24"
 
 [sd_card_peripherals]
-pin_clk = "embassy_rp::peripherals::PIN_41"
-pin_cmd = "embassy_rp::peripherals::PIN_42"
-pin_d0 = "embassy_rp::peripherals::PIN_43"
-pin_d1 = "embassy_rp::peripherals::PIN_44"
-pin_d2 = "embassy_rp::peripherals::PIN_45"
-pin_d3 = "embassy_rp::peripherals::PIN_46"
-pin_det = "embassy_rp::peripherals::PIN_5"
+pin_cs = "embassy_rp::peripherals::PIN_41"
+pin_det = "embassy_rp::peripherals::PIN_42"
 
 [qwiic_i2c_bus_peripherals]
 i2c = "embassy_rp::peripherals::I2C0"
