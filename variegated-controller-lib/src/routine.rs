@@ -1231,7 +1231,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
 }
 
 pub fn create_backflush_routine(group: GroupIndex, pump_duty_cycle: DutyCycleType) -> Routine {
-    const PUMP_ON_TIME: f32 = 2.5; // seconds
+    const PUMP_ON_TIME: f32 = 4.0; // seconds
     const PUMP_OFF_TIME: f32 = 5.0; // seconds
     const NUM_CYCLES: usize = 5;
 
