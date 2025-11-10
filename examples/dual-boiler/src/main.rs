@@ -90,10 +90,13 @@ mod mcp23017_hd44780;
 mod display;
 mod buttons;
 mod led_controller;
+mod ads_measurement_coordinator;
+
 use mcp23017_hd44780::Mcp23017HD44780Device;
 use display::lcd_display_task;
 use buttons::button_controller_task;
 use led_controller::led_controller_task;
+use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
@@ -916,6 +919,14 @@ async fn main_task(
         0.0
     );
 
+    // Create the ADS124S08 measurement coordinator
+    let mut ads_coordinator = Ads124S08MeasurementCoordinator::new(
+        &mut brew_temp_sensor,
+        &mut brew_pressure_sensor,
+        &mut steam_temp_sensor,
+        &mut steam_pressure_sensor,
+    );
+
     // Helper function for water level transformer
     let water_level_transformer = |m: SuccessfulMeasurement| -> WaterLevelType {
         match m {
@@ -1251,11 +1262,8 @@ async fn main_task(
 
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
         vec![
-            Box::pin(brew_temp_sensor.task()),
-            Box::pin(steam_temp_sensor.task()),
+            Box::pin(ads_coordinator.task()),
             Box::pin(flow_meter.task()),
-            Box::pin(brew_pressure_sensor.task()),
-            Box::pin(steam_pressure_sensor.task()),
             Box::pin(brew_he.task()),
             Box::pin(steam_he.task()),
             Box::pin(steam_boiler_water_level.task()),
