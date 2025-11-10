@@ -119,7 +119,7 @@ use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
 use variegated_hal::scale::ScaleController;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity;
-use variegated_instrumentation::{async_task_loop, instrumented_section};
+use variegated_instrumentation::{async_task_loop, instrumented_section, PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -328,6 +328,30 @@ const CORE1_STACK_LENGTH: usize = 32*1024;
 static mut CORE1_STACK: Stack<CORE1_STACK_LENGTH> = Stack::new();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+
+// Performance Counters - Track events by incrementing
+define_counters! {
+    enum CounterId {
+        // Task loop iterations
+        BrewTemperatureReading = 0,
+        BrewPressureReading = 1,
+        SteamTemperatureReading = 2,
+        SteamPressureReading = 3,
+    }
+}
+
+// Performance Indicators - Track current state by setting values
+define_indicators! {
+    enum IndicatorId {
+        BrewTemperatureReadingTimeMs = 0,
+        BrewPressureReadingTimeMs = 1,
+        SteamTemperatureReadingTimeMs = 2,
+        SteamPressureReadingTimeMs = 3,
+    }
+}
+
+static COUNTERS: PerformanceCounters<4> = PerformanceCounters::new();
+static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
@@ -877,7 +901,9 @@ async fn main_task(
         brew_boiler_temp_watch.sender(),
         RatiometricLowSide(Mux::AIN9, Mux::AIN10, IDACMux::AIN8, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0 / 1.03),
         ConversionParameters::pt1000().with_kalman_filter(0.001, 0.05, 1.0),
-        0.0
+        0.0,
+        Some(COUNTERS.handle(CounterId::BrewTemperatureReading)),
+        Some(INDICATORS.handle(IndicatorId::BrewTemperatureReadingTimeMs)),
     );
 
     let brew_boiler_pressure_watch: &'static Watch<_, _, 3> = BREW_BOILER_PRESSURE_WATCH.init(Watch::new());
@@ -890,9 +916,12 @@ async fn main_task(
             5.0
         ),
         ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 16.0)
-            .with_median_filter(5)
-            .with_kalman_filter(0.05, 0.1, 0.5),
-        0.0
+            .with_median_filter(3)
+            //.with_kalman_filter(0.05, 0.1, 0.5)
+        ,
+        0.0,
+        Some(COUNTERS.handle(CounterId::BrewPressureReading)),
+        Some(INDICATORS.handle(IndicatorId::BrewPressureReadingTimeMs)),
     );
 
     let steam_boiler_temp_watch: &'static Watch<_, _, 3>  = STEAM_BOILER_TEMP_WATCH.init(Watch::new());
@@ -901,7 +930,9 @@ async fn main_task(
         steam_boiler_temp_watch.sender(),
         RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::Disconnected, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain1, 2200.0 / 1.03),
         ConversionParameters::pt1000().with_kalman_filter(0.001, 0.05, 1.0),
-        0.0
+        0.0,
+        Some(COUNTERS.handle(CounterId::SteamTemperatureReading)),
+        Some(INDICATORS.handle(IndicatorId::SteamTemperatureReadingTimeMs)),
     );
 
     let steam_boiler_pressure_watch: &'static Watch<_, _, 3> = STEAM_BOILER_PRESSURE_WATCH.init(Watch::new());
@@ -916,7 +947,9 @@ async fn main_task(
         ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 4.0)
             .with_median_filter(5)
             .with_kalman_filter(0.05, 0.1, 0.5),
-        0.0
+        0.0,
+        Some(COUNTERS.handle(CounterId::SteamPressureReading)),
+        Some(INDICATORS.handle(IndicatorId::SteamPressureReadingTimeMs)),
     );
 
     // Create the ADS124S08 measurement coordinator
@@ -1251,6 +1284,9 @@ async fn main_task(
     // Spawn the configuration debug logger task
     unwrap!(spawner.spawn(configuration_debug_logger(debug_configuration_receiver)));
 
+    // Spawn the instrumentation monitor task
+    unwrap!(spawner.spawn(instrumentation_monitor_task()));
+
     // Spawn the SD detect pin toggle task
     //unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
 
@@ -1473,6 +1509,60 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
             }
         });
     });
+}
+
+#[embassy_executor::task]
+async fn instrumentation_monitor_task() {
+    info!("Starting instrumentation monitor task");
+
+    // Initialize tracking variables for frequency calculation
+    let mut last_counts = [0u64; 4];
+    let mut last_time = Instant::now();
+
+    // Wait 5 seconds before first report to get meaningful data
+    Timer::after_secs(5).await;
+
+    loop {
+        let now = Instant::now();
+        let elapsed = now.duration_since(last_time);
+        let elapsed_secs = elapsed.as_millis() as f32 / 1000.0;
+
+        // Read current counter values
+        let brew_temp_count = COUNTERS.read(CounterId::BrewTemperatureReading);
+        let brew_press_count = COUNTERS.read(CounterId::BrewPressureReading);
+        let steam_temp_count = COUNTERS.read(CounterId::SteamTemperatureReading);
+        let steam_press_count = COUNTERS.read(CounterId::SteamPressureReading);
+
+        // Calculate frequencies (reads per second)
+        let brew_temp_freq = (brew_temp_count - last_counts[0]) as f32 / elapsed_secs;
+        let brew_press_freq = (brew_press_count - last_counts[1]) as f32 / elapsed_secs;
+        let steam_temp_freq = (steam_temp_count - last_counts[2]) as f32 / elapsed_secs;
+        let steam_press_freq = (steam_press_count - last_counts[3]) as f32 / elapsed_secs;
+
+        // Read current indicator values (timing in milliseconds)
+        let brew_temp_time = INDICATORS.read(IndicatorId::BrewTemperatureReadingTimeMs);
+        let brew_press_time = INDICATORS.read(IndicatorId::BrewPressureReadingTimeMs);
+        let steam_temp_time = INDICATORS.read(IndicatorId::SteamTemperatureReadingTimeMs);
+        let steam_press_time = INDICATORS.read(IndicatorId::SteamPressureReadingTimeMs);
+
+        // Log counter frequencies
+        info!("[Counters] Brew Temp: {}/s, Brew Press: {}/s, Steam Temp: {}/s, Steam Press: {}/s",
+              brew_temp_freq, brew_press_freq, steam_temp_freq, steam_press_freq);
+
+        // Log indicator values
+        info!("[Indicators] Brew Temp: {}ms, Brew Press: {}ms, Steam Temp: {}ms, Steam Press: {}ms",
+              brew_temp_time, brew_press_time, steam_temp_time, steam_press_time);
+
+        // Update tracking variables
+        last_counts[0] = brew_temp_count;
+        last_counts[1] = brew_press_count;
+        last_counts[2] = steam_temp_count;
+        last_counts[3] = steam_press_count;
+        last_time = now;
+
+        // Wait 5 seconds before next report
+        Timer::after_secs(5).await;
+    }
 }
 
 #[cfg(feature = "tft-display")]

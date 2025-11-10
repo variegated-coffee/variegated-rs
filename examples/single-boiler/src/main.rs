@@ -411,7 +411,9 @@ async fn main_task(spawner: Spawner) -> ! {
         temp_sig.sender(),
         RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::AIN3, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain4, 1620.0),
         ConversionParameters::pt100().with_kalman_filter(0.001, 0.05, 1.0),
-        -2.95
+        -2.95,
+        None::<variegated_instrumentation::CounterHandle<1>>,
+        None::<variegated_instrumentation::IndicatorHandle<1>>,
     );
 
     let prs_sig: &'static Watch<_, _, 3> = PRESSURE_SIGNAL.init(Watch::new());
@@ -426,7 +428,9 @@ async fn main_task(spawner: Spawner) -> ! {
         ConversionParameters::linear_range_mapping(0.5, 4.5, 0.0, 15.0)
             .with_median_filter(5)
             .with_kalman_filter(0.05, 0.1, 0.5),
-        0.0
+        0.0,
+        None::<variegated_instrumentation::CounterHandle<1>>,
+        None::<variegated_instrumentation::IndicatorHandle<1>>,
     );
 
     let mechanism_p = mechanism_peripherals!(p);

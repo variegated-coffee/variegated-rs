@@ -8,3 +8,17 @@ test = false
 bench = false
 
 [dependencies]
+portable-atomic = { version = "1.9", default-features = false }
+
+[dependencies.defmt]
+version = "0.3"
+optional = true
+
+[dependencies.serde]
+version = "1.0"
+default-features = false
+optional = true
+
+[features]
+default = []
+instrumentation = []
