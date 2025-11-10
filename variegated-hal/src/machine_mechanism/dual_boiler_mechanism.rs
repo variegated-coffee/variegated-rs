@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Instant;
 use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
@@ -261,14 +261,14 @@ impl<'a> DualBoilerMechanism<'a> {
     }
 }
 
-pub struct DualBoilerFillMechanism<'a> {
-    mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>,
+pub struct DualBoilerFillMechanism<'a, M: RawMutex> {
+    mechanism: &'a Mutex<M, DualBoilerMechanism<'a>>,
     threshold_exceeded_time: Option<Instant>,
     is_filling_cycle: bool,
 }
 
-impl<'a> DualBoilerFillMechanism<'a> {
-    pub fn new(mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>) -> Self {
+impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
+    pub fn new(mechanism: &'a Mutex<M, DualBoilerMechanism<'a>>) -> Self {
         DualBoilerFillMechanism {
             mechanism,
             threshold_exceeded_time: None,
@@ -338,18 +338,18 @@ impl<'a> DualBoilerFillMechanism<'a> {
     }
 }
 
-pub struct DualBoilerBrewMechanism<'a> {
-    mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>,
+pub struct DualBoilerBrewMechanism<'a, M: RawMutex> {
+    mechanism: &'a Mutex<M, DualBoilerMechanism<'a>>,
 }
 
-impl<'a> DualBoilerBrewMechanism<'a> {
-    pub fn new(mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>) -> Self {
+impl<'a, M: RawMutex> DualBoilerBrewMechanism<'a, M> {
+    pub fn new(mechanism: &'a Mutex<M, DualBoilerMechanism<'a>>) -> Self {
         DualBoilerBrewMechanism { mechanism }
     }
 }
 
 #[async_trait]
-impl<'a> BrewMechanism for DualBoilerBrewMechanism<'a> {
+impl<'a, M: RawMutex + Sync> BrewMechanism for DualBoilerBrewMechanism<'a, M> {
     async fn set_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError> {
         let mut mechanism = self.mechanism.lock().await;
         mechanism.request_brew_state(brewing, duty_cycle_percent);
@@ -372,18 +372,18 @@ impl<'a> BrewMechanism for DualBoilerBrewMechanism<'a> {
     }
 }
 
-pub struct DualBoilerWaterTapMechanism<'a> {
-    mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>,
+pub struct DualBoilerWaterTapMechanism<'a, M: RawMutex> {
+    mechanism: &'a Mutex<M, DualBoilerMechanism<'a>>,
 }
 
-impl<'a> DualBoilerWaterTapMechanism<'a> {
-    pub fn new(mechanism: &'a Mutex<CriticalSectionRawMutex, DualBoilerMechanism<'a>>) -> Self {
+impl<'a, M: RawMutex> DualBoilerWaterTapMechanism<'a, M> {
+    pub fn new(mechanism: &'a Mutex<M, DualBoilerMechanism<'a>>) -> Self {
         DualBoilerWaterTapMechanism { mechanism }
     }
 }
 
 #[async_trait]
-impl<'a> WaterTapMechanism for DualBoilerWaterTapMechanism<'a> {
+impl<'a, M: RawMutex + Sync> WaterTapMechanism for DualBoilerWaterTapMechanism<'a, M> {
     async fn set_state(&mut self, dispensing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), WaterTapMechanismError> {
         let mut mechanism = self.mechanism.lock().await;
         mechanism.request_water_dispersal_state(dispensing, duty_cycle_percent);

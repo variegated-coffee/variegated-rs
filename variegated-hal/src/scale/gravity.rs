@@ -24,13 +24,13 @@ pub enum GravityCommand {
     ReferenceWeightCalibration(u32),
 }
 
-pub struct GravityDevice<'a, M: RawMutex, I2cDevT: I2c, const N: usize> {
+pub struct GravityDevice<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> {
     gravity: &'a Mutex<M, Gravity<I2cDevT>>,
     weight_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
     weight_conversion_parameters: ConversionParameters,
     rate_of_change_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
     rate_of_change_conversion_parameters: ConversionParameters,
-    command_signal: Receiver<'a, CriticalSectionRawMutex, GravityCommand, N>,
+    command_signal: Receiver<'a, CM, GravityCommand, N>,
     poll_delay: Duration,
     channel: Channel,
     connected_signal: Option<&'a Signal<NoopRawMutex, bool>>,
@@ -39,7 +39,7 @@ pub struct GravityDevice<'a, M: RawMutex, I2cDevT: I2c, const N: usize> {
     is_connected: bool,
 }
 
-impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<'a, M, I2cDevT, N> {
+impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<'a, M, CM, I2cDevT, N> {
     pub fn new(
         gravity: &'a Mutex<M, Gravity<I2cDevT>>,
         channel: Channel,
@@ -47,7 +47,7 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<'a, M, I2cDevT
         rate_of_change_signal: Option<WatchSender<'a, NoopRawMutex, SensorReading<f32>, N>>,
         weight_conversion_parameters: ConversionParameters,
         rate_of_change_conversion_parameters: ConversionParameters,
-        command_signal: Receiver<'a, CriticalSectionRawMutex, GravityCommand, N>,
+        command_signal: Receiver<'a, CM, GravityCommand, N>,
         poll_delay: Duration,
     ) -> Self {
         GravityDevice {
@@ -92,7 +92,7 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<'a, M, I2cDevT
     }
 }
 
-impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'a, M, I2cDevT, N>  where <I2cDevT as embedded_hal::i2c::ErrorType>::Error: Format  {
+impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'a, M, CM, I2cDevT, N>  where <I2cDevT as embedded_hal::i2c::ErrorType>::Error: Format  {
     async fn task(&mut self) {
         let mut current_retry_delay = self.retry_delay;
         
@@ -238,18 +238,18 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for GravityDevice<'
     }
 }
 
-pub struct GravityController<'a, const N: usize> {
-    command_sender: ChannelSender<'a, CriticalSectionRawMutex, GravityCommand, N>,
+pub struct GravityController<'a, M: RawMutex, const N: usize> {
+    command_sender: ChannelSender<'a, M, GravityCommand, N>,
 }
 
-impl <'a, const N: usize> GravityController<'a, N> {
-    pub fn new(command_sender: ChannelSender<'a, CriticalSectionRawMutex, GravityCommand, N>) -> Self {
+impl<'a, M: RawMutex, const N: usize> GravityController<'a, M, N> {
+    pub fn new(command_sender: ChannelSender<'a, M, GravityCommand, N>) -> Self {
         GravityController { command_sender }
     }
 }
 
 #[async_trait]
-impl <'a, const N: usize> ScaleController for GravityController<'a, N> {
+impl<'a, M: RawMutex + Sync, const N: usize> ScaleController for GravityController<'a, M, N> {
     async fn tare(&mut self) -> Result<(), ScaleError> {
         self.command_sender.try_send(GravityCommand::Tare).map_err(|_| ScaleError::TareFailed)
     }

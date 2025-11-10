@@ -1,0 +1,21 @@
+[package]
+name = "variegated-rp235x-atomic-raw-mutex"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.0"
+authors = ["Variegated Coffee <info@variegated.coffee>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+description = "High-performance atomic RawMutex for RP235x with full reentrancy and reference counting"
+keywords = ["embedded", "rp2350", "mutex", "embassy", "no-std"]
+categories = ["embedded", "no-std", "concurrency"]
+
+[dependencies]
+embassy-sync = "0.7.2"
+
+[features]
+default = []
+defmt = ["embassy-sync/defmt"]
+
+[package.metadata.docs.rs]
+targets = ["thumbv8m.main-none-eabihf"]

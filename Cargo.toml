@@ -20,6 +20,7 @@ members = [
     "variegated-nv3007",
     "variegated-comms",
     "variegated-timekeeping",
+    "variegated-rp235x-atomic-raw-mutex",
 ]
 resolver = "2"
 package = { rust-version = "1.85.0" }

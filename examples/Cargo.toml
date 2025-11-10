@@ -58,6 +58,7 @@ variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", feat
 variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics", "delta-updates"], optional = true, default-features = false }
 variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
+variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal = "1.0.0"

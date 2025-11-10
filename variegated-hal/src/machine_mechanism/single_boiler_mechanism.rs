@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use crate::{BrewMechanism, BrewMechanismError, DutyCycleType, Pump, ValveMechanism};
 use alloc::boxed::Box;
@@ -58,18 +58,18 @@ impl<'a> SingleBoilerMechanism<'a> {
     }
 }
 
-pub struct SingleBoilerBrewMechanism<'a> {
-    mechanism: &'a Mutex<CriticalSectionRawMutex, SingleBoilerMechanism<'a>>
+pub struct SingleBoilerBrewMechanism<'a, M: RawMutex> {
+    mechanism: &'a Mutex<M, SingleBoilerMechanism<'a>>
 }
 
-impl<'a> SingleBoilerBrewMechanism<'a> {
-    pub fn new(mechanism: &'a Mutex<CriticalSectionRawMutex, SingleBoilerMechanism<'a>>) -> Self {
+impl<'a, M: RawMutex> SingleBoilerBrewMechanism<'a, M> {
+    pub fn new(mechanism: &'a Mutex<M, SingleBoilerMechanism<'a>>) -> Self {
         SingleBoilerBrewMechanism { mechanism }
     }
 }
 
 #[async_trait]
-impl<'a> BrewMechanism for SingleBoilerBrewMechanism<'a> {
+impl<'a, M: RawMutex + Sync> BrewMechanism for SingleBoilerBrewMechanism<'a, M> {
     async fn set_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError> {
         let mut mechanism = self.mechanism.lock().await;
         if brewing {

@@ -120,6 +120,9 @@ use variegated_hal::scale::ScaleController;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity;
 use variegated_instrumentation::{async_task_loop, instrumented_section, PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
+use variegated_rp235x_atomic_raw_mutex::AtomicRawMutex;
+
+type SyncSendRawMutex = AtomicRawMutex;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -139,9 +142,9 @@ pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 #[embassy_executor::task]
 async fn esp_transceiver_task(
     esp_p: Esp32Peripherals,
-    status_receiver: Subscriber<'static, CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>,
-    configuration_receiver: Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>,
-    command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, MachineCommand, 10>,
+    status_receiver: Subscriber<'static, SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>,
+    configuration_receiver: Subscriber<'static, SyncSendRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>,
+    command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
     machine_definition: MachineDefinition,
     routine_repository: &'static RoutineRepositoryMutex,
 ) {
@@ -283,13 +286,13 @@ struct BacklightPeripherals {
     pin: Peri<'static, ()>,
 }
 
-type InternalSPIBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
+type InternalSPIBus = Mutex<SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
 type QwiicI2CDevice = I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
 type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
-type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
+type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>, Output<'static>>, Input<'static>, Delay>>;
 type FdcMutex = Mutex<NoopRawMutex, FDC1004<I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>, Delay>>;
-type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
+type SettingsFlashMutex = Mutex<SyncSendRawMutex, W25q32jv<SpiDevice<'static, SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
 #[cfg(feature = "gravity")]
 type GravityMutex = Mutex<NoopRawMutex, Gravity<QwiicI2CDevice>>;
 
@@ -302,26 +305,26 @@ type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'stati
 type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
 
 const STATUS_RECEIVERS: usize = 7; // Includes: display, LCD, button controller, LED controller, ESP transceiver, and backlight
-type StatusChannel = PubSubChannel<CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
-type StatusSubscriber = Subscriber<'static, CriticalSectionRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
+type StatusChannel = PubSubChannel<SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
+type StatusSubscriber = Subscriber<'static, SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
 const CONFIGURATION_RECEIVERS: usize = 4;
-type ConfigurationChannel = PubSubChannel<CriticalSectionRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
-type ConfigurationSubscriber = Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
+type ConfigurationChannel = PubSubChannel<SyncSendRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
+type ConfigurationSubscriber = Subscriber<'static, SyncSendRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 
-type SettingsFlashType = W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>;
+type SettingsFlashType = W25q32jv<SpiDevice<'static, SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>;
 
-type RoutineRepositoryType = SequentialStorageRoutineRepository<'static, NoopRawMutex, SettingsFlashType>;
-type ScheduleStoreType = SequentialStorageScheduleStore<'static, NoopRawMutex, SettingsFlashType>;
-type SettingsStorageType = SequentialStorageSettingsStorage<'static, NoopRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration>;
+type RoutineRepositoryType = SequentialStorageRoutineRepository<'static, SyncSendRawMutex, SettingsFlashType>;
+type ScheduleStoreType = SequentialStorageScheduleStore<'static, SyncSendRawMutex, SettingsFlashType>;
+type SettingsStorageType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration>;
 
-type RoutineRepositoryMutex = Mutex<NoopRawMutex, RoutineRepositoryType>;
-type ScheduleStoreMutex = Mutex<NoopRawMutex, ScheduleStoreType>;
-type SettingsStorageMutex = Mutex<NoopRawMutex, SettingsStorageType>;
-type StorageCommandChannel = Channel<CriticalSectionRawMutex, StorageCommand, 4>;
+type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
+type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
+type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
+type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
 const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
-type ShotLogDataPointChannel = PubSubChannel<CriticalSectionRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
+type ShotLogDataPointChannel = PubSubChannel<SyncSendRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
 
 const CORE1_STACK_LENGTH: usize = 32*1024;
 
@@ -472,8 +475,8 @@ static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<Tem
 static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
 static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
 static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
-static BREW_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
-static STEAM_HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
+static BREW_HE_SIGNAL: StaticCell<Signal<SyncSendRawMutex, DutyCycleType>> = StaticCell::new();
+static STEAM_HE_SIGNAL: StaticCell<Signal<SyncSendRawMutex, DutyCycleType>> = StaticCell::new();
 #[cfg(feature = "gear-pump")]
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
@@ -487,10 +490,10 @@ static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = Static
 #[cfg(feature = "gravity")]
 static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
 #[cfg(feature = "gravity")]
-static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
 
-static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, DualBoilerMechanism>> = StaticCell::new();
-static COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, 10>> = StaticCell::new();
+static MECHANISM_MUTEX: StaticCell<Mutex<SyncSendRawMutex, DualBoilerMechanism>> = StaticCell::new();
+static COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
@@ -502,32 +505,23 @@ static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
 
-// Wrapper type for schedule store pointer that's explicitly Send/Sync (safe because the pointer is stable after initialization)
-#[derive(Clone, Copy)]
-struct ScheduleStorePtr(*const ScheduleStoreMutex);
-unsafe impl Send for ScheduleStorePtr {}
-unsafe impl Sync for ScheduleStorePtr {}
+// Type aliases for cross-core storage references
+// These use CriticalSectionRawMutex which is safe for cross-core access
+type ScheduleStoreRef = &'static ScheduleStoreMutex;
+type RoutineRepositoryRef = &'static RoutineRepositoryMutex;
 
-// Global reference to schedule store for access from display task (using raw pointer for cross-core access)
-static SCHEDULE_STORE_PTR: Mutex<CriticalSectionRawMutex, Option<ScheduleStorePtr>> = Mutex::new(None);
-
-// Wrapper type for routine repository pointer that's explicitly Send/Sync (safe because the pointer is stable after initialization)
-#[derive(Clone, Copy)]
-struct RoutineRepositoryPtr(*const RoutineRepositoryMutex);
-unsafe impl Send for RoutineRepositoryPtr {}
-unsafe impl Sync for RoutineRepositoryPtr {}
-
-// Global reference to routine repository for access from display task (using raw pointer for cross-core access)
-static ROUTINE_REPOSITORY_PTR: Mutex<CriticalSectionRawMutex, Option<RoutineRepositoryPtr>> = Mutex::new(None);
+// Global references to storage for cross-core access (safe via CriticalSectionRawMutex)
+static SCHEDULE_STORE_REF: Mutex<SyncSendRawMutex, Option<ScheduleStoreRef>> = Mutex::new(None);
+static ROUTINE_REPOSITORY_REF: Mutex<SyncSendRawMutex, Option<RoutineRepositoryRef>> = Mutex::new(None);
 
 /// Background task for handling long-running storage operations
 /// This task processes optimize commands without blocking the main control loop
 #[embassy_executor::task]
 async fn storage_task(
-    mut storage_command_receiver: Receiver<'static, CriticalSectionRawMutex, StorageCommand, 4>,
-    routine_repository: &'static Mutex<NoopRawMutex, RoutineRepositoryType>,
-    schedule_store: &'static Mutex<NoopRawMutex, ScheduleStoreType>,
-    configuration_store: &'static Mutex<NoopRawMutex, SettingsStorageType>,
+    mut storage_command_receiver: Receiver<'static, SyncSendRawMutex, StorageCommand, 4>,
+    routine_repository: &'static Mutex<SyncSendRawMutex, RoutineRepositoryType>,
+    schedule_store: &'static Mutex<SyncSendRawMutex, ScheduleStoreType>,
+    configuration_store: &'static Mutex<SyncSendRawMutex, SettingsStorageType>,
 ) {
     use defmt::info;
     use variegated_controller_types::StorageCommand;
@@ -830,7 +824,7 @@ async fn main_task(
     watchdog.start(Duration::from_secs(15)); // 5 second timeout
     info!("Watchdog initialized with 5 second timeout");
 
-    let settings_storage: SequentialStorageSettingsStorage<NoopRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    let settings_storage: SequentialStorageSettingsStorage<SyncSendRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let settings_storage_ref = SETTINGS_STORAGE.init(Mutex::new(settings_storage));
 
     // Load initial configuration
@@ -838,7 +832,7 @@ async fn main_task(
 //    let configuration = DualBoilerSingleGroupPersistentConfiguration::default();
 //    settings_storage_ref.lock().await.save_settings(&configuration).await.unwrap();
 
-    let mut routine_repository = SequentialStorageRoutineRepository::new(
+    let mut routine_repository: RoutineRepositoryType = SequentialStorageRoutineRepository::new(
         flash,
         0x0008_0000..0x0010_0000
     );
@@ -856,10 +850,10 @@ async fn main_task(
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
-    // Make routine repository reference available globally for display task (via raw pointer for cross-core access)
-    *ROUTINE_REPOSITORY_PTR.lock().await = Some(RoutineRepositoryPtr(routine_repository_ref as *const _));
+    // Make routine repository reference available globally for display task (cross-core safe via CriticalSectionRawMutex)
+    *ROUTINE_REPOSITORY_REF.lock().await = Some(routine_repository_ref);
 
-    let mut schedule_store = SequentialStorageScheduleStore::new(
+    let mut schedule_store: ScheduleStoreType = SequentialStorageScheduleStore::new(
         flash,
         0x0040_0000..0x0042_0000
     );
@@ -877,8 +871,8 @@ async fn main_task(
     schedule_store.load_from_flash().await.unwrap();
     let schedule_store_ref = SCHEDULE_STORE.init(Mutex::new(schedule_store));
 
-    // Make schedule store reference available globally for display task (via raw pointer for cross-core access)
-    *SCHEDULE_STORE_PTR.lock().await = Some(ScheduleStorePtr(schedule_store_ref as *const _));
+    // Make schedule store reference available globally for display task (cross-core safe via CriticalSectionRawMutex)
+    *SCHEDULE_STORE_REF.lock().await = Some(schedule_store_ref);
 
     info!("Configuration loaded");
 
@@ -1077,7 +1071,7 @@ async fn main_task(
 
     // Create water tap with dual boiler mechanism
     let water_tap_mechanism = DualBoilerWaterTapMechanism::new(mechanism_mutex);
-    let water_tap = WaterTap::new(
+    let water_tap: WaterTap<'static, NoopRawMutex, 3> = WaterTap::new(
         Some(Box::new(water_tap_mechanism)),
         None,
         None,
@@ -1448,15 +1442,12 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
         // Query schedule store periodically (every ~1 second = 100 * 10ms)
         schedule_query_counter = schedule_query_counter.wrapping_add(1);
         if schedule_query_counter % 100 == 0 {
-            // Try to access the schedule store if it's initialized (safe because pointer is stable after init)
-            let schedule_store_ptr_opt = SCHEDULE_STORE_PTR.lock().await.clone();
-            if let Some(ScheduleStorePtr(ptr)) = schedule_store_ptr_opt {
-                unsafe {
-                    let schedule_store = &*ptr;
-                    let mut store_guard = schedule_store.lock().await;
-                    // Always update the cache, even if None (to clear stale data)
-                    display_state.next_schedule = store_guard.get_next_schedule().await;
-                }
+            // Try to access the schedule store if it's initialized
+            let schedule_store_ref_opt = SCHEDULE_STORE_REF.lock().await.clone();
+            if let Some(schedule_store) = schedule_store_ref_opt {
+                let mut store_guard = schedule_store.lock().await;
+                // Always update the cache, even if None (to clear stale data)
+                display_state.next_schedule = store_guard.get_next_schedule().await;
             } else {
                 // Clear cache if schedule store isn't available
                 display_state.next_schedule = None;
@@ -1467,19 +1458,16 @@ async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSub
         if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
             // Check if routine has changed or cache is empty
             if current_routine_index != Some(routine_execution.routine_index) {
-                let routine_repository_ptr_opt = ROUTINE_REPOSITORY_PTR.lock().await.clone();
-                if let Some(RoutineRepositoryPtr(ptr)) = routine_repository_ptr_opt {
-                    unsafe {
-                        let routine_repository = &*ptr;
-                        let mut repo_guard = routine_repository.lock().await;
-                        // Fetch the current routine once
-                        if let Some(routine) = repo_guard.get_routine(routine_execution.routine_index).await {
-                            display_state.current_routine = Some(routine.clone());
-                            current_routine_index = Some(routine_execution.routine_index);
-                        } else {
-                            display_state.current_routine = None;
-                            current_routine_index = None;
-                        }
+                let routine_repository_ref_opt = ROUTINE_REPOSITORY_REF.lock().await.clone();
+                if let Some(routine_repository) = routine_repository_ref_opt {
+                    let mut repo_guard = routine_repository.lock().await;
+                    // Fetch the current routine once
+                    if let Some(routine) = repo_guard.get_routine(routine_execution.routine_index).await {
+                        display_state.current_routine = Some(routine.clone());
+                        current_routine_index = Some(routine_execution.routine_index);
+                    } else {
+                        display_state.current_routine = None;
+                        current_routine_index = None;
                     }
                 } else {
                     display_state.current_routine = None;

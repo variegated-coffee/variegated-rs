@@ -258,7 +258,12 @@ impl Default for DualBoilerSingleGroupConfiguration {
 pub struct DualBoilerSingleGroupController<
     'a,
     ChannelM: RawMutex,
-    M: RawMutex,
+    BoilerM: RawMutex,
+    GroupM: RawMutex,
+    WaterTapM: RawMutex,
+    TankM: RawMutex,
+    FillM: RawMutex,
+    StorageM: RawMutex + 'static,
     SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration> + 'static,
     RoutineRepoT: RoutineRepository + 'static,
     ScheduleStoreT: ScheduleStore + 'static,
@@ -273,12 +278,12 @@ pub struct DualBoilerSingleGroupController<
     storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
 
     // Hardware components
-    brew_boiler: Boiler<'a, M, N_WATCH>,
-    steam_boiler: Boiler<'a, M, N_WATCH>,
-    group: Group<'a, M, N_WATCH>,
-    water_tap: WaterTap<'a, M, N_WATCH>,
-    tank: Option<Tank<'a, M, N_WATCH>>,
-    fill_mechanism: Option<DualBoilerFillMechanism<'a>>,
+    brew_boiler: Boiler<'a, BoilerM, N_WATCH>,
+    steam_boiler: Boiler<'a, BoilerM, N_WATCH>,
+    group: Group<'a, GroupM, N_WATCH>,
+    water_tap: WaterTap<'a, WaterTapM, N_WATCH>,
+    tank: Option<Tank<'a, TankM, N_WATCH>>,
+    fill_mechanism: Option<DualBoilerFillMechanism<'a, FillM>>,
 
     // Control systems
     brew_boiler_pid: PidCtrl<f32>,
@@ -288,7 +293,7 @@ pub struct DualBoilerSingleGroupController<
     last_steam_boiler_output: f32,
 
     // Configuration and storage
-    configuration_store: &'static Mutex<NoopRawMutex, SettingsStoreT>,
+    configuration_store: &'static Mutex<StorageM, SettingsStoreT>,
     configuration: DualBoilerSingleGroupConfiguration,
 //    persistent_configuration: DualBoilerSingleGroupPersistentConfiguration,
 //    ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration,
@@ -300,7 +305,7 @@ pub struct DualBoilerSingleGroupController<
     water_tap_dispensing: bool,
 
     // Routine execution
-    routine_repository: &'static Mutex<NoopRawMutex, RoutineRepoT>,
+    routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
     current_routine: Option<RoutineExecutionContext<u8, DualBoilerSingleGroupConfiguration>>,
 
     // Shot logging
@@ -308,7 +313,7 @@ pub struct DualBoilerSingleGroupController<
     previous_routine_step: Option<usize>,
 
     // Schedule store
-    schedule_store: &'static Mutex<NoopRawMutex, ScheduleStoreT>,
+    schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
 
     // Status tracking
     previous_status: Option<Status>,
@@ -334,7 +339,12 @@ pub struct DualBoilerSingleGroupController<
 impl<
     'a,
     ChannelM: RawMutex,
-    M: RawMutex,
+    BoilerM: RawMutex,
+    GroupM: RawMutex,
+    WaterTapM: RawMutex,
+    TankM: RawMutex,
+    FillM: RawMutex,
+    StorageM: RawMutex + 'static,
     SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>,
     RoutineRepoT: RoutineRepository,
     ScheduleStoreT: ScheduleStore,
@@ -342,7 +352,7 @@ impl<
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> DualBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, RoutineRepoT, ScheduleStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
 /*    fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -355,15 +365,15 @@ impl<
         status_channel_sender: Publisher<'a, ChannelM, Status, 1, N_SUBS, 1>,
         configuration_channel_sender: Publisher<'a, ChannelM, Configuration, 1, N_CONFIG_SUBS, 1>,
         storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
-        brew_boiler: Boiler<'a, M, N_WATCH>,
-        steam_boiler: Boiler<'a, M, N_WATCH>,
-        group: Group<'a, M, N_WATCH>,
-        water_tap: WaterTap<'a, M, N_WATCH>,
-        tank: Option<Tank<'a, M, N_WATCH>>,
-        fill_mechanism: Option<DualBoilerFillMechanism<'a>>,
-        settings_store: &'static Mutex<NoopRawMutex, SettingsStoreT>,
-        routine_repository: &'static Mutex<NoopRawMutex, RoutineRepoT>,
-        schedule_store: &'static Mutex<NoopRawMutex, ScheduleStoreT>,
+        brew_boiler: Boiler<'a, BoilerM, N_WATCH>,
+        steam_boiler: Boiler<'a, BoilerM, N_WATCH>,
+        group: Group<'a, GroupM, N_WATCH>,
+        water_tap: WaterTap<'a, WaterTapM, N_WATCH>,
+        tank: Option<Tank<'a, TankM, N_WATCH>>,
+        fill_mechanism: Option<DualBoilerFillMechanism<'a, FillM>>,
+        settings_store: &'static Mutex<StorageM, SettingsStoreT>,
+        routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
+        schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
     ) -> Self {

@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use defmt::info;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::OutputPin;
@@ -8,13 +8,13 @@ use variegated_instrumentation::async_task_loop;
 use variegated_soft_pwm::SoftPwm;
 use crate::{DutyCycleType, HeatingElement, WithTask};
 
-pub struct GpioBinaryHeatingElementControl<'a> {
+pub struct GpioBinaryHeatingElementControl<'a, M: RawMutex> {
     last_value: DutyCycleType,
-    signal: &'a Signal<CriticalSectionRawMutex, DutyCycleType>,
+    signal: &'a Signal<M, DutyCycleType>,
 }
 
-impl <'a> GpioBinaryHeatingElementControl<'a> {
-    pub fn new(signal: &'a Signal<CriticalSectionRawMutex, DutyCycleType>) -> Self {
+impl<'a, M: RawMutex> GpioBinaryHeatingElementControl<'a, M> {
+    pub fn new(signal: &'a Signal<M, DutyCycleType>) -> Self {
         GpioBinaryHeatingElementControl {
             last_value: 0,
             signal
@@ -22,14 +22,14 @@ impl <'a> GpioBinaryHeatingElementControl<'a> {
     }
 }
 
-pub struct GpioBinaryHeatingElement<'a, O: OutputPin> {
+pub struct GpioBinaryHeatingElement<'a, O: OutputPin, M: RawMutex> {
     output: O,
     soft_pwm: SoftPwm,
-    signal: &'a Signal<CriticalSectionRawMutex, DutyCycleType>,
+    signal: &'a Signal<M, DutyCycleType>,
 }
 
-impl<'a, O: OutputPin> GpioBinaryHeatingElement<'a, O> {
-    pub fn new(output: O, signal: &'a Signal<CriticalSectionRawMutex, DutyCycleType>) -> Self {
+impl<'a, O: OutputPin, M: RawMutex> GpioBinaryHeatingElement<'a, O, M> {
+    pub fn new(output: O, signal: &'a Signal<M, DutyCycleType>) -> Self {
         GpioBinaryHeatingElement {
             output,
             soft_pwm: SoftPwm::new(Duration::from_secs(3), 0),
@@ -39,7 +39,7 @@ impl<'a, O: OutputPin> GpioBinaryHeatingElement<'a, O> {
 }
 
 #[async_trait::async_trait]
-impl<'a> HeatingElement for GpioBinaryHeatingElementControl<'a> {
+impl<'a, M: RawMutex + Sync> HeatingElement for GpioBinaryHeatingElementControl<'a, M> {
     async fn set_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) {
         self.last_value = duty_cycle_percent;
         self.signal.signal(duty_cycle_percent);
@@ -50,7 +50,7 @@ impl<'a> HeatingElement for GpioBinaryHeatingElementControl<'a> {
     }
 }
 
-impl<'a, O: OutputPin> WithTask for GpioBinaryHeatingElement<'a, O> {
+impl<'a, O: OutputPin, M: RawMutex> WithTask for GpioBinaryHeatingElement<'a, O, M> {
     async fn task(&mut self) {
         async_task_loop!("GpioBinaryHeatingElement", None, {
             let new_duty_cycle = self.signal.try_take();

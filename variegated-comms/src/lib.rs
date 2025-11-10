@@ -10,7 +10,7 @@ use defmt::{error, info};
 use embassy_futures::join::join4;
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
-use embassy_sync::blocking_mutex::{Mutex, raw::NoopRawMutex, raw::CriticalSectionRawMutex};
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Instant;
 use postcard::{from_bytes_cobs, to_allocvec_cobs};
 use variegated_controller_types::{
@@ -22,7 +22,7 @@ use variegated_controller_types::{
     Status
 };
 use embassy_sync::channel::{Channel, Sender};
-use variegated_controller_lib::routine::{InMemoryRoutineRepository, RoutineRepository};
+use variegated_controller_lib::routine::RoutineRepository;
 use variegated_timekeeping::TimeKeeper;
 
 /// Generic ESP32-C6 transceiver task that handles bidirectional communication
@@ -37,7 +37,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
     mut status_receiver: Subscriber<'static, M, Status, 1, STATUS_SUBS, 1>,
     mut configuration_receiver: Subscriber<'static, M, Configuration, 1, CONFIG_SUBS, 1>,
-    routine_repository: &'static embassy_sync::mutex::Mutex<NoopRawMutex, R>,
+    routine_repository: &'static embassy_sync::mutex::Mutex<M, R>,
     command_sender: Sender<'static, M, MachineCommand, 10>,
     machine_definition: MachineDefinition
 ) {
@@ -88,7 +88,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         let now_unix = timestamp;
                                         let seconds_since_boot = Instant::now().as_secs();
 
-                                        let boot_time = now_unix - seconds_since_boot;
+                                        let _boot_time = now_unix - seconds_since_boot;
 
                                         if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
                                             // Set time and sync to RTC if available

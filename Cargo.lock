@@ -883,6 +883,7 @@ dependencies = [
  "variegated-mcp23017",
  "variegated-mcp9600",
  "variegated-nv3007",
+ "variegated-rp235x-atomic-raw-mutex",
  "variegated-timekeeping",
  "variegated-tlc59108",
  "w25q32jv",
@@ -2263,6 +2264,11 @@ dependencies = [
 [[package]]
 name = "variegated-instrumentation"
 version = "0.1.0"
+dependencies = [
+ "defmt 0.3.100",
+ "portable-atomic",
+ "serde",
+]
 
 [[package]]
 name = "variegated-log"
@@ -2342,6 +2348,13 @@ dependencies = [
  "heapless 0.8.0",
  "panic-probe",
  "variegated-instrumentation",
+]
+
+[[package]]
+name = "variegated-rp235x-atomic-raw-mutex"
+version = "0.1.0"
+dependencies = [
+ "embassy-sync",
 ]
 
 [[package]]

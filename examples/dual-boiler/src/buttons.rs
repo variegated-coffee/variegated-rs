@@ -45,6 +45,7 @@ use embassy_futures::select::{select, Either};
 use embassy_rp::i2c::{Async, I2c};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Sender;
+use variegated_rp235x_atomic_raw_mutex::AtomicRawMutex;
 use embassy_time::{Instant, Timer};
 use variegated_controller_types::{
     MachineCommand, MachineMode, RoutineIndex, SingleGroupControllerGroups, Status,
@@ -427,7 +428,7 @@ impl ButtonEventHandler {
 pub async fn button_controller_task(
     mut mcp23017: Mcp23017<I2cDevice<'static, NoopRawMutex, I2c<'static, embassy_rp::peripherals::I2C1, Async>>, embassy_time::Delay>,
     mut button_interrupt: embassy_rp::gpio::Input<'static>,
-    command_sender: Sender<'static, embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, MachineCommand, 10>,
+    command_sender: Sender<'static, AtomicRawMutex, MachineCommand, 10>,
     mut status_receiver: StatusSubscriber,
 ) {
     let mut recognizer = ButtonEventRecognizer::new();
