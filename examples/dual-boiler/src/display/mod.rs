@@ -17,6 +17,27 @@ use hd44780_controller::controller::{Controller, config::{InitialConfig, Runtime
 use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
 use embassy_time::Delay;
 
+#[cfg(feature = "tft-display")]
+use alloc::boxed::Box;
+#[cfg(feature = "tft-display")]
+use defmt::info;
+#[cfg(feature = "tft-display")]
+use display_interface_spi::SPIInterface;
+#[cfg(feature = "tft-display")]
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
+#[cfg(feature = "tft-display")]
+use embassy_rp::gpio::{Level, Output};
+#[cfg(feature = "tft-display")]
+use embassy_rp::spi::{Phase, Polarity, Spi};
+#[cfg(feature = "tft-display")]
+use embassy_sync::mutex::Mutex;
+#[cfg(feature = "tft-display")]
+use variegated_instrumentation::async_task_loop;
+#[cfg(feature = "tft-display")]
+use variegated_instrumentation::instrumented_section;
+#[cfg(feature = "tft-display")]
+use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
+
 pub mod lcd_renderer;
 
 #[cfg(feature = "tft-display")]
@@ -24,6 +45,8 @@ pub mod graphical_renderer;
 
 use crate::{StatusSubscriber, mcp23017_hd44780::Mcp23017HD44780Device};
 use variegated_controller_lib::routine::RoutineRepository;
+#[cfg(feature = "tft-display")]
+use variegated_controller_lib::schedule::ScheduleStore;
 use variegated_controller_types::RoutineIndex;
 
 pub use lcd_renderer::LcdDisplayState;
@@ -129,4 +152,153 @@ pub async fn lcd_display_task(
         // Small delay to prevent tight loop
         Timer::after(Duration::from_millis(10)).await;
     }
+}
+
+/// Embassy task for running the graphical TFT display controller
+///
+/// This task handles the NV3007 168x428 TFT display with double-buffered delta updates.
+/// It initializes the display hardware, manages the display buffers, and runs the main
+/// rendering loop that updates the display at 100Hz (every 10ms).
+///
+/// The display uses PSRAM-allocated buffers for efficient delta updates, only sending
+/// changed regions to minimize SPI transactions.
+#[cfg(feature = "tft-display")]
+#[embassy_executor::task]
+pub async fn graphical_display_task(
+    disp_p: crate::DisplayPeripherals,
+    mut status_receiver: StatusSubscriber
+) {
+    use crate::display::GraphicalDisplayState;
+
+    info!("Initializing NV3007 display");
+
+    // Allocate double buffers in PSRAM for delta updates (143,808 bytes each for 168x428 RGB565)
+    // Current buffer: user draws to this
+    // Previous buffer: used for change detection
+    let current_buffer = Box::leak(Box::new([0u8; 143_808]));
+    let previous_buffer = Box::leak(Box::new([0u8; 143_808]));
+    info!("Display buffers allocated:");
+    info!("  Current:  0x{:x}", current_buffer.as_ptr() as usize);
+    info!("  Previous: 0x{:x}", previous_buffer.as_ptr() as usize);
+
+    // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
+    let mut spi_config = embassy_rp::spi::Config::default();
+    spi_config.frequency = 10_000_000;
+    spi_config.phase = Phase::CaptureOnFirstTransition;
+    spi_config.polarity = Polarity::IdleLow;
+    let spi = Spi::new(
+        disp_p.spi,
+        disp_p.sclk_pin,
+        disp_p.mosi_pin,
+        disp_p.miso_pin,
+        disp_p.dma_tx,
+        disp_p.dma_rx,
+        spi_config,
+    );
+
+    let spi_bus = crate::DISPLAY_SPI_BUS.init(Mutex::new(spi));
+    let spi_dev = SpiDevice::new(spi_bus, Output::new(disp_p.disp_cs_pin, Level::High));
+
+    // Setup control pins
+    let dc = Output::new(disp_p.dc_pin, Level::Low);
+    let mut reset = Output::new(disp_p.reset_pin, Level::Low);
+
+    // Create display interface
+    let di = SPIInterface::new(spi_dev, dc);
+
+    // Initialize display with double buffering for delta updates using 279 variant
+    // Rotate270 gives us landscape mode: 428x168 (width x height)
+    let mut display = Builder::new(Nv3007_168_428 { variant: Nv3007Variant::Variant279 })
+        .with_rotation(DisplayRotation::Rotate270)
+        //.connect_with_buffer(di, current_buffer);
+        .connect_with_double_buffer(di, current_buffer, previous_buffer);
+
+    // Hardware reset
+    display.reset(&mut reset, &mut embassy_time::Delay).expect("Failed to reset display");
+    info!("Display reset completed");
+
+    // Initialize display with variant-specific initialization
+    display.init_with_variant().await.expect("Failed to initialize display");
+    info!("Display initialized successfully with 279 variant");
+
+    // Clear and show initial screen
+    // Use flush_full() for initial screen - only 3 SPI transactions!
+    display.clear();
+    display.flush_full().await.expect("Failed to flush display");
+    info!("Display cleared and ready");
+
+    // Create graphical display state
+    let mut display_state = GraphicalDisplayState::new();
+
+    // Counter to throttle schedule queries (query every ~1 second)
+    let mut schedule_query_counter = 0u32;
+
+    // Track current routine execution to detect changes (fetch routine once per execution)
+    let mut current_routine_index: Option<variegated_controller_types::RoutineIndex> = None;
+
+    // Main display loop
+    async_task_loop!("Display task", Some(Duration::from_millis(10)), {
+        // Update status
+        if let Some(new_status) = status_receiver.try_next_message_pure() {
+            display_state.shared_state.update_status(new_status);
+        }
+
+        // Query schedule store periodically (every ~1 second = 100 * 10ms)
+        schedule_query_counter = schedule_query_counter.wrapping_add(1);
+        if schedule_query_counter % 100 == 0 {
+            // Try to access the schedule store if it's initialized
+            let schedule_store_ref_opt = crate::SCHEDULE_STORE_REF.lock().await.clone();
+            if let Some(schedule_store) = schedule_store_ref_opt {
+                let mut store_guard = schedule_store.lock().await;
+                // Always update the cache, even if None (to clear stale data)
+                display_state.next_schedule = store_guard.get_next_schedule().await;
+            } else {
+                // Clear cache if schedule store isn't available
+                display_state.next_schedule = None;
+            }
+        }
+
+        // Update cached routine when routine execution changes (fetch once per execution, not every iteration)
+        if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
+            // Check if routine has changed or cache is empty
+            if current_routine_index != Some(routine_execution.routine_index) {
+                let routine_repository_ref_opt = crate::ROUTINE_REPOSITORY_REF.lock().await.clone();
+                if let Some(routine_repository) = routine_repository_ref_opt {
+                    let mut repo_guard = routine_repository.lock().await;
+                    // Fetch the current routine once
+                    if let Some(routine) = repo_guard.get_routine(routine_execution.routine_index).await {
+                        display_state.current_routine = Some(routine.clone());
+                        current_routine_index = Some(routine_execution.routine_index);
+                    } else {
+                        display_state.current_routine = None;
+                        current_routine_index = None;
+                    }
+                } else {
+                    display_state.current_routine = None;
+                    current_routine_index = None;
+                }
+            }
+        } else {
+            // Clear routine cache when not executing
+            if display_state.current_routine.is_some() {
+                display_state.current_routine = None;
+                current_routine_index = None;
+            }
+        }
+
+        instrumented_section!("Display update", {
+            if let Err(_) = display_state.render(&mut *display) {
+                defmt::error!("Failed to render to TFT display");
+            }
+        });
+
+        instrumented_section!("Display flush", {
+            // Flush to display with delta updates
+            // With double buffering, only changed regions are sent (typically 50-100 transactions)
+            // Falls back to full update if >70% changed (~3 transactions)
+            if let Err(_) = display.flush().await {
+                defmt::error!("Failed to flush TFT display");
+            }
+        });
+    });
 }

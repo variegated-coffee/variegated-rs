@@ -43,7 +43,7 @@ num-traits = { version ="0.2.19", default-features = false, features = ["libm"] 
 
 variegated-board-cfg = { version = "0.2.1", path = "../../variegated-board/variegated-board-cfg" }
 
-variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb"] }
+variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb", "atomic-mutex"] }
 
 variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08", features = ["defmt"] }
 variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }

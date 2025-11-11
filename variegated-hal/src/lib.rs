@@ -10,6 +10,45 @@ use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, InputVolumeType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
 
+/// Mutex type for cross-core and cross-executor synchronization
+///
+/// Use this mutex type when you need to share data between:
+/// - Different CPU cores (e.g., core 0 and core 1 on RP2350)
+/// - Different embassy executors running on the same or different cores
+/// - Interrupt handlers and async tasks
+///
+/// **When NOT to use:** For single-core, single-executor scenarios, use
+/// `NoopRawMutex` instead for better performance (zero overhead).
+///
+/// # Feature Flags
+///
+/// - **With `atomic-mutex` feature (RP2350 only):** Uses hardware atomic
+///   operations via `AtomicRawMutex` for lower overhead cross-core synchronization.
+///   This is the most efficient option for RP2350 chips.
+///
+/// - **Without `atomic-mutex` feature (default):** Uses `CriticalSectionRawMutex`
+///   which disables interrupts. This works on all platforms (RP2040, RP2350, etc.)
+///   but has slightly higher overhead.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // For cross-core communication (e.g., heating element controlled from one core,
+/// // commanded from another):
+/// static SIGNAL: StaticCell<Signal<SyncSendRawMutex, DutyCycleType>> = StaticCell::new();
+///
+/// // For single-core local state (no sharing between cores):
+/// static LOCAL: StaticCell<Signal<NoopRawMutex, DutyCycleType>> = StaticCell::new();
+/// ```
+#[cfg(feature = "atomic-mutex")]
+pub type SyncSendRawMutex = variegated_rp235x_atomic_raw_mutex::AtomicRawMutex;
+
+/// Mutex type for cross-core and cross-executor synchronization
+///
+/// See documentation above for details on when to use this vs `NoopRawMutex`.
+#[cfg(not(feature = "atomic-mutex"))]
+pub type SyncSendRawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+
 #[derive(Clone, Debug, Format)]
 pub struct SensorReading<Transformed> {
     pub raw: f32,
@@ -27,6 +66,7 @@ pub mod machine_mechanism;
 pub mod scale;
 pub mod noop;
 pub mod pump;
+pub mod heating_element;
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {

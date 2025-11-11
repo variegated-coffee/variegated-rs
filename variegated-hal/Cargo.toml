@@ -10,12 +10,15 @@ bench = false
 [dependencies]
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
 embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 embedded-hal = "1.0.0"
 embedded-hal-async = "1.0.0"
 embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
 embassy-sync = { version = "0.7.2", features = ["defmt"] }
 embassy-futures = { version = "0.1.1" }
 embassy-rp = { version = "0.8.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+static_cell = "2"
+variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", optional = true }
 variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08" }
 variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
 variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", features = ["defmt"] }
@@ -36,3 +39,4 @@ rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa", "rp235x"]
 rp235xb = ["embassy-rp/rp235xb", "rp235x"]
 rp235x = []
+atomic-mutex = ["dep:variegated-rp235x-atomic-raw-mutex", "rp235x"]

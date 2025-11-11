@@ -30,7 +30,6 @@ use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
 use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank, SensorReading};
-use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
 use embassy_futures::select::Either::{First, Second};
@@ -42,9 +41,6 @@ use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
 use embassy_time::{Delay, Duration, Instant, Timer};
-use embedded_graphics::primitives::{PrimitiveStyleBuilder, StyledDrawable, Circle};
-use embedded_graphics_core::primitives::Rectangle;
-use embedded_graphics_core::prelude::*;
 use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::{ConversionParameters, ResistorDividerPosition};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
@@ -60,17 +56,11 @@ use embassy_rp::pio::Pio;
 use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::priority_channel::Min;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
-use embedded_graphics::{
-    mono_font::{ascii::FONT_5X7, MonoTextStyleBuilder},
-    pixelcolor::{BinaryColor, Rgb565, RgbColor},
-    prelude::*,
-    text::{Baseline, Text},
-};
 use embedded_hal::pwm::SetDutyCycle;
 use futures::future::join_all;
 
 #[cfg(feature = "tft-display")]
-use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
+use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
@@ -92,14 +82,20 @@ mod buttons;
 mod led_controller;
 mod backlight_controller;
 mod ads_measurement_coordinator;
+mod instrumentation_monitor;
 
 use mcp23017_hd44780::Mcp23017HD44780Device;
 use display::lcd_display_task;
+#[cfg(feature = "tft-display")]
+use display::graphical_display_task;
 use buttons::button_controller_task;
 use led_controller::led_controller_task;
 #[cfg(feature = "tft-display")]
 use backlight_controller::{backlight_task, BacklightPeripherals};
 use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
+use instrumentation_monitor::instrumentation_monitor_task;
+use variegated_hal::heating_element::manager::init_heating_elements_dual;
+use variegated_hal::SyncSendRawMutex;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
@@ -123,9 +119,6 @@ use variegated_hal::scale::ScaleController;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity;
 use variegated_instrumentation::{async_task_loop, instrumented_section, PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
-use variegated_rp235x_atomic_raw_mutex::AtomicRawMutex;
-
-type SyncSendRawMutex = AtomicRawMutex;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -404,7 +397,7 @@ fn main() -> ! {
                 let executor1 = EXECUTOR1.init(Executor::new());
                 executor1.run(|spawner| {
                     info!("Spawning display task on core 1");
-                    unwrap!(spawner.spawn(display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
+                    unwrap!(spawner.spawn(graphical_display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
 
                     info!("Spawning backlight task on core 1");
                     unwrap!(spawner.spawn(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
@@ -472,8 +465,6 @@ static STEAM_BOILER_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<Tem
 static STEAM_BOILER_PRESSURE_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
 static STEAM_BOILER_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
 static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<WaterLevelType>, 3>> = StaticCell::new();
-static BREW_HE_SIGNAL: StaticCell<Signal<SyncSendRawMutex, DutyCycleType>> = StaticCell::new();
-static STEAM_HE_SIGNAL: StaticCell<Signal<SyncSendRawMutex, DutyCycleType>> = StaticCell::new();
 #[cfg(feature = "gear-pump")]
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
@@ -984,26 +975,23 @@ async fn main_task(
         Some(tank_water_level_watch.receiver().unwrap()),
     );
 
-    let brew_he_sig: &'static Signal<_, _> = BREW_HE_SIGNAL.init(Signal::new());
-
-    let mut brew_he = GpioBinaryHeatingElement::new(Output::new(mechanism_p.pin_brew_he, Low), brew_he_sig);
-    let brew_he_control = GpioBinaryHeatingElementControl::new(brew_he_sig);
+    // Initialize heating elements and spawn their background tasks
+    let he_controls = init_heating_elements_dual(
+        &spawner,
+        mechanism_p.pin_brew_he,
+        mechanism_p.pin_service_he,
+    );
 
     let brew_boiler = Boiler::new(
-        Box::new(brew_he_control),
+        Box::new(he_controls.brew_he_control),
         None,
         Some(brew_boiler_temp_watch.receiver().unwrap()),
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
         None
     );
 
-    let steam_he_sig: &'static Signal<_, _> = STEAM_HE_SIGNAL.init(Signal::new());
-
-    let mut steam_he = GpioBinaryHeatingElement::new(Output::new(mechanism_p.pin_service_he, Low), steam_he_sig);
-    let steam_he_control = GpioBinaryHeatingElementControl::new(steam_he_sig);
-
     let steam_boiler = Boiler::new(
-        Box::new(steam_he_control),
+        Box::new(he_controls.steam_he_control),
         None,
         Some(steam_boiler_temp_watch.receiver().unwrap()),
         Some(steam_boiler_pressure_watch.receiver().unwrap()),
@@ -1291,8 +1279,6 @@ async fn main_task(
         vec![
             Box::pin(ads_coordinator.task()),
             Box::pin(flow_meter.task()),
-            Box::pin(brew_he.task()),
-            Box::pin(steam_he.task()),
             Box::pin(steam_boiler_water_level.task()),
             Box::pin(tank_water_level.task()),
             Box::pin(controller.task()),
@@ -1336,216 +1322,5 @@ async fn sync_rtc(rtc: &mut DS3231<QwiicI2CDevice>) {
         }
 
         Timer::after(Duration::from_secs(3600)).await;
-    }
-}
-/*
-#[embassy_executor::task]
-async fn sd_det_toggle_task(mut sd_det_pin: Output<'static>) {
-    info!("Starting SD detect pin toggle task");
-
-    loop {
-        // Toggle the pin high
-        sd_det_pin.set_high();
-
-        // Wait 1 second
-        Timer::after_millis(50).await;
-
-        // Toggle the pin low
-        sd_det_pin.set_low();
-
-        // Wait 1 second
-        Timer::after_millis(50).await;
-    }
-}
-*/
-#[cfg(feature = "tft-display")]
-#[embassy_executor::task]
-async fn display_task(disp_p: DisplayPeripherals, mut status_receiver: StatusSubscriber) {
-    use crate::display::GraphicalDisplayState;
-
-    info!("Initializing NV3007 display");
-
-    // Allocate double buffers in PSRAM for delta updates (143,808 bytes each for 168x428 RGB565)
-    // Current buffer: user draws to this
-    // Previous buffer: used for change detection
-    let current_buffer = Box::leak(Box::new([0u8; 143_808]));
-    let previous_buffer = Box::leak(Box::new([0u8; 143_808]));
-    info!("Display buffers allocated:");
-    info!("  Current:  0x{:x}", current_buffer.as_ptr() as usize);
-    info!("  Previous: 0x{:x}", previous_buffer.as_ptr() as usize);
-
-    // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
-    let mut spi_config = spi::Config::default();
-    spi_config.frequency = 10_000_000;
-    spi_config.phase = Phase::CaptureOnFirstTransition;
-    spi_config.polarity = Polarity::IdleLow;
-    let spi = Spi::new(
-        disp_p.spi,
-        disp_p.sclk_pin,
-        disp_p.mosi_pin,
-        disp_p.miso_pin,
-        disp_p.dma_tx,
-        disp_p.dma_rx,
-        spi_config,
-    );
-
-    let spi_bus = DISPLAY_SPI_BUS.init(Mutex::new(spi));
-    let spi_dev = SpiDevice::new(spi_bus, Output::new(disp_p.disp_cs_pin, Level::High));
-
-    // Setup control pins
-    let dc = Output::new(disp_p.dc_pin, Level::Low);
-    let mut reset = Output::new(disp_p.reset_pin, Level::Low);
-
-    // Create display interface
-    let di = SPIInterface::new(spi_dev, dc);
-
-    // Initialize display with double buffering for delta updates using 279 variant
-    // Rotate270 gives us landscape mode: 428x168 (width x height)
-    let mut display = Builder::new(Nv3007_168_428 { variant: Nv3007Variant::Variant279 })
-        .with_rotation(DisplayRotation::Rotate270)
-        //.connect_with_buffer(di, current_buffer);
-        .connect_with_double_buffer(di, current_buffer, previous_buffer);
-
-    // Hardware reset
-    display.reset(&mut reset, &mut embassy_time::Delay).expect("Failed to reset display");
-    info!("Display reset completed");
-
-    // Initialize display with variant-specific initialization
-    display.init_with_variant().await.expect("Failed to initialize display");
-    info!("Display initialized successfully with 279 variant");
-
-    // Clear and show initial screen
-    // Use flush_full() for initial screen - only 3 SPI transactions!
-    display.clear();
-    display.flush_full().await.expect("Failed to flush display");
-    info!("Display cleared and ready");
-
-    // Create graphical display state
-    let mut display_state = GraphicalDisplayState::new();
-
-    // Counter to throttle schedule queries (query every ~1 second)
-    let mut schedule_query_counter = 0u32;
-
-    // Track current routine execution to detect changes (fetch routine once per execution)
-    let mut current_routine_index: Option<variegated_controller_types::RoutineIndex> = None;
-
-    // Main display loop
-    async_task_loop!("Display task", Some(Duration::from_millis(10)), {
-        // Update status
-        if let Some(new_status) = status_receiver.try_next_message_pure() {
-            display_state.shared_state.update_status(new_status);
-        }
-
-        // Query schedule store periodically (every ~1 second = 100 * 10ms)
-        schedule_query_counter = schedule_query_counter.wrapping_add(1);
-        if schedule_query_counter % 100 == 0 {
-            // Try to access the schedule store if it's initialized
-            let schedule_store_ref_opt = SCHEDULE_STORE_REF.lock().await.clone();
-            if let Some(schedule_store) = schedule_store_ref_opt {
-                let mut store_guard = schedule_store.lock().await;
-                // Always update the cache, even if None (to clear stale data)
-                display_state.next_schedule = store_guard.get_next_schedule().await;
-            } else {
-                // Clear cache if schedule store isn't available
-                display_state.next_schedule = None;
-            }
-        }
-
-        // Update cached routine when routine execution changes (fetch once per execution, not every iteration)
-        if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
-            // Check if routine has changed or cache is empty
-            if current_routine_index != Some(routine_execution.routine_index) {
-                let routine_repository_ref_opt = ROUTINE_REPOSITORY_REF.lock().await.clone();
-                if let Some(routine_repository) = routine_repository_ref_opt {
-                    let mut repo_guard = routine_repository.lock().await;
-                    // Fetch the current routine once
-                    if let Some(routine) = repo_guard.get_routine(routine_execution.routine_index).await {
-                        display_state.current_routine = Some(routine.clone());
-                        current_routine_index = Some(routine_execution.routine_index);
-                    } else {
-                        display_state.current_routine = None;
-                        current_routine_index = None;
-                    }
-                } else {
-                    display_state.current_routine = None;
-                    current_routine_index = None;
-                }
-            }
-        } else {
-            // Clear routine cache when not executing
-            if display_state.current_routine.is_some() {
-                display_state.current_routine = None;
-                current_routine_index = None;
-            }
-        }
-
-        instrumented_section!("Display update", {
-            if let Err(_) = display_state.render(&mut *display) {
-                defmt::error!("Failed to render to TFT display");
-            }
-        });
-
-        instrumented_section!("Display flush", {
-            // Flush to display with delta updates
-            // With double buffering, only changed regions are sent (typically 50-100 transactions)
-            // Falls back to full update if >70% changed (~3 transactions)
-            if let Err(_) = display.flush().await {
-                defmt::error!("Failed to flush TFT display");
-            }
-        });
-    });
-}
-
-#[embassy_executor::task]
-async fn instrumentation_monitor_task() {
-    info!("Starting instrumentation monitor task");
-
-    // Initialize tracking variables for frequency calculation
-    let mut last_counts = [0u64; 4];
-    let mut last_time = Instant::now();
-
-    // Wait 5 seconds before first report to get meaningful data
-    Timer::after_secs(5).await;
-
-    loop {
-        let now = Instant::now();
-        let elapsed = now.duration_since(last_time);
-        let elapsed_secs = elapsed.as_millis() as f32 / 1000.0;
-
-        // Read current counter values
-        let brew_temp_count = COUNTERS.read(CounterId::BrewTemperatureReading);
-        let brew_press_count = COUNTERS.read(CounterId::BrewPressureReading);
-        let steam_temp_count = COUNTERS.read(CounterId::SteamTemperatureReading);
-        let steam_press_count = COUNTERS.read(CounterId::SteamPressureReading);
-
-        // Calculate frequencies (reads per second)
-        let brew_temp_freq = (brew_temp_count - last_counts[0]) as f32 / elapsed_secs;
-        let brew_press_freq = (brew_press_count - last_counts[1]) as f32 / elapsed_secs;
-        let steam_temp_freq = (steam_temp_count - last_counts[2]) as f32 / elapsed_secs;
-        let steam_press_freq = (steam_press_count - last_counts[3]) as f32 / elapsed_secs;
-
-        // Read current indicator values (timing in milliseconds)
-        let brew_temp_time = INDICATORS.read(IndicatorId::BrewTemperatureReadingTimeMs);
-        let brew_press_time = INDICATORS.read(IndicatorId::BrewPressureReadingTimeMs);
-        let steam_temp_time = INDICATORS.read(IndicatorId::SteamTemperatureReadingTimeMs);
-        let steam_press_time = INDICATORS.read(IndicatorId::SteamPressureReadingTimeMs);
-
-        // Log counter frequencies
-        info!("[Counters] Brew Temp: {}/s, Brew Press: {}/s, Steam Temp: {}/s, Steam Press: {}/s",
-              brew_temp_freq, brew_press_freq, steam_temp_freq, steam_press_freq);
-
-        // Log indicator values
-        info!("[Indicators] Brew Temp: {}ms, Brew Press: {}ms, Steam Temp: {}ms, Steam Press: {}ms",
-              brew_temp_time, brew_press_time, steam_temp_time, steam_press_time);
-
-        // Update tracking variables
-        last_counts[0] = brew_temp_count;
-        last_counts[1] = brew_press_count;
-        last_counts[2] = steam_temp_count;
-        last_counts[3] = steam_press_count;
-        last_time = now;
-
-        // Wait 5 seconds before next report
-        Timer::after_secs(5).await;
     }
 }
