@@ -5,7 +5,7 @@ use either::{Either, Left, Right};
 use inflector::Inflector;
 use proc_macro2::{ Span, TokenStream as TS2 };
 use quote::{quote, ToTokens, format_ident};
-use syn::{Attribute, Expr, Ident, ItemStruct, ItemType, LitStr, parse_macro_input, parse_str, braced, Token, Type, TypeParamBound, Result as SynResult};
+use syn::{Attribute, Expr, Ident, ItemStruct, ItemType, LitStr, parse_macro_input, parse_str, braced, Token, Type, TypeParamBound, Result as SynResult, PathArguments, GenericArgument, TypePath};
 use syn::parse::{Parse, ParseStream};
 use serde::Deserialize;
 use syn::punctuated::Punctuated;
@@ -28,6 +28,8 @@ struct PeripheralField {
 //    original_type: Type,
 //    altered_type: Type,
     alias: ItemType,
+    inner_type: Type,
+    field_type: Type,
     impls: Option<Punctuated<TypeParamBound, Token![+]>>,
     field_value: Either<Ident, toml::Value>,
     attrs: Vec<Attribute>
@@ -35,49 +37,90 @@ struct PeripheralField {
 
 impl PeripheralField {
     fn new(struct_ident: Ident, ident: Ident, original_type: Type, section_definition: &Defn, attrs: Vec<Attribute>) -> Self {
-        let alias_value = struct_ident.to_string() + ident.to_string().to_class_case().as_str();
+        let alias_name = struct_ident.to_string() + ident.to_string().to_class_case().as_str();
 
         let alias_value = Ident::new(
-            alias_value.as_str(),
+            alias_name.as_str(),
             Span::call_site(),
         );
 
+        let alias_type_path: TypePath = syn::parse2(quote! { #alias_value }).expect("Unable to parse alias value as a type");
+
         let config = section_definition.vals.get(&ident.to_string()).unwrap_or_else(|| panic!("Board config for field {:?} missing", ident.to_string()));
+        
+        let mut cloned = original_type.clone();
 
-        let mut impls: Option<Punctuated<TypeParamBound, Token![+]>> = None;
-
-        let mut should_be_const = false;
-
-        let altered_type = match original_type {
+        let (should_be_const, field_type, impls, inner_type) = match cloned {
             Type::ImplTrait(ref ty) => {
                 let toml::Value::String(t) = config else {
                     panic!("Type of {:?} in board-cfg.toml is not a string", ident.to_string());
                 };
-
-                impls = Some(ty.bounds.clone());
-
-                syn::parse_str::<Type>(t.as_str()).expect("Exp:6")
+                
+                let Ok(t) = parse_str::<Type>(t.as_str()) else {
+                    panic!("Unable to parse the value for {:?} in board-cfg.toml as a type", ident.to_string());
+                };
+                
+                (false, Type::Path(alias_type_path), Some(ty.bounds.clone()), t)
             },
             Type::Tuple(_) => {
                 let toml::Value::String(t) = config else {
                     panic!("Type of {:?} in board-cfg.toml is not a string", ident.to_string());
                 };
 
-                syn::parse_str::<Type>(t.as_str()).expect("Exp:7")
+                let Ok(t) = parse_str::<Type>(t.as_str()) else {
+                    panic!("Unable to parse the value for {:?} in board-cfg.toml as a type", ident.to_string());
+                };
+                
+                (false, Type::Path(alias_type_path), None, t)
+            },
+            Type::Path(ref mut p) => {
+                let Some(last_segment) = p.path.segments.last_mut() else {
+                    panic!("Only objects which have a last segment are allowed");
+                };
+                
+                let mut last_segment = last_segment.clone();
+                
+                if last_segment.ident == "Peri" {
+                    // Check if this segment has angle-bracketed arguments
+                    let PathArguments::AngleBracketed(ref mut args) = last_segment.arguments else {
+                        panic!("Only Peri objects with angle-bracketed arguments are allowed");
+                    };
+
+                    let Some(_) = args.args.pop() else {
+                        panic!("Only Peri objects with at least one angle-bracketed argument are allowed");
+                    };
+
+                    let toml::Value::String(t) = config else {
+                        panic!("Type of {:?} in board-cfg.toml is not a string", ident.to_string());
+                    };
+
+                    let Ok(t) = parse_str::<Type>(t.as_str()) else {
+                        panic!("Unable to parse the value for {:?} in board-cfg.toml as a type", ident.to_string());
+                    };
+
+                    args.args.push(GenericArgument::Type(Type::Path(alias_type_path)));
+
+                    p.path.segments.pop();
+                    p.path.segments.push(last_segment);
+
+                    (false, cloned, None, t)
+                } else {
+                    (true, original_type.clone(), None, original_type.clone())
+                }
             },
             _ => {
-                should_be_const = true;
-                original_type.clone()
+                (true, original_type.clone(), None, original_type.clone())
             }
         };
-        let alias_type = altered_type.clone();
+        
+        let alias_type = inner_type.clone();
         let alias: ItemType =
-            syn::parse2(quote! { type #alias_value = #alias_type; }).expect("Exp:8");
+            syn::parse2(quote! { type #alias_value = #alias_type; }).expect("Unable to parse type alias statement");
 
         let field_value = if should_be_const {
             Right(config.clone())
         } else {
-            match altered_type.clone() {
+            match inner_type.clone() {
                 Type::Path(ty) => {
                     let ident = &ty.path.segments.last().unwrap().ident;
                     Left(ident.clone())
@@ -88,9 +131,9 @@ impl PeripheralField {
 
         PeripheralField {
             ident,
-//            original_type,
-//            altered_type,
             alias,
+            inner_type,
+            field_type,
             impls,
             field_value,
             attrs
@@ -170,13 +213,6 @@ pub fn aliased_bind_interrupts(input: TS1) -> TS1
         (k, v.as_str().unwrap().to_string())
     } ).collect();
 
-//    panic!("Alias map: {}", alias_map);
-
-/*    // Define your mapping here
-    let mut alias_map = HashMap::new();
-    alias_map.insert("Nau7802Irq", "I2C0_IRQ");
-    alias_map.insert("DispIrq", "I2C1_IRQ");*/
-
     // Parse the input tokens
     let aliased_input = parse_macro_input!(input as AliasedBindInterrupts);
     let struct_name = &aliased_input.struct_name;
@@ -228,7 +264,7 @@ pub fn type_aliases(_input: TS1) -> TS1 {
         let alias_ident = format_ident!("{}", k);
         let parsed_type: Type = parse_str(v_str).unwrap();
 
-        syn::parse2(quote! { type #alias_ident = #parsed_type; }).expect("ExpT:1")
+        syn::parse2(quote! { pub(crate) type #alias_ident = #parsed_type; }).expect("Unable to parse type alias creation")
     } );
     let aliases_vec: Vec<TS2> = aliases_map.into_iter().collect();
 
@@ -262,7 +298,7 @@ pub fn board_cfg(args: TS1, item: TS1) -> TS1 {
     let cfg_path_str = cfg_path.to_str().unwrap();
 
     let macro_ident = Ident::new(
-        inflector::cases::snakecase::to_snake_case(s.ident.to_string().as_str()).as_str(),
+        section.as_str(),
         Span::call_site(),
     );
 
@@ -273,14 +309,17 @@ pub fn board_cfg(args: TS1, item: TS1) -> TS1 {
     let aliases: Vec<ItemType> = field_data.iter().map(|(_, f)| f.alias.clone()).collect();
 
     let ident = &s.ident;
-
+    
     s.fields.iter_mut().for_each(
         |field| {
-            let ident = &field.ident.clone().expect("Exp:2");
+            field.ty = field_data.get(&field.ident.clone().expect("Exp:1"))
+                .expect("Exp:5")
+                .field_type.clone();
+/*            let ident = &field.ident.clone().expect("Exp:2");
 
             let alias_ident = field_data.get(ident).expect("Exp:3").alias.clone().ident;
 
-            field.ty = syn::parse2(quote! { #alias_ident }).expect("Exp:4");
+            field.ty = syn::parse2(quote! { #alias_ident }).expect("Exp:4");*/
         });
 
     let field_idents: Vec<Ident> = field_data.iter().map(|(i, _)| i.clone()).collect();
@@ -339,6 +378,7 @@ pub fn board_cfg(args: TS1, item: TS1) -> TS1 {
         #impl_clause
 
         #[doc = #doc]
+        #[macro_export]
         macro_rules! #macro_ident {
             ( $P:ident ) => {
                 #ident {

@@ -31,8 +31,8 @@ mod tests {
     #[test]
     fn basic() {
         let p = Peripherals::new();
-        let r1 = resources_1!(p);
-        let r2 = resources_2!(p);
+        let r1 = resources1!(p);
+        let r2 = resources2!(p);
 
         assert_eq!(r2.p0.type_id(), TypeId::of::<PIN_0>());
         assert_eq!(r2.p1.type_id(), TypeId::of::<PIN_1>());
