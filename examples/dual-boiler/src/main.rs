@@ -90,12 +90,15 @@ mod mcp23017_hd44780;
 mod display;
 mod buttons;
 mod led_controller;
+mod backlight_controller;
 mod ads_measurement_coordinator;
 
 use mcp23017_hd44780::Mcp23017HD44780Device;
 use display::lcd_display_task;
 use buttons::button_controller_task;
 use led_controller::led_controller_task;
+#[cfg(feature = "tft-display")]
+use backlight_controller::{backlight_task, BacklightPeripherals};
 use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
@@ -278,12 +281,6 @@ struct ButtonMuxPeripherals {
 #[variegated_board_cfg::board_cfg("watchdog_peripherals")]
 struct WatchdogPeripherals {
     watchdog: Peri<'static, ()>,
-}
-
-#[variegated_board_cfg::board_cfg("backlight_peripherals")]
-struct BacklightPeripherals {
-    pwm: Peri<'static, ()>,
-    pin: Peri<'static, ()>,
 }
 
 type InternalSPIBus = Mutex<SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
@@ -1550,59 +1547,5 @@ async fn instrumentation_monitor_task() {
 
         // Wait 5 seconds before next report
         Timer::after_secs(5).await;
-    }
-}
-
-#[cfg(feature = "tft-display")]
-#[embassy_executor::task]
-async fn backlight_task(backlight_p: BacklightPeripherals, mut status_receiver: StatusSubscriber) {
-    use embassy_rp::pwm::{Config as PwmConfig, Pwm};
-    use embedded_hal::pwm::SetDutyCycle;
-    use variegated_controller_types::MachineMode;
-
-    info!("Initializing TFT backlight control");
-
-    // Configure PWM for backlight control
-    // Using ~1kHz frequency (suitable for LED backlights to avoid flicker)
-    // Assuming 150 MHz system clock: 150MHz / 125 = 1.2MHz, / 1200 = 1kHz
-    let mut pwm_config = PwmConfig::default();
-    pwm_config.divider = 125.into(); // Divide system clock by 125
-    pwm_config.top = 1200; // Period count for ~1kHz
-    pwm_config.compare_b = 1200; // Start at 100% duty cycle
-
-    let (_, pwm_ch_b_opt) = Pwm::new_output_b(backlight_p.pwm, backlight_p.pin, pwm_config.clone()).split();
-    let mut pwm_ch_b = pwm_ch_b_opt.unwrap();
-
-    // Track current duty cycle percentage
-    let mut current_duty_pct = 100u8; // 100% duty cycle
-
-    info!("Backlight initialized at 100% brightness");
-
-    // Main backlight control loop
-    loop {
-        // Check for status updates
-        if let Some(new_status) = status_receiver.try_next_message_pure() {
-            // Calculate target duty cycle percentage based on machine mode
-            let target_duty_pct = match new_status.mode {
-                MachineMode::On => 100u8,              // 100% brightness when active
-                MachineMode::Off |
-                MachineMode::PowerSaveStandby => 10u8, // 50% brightness when off/standby
-            };
-
-            // Update PWM duty cycle if it changed
-            if target_duty_pct != current_duty_pct {
-                current_duty_pct = target_duty_pct;
-
-                if let Err(_) = pwm_ch_b.set_duty_cycle_percent(current_duty_pct) {
-                    error!("Failed to set backlight duty cycle");
-                } else {
-                    info!("Backlight brightness adjusted to {}% (mode: {:?})",
-                          current_duty_pct, new_status.mode);
-                }
-            }
-        }
-
-        // Small delay to prevent tight loop
-        Timer::after(Duration::from_millis(100)).await;
     }
 }
