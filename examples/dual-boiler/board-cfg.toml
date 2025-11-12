@@ -34,14 +34,17 @@ pin_speed = "embassy_rp::peripherals::PIN_44"
 pwm_tacho_out = "embassy_rp::peripherals::PWM_SLICE4"
 pin_tacho_out = "embassy_rp::peripherals::PIN_25"
 pin_dir = "embassy_rp::peripherals::PIN_35"
+dma_tacho = "embassy_rp::peripherals::DMA_CH9"
 
 [rotary_pump_peripherals]
 pin_rotary_pump_enable = "embassy_rp::peripherals::PIN_34"
 
+[pulse_counter_pio_peripherals]
+pio = "embassy_rp::peripherals::PIO0"
+
 [flow_meter_peripherals]
 pwm_flow_meter = "embassy_rp::peripherals::PWM_SLICE3"
 pin_flow_meter = "embassy_rp::peripherals::PIN_23"
-pio = "embassy_rp::peripherals::PIO0"
 dma = "embassy_rp::peripherals::DMA_CH8"
 
 [mechanism_peripherals]

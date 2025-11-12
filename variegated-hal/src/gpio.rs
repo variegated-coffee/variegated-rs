@@ -1,4 +1,5 @@
 pub mod gpio_binary_heating_element;
+pub mod coordinated_dual_heating_element;
 pub mod gpio_pwm_pump;
 pub mod gpio_binary_pump;
 pub mod gpio_binary_solenoid_valve;

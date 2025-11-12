@@ -77,6 +77,12 @@ pub enum MachineCommand {
     /// Infer and set the group output flow rate PID integral term for bumpless transfer
     /// Takes target output flow rate and calculates integral based on current duty cycle and measurement
     InferGroupOutputFlowRateIntegral(GroupIndex, FlowRateType),
+
+    /// Enable or disable heating element interlock (prevents simultaneous heating)
+    SetHeatingElementInterlock(bool),
+
+    /// Set the strategy for resolving heating element contention when demand exceeds capacity
+    SetHeatingElementContentionStrategy(HeatingElementContentionStrategy),
 }
 
 #[cfg(feature = "defmt")]
@@ -116,6 +122,8 @@ impl defmt::Format for MachineCommand {
             MachineCommand::InferGroupPressureIntegral(idx, pressure) => defmt::write!(f, "InferGroupPressureIntegral({}, {})", idx, pressure),
             MachineCommand::InferGroupFlowRateIntegral(idx, flow_rate) => defmt::write!(f, "InferGroupFlowRateIntegral({}, {})", idx, flow_rate),
             MachineCommand::InferGroupOutputFlowRateIntegral(idx, flow_rate) => defmt::write!(f, "InferGroupOutputFlowRateIntegral({}, {})", idx, flow_rate),
+            MachineCommand::SetHeatingElementInterlock(enabled) => defmt::write!(f, "SetHeatingElementInterlock({})", enabled),
+            MachineCommand::SetHeatingElementContentionStrategy(strategy) => defmt::write!(f, "SetHeatingElementContentionStrategy({:?})", strategy),
         }
     }
 }

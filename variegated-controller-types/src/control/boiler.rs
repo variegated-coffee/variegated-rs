@@ -82,3 +82,23 @@ impl Default for WaterDispersalPumpStrategy {
         WaterDispersalPumpStrategy::AlwaysPump
     }
 }
+
+/// Strategy for resolving heating element contention when multiple boilers
+/// request more combined duty cycle than available (>100% total)
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HeatingElementContentionStrategy {
+    /// Brew boiler gets full request, steam boiler gets remainder
+    BrewPriority,
+    /// Steam boiler gets full request, brew boiler gets remainder
+    SteamPriority,
+    /// Both scaled proportionally to fit in 100%
+    Proportional,
+}
+
+impl Default for HeatingElementContentionStrategy {
+    fn default() -> Self {
+        Self::Proportional
+    }
+}

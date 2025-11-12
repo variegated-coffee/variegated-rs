@@ -64,7 +64,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, RPMType, Status, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
+use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, GroupConfiguration, MachineCommand, MachineConfiguration, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, RPMType, Status, TankConfiguration, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
@@ -633,6 +633,10 @@ async fn main_task(spawner: Spawner) -> ! {
         group,
         None, // tank - not used in this example
         settings_storage,
+        MachineConfiguration::default(),  // Machine-wide configuration
+        TankConfiguration::default(),     // Tank configuration
+        GroupConfiguration::default(),    // Group configuration
+        BoilerConfiguration::default(),   // Boiler configuration
         routine_repository_ref,
         &peripheral_registry,
     );

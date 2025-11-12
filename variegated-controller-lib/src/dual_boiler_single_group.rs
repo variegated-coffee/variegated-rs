@@ -19,7 +19,7 @@ use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankIndex, TankStatus, RoutineParameters, MachineMode};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -45,6 +45,7 @@ pub struct DualBoilerSingleGroupPersistentConfiguration {
     pub steam_boiler_control_state: BoilerControlState,
     pub pid_parameters: DualBoilerSingleGroupPidParameters,
     pub heating_element_interlock: bool,
+    pub heating_element_contention_strategy: variegated_controller_types::HeatingElementContentionStrategy,
     pub allow_simultaneous_operations: bool,
     pub pump_tacho_pulses_per_liter: Option<f32>,
     pub flow_sensor_pulses_per_liter: Option<f32>,
@@ -234,6 +235,7 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             },
             pid_parameters,
             heating_element_interlock: false,
+            heating_element_contention_strategy: variegated_controller_types::HeatingElementContentionStrategy::default(),
             allow_simultaneous_operations: true,
             pump_tacho_pulses_per_liter: None,
             flow_sensor_pulses_per_liter: None,
@@ -297,6 +299,12 @@ pub struct DualBoilerSingleGroupController<
     configuration: DualBoilerSingleGroupConfiguration,
 //    persistent_configuration: DualBoilerSingleGroupPersistentConfiguration,
 //    ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration,
+    machine_config: MachineConfiguration,
+    tank_config: TankConfiguration,
+    group_config: GroupConfiguration,
+    water_tap_config: WaterTapConfiguration,
+    brew_boiler_config: BoilerConfiguration,
+    steam_boiler_config: BoilerConfiguration,
 
     // Component-based state tracking
     brew_boiler_enabled: bool,
@@ -327,6 +335,10 @@ pub struct DualBoilerSingleGroupController<
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
     watchdog: Option<Watchdog>,
+
+    // Heating element coordination signals
+    interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
+    contention_strategy_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>,
 
     // Shot state tracking
     current_shot_state: Option<variegated_controller_types::ShotState>,
@@ -372,10 +384,18 @@ impl<
         tank: Option<Tank<'a, TankM, N_WATCH>>,
         fill_mechanism: Option<DualBoilerFillMechanism<'a, FillM>>,
         settings_store: &'static Mutex<StorageM, SettingsStoreT>,
+        machine_config: MachineConfiguration,
+        tank_config: TankConfiguration,
+        group_config: GroupConfiguration,
+        water_tap_config: WaterTapConfiguration,
+        brew_boiler_config: BoilerConfiguration,
+        steam_boiler_config: BoilerConfiguration,
         routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
         schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
+        interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
+        contention_strategy_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -397,6 +417,12 @@ impl<
             configuration: DualBoilerSingleGroupConfiguration::default(),
 //            persistent_configuration: DualBoilerSingleGroupPersistentConfiguration::default(),
 //            ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration::default(),
+            machine_config,
+            tank_config,
+            group_config,
+            water_tap_config,
+            brew_boiler_config,
+            steam_boiler_config,
             brew_boiler_enabled: true,
             steam_boiler_enabled: true,
             group_brewing: false,
@@ -417,6 +443,8 @@ impl<
             comms_status_received_instant: None,
             peripheral_registry,
             watchdog,
+            interlock_enabled_signal,
+            contention_strategy_signal,
 
             // Shot state tracking initialization
             current_shot_state: None,
@@ -440,6 +468,8 @@ impl<
             temperature_sensor_kalman_parameters: None,
             pressure_sensor_kalman_parameters: None,
             fill_config: None,
+            supply_tank_index: None,
+            minimum_safe_level: self.brew_boiler_config.minimum_safe_level,
         };
         configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
 
@@ -456,6 +486,8 @@ impl<
                 fill_threshold: self.configuration.persistent.service_boiler_fill_threshold,
                 pump_configuration: self.configuration.persistent.fill_pump_configuration.clone(),
             }),
+            supply_tank_index: None,
+            minimum_safe_level: self.steam_boiler_config.minimum_safe_level,
         };
         configuration.insert_boiler_configuration(SteamBoiler.as_index(), steam_boiler_config);
 
@@ -470,6 +502,7 @@ impl<
             pump_configuration: self.configuration.persistent.group_pump_configuration.clone(),
             pressure_sensor_kalman_parameters: None,
             flow_sensor_pulses_per_liter: None,
+            supply_tank_index: None,
         };
         configuration.insert_group_configuration(SingleGroup.as_index(), group_config);
 
@@ -479,6 +512,7 @@ impl<
             max_dispense_time_seconds: None,
             flow_rate_limit: None,
             pump_configuration: self.configuration.persistent.water_tap_pump_configuration.clone(),
+            supply_tank_index: None,
         };
         configuration.insert_water_tap_configuration(0, water_tap_config);
 
@@ -488,6 +522,7 @@ impl<
         let tank_config = TankConfiguration {
             low_level_warning_threshold: Some(20),
             water_level_sensor_kalman_parameters: None,
+            empty_threshold: None,
         };
         configuration.insert_tank_configuration(0, tank_config);
 
@@ -518,6 +553,12 @@ impl<
                     self.configuration.persistent.clone()
                 }
             };
+
+            // Initialize hardware signals with current configuration (only on first iteration)
+            if last_pid_update == Instant::now() {
+                self.interlock_enabled_signal.signal(self.configuration.persistent.heating_element_interlock);
+                self.contention_strategy_signal.signal(self.configuration.persistent.heating_element_contention_strategy);
+            }
 
             last_published_configuration = self.publish_configuration_if_changed(last_published_configuration).await;
 
@@ -627,23 +668,6 @@ impl<
     }
 
     // Safety interlock logic
-    fn check_heating_element_interlock(&self, brew_demand: f32, steam_demand: f32) -> (f32, f32) {
-        if !self.configuration.persistent.heating_element_interlock {
-            return (brew_demand, steam_demand);
-        }
-
-        // If both boilers want to heat simultaneously, prioritize based on demand
-        if brew_demand > 0.0 && steam_demand > 0.0 {
-            if brew_demand >= steam_demand {
-                (brew_demand, 0.0) // Priority to brew boiler
-            } else {
-                (0.0, steam_demand) // Priority to steam boiler
-            }
-        } else {
-            (brew_demand, steam_demand)
-        }
-    }
-
     async fn update_brew_boiler(&mut self, delta_t: f32) -> Output {
         if !self.brew_boiler_enabled {
             self.brew_boiler.set_heating_element_duty_cycle(0).await;
@@ -673,29 +697,20 @@ impl<
         }
 
         let brew_pid_out = self.brew_boiler_pid.step(PidIn::new(brew_pv, delta_t));
-        let brew_demand = brew_pid_out.out.max(0.0);
+        let mut brew_demand = brew_pid_out.out.max(0.0);
         self.last_brew_boiler_output = brew_demand;
 
-        // Apply heating element interlock (will be checked in update_steam_boiler too)
-        let steam_demand = if self.steam_boiler_enabled {
-            match self.configuration.effective_steam_boiler_control_mode() {
-                BoilerControlMode::Off => 0.0,
-                _ => self.last_steam_boiler_output.max(0.0),
-            }
-        } else {
-            0.0
-        };
-
-        let (final_brew_demand, _) = self.check_heating_element_interlock(brew_demand, steam_demand);
-
-        self.brew_boiler.set_heating_element_duty_cycle(final_brew_demand as u8).await;
-
-        if final_brew_demand != brew_demand {
-            // Create modified PID output to reflect interlock adjustment
-            Output::PidOutput(PidOut { out: final_brew_demand, ..brew_pid_out })
-        } else {
-            Output::PidOutput(brew_pid_out)
+        // Dry-run protection: disable heating if water level too low
+        let brew_boiler_level = self.brew_boiler.get_water_level();
+        if !Self::is_boiler_level_safe(brew_boiler_level, &self.brew_boiler_config) {
+            warn!("Brew boiler heating disabled: water level below minimum safe level");
+            brew_demand = 0.0;
         }
+
+        // Set duty cycle directly - coordination handled by hardware device
+        self.brew_boiler.set_heating_element_duty_cycle(brew_demand as u8).await;
+
+        Output::PidOutput(brew_pid_out)
     }
 
     async fn update_steam_boiler(&mut self, delta_t: f32) -> Output {
@@ -727,29 +742,20 @@ impl<
         }
 
         let steam_pid_out = self.steam_boiler_pid.step(PidIn::new(steam_pv, delta_t));
-        let steam_demand = steam_pid_out.out.max(0.0);
+        let mut steam_demand = steam_pid_out.out.max(0.0);
         self.last_steam_boiler_output = steam_demand;
 
-        // Apply heating element interlock
-        let brew_demand = if self.brew_boiler_enabled {
-            match self.configuration.effective_brew_boiler_control_mode() {
-                BoilerControlMode::Off => 0.0,
-                _ => self.last_brew_boiler_output.max(0.0),
-            }
-        } else {
-            0.0
-        };
-
-        let (_, final_steam_demand) = self.check_heating_element_interlock(brew_demand, steam_demand);
-
-        self.steam_boiler.set_heating_element_duty_cycle(final_steam_demand as u8).await;
-
-        if final_steam_demand != steam_demand {
-            // Create modified PID output to reflect interlock adjustment
-            Output::PidOutput(PidOut { out: final_steam_demand, ..steam_pid_out })
-        } else {
-            Output::PidOutput(steam_pid_out)
+        // Dry-run protection: disable heating if water level too low
+        let steam_boiler_level = self.steam_boiler.get_water_level();
+        if !Self::is_boiler_level_safe(steam_boiler_level, &self.steam_boiler_config) {
+            warn!("Steam boiler heating disabled: water level below minimum safe level");
+            steam_demand = 0.0;
         }
+
+        // Set duty cycle directly - coordination handled by hardware device
+        self.steam_boiler.set_heating_element_duty_cycle(steam_demand as u8).await;
+
+        Output::PidOutput(steam_pid_out)
     }
 
     fn apply_pump_configuration_limits(&self, duty_cycle: u8, is_off: bool) -> u8 {
@@ -916,9 +922,21 @@ impl<
             return;
         }
 
+        // Check tank status before trying to fill
+        let tank_empty = self.is_tank_empty();
+        let prevent_on_empty = self.machine_config.prevent_start_on_empty_tank;
+        let allow_continue = self.machine_config.allow_continue_on_empty_tank;
+        let fill_threshold = self.configuration.persistent.service_boiler_fill_threshold;
+
         if let Some(fill_mechanism) = &mut self.fill_mechanism {
             if let Some(current_level) = self.steam_boiler.get_water_level() {
-                fill_mechanism.check_and_fill_if_needed(current_level, self.configuration.persistent.service_boiler_fill_threshold).await;
+                fill_mechanism.check_and_fill_if_needed(
+                    current_level,
+                    fill_threshold,
+                    tank_empty,
+                    prevent_on_empty,
+                    allow_continue,
+                ).await;
             }
         }
     }
@@ -1027,6 +1045,68 @@ impl<
         self.previous_status = Some(status);
     }
 
+    /// Determines if tank is empty based on configuration.
+    /// Returns false (not empty) if no tank, no sensor, no threshold, or level is above threshold.
+    fn is_tank_empty(&mut self) -> bool {
+        match (&mut self.tank, &self.tank_config.empty_threshold) {
+            (Some(tank), Some(threshold)) => {
+                match tank.get_water_level() {
+                    Some(level) => level < *threshold,
+                    None => false, // No sensor reading = assume OK
+                }
+            }
+            _ => false, // No tank or no threshold = assume OK (mains water supply)
+        }
+    }
+
+    /// Determines if we should block starting a new water operation.
+    /// Logic:
+    /// - If feature disabled: allow
+    /// - If tank not empty: allow
+    /// - If routine executing AND allow_continue=true: allow (treat as continuation)
+    /// - If routine executing AND allow_continue=false: block (abort routine)
+    /// - If no routine: block (standalone operation with empty tank)
+    fn should_block_water_operation(&mut self) -> bool {
+        // Feature disabled?
+        if !self.machine_config.prevent_start_on_empty_tank {
+            return false;
+        }
+
+        // Tank empty?
+        let tank_empty = self.is_tank_empty();
+        if !tank_empty {
+            return false;
+        }
+
+        // Tank is empty - check if routine is executing
+        if self.current_routine.is_some() {
+            // Routine executing: respect allow_continue policy
+            return !self.machine_config.allow_continue_on_empty_tank;
+        } else {
+            // No routine: always block standalone operations on empty tank
+            return true;
+        }
+    }
+
+    /// Determines if a boiler's water level is safe for heating.
+    /// Returns true if heating is allowed, false if it should be blocked.
+    /// Logic:
+    /// - If no minimum_safe_level configured: allow (feature disabled)
+    /// - If level sensor reading available: check level >= minimum
+    /// - If no sensor reading (but feature enabled): block (assume empty for safety)
+    fn is_boiler_level_safe(level: Option<WaterLevelType>, boiler_config: &BoilerConfiguration) -> bool {
+        // If no minimum configured, feature is disabled (no level sensor needed)
+        let Some(minimum) = boiler_config.minimum_safe_level else {
+            return true;
+        };
+
+        // Feature enabled: check water level
+        match level {
+            Some(level) => level >= minimum,  // Have reading: check against threshold
+            None => false, // No reading but sensor exists: assume empty (UNSAFE)
+        }
+    }
+
     async fn handle_command(&mut self, command: MachineCommand) {
         info!("Received command: {:?}", command);
 
@@ -1051,11 +1131,20 @@ impl<
         }
     }
 
+    /// Handles commands eligible for routine "finally" blocks (cleanup commands).
+    /// This is the main command executor for all non-routine-lifecycle commands,
+    /// whether from external sources or routine steps.
     async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::StartBrewing(_) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
                     warn!("Cannot start brewing while not in On mode");
+                    return;
+                }
+
+                // Validate tank status before starting brewing
+                if self.should_block_water_operation() {
+                    error!("Blocked StartBrewing: Insufficient water in tank");
                     return;
                 }
 
@@ -1071,6 +1160,12 @@ impl<
             MachineCommand::StartPumpingToWaterTap(_) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
                     warn!("Cannot start pumping while not in On mode");
+                    return;
+                }
+
+                // Validate tank status before starting water dispensing
+                if self.should_block_water_operation() {
+                    error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
                     return;
                 }
 
@@ -1514,6 +1609,24 @@ impl<
                     error!("Invalid group index: {}", group_index);
                 }
             }
+            MachineCommand::SetHeatingElementInterlock(enabled) => {
+                info!("Setting heating element interlock: {}", enabled);
+                self.configuration.persistent.heating_element_interlock = enabled;
+                self.interlock_enabled_signal.signal(enabled);
+                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                }
+            }
+            MachineCommand::SetHeatingElementContentionStrategy(strategy) => {
+                info!("Setting heating element contention strategy: {:?}", strategy);
+                self.configuration.persistent.heating_element_contention_strategy = strategy;
+                self.contention_strategy_signal.signal(strategy);
+                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                }
+            }
         }
     }
 
@@ -1691,6 +1804,12 @@ impl<
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
         if self.current_routine.is_some() {
+            return;
+        }
+
+        // Validate tank status before starting routine
+        if self.should_block_water_operation() {
+            error!("Blocked RunRoutine: Insufficient water in tank");
             return;
         }
         let mut repo = self.routine_repository.lock().await;

@@ -64,12 +64,13 @@ use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, InputVolumeType, MachineCommand, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
 use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
+use variegated_hal::gpio::coordinated_dual_heating_element::{CoordinatedDualHeatingElementControl, CoordinatedDualHeatingElementDevice};
 use variegated_mcp23017::{Mcp23017, Mcp23017Config};
 use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
 use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
@@ -94,7 +95,6 @@ use led_controller::led_controller_task;
 use backlight_controller::{backlight_task, BacklightPeripherals};
 use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
 use instrumentation_monitor::instrumentation_monitor_task;
-use variegated_hal::heating_element::manager::init_heating_elements_dual;
 use variegated_hal::SyncSendRawMutex;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
@@ -128,7 +128,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     AdcIrq => adc::InterruptHandler;
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
     QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
-    FlowMeterPioIrq => pio::InterruptHandler<FlowMeterPeripheralsPio>;
+    FlowMeterPioIrq => pio::InterruptHandler<PulseCounterPioPeripheralsPio>;
 });
 
 #[cfg(feature = "gravity")]
@@ -214,13 +214,18 @@ struct PumpPeripherals {
     pwm_tacho_out: Peri<'static, ()>,
     pin_tacho_out: Peri<'static, ()>,
     pin_dir: Peri<'static, ()>,
+    dma_tacho: Peri<'static, ()>,
+}
+
+#[variegated_board_cfg::board_cfg("pulse_counter_pio_peripherals")]
+struct PulseCounterPioPeripherals {
+    pio: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("flow_meter_peripherals")]
 struct FlowMeterPeripherals {
     pwm_flow_meter: Peri<'static, ()>,
     pin_flow_meter: Peri<'static, ()>,
-    pio: Peri<'static, ()>,
     dma: Peri<'static, ()>,
 }
 
@@ -419,6 +424,7 @@ fn main() -> ! {
     let button_mux_p = button_mux_peripherals!(p);
     let flash_p = settings_flash_peripherals!(p);
     let watchdog_p = watchdog_peripherals!(p);
+    let pulse_counter_pio_p = pulse_counter_pio_peripherals!(p);
     let flow_meter_p = flow_meter_peripherals!(p);
     let esp_p = esp32_peripherals!(p);
 
@@ -440,6 +446,7 @@ fn main() -> ! {
             button_mux_p,
             flash_p,
             watchdog_p,
+            pulse_counter_pio_p,
             flow_meter_p,
             esp_p,
             status_channel,
@@ -469,6 +476,8 @@ static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<Wate
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
+static PUMP_TACHO_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
+static PUMP_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 #[cfg(feature = "gravity")]
 static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
 #[cfg(feature = "gravity")]
@@ -479,6 +488,12 @@ static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = Static
 static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
 #[cfg(feature = "gravity")]
 static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+
+// Heating element coordination signals
+static INTERLOCK_ENABLED_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, bool>> = StaticCell::new();
+static CONTENTION_STRATEGY_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>> = StaticCell::new();
+static BREW_DUTY_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
+static STEAM_DUTY_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 
 static MECHANISM_MUTEX: StaticCell<Mutex<SyncSendRawMutex, DualBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, MachineCommand, 10>> = StaticCell::new();
@@ -501,6 +516,18 @@ type RoutineRepositoryRef = &'static RoutineRepositoryMutex;
 // Global references to storage for cross-core access (safe via CriticalSectionRawMutex)
 static SCHEDULE_STORE_REF: Mutex<SyncSendRawMutex, Option<ScheduleStoreRef>> = Mutex::new(None);
 static ROUTINE_REPOSITORY_REF: Mutex<SyncSendRawMutex, Option<RoutineRepositoryRef>> = Mutex::new(None);
+
+/// Background task for coordinated dual heating element device
+#[embassy_executor::task]
+async fn coordinated_heating_element_task(
+    mut device: CoordinatedDualHeatingElementDevice<
+        Output<'static>,
+        Output<'static>,
+        CriticalSectionRawMutex,
+    >
+) {
+    device.task().await;
+}
 
 /// Background task for handling long-running storage operations
 /// This task processes optimize commands without blocking the main control loop
@@ -582,6 +609,7 @@ async fn main_task(
     button_mux_p: ButtonMuxPeripherals,
     flash_p: SettingsFlashPeripherals,
     watchdog_p: WatchdogPeripherals,
+    pulse_counter_pio_p: PulseCounterPioPeripherals,
     flow_meter_p: FlowMeterPeripherals,
     esp_p: Esp32Peripherals,
     status_channel: &'static StatusChannel
@@ -630,8 +658,7 @@ async fn main_task(
     let pump_output = variegated_hal::gpio::gpio_binary_pump::GpioBinaryPump::new(Output::new(rotary_p.pin_rotary_pump_enable, Low));
 
     #[cfg(feature = "gear-pump")]
-    let (pump_output, mut pump_rpm_counter) = {
-        use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
+    let pump_output = {
         use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
 
         let _pump_dir = Output::new(pump_p.pin_dir, Low);
@@ -645,22 +672,10 @@ async fn main_task(
         let (pump_pwm, _) = pwm::Pwm::new_output_a(pump_p.pwm_speed, pump_p.pin_speed, pwm_config).split();
         let pump_pwm = pump_pwm.unwrap();
 
-        // Configure PWM input for tachometer
-        let mut pwm_input_config = pwm::Config::default();
-        pwm_input_config.divider = 1.into();
-        let pump_input = pwm::Pwm::new_input(pump_p.pwm_tacho_out, pump_p.pin_tacho_out, Pull::Up, InputMode::FallingEdge, pwm_input_config);
+        // Tachometer is now handled by PIO pulse counter (see pump_tacho below)
+        // PWM input no longer needed - using PIO instead for better volume tracking
 
-        // Create RPM signal and frequency counter
-        let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
-        let pump_frequency_counter = GpioTransformingFrequencyCounter::new(
-            pump_input,
-            pump_rpm_sig.sender(),
-            None,
-            |v| (v * 60.0 / 32.0) as RPMType,
-            |v| v
-        );
-
-        (GpioPwmPump::new(pump_pwm), pump_frequency_counter)
+        GpioPwmPump::new(pump_pwm)
     };
 
     let group_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_group_solenoid, Low)));
@@ -975,15 +990,29 @@ async fn main_task(
         Some(tank_water_level_watch.receiver().unwrap()),
     );
 
-    // Initialize heating elements and spawn their background tasks
-    let he_controls = init_heating_elements_dual(
-        &spawner,
-        mechanism_p.pin_brew_he,
-        mechanism_p.pin_service_he,
+    // Initialize coordinated heating elements
+    let interlock_enabled_signal = INTERLOCK_ENABLED_SIGNAL.init(Signal::new());
+    let contention_strategy_signal = CONTENTION_STRATEGY_SIGNAL.init(Signal::new());
+    let brew_duty_signal = BREW_DUTY_SIGNAL.init(Signal::new());
+    let steam_duty_signal = STEAM_DUTY_SIGNAL.init(Signal::new());
+
+    let brew_he_control = CoordinatedDualHeatingElementControl::new(brew_duty_signal);
+    let steam_he_control = CoordinatedDualHeatingElementControl::new(steam_duty_signal);
+
+    let mut coordinated_heating_device = CoordinatedDualHeatingElementDevice::new(
+        Output::new(mechanism_p.pin_brew_he, Level::Low),
+        Output::new(mechanism_p.pin_service_he, Level::Low),
+        Duration::from_secs(3),
+        brew_duty_signal,
+        steam_duty_signal,
+        interlock_enabled_signal,
+        contention_strategy_signal,
     );
 
+    unwrap!(spawner.spawn(coordinated_heating_element_task(coordinated_heating_device)));
+
     let brew_boiler = Boiler::new(
-        Box::new(he_controls.brew_he_control),
+        Box::new(brew_he_control),
         None,
         Some(brew_boiler_temp_watch.receiver().unwrap()),
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
@@ -991,7 +1020,7 @@ async fn main_task(
     );
 
     let steam_boiler = Boiler::new(
-        Box::new(he_controls.steam_he_control),
+        Box::new(steam_he_control),
         None,
         Some(steam_boiler_temp_watch.receiver().unwrap()),
         Some(steam_boiler_pressure_watch.receiver().unwrap()),
@@ -1022,11 +1051,12 @@ async fn main_task(
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
     let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
 
+    // Get PIO peripheral - shared for all pulse counters
     let Pio {
-        mut common, irq0, sm0, ..
-    } = Pio::new(flow_meter_p.pio, Irqs);
+        mut common, irq0, irq1, sm0, sm1, ..
+    } = Pio::new(pulse_counter_pio_p.pio, Irqs);
 
-
+    // Flow meter pulse counter using SM0
     let mut flow_meter = GpioPioTransformingPulseCounter::new(
         &mut common,
         sm0,
@@ -1037,6 +1067,25 @@ async fn main_task(
         Some(input_volume_sig.sender()),
         |pulses| (pulses / 2.79) as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
         |pulses| ((pulses as f64) / 2.79f64) as InputVolumeType  // Total pulses to ml
+    );
+
+    // Pump tacho pulse counter using SM1 (replaces PWM-based frequency counter)
+    #[cfg(feature = "gear-pump")]
+    let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
+    #[cfg(feature = "gear-pump")]
+    let pump_volume_sig: &'static Watch<_, _, 3> = PUMP_VOLUME_SIGNAL.init(Watch::new());
+
+    #[cfg(feature = "gear-pump")]
+    let mut pump_tacho = GpioPioTransformingPulseCounter::new(
+        &mut common,
+        sm1,
+        irq1,
+        pump_p.dma_tacho,
+        pump_p.pin_tacho_out,
+        pump_rpm_sig.sender(),
+        Some(pump_volume_sig.sender()),
+        |freq_hz| (freq_hz * 60.0 / 32.0) as RPMType,  // 32 pulses per revolution -> RPM
+        |pulses| pulses as InputVolumeType  // Total pulses (can be calibrated to volume later)
     );
 
     let group = Group::new(
@@ -1224,10 +1273,18 @@ async fn main_task(
         Some(tank),
         Some(fill_mechanism),
         settings_storage_ref,
+        MachineConfiguration::default(),  // Machine-wide configuration
+        TankConfiguration::default(),     // Tank configuration
+        GroupConfiguration::default(),    // Group configuration
+        WaterTapConfiguration::default(), // Water tap configuration
+        BoilerConfiguration::default(),   // Brew boiler configuration
+        BoilerConfiguration::default(),   // Steam boiler configuration
         routine_repository_ref,
         schedule_store_ref,
         peripheral_registry,
         Some(watchdog),
+        interlock_enabled_signal,
+        contention_strategy_signal,
     );
 
     // Create status subscriber for LCD display and spawn the task
@@ -1286,8 +1343,9 @@ async fn main_task(
             Box::pin(scheduler),
         ];
 
+    // Pump RPM/tacho is now handled by PIO pulse counter instead of PWM
     #[cfg(feature = "gear-pump")]
-    futures.push(Box::pin(pump_rpm_counter.task()));
+    futures.push(Box::pin(pump_tacho.task()));
 
     #[cfg(feature = "gravity")]
     if let Some(ref mut g) = gravity_device {

@@ -176,6 +176,14 @@ pub struct BoilerConfiguration {
     pub temperature_sensor_kalman_parameters: Option<KalmanParameters>,
     pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
     pub fill_config: Option<FillConfiguration>,
+    /// Index of the supply tank to check before filling this boiler.
+    /// If None, no tank validation is performed (assumes mains water supply).
+    pub supply_tank_index: Option<TankIndex>,
+    /// Minimum safe water level percentage below which heating element will be disabled.
+    /// If None, no level check is performed (allows heating without level sensor).
+    /// If Some(threshold) and boiler has no level reading, heating is blocked (assumes empty).
+    /// Example: Some(10.0) = disable heating below 10% water level
+    pub minimum_safe_level: Option<WaterLevelType>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -201,6 +209,9 @@ pub struct GroupConfiguration {
     pub pump_configuration: Option<PumpConfiguration>,
     pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
     pub flow_sensor_pulses_per_liter: Option<f32>,
+    /// Index of the supply tank to check before starting brewing operations.
+    /// If None, no tank validation is performed (assumes mains water supply).
+    pub supply_tank_index: Option<TankIndex>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -212,6 +223,12 @@ pub struct MachineConfiguration {
     pub max_shot_logs: usize,
     /// Sample every Nth control loop tick (1 = every tick, 2 = every other tick, etc.)
     pub log_sample_decimation: u8,
+    /// Prevent starting water-consuming operations (brewing, water dispensing, steaming, routines)
+    /// when the supply tank is empty. Default: false (feature disabled for backward compatibility).
+    pub prevent_start_on_empty_tank: bool,
+    /// Allow in-progress operations to continue even if the tank becomes empty during execution.
+    /// If false, operations will be aborted when tank empties. Default: true (safer - don't interrupt).
+    pub allow_continue_on_empty_tank: bool,
 }
 
 impl Default for MachineConfiguration {
@@ -220,6 +237,8 @@ impl Default for MachineConfiguration {
             heating_element_interlock: false,
             max_shot_logs: 10,
             log_sample_decimation: 1,
+            prevent_start_on_empty_tank: false,
+            allow_continue_on_empty_tank: true,
         }
     }
 }
@@ -233,6 +252,9 @@ pub struct WaterTapConfiguration {
     pub max_dispense_time_seconds: Option<u32>,
     pub flow_rate_limit: Option<FlowRateType>,
     pub pump_configuration: Option<PumpConfiguration>,
+    /// Index of the supply tank to check before starting water dispensing.
+    /// If None, no tank validation is performed (assumes mains water supply).
+    pub supply_tank_index: Option<TankIndex>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -244,6 +266,9 @@ pub struct SteamWandConfiguration {
     pub purge_time_seconds: Option<u32>,
     pub max_steam_time_seconds: Option<u32>,
     pub auto_purge_enabled: bool,
+    /// Index of the supply tank to check before starting steam dispensing.
+    /// If None, no tank validation is performed (assumes mains water supply).
+    pub supply_tank_index: Option<TankIndex>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -252,4 +277,7 @@ pub struct SteamWandConfiguration {
 pub struct TankConfiguration {
     pub low_level_warning_threshold: Option<WaterLevelType>,
     pub water_level_sensor_kalman_parameters: Option<KalmanParameters>,
+    /// Water level below this threshold is considered "empty" and will prevent
+    /// starting new water-consuming operations if prevention is enabled.
+    pub empty_threshold: Option<WaterLevelType>,
 }

@@ -4,7 +4,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::Instant;
 use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
 use alloc::boxed::Box;
-use defmt::{info, Format};
+use defmt::{info, warn, Format};
 
 #[derive(Debug, Clone, Format)]
 pub struct DualBoilerConfig {
@@ -281,7 +281,14 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
         mechanism.request_fill_state(filling, duty_cycle);
     }
 
-    pub async fn check_and_fill_if_needed(&mut self, current_level: WaterLevelType, threshold: Option<WaterLevelType>) {
+    pub async fn check_and_fill_if_needed(
+        &mut self,
+        current_level: WaterLevelType,
+        threshold: Option<WaterLevelType>,
+        tank_empty: bool,
+        prevent_on_empty: bool,
+        allow_continue: bool,
+    ) {
         if let Some(fill_threshold) = threshold {
             let mechanism = self.mechanism.lock().await;
             let is_idle = matches!(mechanism.state, DualBoilerMechanismState::Idle);
@@ -289,13 +296,31 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
 
             if current_level < fill_threshold {
                 // Below threshold - need to fill
-                if is_idle {
-                    // Start/continue filling cycle
+
+                // Check tank before filling
+                let should_block = if prevent_on_empty && tank_empty {
+                    // Tank is empty. Should we block?
+                    if self.is_filling_cycle {
+                        // Fill in progress: respect allow_continue
+                        !allow_continue
+                    } else {
+                        // Starting new fill: always block
+                        true
+                    }
+                } else {
+                    false // Tank not empty or feature disabled
+                };
+
+                if is_idle && !should_block {
+                    // Start/continue filling cycle (tank has water or feature disabled)
                     self.is_filling_cycle = true;
                     self.threshold_exceeded_time = None;
                     self.set_fill_state(true, 100).await;
                 } else {
-                    // Can't fill (not idle) - end fill cycle
+                    // Can't fill (not idle OR tank empty)
+                    if should_block {
+                        warn!("Cannot fill boiler: Tank is empty");
+                    }
                     self.is_filling_cycle = false;
                     self.threshold_exceeded_time = None;
                     self.set_fill_state(false, 0).await;
