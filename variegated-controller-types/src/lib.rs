@@ -86,6 +86,7 @@ pub use communication::*;
 pub use configuration::*;
 pub use control::boiler::*;
 pub use control::group::*;
+pub use control::steam_wand::*;
 pub use controller_variants::*;
 pub use machine_definition::*;
 pub use machine_mode::*;

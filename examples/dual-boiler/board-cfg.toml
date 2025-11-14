@@ -36,6 +36,10 @@ pin_tacho_out = "embassy_rp::peripherals::PIN_25"
 pin_dir = "embassy_rp::peripherals::PIN_35"
 dma_tacho = "embassy_rp::peripherals::DMA_CH9"
 
+[steam_solenoid_peripherals]
+pin_steam_solenoid = "embassy_rp::peripherals::PIN_5"
+pwm = "embassy_rp::peripherals::PWM_SLICE2"
+
 [rotary_pump_peripherals]
 pin_rotary_pump_enable = "embassy_rp::peripherals::PIN_34"
 

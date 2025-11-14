@@ -73,13 +73,13 @@ impl Default for BoilerControlState {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaterDispersalPumpStrategy {
-    AlwaysPump,
+    AlwaysPump(DutyCycleType),  // Pump at specified duty cycle percentage
     NoPump,
 }
 
 impl Default for WaterDispersalPumpStrategy {
     fn default() -> Self {
-        WaterDispersalPumpStrategy::AlwaysPump
+        WaterDispersalPumpStrategy::AlwaysPump(100)
     }
 }
 

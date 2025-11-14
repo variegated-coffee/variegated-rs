@@ -38,6 +38,8 @@
 //! - Integration with the machine command system
 
 use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::time::Duration;
 use defmt;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
@@ -54,7 +56,7 @@ use variegated_mcp23017::{Mcp23017, Port, InterruptMode};
 use crate::StatusSubscriber;
 
 /// Number of buttons on the controller
-const NUM_BUTTONS: usize = 6;
+const NUM_BUTTONS: usize = 8;
 
 /// Button indices for routine control (buttons 0-3)
 const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
@@ -65,6 +67,10 @@ const ROUTINE_BUTTON_3: usize = 3;    // Button 4 (Pin 3) - Triggers routine 3
 /// Button indices for specific functions
 const BREWING_BUTTON: usize = 4;      // Button 5 (Pin 4)
 const WATER_TAP_BUTTON: usize = 5;    // Button 6 (Pin 5)
+
+const MP_PADDLE_SWITCH_BUTTON: usize = 6;
+
+const ON_BOARD_BUTTON: usize = 7;
 
 /// Timing constants for event recognition
 const SETTLING_DELAY_MS: u64 = 50;           // Time to group simultaneous button presses
@@ -87,13 +93,13 @@ impl ButtonSet {
 
     /// Create a button set from raw bits
     pub const fn from_bits(bits: u8) -> Self {
-        Self(bits & 0x3F) // Mask to 6 buttons
+        Self(bits & 0xFF) // Mask to 8 buttons
     }
 
     /// Create a button set from raw GPIO state (active low)
     pub const fn from_gpio_state(state: u8) -> Self {
         // Invert bits since buttons are active low, then mask to 6 buttons
-        Self(!state & 0x3F)
+        Self(!state & 0xFF)
     }
 
     /// Check if a specific button is in the set
@@ -277,6 +283,53 @@ impl ButtonEventRecognizer {
 // Event Handling
 // ============================================================================
 
+#[cfg(feature = "pwm-steam-valve")]
+#[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+enum SteamValveState {
+    Off,
+    Low,      // 25%
+    Medium,   // 50%
+    High,     // 75%
+    Full,     // 100%
+}
+
+#[cfg(feature = "pwm-steam-valve")]
+impl SteamValveState {
+    fn next(&self) -> Self {
+        match self {
+            Self::Off => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Full,
+            Self::Full => Self::Off,
+        }
+    }
+
+    fn to_valve_openness(&self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Low => 25,
+            Self::Medium => 50,
+            Self::High => 75,
+            Self::Full => 100,
+        }
+    }
+
+    fn from_valve_openness(openness: u8, is_steaming: bool) -> Self {
+        if !is_steaming || openness == 0 {
+            Self::Off
+        } else if openness <= 25 {
+            Self::Low
+        } else if openness <= 50 {
+            Self::Medium
+        } else if openness <= 75 {
+            Self::High
+        } else {
+            Self::Full
+        }
+    }
+}
+
 /// Button event handler - translates events to machine commands
 /// Maintains machine state for toggle behavior
 pub struct ButtonEventHandler {
@@ -284,6 +337,9 @@ pub struct ButtonEventHandler {
     brewing_active: bool,
     /// Current water dispensing state (from status subscription)
     water_dispensing_active: bool,
+    /// Steam valve state
+    #[cfg(feature = "pwm-steam-valve")]
+    steam_valve_state: SteamValveState,
     /// Current routine execution state (from status subscription)
     routine_executing: bool,
     /// Current machine mode (from status subscription)
@@ -298,6 +354,8 @@ impl ButtonEventHandler {
         Self {
             brewing_active: false,
             water_dispensing_active: false,
+            #[cfg(feature = "pwm-steam-valve")]
+            steam_valve_state: SteamValveState::Off,
             routine_executing: false,
             machine_mode: MachineMode::Off,
             button_5_hold_start: None,
@@ -316,6 +374,13 @@ impl ButtonEventHandler {
             .map(|water_tap| water_tap.is_dispensing)
             .unwrap_or(false);
 
+        #[cfg(feature = "pwm-steam-valve")]
+        {
+            self.steam_valve_state = status.get_steam_wand_status(0)
+                .map(|steam| SteamValveState::from_valve_openness(steam.valve_openness, steam.is_steaming))
+                .unwrap_or(SteamValveState::Off);
+        }
+
         // Update routine execution state from status
         self.routine_executing = status.routine_execution.is_some();
 
@@ -324,7 +389,7 @@ impl ButtonEventHandler {
     }
 
     /// Handle a button event and return the appropriate machine command
-    pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Option<MachineCommand> {
+    pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Vec<MachineCommand> {
         match event {
             ButtonEvent::Press(buttons) => self.handle_press(buttons),
             ButtonEvent::PressAndHoldStart(buttons) => {
@@ -333,11 +398,11 @@ impl ButtonEventHandler {
                     self.button_5_hold_start = Some(now);
                     defmt::debug!("Button 5 hold started at {:?}", now);
                 }
-                None
+                vec![]
             }
             ButtonEvent::PressAndHoldChange { .. } => {
                 // Could be used for special functions in the future
-                None
+                vec![]
             }
             ButtonEvent::PressAndHoldStop(buttons) => {
                 // Clear button 5 hold tracking when released
@@ -345,16 +410,16 @@ impl ButtonEventHandler {
                     self.button_5_hold_start = None;
                     defmt::debug!("Button 5 hold stopped");
                 }
-                None
+                vec![]
             }
         }
     }
 
     /// Handle a button press event
-    fn handle_press(&self, buttons: ButtonSet) -> Option<MachineCommand> {
+    fn handle_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
         // Check if machine is Off - any button press should turn it On
         if self.machine_mode == MachineMode::Off {
-            return Some(MachineCommand::SetMachineMode(MachineMode::On));
+            return vec![MachineCommand::SetMachineMode(MachineMode::On)];
         }
 
         // Single button presses for routine control (buttons 0-3)
@@ -368,7 +433,7 @@ impl ButtonEventHandler {
                         defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
                         MachineCommand::RunRoutine(RoutineIndex::Function(button_idx), None)
                     };
-                    return Some(command);
+                    return vec![command];
                 }
             }
 
@@ -381,7 +446,7 @@ impl ButtonEventHandler {
                     MachineCommand::StartBrewing(group_index)
                 };
                 defmt::info!("Button 5 pressed - sending brewing command: {:?}", command);
-                return Some(command);
+                return vec![command];
             }
 
             // Button 6: Water tap toggle
@@ -393,14 +458,33 @@ impl ButtonEventHandler {
                     MachineCommand::StartPumpingToWaterTap(water_tap_index)
                 };
                 defmt::info!("Button 6 pressed - sending water tap command: {:?}", command);
-                return Some(command);
+                return vec![command];
             }
+
+            // Button 7: Steam valve cycling
+            #[cfg(feature = "pwm-steam-valve")]
+            if buttons.contains(ON_BOARD_BUTTON) {
+                let next_state = self.steam_valve_state.next();
+                defmt::info!("Steam button pressed - cycling to: {:?}", next_state);
+
+                self.steam_valve_state = next_state;
+
+                return if matches!(next_state, SteamValveState::Off) {
+                    vec![MachineCommand::StopSteaming(0)]
+                } else {
+                    vec![
+                        MachineCommand::StartSteaming(0),
+                        MachineCommand::SetSteamValveOpenness(0, next_state.to_valve_openness())
+                    ]
+                };
+            }
+
         }
 
         // Multi-button combinations can be added here in the future
         // For example: buttons 1+6 could trigger a specific routine or function
 
-        None
+        vec![]
     }
 
     /// Check for long hold conditions and return appropriate command
@@ -435,6 +519,16 @@ pub async fn button_controller_task(
     let mut handler = ButtonEventHandler::new();
 
     defmt::info!("Button controller task started");
+
+    mcp23017.set_pin_pullup(ROUTINE_BUTTON_0 as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(ROUTINE_BUTTON_1 as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(ROUTINE_BUTTON_2 as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(ROUTINE_BUTTON_3 as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(BREWING_BUTTON as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(WATER_TAP_BUTTON as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(MP_PADDLE_SWITCH_BUTTON as u8, true).await.unwrap();
+    mcp23017.set_pin_pullup(ON_BOARD_BUTTON as u8, true).await.unwrap();
+
 
     // Configure all button pins (0-5 on Port A) for interrupt-on-change
     if let Err(e) = mcp23017.set_port_interrupt(Port::A, InterruptMode::OnChange).await {
@@ -492,8 +586,8 @@ pub async fn button_controller_task(
             if let Some(event) = recognizer.update(button_set, now) {
                 defmt::debug!("Button event: {:?}", event);
 
-                // Handle the event and get optional command
-                if let Some(command) = handler.handle_event(event, now) {
+                // Handle the event and get commands
+                for command in handler.handle_event(event, now) {
                     if let Err(_) = command_sender.try_send(command) {
                         defmt::warn!("Failed to send command - channel full");
                     }

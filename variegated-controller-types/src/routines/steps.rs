@@ -31,8 +31,13 @@ pub enum RoutineCommand {
     StartBrewing(GroupIndex),
     StopBrewing(GroupIndex),
     TareGroupScale(GroupIndex),
+    StartPumpingToWaterTap(WaterTapIndex),
+    StopPumpingToWaterTap(WaterTapIndex),
+    StartSteaming(SteamWandIndex),
+    StopSteaming(SteamWandIndex),
 
     // Parameterizable commands
+    SetSteamValveOpenness(SteamWandIndex, ParameterValue),
     SetBoilerTemperature(BoilerIndex, ParameterValue),
     SetBoilerPressure(BoilerIndex, ParameterValue),
     SetGroupFlowRate(GroupIndex, ParameterValue),

@@ -262,7 +262,7 @@ pub struct WaterTapConfiguration {
 #[derive(Clone, Debug, Default)]
 pub struct SteamWandConfiguration {
     pub temperature_target: Option<TemperatureType>,
-    pub pressure_target: Option<PressureType>,
+    pub openness: Option<ValveOpenType>,
     pub purge_time_seconds: Option<u32>,
     pub max_steam_time_seconds: Option<u32>,
     pub auto_purge_enabled: bool,

@@ -632,6 +632,7 @@ impl<
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (VirtualSteamBoiler.as_index(), virtual_steam_boiler_status)]),
             group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
             water_tap_statuses: FnvIndexMap::new(),
+            steam_wand_statuses: FnvIndexMap::new(),
             tank_statuses,
             mode: Default::default(),
             routine_execution,

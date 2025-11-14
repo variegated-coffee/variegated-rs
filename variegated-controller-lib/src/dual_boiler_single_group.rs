@@ -18,8 +18,12 @@ use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
+#[cfg(feature = "pwm-steam-valve")]
+use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankIndex, TankStatus, RoutineParameters, MachineMode};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, TemperatureType, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankIndex, TankStatus, RoutineParameters, MachineMode};
+#[cfg(feature = "pwm-steam-valve")]
+use variegated_controller_types::{SteamWandStatus, ValveOpenType, SteamWandControlState, SteamWandConfiguration};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -54,12 +58,46 @@ pub struct DualBoilerSingleGroupPersistentConfiguration {
     pub group_pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
     pub water_tap_pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
     pub fill_pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
+
+    // Machine-wide safety settings
+    pub prevent_start_on_empty_tank: bool,
+    pub allow_continue_on_empty_tank: bool,
+
+    // Brew boiler configuration
+    pub brew_boiler_max_temperature: Option<TemperatureType>,
+    pub brew_boiler_max_pressure: Option<PressureType>,
+    pub brew_boiler_minimum_safe_level: Option<WaterLevelType>,
+    pub brew_boiler_temp_kalman: Option<KalmanParameters>,
+    pub brew_boiler_pressure_kalman: Option<KalmanParameters>,
+
+    // Steam boiler configuration
+    pub steam_boiler_max_temperature: Option<TemperatureType>,
+    pub steam_boiler_max_pressure: Option<PressureType>,
+    pub steam_boiler_minimum_safe_level: Option<WaterLevelType>,
+    pub steam_boiler_temp_kalman: Option<KalmanParameters>,
+    pub steam_boiler_pressure_kalman: Option<KalmanParameters>,
+
+    // Group configuration
+    pub group_auto_tare_enabled: bool,
+    pub group_max_brew_time_seconds: Option<u32>,
+    pub group_pressure_kalman: Option<KalmanParameters>,
+
+    // Tank configuration
+    pub tank_low_level_warning_threshold: Option<WaterLevelType>,
+    pub tank_empty_threshold: Option<WaterLevelType>,
+
+    // Water tap configuration
+    pub water_tap_temperature_target: Option<TemperatureType>,
+    pub water_tap_max_dispense_time_seconds: Option<u32>,
+    pub water_tap_flow_rate_limit: Option<FlowRateType>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DualBoilerSingleGroupEphemeralConfiguration {
     pub mode: MachineMode,
     pub group_brew_control_state: GroupBrewControlState,
+    #[cfg(feature = "pwm-steam-valve")]
+    pub steam_wand_control_state: SteamWandControlState,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -169,6 +207,8 @@ impl Default for DualBoilerSingleGroupEphemeralConfiguration {
                 },
             },
             mode: MachineMode::default(),
+            #[cfg(feature = "pwm-steam-valve")]
+            steam_wand_control_state: SteamWandControlState::default(),
         }
     }
 }
@@ -240,10 +280,42 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             pump_tacho_pulses_per_liter: None,
             flow_sensor_pulses_per_liter: None,
             service_boiler_fill_threshold: Some(20), // Fill when below 20%
-            water_dispersal_pump_strategy: WaterDispersalPumpStrategy::AlwaysPump,
+            water_dispersal_pump_strategy: WaterDispersalPumpStrategy::AlwaysPump(100),
             group_pump_configuration: None,
             water_tap_pump_configuration: None,
             fill_pump_configuration: None,
+
+            // Machine-wide safety settings (match MachineConfiguration::default())
+            prevent_start_on_empty_tank: false,
+            allow_continue_on_empty_tank: true,
+
+            // Brew boiler configuration (match example values from main.rs)
+            brew_boiler_max_temperature: Some(105.0),
+            brew_boiler_max_pressure: Some(15.0),
+            brew_boiler_minimum_safe_level: None,
+            brew_boiler_temp_kalman: None,
+            brew_boiler_pressure_kalman: None,
+
+            // Steam boiler configuration (match example values from main.rs)
+            steam_boiler_max_temperature: Some(130.0),
+            steam_boiler_max_pressure: Some(2.0),
+            steam_boiler_minimum_safe_level: None,
+            steam_boiler_temp_kalman: None,
+            steam_boiler_pressure_kalman: None,
+
+            // Group configuration (match GroupConfiguration::default())
+            group_auto_tare_enabled: false,
+            group_max_brew_time_seconds: None,
+            group_pressure_kalman: None,
+
+            // Tank configuration (match TankConfiguration::default())
+            tank_low_level_warning_threshold: None,
+            tank_empty_threshold: None,
+
+            // Water tap configuration (match WaterTapConfiguration::default())
+            water_tap_temperature_target: None,
+            water_tap_max_dispense_time_seconds: None,
+            water_tap_flow_rate_limit: None,
         }
     }
 }
@@ -284,6 +356,8 @@ pub struct DualBoilerSingleGroupController<
     steam_boiler: Boiler<'a, BoilerM, N_WATCH>,
     group: Group<'a, GroupM, N_WATCH>,
     water_tap: WaterTap<'a, WaterTapM, N_WATCH>,
+    #[cfg(feature = "pwm-steam-valve")]
+    steam_wand: SteamWand,
     tank: Option<Tank<'a, TankM, N_WATCH>>,
     fill_mechanism: Option<DualBoilerFillMechanism<'a, FillM>>,
 
@@ -381,15 +455,11 @@ impl<
         steam_boiler: Boiler<'a, BoilerM, N_WATCH>,
         group: Group<'a, GroupM, N_WATCH>,
         water_tap: WaterTap<'a, WaterTapM, N_WATCH>,
+        #[cfg(feature = "pwm-steam-valve")]
+        mut steam_wand: SteamWand,
         tank: Option<Tank<'a, TankM, N_WATCH>>,
         fill_mechanism: Option<DualBoilerFillMechanism<'a, FillM>>,
         settings_store: &'static Mutex<StorageM, SettingsStoreT>,
-        machine_config: MachineConfiguration,
-        tank_config: TankConfiguration,
-        group_config: GroupConfiguration,
-        water_tap_config: WaterTapConfiguration,
-        brew_boiler_config: BoilerConfiguration,
-        steam_boiler_config: BoilerConfiguration,
         routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
         schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -397,6 +467,66 @@ impl<
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
         contention_strategy_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>,
     ) -> Self {
+        // Create configuration objects from persistent config defaults
+        // These will be overridden when the persistent config is loaded from flash
+        let default_persistent = DualBoilerSingleGroupPersistentConfiguration::default();
+
+        let machine_config = MachineConfiguration {
+            heating_element_interlock: default_persistent.heating_element_interlock,
+            prevent_start_on_empty_tank: default_persistent.prevent_start_on_empty_tank,
+            allow_continue_on_empty_tank: default_persistent.allow_continue_on_empty_tank,
+            max_shot_logs: 100,
+            log_sample_decimation: 1,
+        };
+
+        let brew_boiler_config = BoilerConfiguration {
+            max_temperature: default_persistent.brew_boiler_max_temperature,
+            max_pressure: default_persistent.brew_boiler_max_pressure,
+            minimum_safe_level: default_persistent.brew_boiler_minimum_safe_level,
+            temperature_sensor_kalman_parameters: default_persistent.brew_boiler_temp_kalman,
+            pressure_sensor_kalman_parameters: default_persistent.brew_boiler_pressure_kalman,
+            ..BoilerConfiguration::default()
+        };
+
+        let steam_boiler_config = BoilerConfiguration {
+            max_temperature: default_persistent.steam_boiler_max_temperature,
+            max_pressure: default_persistent.steam_boiler_max_pressure,
+            minimum_safe_level: default_persistent.steam_boiler_minimum_safe_level,
+            temperature_sensor_kalman_parameters: default_persistent.steam_boiler_temp_kalman,
+            pressure_sensor_kalman_parameters: default_persistent.steam_boiler_pressure_kalman,
+            ..BoilerConfiguration::default()
+        };
+
+        let tank_config = TankConfiguration {
+            low_level_warning_threshold: default_persistent.tank_low_level_warning_threshold,
+            empty_threshold: default_persistent.tank_empty_threshold,
+            water_level_sensor_kalman_parameters: None,
+        };
+
+        let group_config = GroupConfiguration {
+            auto_tare_enabled: default_persistent.group_auto_tare_enabled,
+            max_brew_time_seconds: default_persistent.group_max_brew_time_seconds,
+            pressure_sensor_kalman_parameters: default_persistent.group_pressure_kalman,
+            ..GroupConfiguration::default()
+        };
+
+        let water_tap_config = WaterTapConfiguration {
+            temperature_target: default_persistent.water_tap_temperature_target,
+            max_dispense_time_seconds: default_persistent.water_tap_max_dispense_time_seconds,
+            flow_rate_limit: default_persistent.water_tap_flow_rate_limit,
+            pump_strategy: default_persistent.water_dispersal_pump_strategy,
+            pump_configuration: default_persistent.water_tap_pump_configuration.clone(),
+            supply_tank_index: None,
+        };
+
+        // Initialize steam wand from ephemeral configuration
+        #[cfg(feature = "pwm-steam-valve")]
+        {
+            let default_config = DualBoilerSingleGroupEphemeralConfiguration::default();
+            let initial_valve_openness = default_config.steam_wand_control_state.valve_openness;
+            let _ = steam_wand.set_steam_valve_openness(initial_valve_openness);
+        }
+
         Self {
             command_channel_receiver,
             status_channel_sender,
@@ -406,6 +536,8 @@ impl<
             steam_boiler,
             group,
             water_tap,
+            #[cfg(feature = "pwm-steam-valve")]
+            steam_wand,
             tank,
             fill_mechanism,
             brew_boiler_pid: super::limited_pid(),
@@ -463,13 +595,13 @@ impl<
             temperature_pid_parameters: self.configuration.persistent.pid_parameters.brew_boiler_temperature_params.clone(),
             pressure_pid_parameters: self.configuration.persistent.pid_parameters.brew_boiler_pressure_params.clone(),
             control_state: self.configuration.persistent.brew_boiler_control_state,
-            max_temperature: None,
-            max_pressure: None,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
+            max_temperature: self.configuration.persistent.brew_boiler_max_temperature,
+            max_pressure: self.configuration.persistent.brew_boiler_max_pressure,
+            temperature_sensor_kalman_parameters: self.configuration.persistent.brew_boiler_temp_kalman,
+            pressure_sensor_kalman_parameters: self.configuration.persistent.brew_boiler_pressure_kalman,
             fill_config: None,
             supply_tank_index: None,
-            minimum_safe_level: self.brew_boiler_config.minimum_safe_level,
+            minimum_safe_level: self.configuration.persistent.brew_boiler_minimum_safe_level,
         };
         configuration.insert_boiler_configuration(BrewBoiler.as_index(), brew_boiler_config);
 
@@ -478,16 +610,16 @@ impl<
             temperature_pid_parameters: self.configuration.persistent.pid_parameters.steam_boiler_temperature_params.clone(),
             pressure_pid_parameters: self.configuration.persistent.pid_parameters.steam_boiler_pressure_params.clone(),
             control_state: self.configuration.persistent.steam_boiler_control_state,
-            max_temperature: None,
-            max_pressure: None,
-            temperature_sensor_kalman_parameters: None,
-            pressure_sensor_kalman_parameters: None,
+            max_temperature: self.configuration.persistent.steam_boiler_max_temperature,
+            max_pressure: self.configuration.persistent.steam_boiler_max_pressure,
+            temperature_sensor_kalman_parameters: self.configuration.persistent.steam_boiler_temp_kalman,
+            pressure_sensor_kalman_parameters: self.configuration.persistent.steam_boiler_pressure_kalman,
             fill_config: Some(FillConfiguration {
                 fill_threshold: self.configuration.persistent.service_boiler_fill_threshold,
                 pump_configuration: self.configuration.persistent.fill_pump_configuration.clone(),
             }),
             supply_tank_index: None,
-            minimum_safe_level: self.steam_boiler_config.minimum_safe_level,
+            minimum_safe_level: self.configuration.persistent.steam_boiler_minimum_safe_level,
         };
         configuration.insert_boiler_configuration(SteamBoiler.as_index(), steam_boiler_config);
 
@@ -497,10 +629,10 @@ impl<
             output_flow_rate_pid_parameters: self.configuration.persistent.pid_parameters.pump_output_flow_rate_params.clone(),
             pressure_pid_parameters: self.configuration.persistent.pid_parameters.pump_pressure_params.clone(),
             brew_control_state: self.configuration.ephemeral.group_brew_control_state,
-            max_brew_time_seconds: None,
-            auto_tare_enabled: true,
+            max_brew_time_seconds: self.configuration.persistent.group_max_brew_time_seconds,
+            auto_tare_enabled: self.configuration.persistent.group_auto_tare_enabled,
             pump_configuration: self.configuration.persistent.group_pump_configuration.clone(),
-            pressure_sensor_kalman_parameters: None,
+            pressure_sensor_kalman_parameters: self.configuration.persistent.group_pressure_kalman,
             flow_sensor_pulses_per_liter: None,
             supply_tank_index: None,
         };
@@ -508,21 +640,33 @@ impl<
 
         let water_tap_config = WaterTapConfiguration {
             pump_strategy: self.configuration.persistent.water_dispersal_pump_strategy,
-            temperature_target: None,
-            max_dispense_time_seconds: None,
-            flow_rate_limit: None,
+            temperature_target: self.configuration.persistent.water_tap_temperature_target,
+            max_dispense_time_seconds: self.configuration.persistent.water_tap_max_dispense_time_seconds,
+            flow_rate_limit: self.configuration.persistent.water_tap_flow_rate_limit,
             pump_configuration: self.configuration.persistent.water_tap_pump_configuration.clone(),
             supply_tank_index: None,
         };
         configuration.insert_water_tap_configuration(0, water_tap_config);
 
+        // Add steam wand configuration
+        #[cfg(feature = "pwm-steam-valve")]
+        {
+            let steam_wand_config = SteamWandConfiguration {
+                temperature_target: None,
+                openness: Some(self.configuration.ephemeral.steam_wand_control_state.valve_openness),
+                purge_time_seconds: None,
+                max_steam_time_seconds: None,
+                auto_purge_enabled: false,
+                supply_tank_index: None,
+            };
+            configuration.insert_steam_wand_configuration(0, steam_wand_config);
+        }
+
         // Add tank configuration if tank is present
-        // Note: We can't access self.tank here since this is a From implementation
-        // Tank configuration will need to be added separately when tank is detected
         let tank_config = TankConfiguration {
-            low_level_warning_threshold: Some(20),
+            low_level_warning_threshold: self.configuration.persistent.tank_low_level_warning_threshold,
             water_level_sensor_kalman_parameters: None,
-            empty_threshold: None,
+            empty_threshold: self.configuration.persistent.tank_empty_threshold,
         };
         configuration.insert_tank_configuration(0, tank_config);
 
@@ -700,6 +844,26 @@ impl<
         let mut brew_demand = brew_pid_out.out.max(0.0);
         self.last_brew_boiler_output = brew_demand;
 
+        // Safety check: disable heating if temperature exceeds maximum
+        if let Some(max_temp) = self.brew_boiler_config.max_temperature {
+            if let Some(current_temp) = self.brew_boiler.get_temperature() {
+                if current_temp >= max_temp {
+                    warn!("Brew boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
+                    brew_demand = 0.0;
+                }
+            }
+        }
+
+        // Safety check: disable heating if pressure exceeds maximum
+        if let Some(max_pressure) = self.brew_boiler_config.max_pressure {
+            if let Some(current_pressure) = self.brew_boiler.get_pressure() {
+                if current_pressure >= max_pressure {
+                    warn!("Brew boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
+                    brew_demand = 0.0;
+                }
+            }
+        }
+
         // Dry-run protection: disable heating if water level too low
         let brew_boiler_level = self.brew_boiler.get_water_level();
         if !Self::is_boiler_level_safe(brew_boiler_level, &self.brew_boiler_config) {
@@ -744,6 +908,26 @@ impl<
         let steam_pid_out = self.steam_boiler_pid.step(PidIn::new(steam_pv, delta_t));
         let mut steam_demand = steam_pid_out.out.max(0.0);
         self.last_steam_boiler_output = steam_demand;
+
+        // Safety check: disable heating if temperature exceeds maximum
+        if let Some(max_temp) = self.steam_boiler_config.max_temperature {
+            if let Some(current_temp) = self.steam_boiler.get_temperature() {
+                if current_temp >= max_temp {
+                    warn!("Steam boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
+                    steam_demand = 0.0;
+                }
+            }
+        }
+
+        // Safety check: disable heating if pressure exceeds maximum
+        if let Some(max_pressure) = self.steam_boiler_config.max_pressure {
+            if let Some(current_pressure) = self.steam_boiler.get_pressure() {
+                if current_pressure >= max_pressure {
+                    warn!("Steam boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
+                    steam_demand = 0.0;
+                }
+            }
+        }
 
         // Dry-run protection: disable heating if water level too low
         let steam_boiler_level = self.steam_boiler.get_water_level();
@@ -905,7 +1089,7 @@ impl<
             // Apply water dispersal pump strategy
             let base_duty_cycle = match self.configuration.persistent.water_dispersal_pump_strategy {
                 WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
-                _ => 100, // Normal pumping
+                WaterDispersalPumpStrategy::AlwaysPump(duty_cycle) => duty_cycle, // Pump at specified duty cycle
             };
             let duty_cycle = self.apply_water_tap_pump_configuration_limits(base_duty_cycle, false);
             self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
@@ -1019,6 +1203,12 @@ impl<
             is_dispensing: self.water_tap_dispensing,
         };
 
+        #[cfg(feature = "pwm-steam-valve")]
+        let steam_wand_status = SteamWandStatus {
+            is_steaming: self.steam_wand.get_steaming_state(),
+            valve_openness: self.steam_wand.get_steam_valve_openness(),
+        };
+
         // Create tank statuses map - only include tank if it exists
         let tank_statuses = if let Some(ref mut tank) = self.tank {
             FnvIndexMap::from_iter([(0, TankStatus {
@@ -1032,6 +1222,10 @@ impl<
             boiler_statuses: FnvIndexMap::from_iter([(BrewBoiler.as_index(), brew_boiler_status), (SteamBoiler.as_index(), steam_boiler_status)]),
             group_statuses: FnvIndexMap::from_iter([(SingleGroup.as_index(), group_status)]),
             water_tap_statuses: FnvIndexMap::from_iter([(0, water_tap_status)]),
+            #[cfg(feature = "pwm-steam-valve")]
+            steam_wand_statuses: FnvIndexMap::from_iter([(0, steam_wand_status)]),
+            #[cfg(not(feature = "pwm-steam-valve"))]
+            steam_wand_statuses: FnvIndexMap::new(),
             tank_statuses,
             mode: self.configuration.ephemeral.mode,
             routine_execution,
@@ -1177,6 +1371,23 @@ impl<
             }
             MachineCommand::StopPumpingToWaterTap(_) => {
                 self.stop_water_tap_dispensing().await;
+            }
+            #[cfg(feature = "pwm-steam-valve")]
+            MachineCommand::StartSteaming(_) => {
+                if self.configuration.ephemeral.mode != MachineMode::On {
+                    warn!("Cannot start steaming while not in On mode");
+                    return;
+                }
+
+                self.start_steaming().await;
+            }
+            #[cfg(feature = "pwm-steam-valve")]
+            MachineCommand::StopSteaming(_) => {
+                self.stop_steaming().await;
+            }
+            #[cfg(feature = "pwm-steam-valve")]
+            MachineCommand::SetSteamValveOpenness(_, openness) => {
+                self.set_steam_valve_openness(openness).await;
             }
             MachineCommand::SetBoilerControlTarget(boiler_index, mode, values_update) => {
                 info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
@@ -1627,6 +1838,18 @@ impl<
                     Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
             }
+            MachineCommand::SetWaterDispersalPumpStrategy(index, strategy) => {
+                info!("Setting water dispersal pump strategy for water tap {}: {:?}", index, strategy);
+                self.configuration.persistent.water_dispersal_pump_strategy = strategy;
+                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                }
+            }
+            #[cfg(not(feature = "pwm-steam-valve"))]
+            MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
+                warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
+            }
         }
     }
 
@@ -1787,7 +2010,7 @@ impl<
             // Apply water dispersal pump strategy
             let base_duty_cycle = match self.configuration.persistent.water_dispersal_pump_strategy {
                 WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
-                _ => 100, // Normal pumping
+                WaterDispersalPumpStrategy::AlwaysPump(duty_cycle) => duty_cycle, // Pump at specified duty cycle
             };
             let duty_cycle = self.apply_water_tap_pump_configuration_limits(base_duty_cycle, false);
             self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
@@ -1799,6 +2022,35 @@ impl<
             info!("Stopping water tap dispensing");
             self.water_tap_dispensing = false;
             self.water_tap.set_water_dispensing_state(false, 0).await;
+        }
+    }
+
+    #[cfg(feature = "pwm-steam-valve")]
+    async fn start_steaming(&mut self) {
+        info!("Starting steaming");
+        if let Err(e) = self.steam_wand.set_steaming_state(true) {
+            error!("Failed to start steaming: {:?}", e);
+        }
+    }
+
+    #[cfg(feature = "pwm-steam-valve")]
+    async fn stop_steaming(&mut self) {
+        info!("Stopping steaming");
+        if let Err(e) = self.steam_wand.set_steaming_state(false) {
+            error!("Failed to stop steaming: {:?}", e);
+        }
+    }
+
+    #[cfg(feature = "pwm-steam-valve")]
+    async fn set_steam_valve_openness(&mut self, openness: ValveOpenType) {
+        info!("Setting steam valve openness to {}%", openness);
+
+        // Update configuration (ephemeral)
+        self.configuration.ephemeral.steam_wand_control_state.valve_openness = openness;
+
+        // Update HAL
+        if let Err(e) = self.steam_wand.set_steam_valve_openness(openness) {
+            error!("Failed to set steam valve openness: {:?}", e);
         }
     }
 

@@ -9,7 +9,8 @@
       "Bash(grep:*)",
       "Bash(sed:*)",
       "WebSearch",
-      "WebFetch(domain:docs.rs)"
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:github.com)"
     ]
   },
   "enableAllProjectMcpServers": false

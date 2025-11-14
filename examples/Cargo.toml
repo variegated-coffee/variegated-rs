@@ -50,7 +50,7 @@ variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", featur
 variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", features = ["defmt"] }
 variegated-gravity-driver = { version = "0.1.0", path = "../variegated-gravity-driver", features = ["defmt"], optional = true }
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
-variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib", features = ["rp235xb"] }
+variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation", features = ["instrumentation"] }
 variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
@@ -84,12 +84,13 @@ futures = { version = "0.3.30", default-features = false, features = ["alloc"] }
 default = ["rp235xb"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
-rp235xb = ["embassy-rp/rp235xb"]
-dual-boiler = ["tft-display", "gravity", "gear-pump"]
+rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
+dual-boiler = ["tft-display", "gravity", "gear-pump", "pwm-steam-valve"]
 single-boiler = ["dep:oled_async", "dep:display-interface-spi", "gravity"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 gravity = ["dep:variegated-gravity-driver"]
 gear-pump = []
+pwm-steam-valve = ["variegated-controller-lib/pwm-steam-valve"]
 
 [profile.dev]
 debug = true              # Enable debug info

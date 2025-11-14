@@ -349,6 +349,46 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
 
 pub struct SteamWand {
     pub valve_mechanism: Option<Box<dyn ValveMechanism>>,
+    steaming: bool,
+    configured_valve_openness: ValveOpenType,
+}
+
+impl SteamWand {
+    pub fn new(valve_mechanism: Option<Box<dyn ValveMechanism>>) -> Self {
+        Self {
+            valve_mechanism,
+            steaming: false,
+            configured_valve_openness: 100,
+        }
+    }
+
+    pub fn set_steaming_state(&mut self, steaming: bool) -> Result<(), ValveMechanismError> {
+        self.steaming = steaming;
+        if let Some(valve) = &mut self.valve_mechanism {
+            let openness = if steaming { self.configured_valve_openness } else { 0 };
+            valve.set_valve_state(openness)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_steam_valve_openness(&mut self, openness: ValveOpenType) -> Result<(), ValveMechanismError> {
+        self.configured_valve_openness = openness;
+        // If currently steaming, apply the new openness immediately
+        if self.steaming {
+            if let Some(valve) = &mut self.valve_mechanism {
+                valve.set_valve_state(openness)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_steaming_state(&self) -> bool {
+        self.steaming
+    }
+
+    pub fn get_steam_valve_openness(&self) -> ValveOpenType {
+        self.configured_valve_openness
+    }
 }
 
 pub struct WaterTap<'a, M: RawMutex, const N: usize> {

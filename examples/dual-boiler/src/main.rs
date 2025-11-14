@@ -64,11 +64,12 @@ use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType, SteamWandDefinition};
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
+use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
 use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
 use variegated_hal::gpio::coordinated_dual_heating_element::{CoordinatedDualHeatingElementControl, CoordinatedDualHeatingElementDevice};
 use variegated_mcp23017::{Mcp23017, Mcp23017Config};
@@ -281,6 +282,33 @@ struct WatchdogPeripherals {
     watchdog: Peri<'static, ()>,
 }
 
+#[cfg(feature = "pwm-steam-valve")]
+#[variegated_board_cfg::board_cfg("steam_solenoid_peripherals")]
+struct SteamSolenoidPeripherals {
+    pin_steam_solenoid: Peri<'static, ()>,
+    pwm: Peri<'static, ()>,
+}
+
+struct MainTaskPeripherals {
+    spi_p: InternalSpiBusPeripherals,
+    ads_p: Ads124S08Peripherals,
+    #[cfg(feature = "gear-pump")]
+    pump_p: PumpPeripherals,
+    rotary_p: RotaryPumpPeripherals,
+    mechanism_p: MechanismPeripherals,
+    sd_card_p: SdCardPeripherals,
+    internal_i2c_p: InternalI2cBusPeripherals,
+    qwiic_i2c_p: QwiicI2cBusPeripherals,
+    button_mux_p: ButtonMuxPeripherals,
+    flash_p: SettingsFlashPeripherals,
+    watchdog_p: WatchdogPeripherals,
+    pulse_counter_pio_p: PulseCounterPioPeripherals,
+    flow_meter_p: FlowMeterPeripherals,
+    esp_p: Esp32Peripherals,
+    #[cfg(feature = "pwm-steam-valve")]
+    steam_solenoid_p: SteamSolenoidPeripherals,
+}
+
 type InternalSPIBus = Mutex<SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type InternalI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, InternalI2cBusPeripheralsI2C, i2c::Async>>;
 type QwiicI2CDevice = I2cDevice<'static, NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
@@ -427,28 +455,34 @@ fn main() -> ! {
     let pulse_counter_pio_p = pulse_counter_pio_peripherals!(p);
     let flow_meter_p = flow_meter_peripherals!(p);
     let esp_p = esp32_peripherals!(p);
+    #[cfg(feature = "pwm-steam-valve")]
+    let steam_solenoid_p = steam_solenoid_peripherals!(p);
 
-
+    let peripherals = MainTaskPeripherals {
+        spi_p,
+        ads_p,
+        #[cfg(feature = "gear-pump")]
+        pump_p,
+        rotary_p,
+        mechanism_p,
+        sd_card_p,
+        internal_i2c_p,
+        qwiic_i2c_p,
+        button_mux_p,
+        flash_p,
+        watchdog_p,
+        pulse_counter_pio_p,
+        flow_meter_p,
+        esp_p,
+        #[cfg(feature = "pwm-steam-valve")]
+        steam_solenoid_p,
+    };
 
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
         unwrap!(spawner.spawn(main_task(
             spawner,
-            spi_p,
-            ads_p,
-            #[cfg(feature = "gear-pump")]
-            pump_p,
-            rotary_p,
-            mechanism_p,
-            sd_card_p,
-            internal_i2c_p,
-            qwiic_i2c_p,
-            button_mux_p,
-            flash_p,
-            watchdog_p,
-            pulse_counter_pio_p,
-            flow_meter_p,
-            esp_p,
+            peripherals,
             status_channel,
         )))
     });
@@ -597,23 +631,29 @@ async fn configuration_debug_logger(mut configuration_receiver: ConfigurationSub
 #[embassy_executor::task]
 async fn main_task(
     spawner: Spawner,
-    spi_p: InternalSpiBusPeripherals,
-    ads_p: Ads124S08Peripherals,
-    #[cfg(feature = "gear-pump")]
-    pump_p: PumpPeripherals,
-    rotary_p: RotaryPumpPeripherals,
-    mechanism_p: MechanismPeripherals,
-    sd_card_p: SdCardPeripherals,
-    internal_i2c_p: InternalI2cBusPeripherals,
-    qwiic_i2c_p: QwiicI2cBusPeripherals,
-    button_mux_p: ButtonMuxPeripherals,
-    flash_p: SettingsFlashPeripherals,
-    watchdog_p: WatchdogPeripherals,
-    pulse_counter_pio_p: PulseCounterPioPeripherals,
-    flow_meter_p: FlowMeterPeripherals,
-    esp_p: Esp32Peripherals,
+    peripherals: MainTaskPeripherals,
     status_channel: &'static StatusChannel
 ) -> ! {
+    // Destructure peripherals
+    let MainTaskPeripherals {
+        spi_p,
+        ads_p,
+        #[cfg(feature = "gear-pump")]
+        pump_p,
+        rotary_p,
+        mechanism_p,
+        sd_card_p,
+        internal_i2c_p,
+        qwiic_i2c_p,
+        button_mux_p,
+        flash_p,
+        watchdog_p,
+        pulse_counter_pio_p,
+        flow_meter_p,
+        esp_p,
+        #[cfg(feature = "pwm-steam-valve")]
+        steam_solenoid_p,
+    } = peripherals;
 
     Timer::after_millis(1000).await;
     defmt::info!("Starting!");
@@ -681,6 +721,24 @@ async fn main_task(
     let group_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_group_solenoid, Low)));
     let fill_solenoid = Box::new(GpioBinarySolenoidValve::new(Output::new(mechanism_p.pin_fill_solenoid, Low)));
     let water_dispersal_solenoid = Box::new(GpioBinarySolenoidValve::new(water));
+
+    // Steam solenoid with PWM control
+    #[cfg(feature = "pwm-steam-valve")]
+    let steam_solenoid = {
+        let mut pwm_config = pwm::Config::default();
+        pwm_config.divider = 125.into(); // System clock / 125 = 1.2 MHz
+        pwm_config.top = 60;          // 1.2 MHz / 1200 = 10 kHz; note that the period is actually 2*top, so this is 150 Hz
+        let (_, steam_pwm) = pwm::Pwm::new_output_b(steam_solenoid_p.pwm, steam_solenoid_p.pin_steam_solenoid, pwm_config).split();
+        let steam_pwm = steam_pwm.unwrap();
+
+        Box::new(GpioPwmSolenoidValve::new(steam_pwm)) as Box<dyn variegated_hal::ValveMechanism + Send>
+    };
+
+    // Create steam wand with the PWM valve
+    #[cfg(feature = "pwm-steam-valve")]
+    let steam_wand = variegated_hal::SteamWand::new(Some(steam_solenoid));
+    #[cfg(not(feature = "pwm-steam-valve"))]
+    let steam_wand = variegated_hal::SteamWand::new(None);
 
     let internal_i2c_bus = embassy_rp::i2c::I2c::new_async(internal_i2c_p.i2c, internal_i2c_p.scl_pin, internal_i2c_p.sda_pin, Irqs, i2c::Config::default());
     let internal_i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(internal_i2c_bus));
@@ -1038,7 +1096,7 @@ async fn main_task(
         Some(group_solenoid),
         Some(fill_solenoid),
         Some(water_dispersal_solenoid),
-        None,
+        None, // Steam solenoid is now controlled directly by SteamWand
         dual_boiler_config,
     );
 
@@ -1229,6 +1287,26 @@ async fn main_task(
 
     let _ = machine_definition.add_water_tap(0, water_tap_def);
 
+    // Define steam wand
+    #[cfg(feature = "pwm-steam-valve")]
+    {
+        let mut steam_wand_actuators = heapless::Vec::new();
+        steam_wand_actuators.push(ActuatorCapability::SolenoidValve).ok();
+
+        let mut steam_wand_control_modes = heapless::Vec::new();
+        let _ = steam_wand_control_modes.push(ControlModeCapability::FixedDutyCycle);
+        let _ = steam_wand_control_modes.push(ControlModeCapability::Off);
+
+        let steam_wand_def = SteamWandDefinition {
+            name: heapless::String::try_from("Steam Wand").unwrap(),
+            sensors: heapless::Vec::new(),
+            actuators: steam_wand_actuators,
+            control_modes: steam_wand_control_modes,
+        };
+
+        let _ = machine_definition.add_steam_wand(0, steam_wand_def);
+    }
+
     let mut tank_sensors = heapless::Vec::new();
     tank_sensors.push(SensorCapability::WaterLevel).ok();
     let tank_def = TankDefinition {
@@ -1270,15 +1348,11 @@ async fn main_task(
         steam_boiler,
         group,
         water_tap,
+        #[cfg(feature = "pwm-steam-valve")]
+        steam_wand,
         Some(tank),
         Some(fill_mechanism),
         settings_storage_ref,
-        MachineConfiguration::default(),  // Machine-wide configuration
-        TankConfiguration::default(),     // Tank configuration
-        GroupConfiguration::default(),    // Group configuration
-        WaterTapConfiguration::default(), // Water tap configuration
-        BoilerConfiguration::default(),   // Brew boiler configuration
-        BoilerConfiguration::default(),   // Steam boiler configuration
         routine_repository_ref,
         schedule_store_ref,
         peripheral_registry,

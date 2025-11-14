@@ -13,7 +13,7 @@ use embedded_storage_async::nor_flash::NorFlash;
 use heapless::FnvIndexMap;
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType, ValveOpenType};
 
 // Re-export types that are commonly used by consumers of this module
 pub use variegated_controller_types::{
@@ -208,7 +208,14 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             RoutineCommand::StartBrewing(idx) => MachineCommand::StartBrewing(*idx),
             RoutineCommand::StopBrewing(idx) => MachineCommand::StopBrewing(*idx),
             RoutineCommand::TareGroupScale(idx) => MachineCommand::TareGroupScale(*idx),
-            
+            RoutineCommand::StartPumpingToWaterTap(idx) => MachineCommand::StartPumpingToWaterTap(*idx),
+            RoutineCommand::StopPumpingToWaterTap(idx) => MachineCommand::StopPumpingToWaterTap(*idx),
+            RoutineCommand::StartSteaming(idx) => MachineCommand::StartSteaming(*idx),
+            RoutineCommand::StopSteaming(idx) => MachineCommand::StopSteaming(*idx),
+
+            RoutineCommand::SetSteamValveOpenness(idx, pv) => {
+                MachineCommand::SetSteamValveOpenness(*idx, self.resolve_value(pv) as ValveOpenType)
+            }
             RoutineCommand::SetBoilerTemperature(idx, pv) => {
                 MachineCommand::SetBoilerControlTarget(*idx,
                     BoilerControlMode::Temperature,
@@ -590,9 +597,14 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 let threshold = self.resolve_value(&pv);
                 status.get_group_status(idx).map_or(false, |s| s.pressure.unwrap_or(0.0) < threshold)
             }
-            // @todo Fix water tap flow code
-            StateCondition::WaterTapFlowRateAbove(_, _) => false,
-            StateCondition::WaterTapFlowRateBelow(_, _) => false,
+            StateCondition::WaterTapFlowRateAbove(_idx, _pv) => {
+                // WaterTapStatus doesn't currently track flow rate
+                false
+            }
+            StateCondition::WaterTapFlowRateBelow(_idx, _pv) => {
+                // WaterTapStatus doesn't currently track flow rate
+                false
+            }
             StateCondition::OutputWeightAbove(idx, pv) => {
                 let threshold = self.resolve_value(&pv);
                 status.get_group_status(idx).map_or(false, |s| s.output_weight.unwrap_or(0.0) > threshold)

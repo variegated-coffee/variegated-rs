@@ -32,6 +32,7 @@ pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
     pub water_tap_statuses: FnvIndexMap<WaterTapIndex, WaterTapStatus, MAX_WATER_TAPS>,
+    pub steam_wand_statuses: FnvIndexMap<SteamWandIndex, SteamWandStatus, MAX_STEAM_WANDS>,
     pub tank_statuses: FnvIndexMap<TankIndex, TankStatus, MAX_TANKS>,
     pub mode: MachineMode,
     pub routine_execution: Option<RoutineExecutionStatus>,
@@ -47,6 +48,7 @@ impl Status {
             boiler_statuses: FnvIndexMap::new(),
             group_statuses: FnvIndexMap::new(),
             water_tap_statuses: FnvIndexMap::new(),
+            steam_wand_statuses: FnvIndexMap::new(),
             tank_statuses: FnvIndexMap::new(),
             mode: MachineMode::Off,
             routine_execution: None,
@@ -67,6 +69,10 @@ impl Status {
 
     pub fn get_water_tap_status(&self, water_tap_index: WaterTapIndex) -> Option<&WaterTapStatus> {
         self.water_tap_statuses.get(&water_tap_index)
+    }
+
+    pub fn get_steam_wand_status(&self, steam_wand_index: SteamWandIndex) -> Option<&SteamWandStatus> {
+        self.steam_wand_statuses.get(&steam_wand_index)
     }
 
     pub fn get_tank_status(&self, tank_index: TankIndex) -> Option<&TankStatus> {
@@ -168,6 +174,16 @@ impl defmt::Format for Status {
         }
         defmt::write!(f, " ]");
 
+        // Steam wand statuses
+        defmt::write!(f, ", steam_wands: [");
+        for (index, steam_wand_status) in self.steam_wand_statuses.iter() {
+            defmt::write!(f, " SW{}(", index);
+            defmt::write!(f, "steaming:{}", steam_wand_status.is_steaming);
+            defmt::write!(f, " valve:{}%", steam_wand_status.valve_openness);
+            defmt::write!(f, ")");
+        }
+        defmt::write!(f, " ]");
+
         // Tank statuses
         defmt::write!(f, ", tanks: [");
         for (index, tank_status) in self.tank_statuses.iter() {
@@ -240,6 +256,14 @@ pub struct GroupStatus {
 #[derive(Clone, Debug, Default)]
 pub struct WaterTapStatus {
     pub is_dispensing: bool,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default)]
+pub struct SteamWandStatus {
+    pub is_steaming: bool,
+    pub valve_openness: ValveOpenType,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

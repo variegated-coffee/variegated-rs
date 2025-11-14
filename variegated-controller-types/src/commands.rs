@@ -18,6 +18,9 @@ pub enum MachineCommand {
     StopBrewing(GroupIndex),
     StartPumpingToWaterTap(WaterTapIndex),
     StopPumpingToWaterTap(WaterTapIndex),
+    StartSteaming(SteamWandIndex),
+    StopSteaming(SteamWandIndex),
+    SetSteamValveOpenness(SteamWandIndex, ValveOpenType),
 
     /// Set boiler control mode, optionally updating target values
     /// Examples:
@@ -83,6 +86,9 @@ pub enum MachineCommand {
 
     /// Set the strategy for resolving heating element contention when demand exceeds capacity
     SetHeatingElementContentionStrategy(HeatingElementContentionStrategy),
+
+    /// Set the water dispersal pump strategy for a specific water tap
+    SetWaterDispersalPumpStrategy(WaterTapIndex, WaterDispersalPumpStrategy),
 }
 
 #[cfg(feature = "defmt")]
@@ -93,6 +99,9 @@ impl defmt::Format for MachineCommand {
             MachineCommand::StopBrewing(idx) => defmt::write!(f, "StopBrewing({})", idx),
             MachineCommand::StartPumpingToWaterTap(idx) => defmt::write!(f, "StartPumpingToWaterTap({})", idx),
             MachineCommand::StopPumpingToWaterTap(idx) => defmt::write!(f, "StopPumpingToWaterTap({})", idx),
+            MachineCommand::StartSteaming(idx) => defmt::write!(f, "StartSteaming({})", idx),
+            MachineCommand::StopSteaming(idx) => defmt::write!(f, "StopSteaming({})", idx),
+            MachineCommand::SetSteamValveOpenness(idx, openness) => defmt::write!(f, "SetSteamValveOpenness({}, {})", idx, openness),
             MachineCommand::SetBoilerControlTarget(idx, mode, values) => defmt::write!(f, "SetBoilerControlTarget({}, {:?}, {:?})", idx, mode, values),
             MachineCommand::SetBoilerControlTargetValues(idx, values) => defmt::write!(f, "SetBoilerControlTargetValues({}, {:?})", idx, values),
             MachineCommand::SetGroupBrewControlTarget(idx, mode, values) => defmt::write!(f, "SetGroupBrewControlTarget({}, {:?}, {:?})", idx, mode, values),
@@ -124,6 +133,7 @@ impl defmt::Format for MachineCommand {
             MachineCommand::InferGroupOutputFlowRateIntegral(idx, flow_rate) => defmt::write!(f, "InferGroupOutputFlowRateIntegral({}, {})", idx, flow_rate),
             MachineCommand::SetHeatingElementInterlock(enabled) => defmt::write!(f, "SetHeatingElementInterlock({})", enabled),
             MachineCommand::SetHeatingElementContentionStrategy(strategy) => defmt::write!(f, "SetHeatingElementContentionStrategy({:?})", strategy),
+            MachineCommand::SetWaterDispersalPumpStrategy(idx, strategy) => defmt::write!(f, "SetWaterDispersalPumpStrategy({}, {:?})", idx, strategy),
         }
     }
 }
