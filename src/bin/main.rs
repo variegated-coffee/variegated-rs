@@ -11,23 +11,18 @@
 #![no_std]
 #![no_main]
 
-use bleps::{
-    Ble,
-    HciConnector,
-    ad_structure::{
-        AdStructure,
-        BR_EDR_NOT_SUPPORTED,
-        LE_GENERAL_DISCOVERABLE,
-        create_advertising_data,
-    },
-    att::Uuid,
-};
+use core::cell::RefCell;
+use bt_hci::controller::ExternalController;
+use trouble_host::prelude::*;
 use core::net::{Ipv4Addr, SocketAddr};
 
 use core::fmt::{Debug, Display};
 
+use embassy_futures::join::join;
+use heapless::Deque;
+
 use embassy_executor::Spawner;
-use embassy_net::{Runner, StackResources};
+use embassy_net::{Runner as NetRunner, StackResources};
 use embassy_time::{Duration, Timer};
 use edge_http::io::client::Connection;
 use edge_http::io::server::{Connection as ServerConnection, DefaultServer, Handler};
@@ -45,7 +40,7 @@ use esp_hal::{
     rng::Rng,
     timer::timg::TimerGroup,
 };
-use esp_println::{print, println};
+use esp_println::println;
 use esp_radio::{
     Controller,
     ble::controller::BleConnector,
@@ -138,7 +133,7 @@ async fn connection(mut controller: WifiController<'static>) {
 }
 
 #[embassy_executor::task]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+async fn net_task(mut runner: NetRunner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
 
@@ -163,6 +158,84 @@ async fn http_server_task(tcp_stack: &'static Tcp<'static, 8, 1024, 1024>) {
     }
 }
 
+// EventHandler for BLE scanning - prints discovered devices
+struct ScanPrinter {
+    seen: RefCell<Deque<BdAddr, 128>>,
+}
+
+impl EventHandler for ScanPrinter {
+    fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
+        let mut seen = self.seen.borrow_mut();
+        while let Some(Ok(report)) = it.next() {
+            info!("Adv report: {:?}", report);
+
+            // Decode and print advertising data structures
+            info!("  Decoded advertising data:");
+            for structure in AdStructure::decode(report.data) {
+                match structure {
+                    Ok(ad) => info!("    {:?}", ad),
+                    Err(_) => info!("    [Decode error]"),
+                }
+            }
+
+            // Track unique devices
+            if seen.iter().find(|b| b.raw() == report.addr.raw()).is_none() {
+                info!("Discovered BLE device: {:?}, RSSI: {}", report.addr, report.rssi);
+                if seen.is_full() {
+                    seen.pop_front();
+                }
+                seen.push_back(report.addr).unwrap();
+            }
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn ble_scanner_task(
+    mut runner: Runner<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    mut scanner: Scanner<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    printer: &'static ScanPrinter,
+) {
+    let _ = join(runner.run_with_handler(printer), async {
+        let target = Address {
+            kind: AddrKind::PUBLIC,
+//            addr: BdAddr::new([0x78, 0x1C, 0x3C, 0xEB, 0x60, 0x3E]),
+            addr: BdAddr::new([0x3E, 0x60,  0xEB, 0x3C,  0x1C,  0x78, ]),
+        };
+//        let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+
+        let list = &[(target.kind, &target.addr)];
+
+        // Configure scanning
+        let mut config = ScanConfig::default();
+        config.active = true;
+        config.phys = PhySet::M1;
+        config.interval = Duration::from_secs(1);
+        config.window = Duration::from_secs(1);
+        config.timeout = Duration::from_secs(10);
+        config.filter_accept_list = list;
+
+
+        loop {
+            info!("Starting BLE scan for 10 seconds...");
+            match scanner.scan(&config).await {
+                Ok(_session) => {
+                    // Session keeps scan active, drop after 10 seconds
+                    Timer::after(Duration::from_secs(10)).await;
+                    info!("Scan session ended");
+                }
+                Err(_e) => {
+                    error!("Failed to start BLE scan");
+                }
+            }
+            // Wait 50 seconds before next scan (10s scan + 50s wait = 60s total)
+            info!("Waiting 50 seconds before next scan...");
+            Timer::after(Duration::from_secs(50)).await;
+        }
+    })
+    .await;
+}
+
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     //esp_println::logger::init_logger_from_env();
@@ -178,30 +251,62 @@ async fn main(spawner: Spawner) -> ! {
 
     let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
 
-    let now = || esp_hal::time::Instant::now().duration_since_epoch().as_millis();
-
     // initializing Bluetooth first results in a more stable WiFi connection on
     // ESP32
     let connector = BleConnector::new(&esp_radio_ctrl, peripherals.BT, Default::default()).unwrap();
-    let hci = HciConnector::new(connector, now);
-    let mut ble = Ble::new(&hci);
+    let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
-    info!("{:?}", ble.init());
-    println!("{:?}", ble.cmd_set_le_advertising_parameters());
-    println!(
-        "{:?}",
-        ble.cmd_set_le_advertising_data(
-            create_advertising_data(&[
-                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                AdStructure::ServiceUuids16(&[Uuid::Uuid16(0x1809)]),
-                AdStructure::CompleteLocalName(esp_hal::chip!()),
-            ])
-                .unwrap()
-        )
+    // Create BLE host resources
+    let ble_resources = mk_static!(
+        HostResources<DefaultPacketPool, 1, 2, 1>,
+        HostResources::new()
     );
-    println!("{:?}", ble.cmd_set_le_advertise_enable(true));
 
-    info!("started advertising");
+    // Generate random BLE address
+    let rng = Rng::new();
+    let address_bytes = [
+        rng.random() as u8,
+        (rng.random() >> 8) as u8,
+        (rng.random() >> 16) as u8,
+        (rng.random() >> 24) as u8,
+        rng.random() as u8,
+        (rng.random() >> 8) as u8,
+    ];
+    let address = Address::random(address_bytes);
+    info!("BLE: Generated random address");
+
+    // Create BLE host/stack
+    info!("BLE: Creating stack...");
+    let stack = trouble_host::new(controller, ble_resources).set_random_address(address);
+    info!("BLE: Stack created");
+
+    let stack = mk_static!(
+        Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+        stack
+    );
+
+    // Build the host to get central and runner
+    info!("BLE: Building host...");
+    let Host {
+        central,
+        runner,
+        ..
+    } = stack.build();
+    info!("BLE: Host built");
+
+    // Create scanner and event handler (make them static for the task)
+    let printer = mk_static!(
+        ScanPrinter,
+        ScanPrinter {
+            seen: RefCell::new(Deque::new()),
+        }
+    );
+    let scanner = Scanner::new(central);
+
+    // Spawn BLE scanner task
+    spawner.spawn(ble_scanner_task(runner, scanner, printer)).ok();
+
+    Timer::after_secs(5).await;
 
     let (mut controller, interfaces) =
         esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
@@ -309,9 +414,9 @@ async fn main(spawner: Spawner) -> ! {
                     break;
                 }
                 Ok(len) => {
-                    if let Ok(text) = core::str::from_utf8(&read_buf[..len]) {
+                    /*if let Ok(text) = core::str::from_utf8(&read_buf[..len]) {
                         print!("{}", text);
-                    }
+                    }*/
                 }
                 Err(e) => {
                     info!("Read error: {:?}", e);
@@ -321,6 +426,6 @@ async fn main(spawner: Spawner) -> ! {
         }
         println!();
 
-        Timer::after(Duration::from_millis(3000)).await;
+        Timer::after(Duration::from_millis(5000)).await;
     }
 }
