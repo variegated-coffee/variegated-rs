@@ -13,9 +13,23 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 bleps = { git = "https://github.com/bjoernQ/bleps", package = "bleps", rev = "a5148d8", features = [
   "async",
   "macros",
+  "defmt"
 ] }
-blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "b3ecefc", default-features = false, features = ["dhcpv4", "dns", "icmp", "ipv4", "defmt", "multicast", "tcp", "udp"] }
-embedded-io = { version = "0.6.1", default-features = false }
+embassy-executor = { version = "0.9.1", features = ["defmt"] }
+embassy-net = { version = "0.7.1", features = [
+  "defmt",
+  "dhcpv4",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+] }
+embassy-time = { version = "0.5.0", features = ["defmt"] }
+edge-net = { version = "0.11.2", features = ["embassy", "defmt", "io"]}
+edge-http = { version = "0.6.1" }
+edge-nal = { version = "0.5.0" }
+edge-nal-embassy = { version = "0.6.0", features = ["tcp"] }
+embedded-io = { version = "0.6.1" }
+embedded-io-async = { version = "0.6.1" }
 esp-alloc = { version = "0.9.0" }
 esp-backtrace = { version = "0.18.1", features = [
   "panic-handler",
@@ -24,7 +38,8 @@ esp-backtrace = { version = "0.18.1", features = [
 esp-bootloader-esp-idf = { version = "0.4.0" }
 esp-hal = { version = "1.0.0", features = ["defmt", "unstable"] }
 esp-println = { version = "0.16.1", features = ["defmt-espflash"] }
-esp-rtos = { version = "0.2.0", features = ["esp-radio", "defmt"] }
+esp-rtos = { version = "0.2.0", features = ["esp-radio", "defmt", "embassy"] }
+static_cell = "2.1.1"
 esp-radio = { version = "0.17.0", features = [
   "ble",
   "coex",
@@ -34,9 +49,16 @@ esp-radio = { version = "0.17.0", features = [
   "wifi",
 ] }
 smoltcp = { version = "0.12.0", default-features = false, features = [
+  "defmt",
   "medium-ethernet",
-  "socket-raw",
+  "multicast",
+  "proto-dhcpv4",
+  "proto-dns",
+  "proto-ipv4",
+  "socket-tcp",
+  "socket-udp",
 ] }
+defmt = "1.0.1"
 
 [features]
 default = [
