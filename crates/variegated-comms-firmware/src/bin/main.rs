@@ -12,18 +12,22 @@
 #![no_main]
 
 use core::cell::RefCell;
-use bt_hci::controller::ExternalController;
-use trouble_host::prelude::*;
-use core::net::{Ipv4Addr, SocketAddr};
-
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::fmt::{Debug, Display};
 
-use embassy_futures::join::join;
+use bt_hci::controller::ExternalController;
+use trouble_host::prelude::*;
+use variegated_trouble_connection_manager::BleConnectionManager;
+use variegated_belka_portal_trouble_driver::BelkaPortalDriver;
+
 use heapless::Deque;
+use embassy_futures::join::join;
+use embassy_futures::select::{select, Either};
 
 use embassy_executor::Spawner;
-use embassy_net::{Runner as NetRunner, StackResources};
+use embassy_net::{Runner as NetRunner, StackResources, dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
 use embassy_time::{Duration, Timer};
+use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
 use edge_http::io::client::Connection;
 use edge_http::io::server::{Connection as ServerConnection, DefaultServer, Handler};
 use edge_http::io::Error;
@@ -38,6 +42,7 @@ use esp_hal::{
     interrupt::software::SoftwareInterruptControl,
     ram,
     rng::Rng,
+    rtc_cntl::Rtc,
     timer::timg::TimerGroup,
 };
 use esp_println::println;
@@ -53,6 +58,31 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
+
+// SNTP configuration
+const NTP_SERVER: &str = "pool.ntp.org";
+const USEC_IN_SEC: u64 = 1_000_000;
+
+// Timestamp generator for SNTP using RTC
+#[derive(Clone, Copy)]
+struct Timestamp<'a> {
+    rtc: &'a Rtc<'a>,
+    current_time_us: u64,
+}
+
+impl NtpTimestampGenerator for Timestamp<'_> {
+    fn init(&mut self) {
+        self.current_time_us = self.rtc.current_time_us();
+    }
+
+    fn timestamp_sec(&self) -> u64 {
+        self.current_time_us / USEC_IN_SEC
+    }
+
+    fn timestamp_subsec_micros(&self) -> u32 {
+        (self.current_time_us % USEC_IN_SEC) as u32
+    }
+}
 
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -191,48 +221,216 @@ impl EventHandler for ScanPrinter {
 }
 
 #[embassy_executor::task]
-async fn ble_scanner_task(
+async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'static>) {
+    // Wait for network link
+    loop {
+        if stack.is_link_up() {
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    info!("Waiting for IP address for SNTP...");
+    loop {
+        if stack.config_v4().is_some() {
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    // Resolve NTP server
+    info!("Resolving NTP server: {}", NTP_SERVER);
+    let ntp_addrs = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
+        Ok(addrs) if !addrs.is_empty() => addrs,
+        Ok(_) => {
+            error!("DNS resolution returned empty results");
+            return;
+        }
+        Err(e) => {
+            error!("Failed to resolve NTP server: {:?}", e);
+            return;
+        }
+    };
+
+    // Create UDP socket for NTP
+    let mut rx_meta = [PacketMetadata::EMPTY; 16];
+    let mut rx_buffer = [0; 4096];
+    let mut tx_meta = [PacketMetadata::EMPTY; 16];
+    let mut tx_buffer = [0; 4096];
+
+    let mut socket = UdpSocket::new(
+        stack,
+        &mut rx_meta,
+        &mut rx_buffer,
+        &mut tx_meta,
+        &mut tx_buffer,
+    );
+
+    socket.bind(123).unwrap();
+
+    // Display initial RTC time
+    info!("Initial RTC time: {} us", rtc.current_time_us());
+
+    // Sync time periodically
+    loop {
+        let addr: IpAddr = ntp_addrs[0].into();
+        let result = get_time(
+            SocketAddr::from((addr, 123)),
+            &socket,
+            NtpContext::new(Timestamp {
+                rtc,
+                current_time_us: 0,
+            }),
+        )
+        .await;
+
+        match result {
+            Ok(time) => {
+                // Update RTC immediately
+                rtc.set_current_time_us(
+                    (time.sec() as u64 * USEC_IN_SEC)
+                        + ((time.sec_fraction() as u64 * USEC_IN_SEC) >> 32),
+                );
+
+                // Log synchronized time
+                info!(
+                    "NTP sync successful | RTC time: {} us | Unix timestamp: {} s",
+                    rtc.current_time_us(),
+                    time.sec()
+                );
+            }
+            Err(_e) => {
+                error!("SNTP error occurred");
+            }
+        }
+
+        // Sync every 300 seconds
+        Timer::after(Duration::from_secs(300)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn ble_runner_task(
     mut runner: Runner<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
-    mut scanner: Scanner<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     printer: &'static ScanPrinter,
 ) {
-    let _ = join(runner.run_with_handler(printer), async {
-        let target = Address {
-            kind: AddrKind::PUBLIC,
-//            addr: BdAddr::new([0x78, 0x1C, 0x3C, 0xEB, 0x60, 0x3E]),
-            addr: BdAddr::new([0x3E, 0x60,  0xEB, 0x3C,  0x1C,  0x78, ]),
-        };
-//        let target: Address = Address::random([0xff, 0x8f, 0x1a, 0x05, 0xe4, 0xff]);
+    // Run the BLE host runner with event handler
+    // This processes HCI events and delivers scan reports to the printer
+    runner.run_with_handler(printer).await;
+}
 
-        let list = &[(target.kind, &target.addr)];
+#[embassy_executor::task]
+async fn belka_task(
+    manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    device_address: BdAddr,
+) {
+    let handle = manager.handle();
 
-        // Configure scanning
-        let mut config = ScanConfig::default();
-        config.active = true;
-        config.phys = PhySet::M1;
-        config.interval = Duration::from_secs(1);
-        config.window = Duration::from_secs(1);
-        config.timeout = Duration::from_secs(10);
-        config.filter_accept_list = list;
+    // Register device and enable auto-connection
+    {
+        let device_handle = handle.register_device(device_address);
+        let driver = BelkaPortalDriver::new(device_handle, stack);
+        driver.set_maintain_connection(true).await;
+    }
 
+    info!("Belka: Configured device {:?}", device_address);
 
-        loop {
-            info!("Starting BLE scan for 10 seconds...");
-            match scanner.scan(&config).await {
-                Ok(_session) => {
-                    // Session keeps scan active, drop after 10 seconds
-                    Timer::after(Duration::from_secs(10)).await;
-                    info!("Scan session ended");
+    // Run connection manager and measurement loop concurrently
+    join(
+        manager.run(),
+        async {
+            loop {
+                // Check if connected
+                let is_connected = {
+                    let device_handle = handle.register_device(device_address);
+                    let driver = BelkaPortalDriver::new(device_handle, stack);
+                    driver.is_connected().await
+                };
+
+                if !is_connected {
+                    info!("Belka Portal not connected, waiting...");
+                    Timer::after(Duration::from_secs(1)).await;
+                    continue;
                 }
-                Err(_e) => {
-                    error!("Failed to start BLE scan");
+
+                info!("Belka Portal connected, creating GATT client...");
+
+                // Create GATT client and subscribe
+                let result = {
+                    let device_handle = handle.register_device(device_address);
+                    let driver = BelkaPortalDriver::new(device_handle, stack);
+                    driver.gatt_client().await
+                };
+
+                match result {
+                    Ok((_conn, gatt)) => {
+                        info!("GATT client created, running task...");
+                        // Run GATT client task alongside operations, exit when either completes
+                        let _ = select(gatt.task(), async {
+                            info!("Let's first read measurements...");
+                            let r = gatt.read_measurements().await;
+                            info!("Measurements: {:?}", r);
+                            info!("Then subscribe...");
+
+                            match gatt.subscribe().await {
+                                Ok(mut stream) => {
+                                    info!("Successfully subscribed to Belka Portal measurements");
+                                    loop {
+                                        // Race between getting next measurement and checking connection status
+                                        match select(
+                                            stream.next(),
+                                            async {
+                                                Timer::after(Duration::from_secs(1)).await;
+                                                let device_handle = handle.register_device(device_address);
+                                                let driver = BelkaPortalDriver::new(device_handle, stack);
+                                                driver.is_connected().await
+                                            }
+                                        ).await {
+                                            Either::First(result) => {
+                                                match result {
+                                                    Ok(measurement) => {
+                                                        info!(
+                                                            "Portal Measurement: EC={}, Temp={} °C, IntTemp?={} °C, Unknown={}",
+                                                            measurement.ec,
+                                                            measurement.temperature,
+                                                            measurement.internal_temperature,
+                                                            measurement.status
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Failed to read measurement: {:?}", e);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Either::Second(is_connected) => {
+                                                if !is_connected {
+                                                    info!("Connection lost during measurements, exiting");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to subscribe to measurements: {:?}", e);
+                                }
+                            }
+                        }).await;
+                        info!("GATT join completed, connection dropped");
+                    }
+                    Err(e) => {
+                        error!("Failed to create GATT client: {:?}", e);
+                    }
                 }
+
+                // Wait before retrying
+                info!("Restarting Belka measurement loop...");
+                Timer::after(Duration::from_secs(5)).await;
             }
-            // Wait 50 seconds before next scan (10s scan + 50s wait = 60s total)
-            info!("Waiting 50 seconds before next scan...");
-            Timer::after(Duration::from_secs(50)).await;
-        }
-    })
+        },
+    )
     .await;
 }
 
@@ -241,6 +439,9 @@ async fn main(spawner: Spawner) -> ! {
     //esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+
+    // Initialize RTC for time synchronization
+    let rtc = Rtc::new(peripherals.LPWR);
 
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 64 * 1024);
@@ -294,17 +495,28 @@ async fn main(spawner: Spawner) -> ! {
     } = stack.build();
     info!("BLE: Host built");
 
-    // Create scanner and event handler (make them static for the task)
+    // Create event handler for scan reports (still useful for logging discovered devices)
     let printer = mk_static!(
         ScanPrinter,
         ScanPrinter {
             seen: RefCell::new(Deque::new()),
         }
     );
-    let scanner = Scanner::new(central);
 
-    // Spawn BLE scanner task
-    spawner.spawn(ble_scanner_task(runner, scanner, printer)).ok();
+    // Create connection manager
+    info!("BLE: Creating connection manager...");
+    let connection_manager = mk_static!(
+        BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+        BleConnectionManager::new(central)
+    );
+
+    // Belka Portal device address
+    let device_address = BdAddr::new([0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78]);
+
+    // Spawn BLE tasks
+    spawner.spawn(ble_runner_task(runner, printer)).ok();
+    spawner.spawn(belka_task(connection_manager, stack, device_address)).ok();
+    info!("BLE: BLE tasks spawned");
 
     Timer::after_secs(5).await;
 
@@ -328,8 +540,15 @@ async fn main(spawner: Spawner) -> ! {
         seed,
     );
 
+    // Make stack static for SNTP task
+    let stack_static = mk_static!(embassy_net::Stack<'static>, stack);
+
+    // Make RTC static for SNTP task
+    let rtc_static = mk_static!(Rtc<'static>, rtc);
+
     spawner.spawn(connection(controller)).ok();
     spawner.spawn(net_task(runner)).ok();
+    spawner.spawn(sntp_task(rtc_static, *stack_static)).ok();
 
     // Wait for link to come up
     info!("Waiting for link to come up...");
@@ -413,7 +632,7 @@ async fn main(spawner: Spawner) -> ! {
                     info!("Response complete");
                     break;
                 }
-                Ok(len) => {
+                Ok(_len) => {
                     /*if let Ok(text) = core::str::from_utf8(&read_buf[..len]) {
                         print!("{}", text);
                     }*/

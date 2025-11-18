@@ -1313,10 +1313,17 @@ version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "980af8b43c3ad5d8d349ace167ec8170839f753a42d233ba19e08afe1850fa69"
 dependencies = [
+ "jiff-tzdb",
  "proc-macro2",
  "quote",
  "syn 2.0.110",
 ]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1283705eb0a21404d2bfd6eef2a7593d240bc42a0bdb39db0ad6fa2ec026524"
 
 [[package]]
 name = "js-sys"
@@ -1734,6 +1741,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sntpc"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13d84c42dedf8b01d52b62272684741866938260e74b9e58851f680b2a92854b"
+dependencies = [
+ "cfg-if",
+ "embassy-net",
+]
+
+[[package]]
 name = "somni-expr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1983,7 +2000,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "variegated-comms-rs"
+name = "variegated-belka-portal-trouble-driver"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.0.1",
+ "embassy-time 0.5.0",
+ "trouble-host",
+ "variegated-trouble-connection-manager",
+]
+
+[[package]]
+name = "variegated-comms-firmware"
 version = "0.1.0"
 dependencies = [
  "bt-hci",
@@ -2006,7 +2033,26 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "heapless 0.8.0",
+ "jiff",
+ "log",
  "smoltcp",
+ "sntpc",
+ "static_cell",
+ "trouble-host",
+ "variegated-belka-portal-trouble-driver",
+ "variegated-trouble-connection-manager",
+]
+
+[[package]]
+name = "variegated-trouble-connection-manager"
+version = "0.1.0"
+dependencies = [
+ "bt-hci",
+ "defmt 1.0.1",
+ "embassy-futures",
+ "embassy-sync 0.7.2",
+ "embassy-time 0.5.0",
+ "heapless 0.8.0",
  "static_cell",
  "trouble-host",
 ]

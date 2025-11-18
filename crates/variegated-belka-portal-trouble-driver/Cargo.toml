@@ -1,0 +1,15 @@
+[package]
+name = "variegated-belka-portal-trouble-driver"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
+trouble-host = { version = "0.5.0", features = ["defmt"] }
+defmt = "1.0.1"
+embassy-time = { version = "0.5.0", features = ["defmt"] }
+
+[features]
+default = ["defmt"]
+defmt = []

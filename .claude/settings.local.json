@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(cargo check:*)"
+      "Bash(cargo check:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(cargo build:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

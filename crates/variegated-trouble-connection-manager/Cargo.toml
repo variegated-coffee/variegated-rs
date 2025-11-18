@@ -1,0 +1,19 @@
+[package]
+name = "variegated-trouble-connection-manager"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+trouble-host = { version = "0.5.0", features = ["default-packet-pool", "central", "scan", "defmt"] }
+bt-hci = "0.6"
+embassy-sync = "0.7.2"
+embassy-time = { version = "0.5.0", features = ["defmt"] }
+embassy-futures = "0.1"
+defmt = "1.0.1"
+heapless = "0.8"
+static_cell = "2.1.1"
+
+[features]
+default = ["defmt"]
+defmt = []
