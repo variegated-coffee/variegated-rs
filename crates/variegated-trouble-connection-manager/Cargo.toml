@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 
 [dependencies]
-trouble-host = { version = "0.5.0", features = ["default-packet-pool", "central", "scan", "defmt"] }
+trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["default-packet-pool", "central", "scan", "defmt"] }
 bt-hci = "0.6"
 embassy-sync = "0.7.2"
 embassy-time = { version = "0.5.0", features = ["defmt"] }

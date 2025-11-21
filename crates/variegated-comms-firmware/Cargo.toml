@@ -10,9 +10,10 @@ path = "./src/bin/main.rs"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [dependencies]
-trouble-host = { version = "0.5.0", features = ["default-packet-pool", "peripheral", "central", "scan", "defmt"] }
+trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-32", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-16", "l2cap-rx-queue-size-16"] }
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
+variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }
 bt-hci = "0.6.0"
 heapless = "0.8"
 embassy-futures = "0.1"
@@ -39,7 +40,7 @@ esp-backtrace = { version = "0.18.1", features = [
 ] }
 esp-bootloader-esp-idf = { version = "0.4.0" }
 esp-hal = { version = "1.0.0", features = ["defmt", "unstable"] }
-esp-println = { version = "0.16.1", features = ["defmt-espflash"] }
+esp-println = { version = "0.16.1", features = ["defmt-espflash", "timestamp"] }
 esp-rtos = { version = "0.2.0", features = ["esp-radio", "defmt", "embassy"] }
 static_cell = "2.1.1"
 esp-radio = { version = "0.17.0", features = [

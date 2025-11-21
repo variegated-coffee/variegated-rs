@@ -5,7 +5,8 @@
       "Bash(cargo check:*)",
       "WebFetch(domain:github.com)",
       "Bash(cargo build:*)",
-      "WebSearch"
+      "WebSearch",
+      "WebFetch(domain:docs.embassy.dev)"
     ],
     "deny": [],
     "ask": []

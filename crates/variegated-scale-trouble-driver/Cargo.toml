@@ -1,14 +1,15 @@
 [package]
-name = "variegated-belka-portal-trouble-driver"
+name = "variegated-scale-trouble-driver"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
+edition = "2021"
 
 [dependencies]
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["defmt"] }
 defmt = "1.0.1"
 embassy-time = { version = "0.5.0", features = ["defmt"] }
+embassy-futures = { version = "0.1", default-features = false }
+heapless = { version = "0.8", default-features = false, features = ["defmt-03"] }
 
 [features]
 default = ["defmt"]

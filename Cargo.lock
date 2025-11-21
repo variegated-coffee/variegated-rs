@@ -1922,8 +1922,7 @@ dependencies = [
 [[package]]
 name = "trouble-host"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5b5d5992d07744e464b294ccf2dd6d96285bd61c267c4e0307d1f7057a8cd7f"
+source = "git+https://github.com/embassy-rs/trouble#53e34022ca3a561f53c6cccea67c6dbc8b69528d"
 dependencies = [
  "bt-hci",
  "defmt 1.0.1",
@@ -1942,8 +1941,7 @@ dependencies = [
 [[package]]
 name = "trouble-host-macros"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcb85bec3a8393c22ca1a7c25c82c2d33689ab412f3487c492fd01a033ede7c2"
+source = "git+https://github.com/embassy-rs/trouble#53e34022ca3a561f53c6cccea67c6dbc8b69528d"
 dependencies = [
  "convert_case",
  "darling 0.20.11",
@@ -2040,6 +2038,19 @@ dependencies = [
  "static_cell",
  "trouble-host",
  "variegated-belka-portal-trouble-driver",
+ "variegated-scale-trouble-driver",
+ "variegated-trouble-connection-manager",
+]
+
+[[package]]
+name = "variegated-scale-trouble-driver"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.0.1",
+ "embassy-futures",
+ "embassy-time 0.5.0",
+ "heapless 0.8.0",
+ "trouble-host",
  "variegated-trouble-connection-manager",
 ]
 

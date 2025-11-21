@@ -19,6 +19,7 @@ use bt_hci::controller::ExternalController;
 use trouble_host::prelude::*;
 use variegated_trouble_connection_manager::BleConnectionManager;
 use variegated_belka_portal_trouble_driver::BelkaPortalDriver;
+use variegated_scale_trouble_driver::acaia_old::{AcaiaOldDriver, Error as AcaiaError, ScaleEvent};
 
 use heapless::Deque;
 use embassy_futures::join::join;
@@ -53,6 +54,7 @@ use esp_radio::{
 };
 
 use defmt::{error, info};
+use trouble_host::config;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -91,6 +93,13 @@ macro_rules! mk_static {
         let x = STATIC_CELL.uninit().write(($val));
         x
     }};
+}
+
+#[unsafe(no_mangle)]
+pub extern "Rust" fn _esp_println_timestamp() -> u64 {
+    esp_hal::time::Instant::now()
+        .duration_since_epoch()
+        .as_millis()
 }
 
 // HTTP Server Handler
@@ -314,36 +323,52 @@ async fn ble_runner_task(
     mut runner: Runner<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     printer: &'static ScanPrinter,
 ) {
-    // Run the BLE host runner with event handler
-    // This processes HCI events and delivers scan reports to the printer
-    runner.run_with_handler(printer).await;
+    loop {
+        // Run the BLE host runner with event handler
+        // This processes HCI events and delivers scan reports to the printer
+        let r = runner.run_with_handler(printer).await;
+        if let Err(e) = r {
+            error!("Failed to run BLE, retrying in 10 seconds");
+            Timer::after_secs(10).await;
+        }
+    }
 }
 
 #[embassy_executor::task]
-async fn belka_task(
+async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
-    device_address: BdAddr,
+    belka_address: BdAddr,
+    acaia_address: BdAddr,
 ) {
     let handle = manager.handle();
 
-    // Register device and enable auto-connection
+    // Register both devices and enable auto-connection
     {
-        let device_handle = handle.register_device(device_address);
+        // Register Belka Portal
+        let device_handle = handle.register_device(belka_address);
         let driver = BelkaPortalDriver::new(device_handle, stack);
+        driver.set_maintain_connection(true).await;
+
+        // Register ACAIA scale
+        let device_handle = handle.register_device(acaia_address);
+        let driver = AcaiaOldDriver::new(device_handle, stack);
         driver.set_maintain_connection(true).await;
     }
 
-    info!("Belka: Configured device {:?}", device_address);
+    info!("BLE Devices: Configured Belka {:?} and ACAIA {:?}", belka_address, acaia_address);
 
-    // Run connection manager and measurement loop concurrently
+    // Run connection manager and both device measurement loops concurrently
     join(
         manager.run(),
-        async {
+        join(
+            // Belka Portal measurement loop
+            async {
+                Timer::after(Duration::from_millis(300)).await;
             loop {
                 // Check if connected
                 let is_connected = {
-                    let device_handle = handle.register_device(device_address);
+                    let device_handle = handle.register_device(belka_address);
                     let driver = BelkaPortalDriver::new(device_handle, stack);
                     driver.is_connected().await
                 };
@@ -358,7 +383,7 @@ async fn belka_task(
 
                 // Create GATT client and subscribe
                 let result = {
-                    let device_handle = handle.register_device(device_address);
+                    let device_handle = handle.register_device(belka_address);
                     let driver = BelkaPortalDriver::new(device_handle, stack);
                     driver.gatt_client().await
                 };
@@ -382,7 +407,7 @@ async fn belka_task(
                                             stream.next(),
                                             async {
                                                 Timer::after(Duration::from_secs(1)).await;
-                                                let device_handle = handle.register_device(device_address);
+                                                let device_handle = handle.register_device(belka_address);
                                                 let driver = BelkaPortalDriver::new(device_handle, stack);
                                                 driver.is_connected().await
                                             }
@@ -391,7 +416,7 @@ async fn belka_task(
                                                 match result {
                                                     Ok(measurement) => {
                                                         info!(
-                                                            "Portal Measurement: EC={}, Temp={} °C, IntTemp?={} °C, Unknown={}",
+                                                            "Portal Measurement: EC={}, Temp={} °C, IntTemp?={} °C, Battery?={}",
                                                             measurement.ec,
                                                             measurement.temperature,
                                                             measurement.internal_temperature,
@@ -429,7 +454,121 @@ async fn belka_task(
                 info!("Restarting Belka measurement loop...");
                 Timer::after(Duration::from_secs(5)).await;
             }
-        },
+            },
+            // ACAIA scale measurement loop
+            async {
+                loop {
+                    // Check if connected
+                    let is_connected = {
+                        let device_handle = handle.register_device(acaia_address);
+                        let driver = AcaiaOldDriver::new(device_handle, stack);
+                        driver.is_connected().await
+                    };
+
+                    if !is_connected {
+                        info!("ACAIA scale not connected, waiting...");
+                        Timer::after(Duration::from_secs(1)).await;
+                        continue;
+                    }
+
+                    info!("ACAIA scale connected, creating GATT client...");
+
+                    // Create GATT client
+                    let result = {
+                        let device_handle = handle.register_device(acaia_address);
+                        let driver = AcaiaOldDriver::new(device_handle, stack);
+                        driver.gatt_client().await
+                    };
+
+                    match result {
+                        Ok((_conn, gatt)) => {
+                            info!("ACAIA GATT client created");
+
+                            // Run GATT client task alongside operations
+                            let _ = select(gatt.task(), async {
+                                // Initialize scale (subscribe + handshake in correct order)
+                                info!("Initializing ACAIA scale...");
+                                match gatt.initialize().await {
+                                    Ok(mut stream) => {
+                                        info!("ACAIA scale initialized successfully");
+
+                                        // Send initial heartbeat to trigger data flow
+                                        info!("Sending initial heartbeat");
+                                        if let Err(e) = gatt.send_heartbeat().await {
+                                            error!("Failed to send initial heartbeat: {:?}", e);
+                                        }
+
+                                        use embassy_time::Instant;
+                                        let mut last_heartbeat = Instant::now();
+
+                                        loop {
+                                            // Race between: getting next event and periodic timer
+                                            match select(
+                                                stream.next(),
+                                                Timer::after(Duration::from_secs(1))
+                                            ).await {
+                                                Either::First(result) => {
+                                                    match result {
+                                                        Ok(event) => {
+                                                            match event {
+                                                                ScaleEvent::Weight(w) => {
+                                                                    info!("Scale Weight: {} g", w.weight);
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            match e {
+                                                                // Fatal errors: break
+                                                                _ => {
+                                                                    error!("Failed to read ACAIA event: {:?}", e);
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Either::Second(_) => {
+                                                    // Check connection
+                                                    let device_handle = handle.register_device(acaia_address);
+                                                    let driver = AcaiaOldDriver::new(device_handle, stack);
+                                                    let is_connected = driver.is_connected().await;
+
+                                                    if !is_connected {
+                                                        info!("ACAIA connection lost during measurements, exiting");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+
+                                            // Send heartbeat if 2 seconds have passed
+                                            let now = Instant::now();
+                                            if now.duration_since(last_heartbeat) >= Duration::from_secs(2) {
+                                                if let Err(e) = gatt.send_heartbeat().await {
+                                                    error!("Failed to send ACAIA heartbeat: {:?}", e);
+                                                } else {
+                                                    last_heartbeat = now;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to initialize ACAIA scale: {:?}", e);
+                                    }
+                                }
+                            }).await;
+                            info!("ACAIA GATT task completed, connection dropped");
+                        }
+                        Err(e) => {
+                            error!("Failed to create ACAIA GATT client: {:?}", e);
+                        }
+                    }
+
+                    // Wait before retrying
+                    info!("Restarting ACAIA measurement loop...");
+                    Timer::after(Duration::from_secs(5)).await;
+                }
+            },
+        ),
     )
     .await;
 }
@@ -457,9 +596,11 @@ async fn main(spawner: Spawner) -> ! {
     let connector = BleConnector::new(&esp_radio_ctrl, peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
+
+
     // Create BLE host resources
     let ble_resources = mk_static!(
-        HostResources<DefaultPacketPool, 1, 2, 1>,
+        HostResources<DefaultPacketPool, 4, 12, 16>,
         HostResources::new()
     );
 
@@ -510,12 +651,13 @@ async fn main(spawner: Spawner) -> ! {
         BleConnectionManager::new(central)
     );
 
-    // Belka Portal device address
-    let device_address = BdAddr::new([0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78]);
+    // BLE device addresses
+    let belka_address = BdAddr::new([0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78]);
+    let acaia_address = BdAddr::new([0x2f, 0xa0, 0x1a, 0x97, 0x1c, 0x00]);
 
     // Spawn BLE tasks
     spawner.spawn(ble_runner_task(runner, printer)).ok();
-    spawner.spawn(belka_task(connection_manager, stack, device_address)).ok();
+    spawner.spawn(ble_devices_task(connection_manager, stack, belka_address, acaia_address)).ok();
     info!("BLE: BLE tasks spawned");
 
     Timer::after_secs(5).await;

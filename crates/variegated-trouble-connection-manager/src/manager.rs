@@ -204,47 +204,4 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
             Timer::after(Duration::from_millis(1000)).await;
         }
     }
-
-    /// Perform a BLE scan by temporarily converting to Scanner
-    ///
-    /// Note: This method starts a scan session for the specified duration but does NOT
-    /// collect discovered devices. To receive scan results, you need to:
-    /// 1. Pass your EventHandler to the Runner task (runner.run_with_handler())
-    /// 2. The EventHandler's on_adv_reports() will be called with discovered devices
-    ///
-    /// Alternatively, note that connect() already scans for devices using the filter
-    /// accept list, so explicit scanning is only needed for device discovery.
-    ///
-    /// This method temporarily converts Central → Scanner, scans, then converts back.
-    pub async fn scan(&mut self, config: &ScanConfig<'_>) -> Result<(), ()>
-    where
-        C: ControllerCmdSync<LeSetScanParams>
-            + ControllerCmdSync<LeSetScanEnable>,
-    {
-        // Take Central and convert to Scanner
-        let central = self.central.borrow_mut().take().expect("Central should exist");
-        let mut scanner = Scanner::new(central);
-
-        defmt::info!("Starting BLE scan for {} ms", config.timeout.as_millis());
-
-        // Perform scan
-        let result = match scanner.scan(config).await {
-            Ok(_session) => {
-                // Wait for scan duration (session stays active)
-                Timer::after(config.timeout).await;
-                defmt::info!("Scan session ended");
-                Ok(())
-            }
-            Err(_e) => {
-                defmt::warn!("Failed to start scan");
-                Err(())
-            }
-        };
-
-        // Convert Scanner back to Central
-        let central = scanner.into_inner();
-        *self.central.borrow_mut() = Some(central);
-
-        result
-    }
 }
