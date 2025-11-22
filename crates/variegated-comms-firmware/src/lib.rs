@@ -2,5 +2,11 @@
 
 extern crate alloc;
 
-pub mod channels;
 pub mod application_processor;
+pub mod ble;
+pub mod channels;
+pub mod config;
+pub mod http;
+pub mod time;
+pub mod utils;
+pub mod wifi;
