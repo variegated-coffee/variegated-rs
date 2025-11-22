@@ -3,6 +3,9 @@ name = "variegated-scale-trouble-driver"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
 [dependencies]
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["defmt"] }

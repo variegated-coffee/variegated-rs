@@ -9,12 +9,19 @@ name = "variegated-comms-firmware"
 path = "./src/bin/main.rs"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
 [dependencies]
-trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-32", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-16", "l2cap-rx-queue-size-16"] }
+trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-32", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-16", "l2cap-rx-queue-size-16"] } # Git revision to get fix for multiple peripherals
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
 variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }
+variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
 bt-hci = "0.6.0"
+postcard = { version = "1.1.1", features = ["alloc", "use-crc"] }
+embassy-sync = { version = "0.7", features = ["defmt"] }
+portable-atomic = { version = "1.11", features = ["critical-section"] }
 heapless = "0.8"
 embassy-futures = "0.1"
 embassy-executor = { version = "0.9.1", features = ["defmt"] }

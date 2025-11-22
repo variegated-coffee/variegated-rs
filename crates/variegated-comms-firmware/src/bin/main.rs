@@ -54,7 +54,14 @@ use esp_radio::{
 };
 
 use defmt::{error, info};
-use trouble_host::config;
+
+// Application processor imports
+use variegated_comms_firmware::channels::{
+    STATUS_CHANNEL, CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL,
+    ApplicationStatusChannel, ApplicationConfigurationChannel,
+};
+use variegated_comms_firmware::application_processor;
+use variegated_controller_types::CommsStatus;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -335,6 +342,67 @@ async fn ble_runner_task(
 }
 
 #[embassy_executor::task]
+async fn status_listener_task(
+    status_channel: &'static ApplicationStatusChannel,
+) {
+    let mut subscriber = status_channel.subscriber().unwrap();
+
+    info!("Status listener task started");
+
+    loop {
+        let status = subscriber.next_message_pure().await;
+        info!("Status: {:?}", status);
+    }
+}
+
+#[embassy_executor::task]
+async fn comms_status_signaller_task() {
+    use variegated_comms_firmware::channels::COMMS_STATUS_SIGNAL;
+    use variegated_controller_types::CommsStatus;
+
+    info!("CommsStatus signaller task started");
+
+    loop {
+        let comms_status = CommsStatus {
+            wifi_connected: true,
+            timestamp: Some(0),
+            wifi_rssi: Some(-50),
+        };
+
+        COMMS_STATUS_SIGNAL.signal(comms_status);
+        info!("Signalled CommsStatus");
+
+        Timer::after(Duration::from_secs(1)).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn application_processor_task(
+    rx: esp_hal::uart::UartRx<'static, esp_hal::Async>,
+    tx: esp_hal::uart::UartTx<'static, esp_hal::Async>,
+    status_channel: &'static ApplicationStatusChannel,
+    config_channel: &'static ApplicationConfigurationChannel,
+    command_channel: &'static embassy_sync::channel::Channel<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::MachineCommand,
+        8,
+    >,
+) {
+    let status_publisher = status_channel.publisher().unwrap();
+    let config_publisher = config_channel.publisher().unwrap();
+    let command_receiver = command_channel.receiver();
+
+    application_processor::start(
+        rx,
+        tx,
+        status_publisher,
+        config_publisher,
+        command_receiver,
+    )
+    .await;
+}
+
+#[embassy_executor::task]
 async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
@@ -584,6 +652,52 @@ async fn main(spawner: Spawner) -> ! {
 
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 64 * 1024);
+
+    // Initialize application processor channels
+    let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
+    let config_channel = CONFIGURATION_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
+    let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
+
+    // Create UART for application processor communication
+    let uart_config = esp_hal::uart::Config::default()
+        .with_baudrate(576_000)
+        .with_data_bits(esp_hal::uart::DataBits::_8)
+        .with_parity(esp_hal::uart::Parity::None)
+        .with_stop_bits(esp_hal::uart::StopBits::_1)
+        .with_hw_flow_ctrl(esp_hal::uart::HwFlowControl {
+            cts: esp_hal::uart::CtsConfig::Enabled,
+            rts: esp_hal::uart::RtsConfig::Enabled(122),
+        });
+
+    let uart = esp_hal::uart::Uart::new(peripherals.UART1, uart_config)
+        .expect("Failed to create UART")
+        .with_tx(peripherals.GPIO20)
+        .with_rx(peripherals.GPIO21)
+        .with_cts(peripherals.GPIO18)
+        .with_rts(peripherals.GPIO19)
+        .into_async();
+
+    let (rx, tx) = uart.split();
+
+    // Spawn application processor task
+    spawner
+        .spawn(application_processor_task(
+            rx,
+            tx,
+            status_channel,
+            config_channel,
+            command_channel,
+        ))
+        .ok();
+    info!("Application processor task spawned");
+
+    // Spawn status listener task
+    spawner.spawn(status_listener_task(status_channel)).ok();
+    info!("Status listener task spawned");
+
+    // Spawn comms status signaller task (dummy, signals every second)
+    spawner.spawn(comms_status_signaller_task()).ok();
+    info!("CommsStatus signaller task spawned");
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);

@@ -10,6 +10,10 @@ trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["def
 defmt = "1.0.1"
 embassy-time = { version = "0.5.0", features = ["defmt"] }
 
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+
 [features]
 default = ["defmt"]
 defmt = []

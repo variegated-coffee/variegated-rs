@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
 [dependencies]
 trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["default-packet-pool", "central", "scan", "defmt"] }
 bt-hci = "0.6"
