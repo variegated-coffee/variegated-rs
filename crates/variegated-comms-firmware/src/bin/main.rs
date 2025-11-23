@@ -41,8 +41,8 @@ use variegated_comms_firmware::{
     application_processor,
     ble::{ble_devices_task, ble_runner_task, ScanPrinter},
     channels::{
-        ApplicationConfigurationChannel, ApplicationStatusChannel,
-        CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL,
+        ApplicationConfigurationChannel, ApplicationStatusChannel, ApplicationRoutineChannel,
+        CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
         MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL,
         StateChangeChannel, CLIENT_EVENT_CAPACITY,
     },
@@ -51,6 +51,7 @@ use variegated_comms_firmware::{
     http::{http_server_task, cache_update_task},
     mk_static,
     time::sntp_task,
+    websocket_server_task,
     wifi::{connection_task, net_task},
 };
 use esphome_device::ClientEvent;
@@ -99,6 +100,7 @@ async fn application_processor_task(
     tx: esp_hal::uart::UartTx<'static, esp_hal::Async>,
     status_channel: &'static ApplicationStatusChannel,
     config_channel: &'static ApplicationConfigurationChannel,
+    routine_channel: &'static ApplicationRoutineChannel,
     command_channel: &'static embassy_sync::channel::Channel<
         embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
         variegated_controller_types::MachineCommand,
@@ -107,6 +109,7 @@ async fn application_processor_task(
 ) {
     let status_publisher = status_channel.publisher().unwrap();
     let config_publisher = config_channel.publisher().unwrap();
+    let routine_publisher = routine_channel.publisher().unwrap();
     let command_receiver = command_channel.receiver();
 
     application_processor::start(
@@ -114,6 +117,7 @@ async fn application_processor_task(
         tx,
         status_publisher,
         config_publisher,
+        routine_publisher,
         command_receiver,
     )
     .await;
@@ -133,6 +137,7 @@ async fn main(spawner: Spawner) -> ! {
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let config_channel = CONFIGURATION_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
+    let routine_channel = ROUTINE_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
 
     // Initialize ESPHome channels
@@ -151,7 +156,7 @@ async fn main(spawner: Spawner) -> ! {
     let (rx, tx) = uart.split();
 
     // Spawn application processor tasks
-    spawner.spawn(application_processor_task(rx, tx, status_channel, config_channel, command_channel)).ok();
+    spawner.spawn(application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel)).ok();
     spawner.spawn(status_listener_task(status_channel)).ok();
     spawner.spawn(comms_status_signaller_task()).ok();
     info!("Application processor tasks spawned");
@@ -292,6 +297,21 @@ async fn main(spawner: Spawner) -> ! {
         command_channel,
     )).ok();
     info!("ESPHome server task spawned on port 6053");
+
+    // Create subscribers for WebSocket server
+    let ws_status_subscriber = status_channel.subscriber().unwrap();
+    let ws_config_subscriber = config_channel.subscriber().unwrap();
+    let ws_routine_subscriber = routine_channel.subscriber().unwrap();
+
+    // Spawn WebSocket server task
+    spawner.spawn(websocket_server_task(
+        stack_static,
+        ws_status_subscriber,
+        ws_config_subscriber,
+        ws_routine_subscriber,
+        command_channel,
+    )).ok();
+    info!("WebSocket server task spawned on port 8080");
 
     // Main loop - periodic HTTP client requests
     loop {

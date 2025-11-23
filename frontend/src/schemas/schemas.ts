@@ -725,3 +725,100 @@ export type GroupStatusEntry = [number, GroupStatus];
 export type WaterTapStatusEntry = [number, WaterTapStatus];
 export type SteamWandStatusEntry = [number, SteamWandStatus];
 export type RoutineEntry = [number, Routine];
+
+// Additional types for WebSocket support
+
+export const HeatingElementContentionStrategySchema = enumType('HeatingElementContentionStrategy', {
+  RoundRobin: unitVariant('RoundRobin'),
+  PriorityBased: unitVariant('PriorityBased')
+});
+
+export const PidParameterTargetSchema = enumType('PidParameterTarget', {
+  BoilerTemperature: newtypeVariant('BoilerTemperature', u8()),
+  BoilerPressure: newtypeVariant('BoilerPressure', u8()),
+  GroupFlowRate: newtypeVariant('GroupFlowRate', u8()),
+  GroupOutputFlowRate: newtypeVariant('GroupOutputFlowRate', u8()),
+  GroupPressure: newtypeVariant('GroupPressure', u8())
+});
+
+export const GroupBrewControlTargetValuesUpdateSchema = struct({
+  flow_rate: option(f32()),
+  flow_rate_curve: option(ControlCurveSchema),
+  pressure: option(f32()),
+  pressure_curve: option(ControlCurveSchema),
+  output_flow_rate: option(f32()),
+  output_flow_rate_curve: option(ControlCurveSchema),
+  duty_cycle: option(u8()),
+  duty_cycle_curve: option(ControlCurveSchema)
+});
+
+// MachineCommand enum - comprehensive variant coverage
+export const MachineCommandSchema = enumType('MachineCommand', {
+  StartBrewing: newtypeVariant('StartBrewing', u8()),
+  StopBrewing: newtypeVariant('StopBrewing', u8()),
+  StartPumpingToWaterTap: newtypeVariant('StartPumpingToWaterTap', u8()),
+  StopPumpingToWaterTap: newtypeVariant('StopPumpingToWaterTap', u8()),
+  StartSteaming: newtypeVariant('StartSteaming', u8()),
+  StopSteaming: newtypeVariant('StopSteaming', u8()),
+  SetSteamValveOpenness: tupleVariant('SetSteamValveOpenness', u8(), u8()),
+  SetBoilerControlTarget: tupleVariant('SetBoilerControlTarget', u8(), BoilerControlModeSchema, option(BoilerControlTargetValuesUpdateSchema)),
+  SetBoilerControlTargetValues: tupleVariant('SetBoilerControlTargetValues', u8(), BoilerControlTargetValuesUpdateSchema),
+  SetGroupBrewControlTarget: tupleVariant('SetGroupBrewControlTarget', u8(), GroupBrewControlModeSchema, option(GroupBrewControlTargetValuesUpdateSchema)),
+  SetGroupBrewControlTargetValues: tupleVariant('SetGroupBrewControlTargetValues', u8(), GroupBrewControlTargetValuesUpdateSchema),
+  SetPidParameters: tupleVariant('SetPidParameters', PidParameterTargetSchema, PidParameters_for_floatSchema),
+  RunRoutine: tupleVariant('RunRoutine', RoutineIndexSchema, option(map(u8(), f32()))),
+  CancelRoutine: unitVariant('CancelRoutine'),
+  EnableBoiler: newtypeVariant('EnableBoiler', u8()),
+  DisableBoiler: newtypeVariant('DisableBoiler', u8()),
+  TareGroupScale: newtypeVariant('TareGroupScale', u8()),
+  ZeroCalibrateGroupScale: newtypeVariant('ZeroCalibrateGroupScale', u8()),
+  CalibrateGroupScale100g: newtypeVariant('CalibrateGroupScale100g', u8()),
+  UpdateCommsStatus: newtypeVariant('UpdateCommsStatus', CommsStatusSchema),
+  AddScheduleItem: newtypeVariant('AddScheduleItem', ScheduleItemSchema),
+  RemoveScheduleItem: newtypeVariant('RemoveScheduleItem', u32()),
+  UpdateScheduleItem: tupleVariant('UpdateScheduleItem', u32(), ScheduleItemSchema),
+  AddRoutine: newtypeVariant('AddRoutine', RoutineSchema),
+  RemoveRoutine: newtypeVariant('RemoveRoutine', RoutineIndexSchema),
+  UpdateRoutine: tupleVariant('UpdateRoutine', RoutineIndexSchema, RoutineSchema),
+  SetMachineMode: newtypeVariant('SetMachineMode', MachineModeSchema),
+  OptimizeConfigurationStorage: unitVariant('OptimizeConfigurationStorage'),
+  OptimizeRoutineStorage: unitVariant('OptimizeRoutineStorage'),
+  OptimizeScheduleStorage: unitVariant('OptimizeScheduleStorage'),
+  SetGroupPumpConfiguration: tupleVariant('SetGroupPumpConfiguration', u8(), PumpConfigurationSchema),
+  SetWaterTapPumpConfiguration: tupleVariant('SetWaterTapPumpConfiguration', u8(), PumpConfigurationSchema),
+  SetFillPumpConfiguration: tupleVariant('SetFillPumpConfiguration', u8(), PumpConfigurationSchema),
+  InferGroupPressureIntegral: tupleVariant('InferGroupPressureIntegral', u8(), f32()),
+  InferGroupFlowRateIntegral: tupleVariant('InferGroupFlowRateIntegral', u8(), f32()),
+  InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), f32()),
+  SetHeatingElementInterlock: newtypeVariant('SetHeatingElementInterlock', bool()),
+  SetHeatingElementContentionStrategy: newtypeVariant('SetHeatingElementContentionStrategy', HeatingElementContentionStrategySchema),
+  SetWaterDispersalPumpStrategy: tupleVariant('SetWaterDispersalPumpStrategy', u8(), WaterDispersalPumpStrategySchema)
+});
+
+// CommandAck for acknowledgements
+export const CommandAckSchema = struct({
+  id: u32(),
+  success: bool(),
+  error: option(string())
+});
+
+// WsMessage enum for WebSocket communication
+export const WsMessageSchema = enumType('WsMessage', {
+  // Server -> Client
+  StatusUpdate: newtypeVariant('StatusUpdate', StatusSchema),
+  ConfigurationUpdate: newtypeVariant('ConfigurationUpdate', ConfigurationSchema),
+  MachineDefinition: newtypeVariant('MachineDefinition', MachineDefinitionSchema),
+  RoutinesUpdate: newtypeVariant('RoutinesUpdate', RoutineStorageSchema),
+  CommandAck: newtypeVariant('CommandAck', CommandAckSchema),
+  // Client -> Server
+  RequestMachineDefinition: unitVariant('RequestMachineDefinition'),
+  RequestRoutines: unitVariant('RequestRoutines'),
+  SendMachineCommand: newtypeVariant('SendMachineCommand', MachineCommandSchema)
+});
+
+export type MachineCommand = InferType<typeof MachineCommandSchema>;
+export type WsMessage = InferType<typeof WsMessageSchema>;
+export type CommandAck = InferType<typeof CommandAckSchema>;
+export type PidParameterTarget = InferType<typeof PidParameterTargetSchema>;
+export type HeatingElementContentionStrategy = InferType<typeof HeatingElementContentionStrategySchema>;
+export type GroupBrewControlTargetValuesUpdate = InferType<typeof GroupBrewControlTargetValuesUpdateSchema>;

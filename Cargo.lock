@@ -673,7 +673,7 @@ dependencies = [
  "edge-nal",
  "edge-nal-embassy",
  "edge-raw",
- "edge-ws",
+ "edge-ws 0.5.0",
 ]
 
 [[package]]
@@ -686,6 +686,12 @@ dependencies = [
  "edge-nal",
  "embedded-io-async 0.6.1",
 ]
+
+[[package]]
+name = "edge-ws"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5c05bca9389c41ee87a2366ddb8cfae5ac568a261dcf1494fe235ad7dc9dd6b"
 
 [[package]]
 name = "edge-ws"
@@ -2988,6 +2994,7 @@ dependencies = [
  "edge-nal",
  "edge-nal-embassy",
  "edge-net",
+ "edge-ws 0.4.0",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",

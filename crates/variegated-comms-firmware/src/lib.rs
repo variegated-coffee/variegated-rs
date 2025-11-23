@@ -11,4 +11,8 @@ pub mod esphome;
 pub mod http;
 pub mod time;
 pub mod utils;
+pub mod websocket;
 pub mod wifi;
+pub mod ws_types;
+
+pub use websocket::websocket_server_task;

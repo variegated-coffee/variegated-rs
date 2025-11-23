@@ -5,16 +5,12 @@ import { StatusDisplay } from './components/StatusDisplay';
 import { ConfigurationPanel } from './components/ConfigurationPanel';
 import { JsonModal } from './components/JsonModal';
 import { MachineProvider } from './contexts/MachineContext';
-import { fetchPostcard } from './utils/postcard';
+import { createWebSocketService, getWebSocketService } from './services/websocket';
 import {
   MachineDefinition,
-  MachineDefinitionSchema,
   Status,
-  StatusSchema,
   Configuration,
-  ConfigurationSchema,
-  RoutineStorage,
-  RoutineStorageSchema
+  RoutineStorage
 } from './schemas/schemas';
 
 export function App() {
@@ -24,6 +20,7 @@ export function App() {
   const [routines, setRoutines] = useState<RoutineStorage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [connected, setConnected] = useState(false);
 
   // JSON modal states
   const [showStatusJson, setShowStatusJson] = useState(false);
@@ -32,111 +29,107 @@ export function App() {
   const [showMachineDefJson, setShowMachineDefJson] = useState(false);
 
   useEffect(() => {
-    // Track in-flight requests to prevent overlapping
-    let statusInFlight = false;
-    let configInFlight = false;
-    let routinesInFlight = false;
+    // Determine WebSocket URL based on current location
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.hostname;
+    const wsUrl = `${protocol}//${host}:8080`;
 
-    // Fetch data sequentially on initial load
-    const loadInitialData = async () => {
-      try {
-        const machineDefData = await fetchPostcard('/machine-definition', MachineDefinitionSchema);
-        setMachineDefinition(machineDefData);
-
-        const statusData = await fetchPostcard('/status', StatusSchema);
-        setStatus(statusData);
-
-        const configData = await fetchPostcard('/configuration', ConfigurationSchema);
-        setConfig(configData);
-
-        const routinesData = await fetchPostcard('/routines', RoutineStorageSchema);
-        setRoutines(routinesData);
-
-        setLoading(false);
-      } catch (err) {
-        if (err instanceof Error) {
-          setError(err.message);
-        } else {
-          setError('An unknown error occurred');
+    // Create WebSocket service with callbacks
+    const wsService = createWebSocketService(wsUrl, {
+      onStatusUpdate: (newStatus) => {
+        setStatus(newStatus);
+        // Clear loading state once we get first status
+        if (loading && machineDefinition) {
+          setLoading(false);
         }
+      },
+      onConfigurationUpdate: (newConfig) => {
+        setConfig(newConfig);
+      },
+      onMachineDefinition: (def) => {
+        setMachineDefinition(def);
+        // Clear loading state if we already have status
+        if (loading && status) {
+          setLoading(false);
+        }
+      },
+      onRoutinesUpdate: (newRoutines) => {
+        setRoutines(newRoutines);
+      },
+      onConnect: () => {
+        setConnected(true);
+        setError(null);
+      },
+      onDisconnect: () => {
+        setConnected(false);
+      },
+      onError: (err) => {
+        setError(err.message);
+      },
+      onCommandAck: (id, success, errorMsg) => {
+        if (!success && errorMsg) {
+          console.error(`Command ${id} failed: ${errorMsg}`);
+        }
+      }
+    });
+
+    // Connect to WebSocket
+    wsService.connect();
+
+    // Set a timeout to clear loading state if initial data doesn't arrive
+    const loadingTimeout = setTimeout(() => {
+      if (loading) {
         setLoading(false);
+        if (!machineDefinition) {
+          setError('Timeout waiting for machine definition');
+        }
       }
-    };
-
-    void loadInitialData();
-
-    // Poll status every second (only if not already in-flight)
-    const statusInterval = setInterval(() => {
-      if (statusInFlight) {
-        console.log('Skipping status fetch - request already in flight');
-        return;
-      }
-
-      statusInFlight = true;
-      fetchPostcard('/status', StatusSchema)
-        .then(data => setStatus(data))
-        .catch(console.error)
-        .finally(() => { statusInFlight = false; });
-    }, 1000);
-
-    // Poll configuration every second (only if not already in-flight)
-    const configInterval = setInterval(() => {
-      if (configInFlight) {
-        console.log('Skipping configuration fetch - request already in flight');
-        return;
-      }
-
-      configInFlight = true;
-      fetchPostcard('/configuration', ConfigurationSchema)
-        .then(data => setConfig(data))
-        .catch(console.error)
-        .finally(() => { configInFlight = false; });
-    }, 1000);
-
-    // Start configuration polling 300ms after status
-    setTimeout(() => {
-      if (!configInFlight) {
-        configInFlight = true;
-        fetchPostcard('/configuration', ConfigurationSchema)
-          .then(data => setConfig(data))
-          .catch(console.error)
-          .finally(() => { configInFlight = false; });
-      }
-    }, 300);
-
-    // Poll routines every 20 seconds (only if not already in-flight)
-    const routinesInterval = setInterval(() => {
-      if (routinesInFlight) {
-        console.log('Skipping routines fetch - request already in flight');
-        return;
-      }
-
-      routinesInFlight = true;
-      fetchPostcard('/routines', RoutineStorageSchema)
-        .then(data => setRoutines(data))
-        .catch(console.error)
-        .finally(() => { routinesInFlight = false; });
-    }, 20000);
+    }, 10000);
 
     return () => {
-      clearInterval(statusInterval);
-      clearInterval(configInterval);
-      clearInterval(routinesInterval);
+      clearTimeout(loadingTimeout);
+      wsService.disconnect();
     };
   }, []);
+
+  // Separate effect to track when we have all initial data
+  useEffect(() => {
+    if (machineDefinition && status && config && loading) {
+      setLoading(false);
+    }
+  }, [machineDefinition, status, config, loading]);
 
   if (loading) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center' }}>
-        <h1>Loading...</h1>
+        <h1>Connecting...</h1>
+        <p style={{ color: '#666' }}>Establishing WebSocket connection...</p>
       </div>
     );
   }
 
-  if (error) {
+  if (error && !connected) {
     return (
       <div style={{ padding: '2rem', textAlign: 'center', color: 'red' }}>
-        <h1>Error: {error}</h1>
+        <h1>Connection Error</h1>
+        <p>{error}</p>
+        <button
+          onClick={() => {
+            setError(null);
+            setLoading(true);
+            const ws = getWebSocketService();
+            if (ws) {
+              ws.connect();
+            }
+          }}
+          style={{
+            marginTop: '1rem',
+            padding: '0.5rem 1rem',
+            cursor: 'pointer'
+          }}
+        >
+          Retry Connection
+        </button>
       </div>
     );
   }
@@ -144,7 +137,18 @@ export function App() {
   return (
     <MachineProvider machineDefinition={machineDefinition as MachineDefinition}>
       <div style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-        <h1 style={{ marginBottom: '2rem' }}>{machineDefinition?.name || 'Espresso Machine'}</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+          <h1>{machineDefinition?.name || 'Espresso Machine'}</h1>
+          <span style={{
+            padding: '0.25rem 0.5rem',
+            borderRadius: '4px',
+            fontSize: '0.75rem',
+            background: connected ? '#e6ffe6' : '#ffe6e6',
+            color: connected ? '#006600' : '#660000'
+          }}>
+            {connected ? 'Connected' : 'Disconnected'}
+          </span>
+        </div>
 
         {/* Status Display */}
         <StatusDisplay status={status as Status} routines={routines as RoutineStorage} />
@@ -164,9 +168,10 @@ export function App() {
               routines={routines}
               machineDefinition={machineDefinition as MachineDefinition}
               onRefresh={() => {
-                fetchPostcard('/routines', RoutineStorageSchema)
-                  .then(data => setRoutines(data))
-                  .catch(console.error);
+                const ws = getWebSocketService();
+                if (ws) {
+                  ws.requestRoutines();
+                }
               }}
             />
           </section>

@@ -14,7 +14,7 @@ use variegated_controller_types::{
 };
 
 use crate::channels::{
-    ApplicationStatusPublisher, ApplicationConfigurationPublisher,
+    ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, MACHINE_DEFINITION, ROUTINE_CACHE,
 };
 
@@ -24,6 +24,7 @@ pub async fn start(
     mut tx: UartTx<'static, Async>,
     status_publisher: ApplicationStatusPublisher,
     config_publisher: ApplicationConfigurationPublisher,
+    routine_publisher: ApplicationRoutinePublisher,
     command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) {
     info!("Starting UART transceiver");
@@ -93,6 +94,9 @@ pub async fn start(
                             }
                             ApplicationProcessorToCommsProcessorMessage::Routines(routine_list) => {
                                 info!("Received {} routines from application processor", routine_list.routines.len());
+                                // Publish to channel for WebSocket clients
+                                routine_publisher.publish_immediate(routine_list.clone());
+                                // Also cache for HTTP/request-response access
                                 {
                                     let mut guard = ROUTINE_CACHE.lock().await;
                                     *guard = Some(routine_list);

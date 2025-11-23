@@ -1,9 +1,9 @@
 import { useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
-import { Routine, RoutineSchema, MachineDefinition, RoutineStorage } from '../../schemas/schemas';
-import { buildRoutineUrl, buildRunRoutineUrl, getRoutineTypeLabel, RoutineIdentifier } from '../../utils/routineHelpers';
-import { postPostcard, putPostcard, deleteRequest } from '../../utils/postcard';
+import { Routine, MachineDefinition, RoutineStorage, RoutineIndex } from '../../schemas/schemas';
+import { getRoutineTypeLabel, RoutineIdentifier } from '../../utils/routineHelpers';
 import { RoutineEditor } from './RoutineEditor';
+import { getWebSocketService } from '../../services/websocket';
 
 interface RoutineBuilderProps {
   routines: RoutineStorage;
@@ -30,59 +30,76 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleSave = async (routine: Routine) => {
-    try {
-      if (editingRoutine !== null) {
-        // Update existing routine
-        const url = buildRoutineUrl(editingRoutine);
-        await putPostcard(url, routine, RoutineSchema);
-        showSuccess('Routine updated successfully');
-      } else {
-        // Add new routine based on type
-        let url: string;
-        if (addingType === 'custom') {
-          url = '/routines/custom';
-        } else {
-          // Function routine - must specify index
-          url = `/routines/function/${addingFunctionIndex}`;
-        }
-
-        await postPostcard(url, routine, RoutineSchema);
-        showSuccess(`${addingType === 'custom' ? 'Custom' : 'Function'} routine added successfully`);
-      }
-
-      setEditingRoutine(null);
-      setIsAdding(false);
-
-      // Trigger refresh after a short delay to allow backend to process
-      setTimeout(() => {
-        onRefresh?.();
-      }, 1000);
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleSave = (routine: Routine) => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+
+    if (editingRoutine !== null) {
+      // Update existing routine
+      const routineIndex: RoutineIndex = editingRoutine.type === 'custom'
+        ? { type: 'Custom', value: editingRoutine.index }
+        : editingRoutine.type === 'function'
+        ? { type: 'Function', value: editingRoutine.index }
+        : { type: 'Internal', value: editingRoutine.index };
+      ws.updateRoutine(routineIndex, routine);
+      showSuccess('Routine updated successfully');
+    } else {
+      // Add new routine
+      if (addingType === 'custom') {
+        ws.addRoutine(routine);
+        showSuccess('Custom routine added successfully');
+      } else {
+        // Function routine - update at specific index
+        const routineIndex: RoutineIndex = { type: 'Function', value: addingFunctionIndex };
+        ws.updateRoutine(routineIndex, routine);
+        showSuccess('Function routine added successfully');
+      }
+    }
+
+    setEditingRoutine(null);
+    setIsAdding(false);
+
+    // Trigger refresh after a short delay to allow backend to process
+    setTimeout(() => {
+      onRefresh?.();
+    }, 1000);
   };
 
-  const handleDelete = async (identifier: RoutineIdentifier, routineName: string) => {
+  const handleDelete = (identifier: RoutineIdentifier, routineName: string) => {
     if (!confirm(`Delete routine "${routineName}"?`)) {
       return;
     }
 
-    try {
-      const url = buildRoutineUrl(identifier);
-      await deleteRequest(url);
-      showSuccess('Routine deleted successfully');
-
-      // Trigger refresh after a short delay
-      setTimeout(() => {
-        onRefresh?.();
-      }, 1000);
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+
+    const routineIndex: RoutineIndex = identifier.type === 'custom'
+      ? { type: 'Custom', value: identifier.index }
+      : identifier.type === 'function'
+      ? { type: 'Function', value: identifier.index }
+      : { type: 'Internal', value: identifier.index };
+    ws.removeRoutine(routineIndex);
+    showSuccess('Routine deleted successfully');
+
+    // Trigger refresh after a short delay
+    setTimeout(() => {
+      onRefresh?.();
+    }, 1000);
   };
 
-  const handleDuplicate = async (routineProp: Routine) => {
+  const handleDuplicate = (routineProp: Routine) => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
+    }
+
     // Type assertion needed: Postcard's InferType fails on Routine type
     const routine = routineProp;
     const newRoutine: Routine = {
@@ -90,50 +107,39 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
       name: `${routine.name} (copy)`
     } as Routine;
 
-    try {
-      await postPostcard('/routines/custom', newRoutine, RoutineSchema);
-      showSuccess('Routine duplicated successfully');
+    ws.addRoutine(newRoutine);
+    showSuccess('Routine duplicated successfully');
 
-      // Trigger refresh after a short delay
-      setTimeout(() => {
-        onRefresh?.();
-      }, 1000);
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
-    }
+    // Trigger refresh after a short delay
+    setTimeout(() => {
+      onRefresh?.();
+    }, 1000);
   };
 
-  const handleRun = async (identifier: RoutineIdentifier) => {
-    try {
-      const url = buildRunRoutineUrl(identifier);
-      const response = await fetch(url, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to run routine: ${response.statusText}`);
-      }
-
-      showSuccess('Routine started successfully');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleRun = (identifier: RoutineIdentifier) => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+
+    const routineIndex: RoutineIndex = identifier.type === 'custom'
+      ? { type: 'Custom', value: identifier.index }
+      : identifier.type === 'function'
+      ? { type: 'Function', value: identifier.index }
+      : { type: 'Internal', value: identifier.index };
+    ws.runRoutine(routineIndex);
+    showSuccess('Routine started successfully');
   };
 
-  const handleOptimizeStorage = async () => {
-    try {
-      const response = await fetch('/command/optimize-routine-storage', {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to optimize storage: ${response.statusText}`);
-      }
-
-      showSuccess('Storage optimized successfully');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Failed to optimize storage');
+  const handleOptimizeStorage = () => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+    ws.optimizeRoutineStorage();
+    showSuccess('Storage optimized successfully');
   };
 
   const renderRoutineCard = (routineProp: Routine, identifier: RoutineIdentifier, allowEdit: boolean, allowDelete: boolean) => {

@@ -10,7 +10,9 @@
       "Read(/Users/magnus/Developer/open-lcc/variegated-umbrella/**)",
       "WebFetch(domain:docs.rs)",
       "WebFetch(domain:docs.espressif.com)",
-      "WebFetch(domain:lib.rs)"
+      "WebFetch(domain:lib.rs)",
+      "WebFetch(domain:crates.io)",
+      "Bash(npm run build:*)"
     ],
     "deny": [],
     "ask": []

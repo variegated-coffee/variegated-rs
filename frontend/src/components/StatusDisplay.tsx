@@ -6,6 +6,7 @@ import { BoilerStatusCard } from './BoilerStatusCard';
 import { GroupStatusCard } from './GroupStatusCard';
 import { SteamWandStatusCard } from './SteamWandStatusCard';
 import { RoutineExecutionCard } from './RoutineExecutionCard';
+import { getWebSocketService } from '../services/websocket';
 
 interface StatusDisplayProps {
   status: Status;
@@ -31,21 +32,14 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleSetMode = async (modeType: 'On' | 'Off' | 'PowerSaveStandby') => {
-    const modeParam = modeType === 'PowerSaveStandby' ? 'powersavestandby' : modeType.toLowerCase();
-    try {
-      const response = await fetch(`/command/set-mode/${modeParam}`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to set mode: ${response.statusText}`);
-      }
-
-      showSuccess(`Machine mode set to ${modeType}`);
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleSetMode = (modeType: 'On' | 'Off' | 'PowerSaveStandby') => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+    ws.setMode(modeType);
+    showSuccess(`Machine mode set to ${modeType}`);
   };
 
   const boilerEntries = getBoilerEntries();

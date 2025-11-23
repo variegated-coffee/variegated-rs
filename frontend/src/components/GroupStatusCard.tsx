@@ -2,6 +2,7 @@ import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
 import { useMachine } from '../contexts/MachineContext';
 import { GroupStatus } from '../schemas/schemas';
+import { getWebSocketService } from '../services/websocket';
 
 interface GroupStatusCardProps {
   index: number;
@@ -24,52 +25,34 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleTareScale = async () => {
-    try {
-      const response = await fetch(`/command/tare-group-scale/${index}`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to tare scale: ${response.statusText}`);
-      }
-
-      showSuccess('Scale tared successfully');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleTareScale = () => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+    ws.tareGroupScale(index);
+    showSuccess('Scale tared successfully');
   };
 
-  const handleZeroCalibrateScale = async () => {
-    try {
-      const response = await fetch(`/command/zero-calibrate-group-scale/${index}`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to zero calibrate scale: ${response.statusText}`);
-      }
-
-      showSuccess('Scale zero calibrated successfully');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleZeroCalibrateScale = () => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+    ws.zeroCalibrateGroupScale(index);
+    showSuccess('Scale zero calibrated successfully');
   };
 
-  const handleCalibrateScale100g = async () => {
-    try {
-      const response = await fetch(`/command/calibrate-group-scale-100g/${index}`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to calibrate scale with 100g: ${response.statusText}`);
-      }
-
-      showSuccess('Scale calibrated with 100g successfully');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleCalibrateScale100g = () => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+    ws.calibrateGroupScale100g(index);
+    showSuccess('Scale calibrated with 100g successfully');
   };
 
   // Determine status color based on brewing state

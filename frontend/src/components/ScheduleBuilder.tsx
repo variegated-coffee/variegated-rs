@@ -5,6 +5,7 @@ import { ScheduleItemEditor } from './ScheduleItemEditor';
 import { useMachine } from '../contexts/MachineContext';
 import { formatScheduleActionsSummary } from '../utils/commandFormatter';
 import * as schedulesApi from '../api/schedules';
+import { getWebSocketService } from '../services/websocket';
 
 interface ScheduleBuilderProps {
   schedules: ScheduleItem[];
@@ -35,23 +36,17 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
   const [schedules, setSchedules] = useState<ScheduleItem[]>(initialSchedules);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [isAdding, setIsAdding] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync with prop changes (from polling or external updates)
+  // Sync with prop changes (from external updates)
   useEffect(() => {
-    if (!loading) {
-      // Only update if we're not currently performing an operation
-      // This preserves optimistic updates during API calls
-      setSchedules(initialSchedules);
-    }
-  }, [initialSchedules, loading]);
+    setSchedules(initialSchedules);
+  }, [initialSchedules]);
 
-  const handleAdd = async (item: ScheduleItem) => {
-    setLoading(true);
+  const handleAdd = (item: ScheduleItem) => {
     setError(null);
     try {
-      await schedulesApi.addSchedule(item);
+      schedulesApi.addSchedule(item);
       // Optimistically update local state
       setSchedules([...schedules, item]);
       setIsAdding(false);
@@ -59,16 +54,13 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
       const errorMsg = err instanceof Error ? err.message : 'Failed to add schedule';
       setError(errorMsg);
       console.error('Failed to add schedule:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const handleEdit = async (index: number, item: ScheduleItem) => {
-    setLoading(true);
+  const handleEdit = (index: number, item: ScheduleItem) => {
     setError(null);
     try {
-      await schedulesApi.updateSchedule(index, item);
+      schedulesApi.updateSchedule(index, item);
       // Optimistically update local state
       const newSchedules = [...schedules];
       newSchedules[index] = item;
@@ -78,20 +70,17 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
       const errorMsg = err instanceof Error ? err.message : 'Failed to update schedule';
       setError(errorMsg);
       console.error('Failed to update schedule:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const handleDelete = async (index: number) => {
+  const handleDelete = (index: number) => {
     if (!confirm('Are you sure you want to delete this schedule?')) {
       return;
     }
 
-    setLoading(true);
     setError(null);
     try {
-      await schedulesApi.deleteSchedule(index);
+      schedulesApi.deleteSchedule(index);
       // Optimistically update local state
       const newSchedules = schedules.filter((_, i) => i !== index);
       setSchedules(newSchedules);
@@ -99,12 +88,10 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
       const errorMsg = err instanceof Error ? err.message : 'Failed to delete schedule';
       setError(errorMsg);
       console.error('Failed to delete schedule:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const handleToggleEnabled = async (index: number) => {
+  const handleToggleEnabled = (index: number) => {
     const newSchedules = [...schedules];
     const updatedItem = {
       ...newSchedules[index],
@@ -114,10 +101,9 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
       }
     };
 
-    setLoading(true);
     setError(null);
     try {
-      await schedulesApi.updateSchedule(index, updatedItem);
+      schedulesApi.updateSchedule(index, updatedItem);
       // Optimistically update local state
       newSchedules[index] = updatedItem;
       setSchedules(newSchedules);
@@ -125,22 +111,19 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
       const errorMsg = err instanceof Error ? err.message : 'Failed to toggle schedule';
       setError(errorMsg);
       console.error('Failed to toggle schedule:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const handleDuplicate = async (index: number) => {
+  const handleDuplicate = (index: number) => {
     if (schedules.length >= MAX_SCHEDULES) {
       alert('Maximum number of schedules reached (64)');
       return;
     }
 
-    setLoading(true);
     setError(null);
     try {
       const itemToDuplicate = { ...schedules[index] };
-      await schedulesApi.addSchedule(itemToDuplicate);
+      schedulesApi.addSchedule(itemToDuplicate);
       // Optimistically update local state
       const newSchedules = [...schedules, itemToDuplicate];
       setSchedules(newSchedules);
@@ -148,36 +131,24 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
       const errorMsg = err instanceof Error ? err.message : 'Failed to duplicate schedule';
       setError(errorMsg);
       console.error('Failed to duplicate schedule:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
-  const handleOptimizeStorage = async () => {
-    setLoading(true);
+  const handleOptimizeStorage = () => {
     setError(null);
-    try {
-      const response = await fetch('/command/optimize-schedule-storage', {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to optimize storage: ${response.statusText}`);
-      }
-
-      // Show temporary success message
-      const successDiv = document.createElement('div');
-      successDiv.textContent = '✅ Storage optimized';
-      successDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #d4edda; color: #155724; padding: 1rem; border-radius: 4px; z-index: 9999;';
-      document.body.appendChild(successDiv);
-      setTimeout(() => successDiv.remove(), 2000);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to optimize storage';
-      setError(errorMsg);
-      console.error('Failed to optimize storage:', err);
-    } finally {
-      setLoading(false);
+    const ws = getWebSocketService();
+    if (!ws) {
+      setError('WebSocket not connected');
+      return;
     }
+    ws.optimizeScheduleStorage();
+
+    // Show temporary success message
+    const successDiv = document.createElement('div');
+    successDiv.textContent = 'Storage optimized';
+    successDiv.style.cssText = 'position: fixed; top: 20px; right: 20px; background: #d4edda; color: #155724; padding: 1rem; border-radius: 4px; z-index: 9999;';
+    document.body.appendChild(successDiv);
+    setTimeout(() => successDiv.remove(), 2000);
   };
 
   return (
@@ -188,19 +159,18 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
         </h2>
         <button
           onClick={() => setIsAdding(true)}
-          disabled={schedules.length >= MAX_SCHEDULES || loading}
+          disabled={schedules.length >= MAX_SCHEDULES}
           style={{
             padding: '0.75rem 1.5rem',
-            backgroundColor: (schedules.length >= MAX_SCHEDULES || loading) ? '#ccc' : '#0066cc',
+            backgroundColor: schedules.length >= MAX_SCHEDULES ? '#ccc' : '#0066cc',
             color: 'white',
             border: 'none',
             borderRadius: '4px',
             fontSize: '1rem',
-            cursor: (schedules.length >= MAX_SCHEDULES || loading) ? 'not-allowed' : 'pointer',
-            opacity: loading ? 0.6 : 1
+            cursor: schedules.length >= MAX_SCHEDULES ? 'not-allowed' : 'pointer'
           }}
         >
-          {loading ? 'Loading...' : '+ Add Schedule'}
+          + Add Schedule
         </button>
       </div>
 
@@ -295,32 +265,28 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
                 <div style={{ display: 'flex', gap: '0.5rem' }}>
                   <button
                     onClick={() => void handleToggleEnabled(index)}
-                    disabled={loading}
                     title={item.trigger_at.enabled ? 'Disable' : 'Enable'}
                     style={{
                       padding: '0.5rem 0.75rem',
                       backgroundColor: 'white',
                       border: '1px solid #ccc',
                       borderRadius: '4px',
-                      cursor: loading ? 'not-allowed' : 'pointer',
-                      fontSize: '0.9rem',
-                      opacity: loading ? 0.5 : 1
+                      cursor: 'pointer',
+                      fontSize: '0.9rem'
                     }}
                   >
                     {item.trigger_at.enabled ? '⏸' : '▶'}
                   </button>
                   <button
                     onClick={() => setEditingIndex(index)}
-                    disabled={loading}
                     title="Edit"
                     style={{
                       padding: '0.5rem 0.75rem',
                       backgroundColor: 'white',
                       border: '1px solid #ccc',
                       borderRadius: '4px',
-                      cursor: loading ? 'not-allowed' : 'pointer',
-                      fontSize: '0.9rem',
-                      opacity: loading ? 0.5 : 1
+                      cursor: 'pointer',
+                      fontSize: '0.9rem'
                     }}
                   >
                     Edit
@@ -328,32 +294,30 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
                   <button
                     onClick={() => void handleDuplicate(index)}
                     title="Duplicate"
-                    disabled={schedules.length >= MAX_SCHEDULES || loading}
+                    disabled={schedules.length >= MAX_SCHEDULES}
                     style={{
                       padding: '0.5rem 0.75rem',
                       backgroundColor: 'white',
                       border: '1px solid #ccc',
                       borderRadius: '4px',
-                      cursor: (schedules.length >= MAX_SCHEDULES || loading) ? 'not-allowed' : 'pointer',
+                      cursor: schedules.length >= MAX_SCHEDULES ? 'not-allowed' : 'pointer',
                       fontSize: '0.9rem',
-                      opacity: (schedules.length >= MAX_SCHEDULES || loading) ? 0.5 : 1
+                      opacity: schedules.length >= MAX_SCHEDULES ? 0.5 : 1
                     }}
                   >
                     Copy
                   </button>
                   <button
                     onClick={() => void handleDelete(index)}
-                    disabled={loading}
                     title="Delete"
                     style={{
                       padding: '0.5rem 0.75rem',
-                      backgroundColor: loading ? '#999' : '#dc3545',
+                      backgroundColor: '#dc3545',
                       color: 'white',
                       border: 'none',
                       borderRadius: '4px',
-                      cursor: loading ? 'not-allowed' : 'pointer',
-                      fontSize: '0.9rem',
-                      opacity: loading ? 0.5 : 1
+                      cursor: 'pointer',
+                      fontSize: '0.9rem'
                     }}
                   >
                     Delete
@@ -376,7 +340,6 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
         }}>
           <button
             onClick={() => void handleOptimizeStorage()}
-            disabled={loading}
             style={{
               padding: '0.5rem 0.75rem',
               fontSize: '0.8rem',
@@ -384,16 +347,15 @@ const ScheduleBuilderComponent = ({ schedules: initialSchedules }: ScheduleBuild
               backgroundColor: 'transparent',
               border: '1px solid #ddd',
               borderRadius: '4px',
-              cursor: loading ? 'not-allowed' : 'pointer',
+              cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              gap: '0.5rem',
-              opacity: loading ? 0.5 : 1
+              gap: '0.5rem'
             }}
-            onMouseEnter={(e) => { if (!loading) e.currentTarget.style.backgroundColor = '#f5f5f5'; }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f5f5f5'; }}
             onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            🗜️ Optimize Storage
+            Optimize Storage
           </button>
         </div>
       )}

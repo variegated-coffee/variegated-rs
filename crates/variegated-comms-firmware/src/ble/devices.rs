@@ -111,7 +111,7 @@ async fn belka_measurement_loop(
                                                     measurement.ec,
                                                     measurement.temperature,
                                                     measurement.internal_temperature,
-                                                    measurement.status
+                                                    measurement.battery
                                                 );
                                             }
                                             Err(e) => {

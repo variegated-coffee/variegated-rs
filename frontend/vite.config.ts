@@ -12,8 +12,8 @@ export default defineConfig({
   plugins: [
     preact(),
     viteCompression({
-      algorithm: 'brotliCompress',
-      ext: '.br',
+      algorithm: 'gzip',
+      ext: '.gz',
       threshold: 1024,
       deleteOriginFile: false
     }),
@@ -52,15 +52,45 @@ export default defineConfig({
           }
         })
       }
+    },
+    // Custom plugin to create index.js.gz symlink after build
+    {
+      name: 'create-gz-symlink',
+      enforce: 'post' as const,
+      async closeBundle() {
+        // Wait for compression plugin to finish
+        await new Promise(resolve => setTimeout(resolve, 100))
+
+        const assetsDir = path.resolve(__dirname, 'dist', 'assets')
+        const symlinkPath = path.join(assetsDir, 'index.js.gz')
+
+        // Find the gzipped JS file
+        const files = fs.readdirSync(assetsDir)
+        const gzFile = files.find(f => f.startsWith('index-') && f.endsWith('.js.gz'))
+
+        if (gzFile) {
+          // Remove existing symlink if it exists
+          try {
+            fs.unlinkSync(symlinkPath)
+          } catch {
+            // Ignore if doesn't exist
+          }
+
+          // Create relative symlink
+          fs.symlinkSync(gzFile, symlinkPath)
+          console.log(`[create-gz-symlink] Created symlink: index.js.gz -> ${gzFile}`)
+        } else {
+          console.warn('[create-gz-symlink] No gzipped JS file found')
+        }
+      }
     }
   ],
   build: {
     minify: 'terser',
     terserOptions: {
       compress: {
-        drop_console: true, // Remove console.* statements in production
-        drop_debugger: true,
-        pure_funcs: ['console.log', 'console.info', 'console.debug', 'console.warn']
+        drop_console: false, // Keep console.* statements for debugging
+        drop_debugger: true
       },
       format: {
         comments: false // Remove all comments

@@ -19,7 +19,7 @@ pub type ApplicationStatusPublisher = Publisher<'static, CriticalSectionRawMutex
 pub static STATUS_CHANNEL: StaticCell<ApplicationStatusChannel> = StaticCell::new();
 
 // Application Configuration Channel
-pub const APPLICATION_CONFIGURATION_RECEIVERS: usize = 3;
+pub const APPLICATION_CONFIGURATION_RECEIVERS: usize = 4;
 pub type ApplicationConfigurationChannel = PubSubChannel<CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
 pub type ApplicationConfigurationSubscriber = Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
 pub type ApplicationConfigurationPublisher = Publisher<'static, CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
@@ -35,6 +35,14 @@ pub static MACHINE_DEFINITION: Mutex<CriticalSectionRawMutex, Option<MachineDefi
 
 // Routine Cache - periodically updated from application processor
 pub static ROUTINE_CACHE: Mutex<CriticalSectionRawMutex, Option<RoutineList>> = Mutex::new(None);
+
+// Application Routine Channel - for pushing routine updates to WebSocket clients
+pub const APPLICATION_ROUTINE_RECEIVERS: usize = 4;
+pub type ApplicationRoutineChannel = PubSubChannel<CriticalSectionRawMutex, RoutineList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
+pub type ApplicationRoutineSubscriber = Subscriber<'static, CriticalSectionRawMutex, RoutineList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
+pub type ApplicationRoutinePublisher = Publisher<'static, CriticalSectionRawMutex, RoutineList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
+
+pub static ROUTINE_CHANNEL: StaticCell<ApplicationRoutineChannel> = StaticCell::new();
 
 // Status Cache - cached status for HTTP server
 pub static STATUS_CACHE: Mutex<CriticalSectionRawMutex, Option<Status>> = Mutex::new(None);

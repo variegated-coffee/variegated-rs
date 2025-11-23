@@ -8,7 +8,7 @@ use core::net::SocketAddr;
 
 // Embedded frontend files
 static INDEX_HTML: &[u8] = include_bytes!("../../../frontend/dist/index.html");
-static APP_JS_GZ: &[u8] = include_bytes!("../../../frontend/dist/assets/index-BQOtS9_M.js.gz");
+static APP_JS_GZ: &[u8] = include_bytes!("../../../frontend/dist/assets/index.js.gz");
 
 use defmt::{error, info, warn};
 use edge_http::io::server::{Connection as ServerConnection, DefaultServer, Handler};

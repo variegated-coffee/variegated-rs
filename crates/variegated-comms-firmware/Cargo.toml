@@ -37,6 +37,7 @@ embassy-net = { version = "0.7.1", features = [
 embassy-time = { version = "0.5.0", features = ["defmt"] }
 edge-net = { version = "0.11.2", features = ["embassy", "defmt", "io"]}
 edge-http = { version = "0.6.1" }
+edge-ws = { version = "0.4.0", default-features = false }
 edge-nal = { version = "0.5.0" }
 edge-nal-embassy = { version = "0.6.0", features = ["tcp"] }
 embedded-io = { version = "0.6.1" }

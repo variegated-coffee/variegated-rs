@@ -5,6 +5,7 @@ import { useMachine } from '../contexts/MachineContext';
 import { formatCommand } from '../utils/commandFormatter';
 import { formatExitCondition, formatExitAction } from '../utils/exitConditionFormatter';
 import { getRoutineFromIndex, getRoutineIndexLabel } from '../utils/routineHelpers';
+import { getWebSocketService } from '../services/websocket';
 
 interface RoutineExecutionCardProps {
   execution: RoutineExecutionStatus;
@@ -31,20 +32,14 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleCancel = async () => {
-    try {
-      const response = await fetch('/command/cancel-routine', {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to cancel routine: ${response.statusText}`);
-      }
-
-      showSuccess('Routine cancelled successfully');
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
+  const handleCancel = () => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
+      return;
     }
+    ws.cancelRoutine();
+    showSuccess('Routine cancelled successfully');
   };
 
   // Get the routine being executed

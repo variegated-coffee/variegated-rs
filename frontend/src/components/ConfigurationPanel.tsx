@@ -2,24 +2,13 @@ import { useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 import {
   Configuration,
-  SetBoilerControlRequest,
-  SetBoilerControlRequestSchema,
-  SetGroupControlRequest,
-  SetGroupControlRequestSchema,
-  SetPidParametersRequest,
-  SetPidParametersRequestSchema,
-  SetGroupPumpConfigurationRequest,
-  SetGroupPumpConfigurationRequestSchema,
-  SetWaterTapPumpConfigurationRequest,
-  SetWaterTapPumpConfigurationRequestSchema,
-  SetFillPumpConfigurationRequest,
-  SetFillPumpConfigurationRequestSchema,
   PidParameters_for_float,
   PumpConfiguration,
   BoilerControlMode,
   GroupBrewControlMode,
   ControlCurve,
-  KalmanParameters
+  KalmanParameters,
+  PidParameterTarget
 } from '../schemas/schemas';
 import { useMachine } from '../contexts/MachineContext';
 import { ConfigurationCard } from './ConfigurationCard';
@@ -34,7 +23,7 @@ import { PumpConfigurationEditor } from './PumpConfigurationEditor';
 import { ControlCurveEditor } from './ControlCurveEditor';
 import { BoilerControlEditor } from './BoilerControlEditor';
 import { GroupControlEditor } from './GroupControlEditor';
-import { postPostcard } from '../utils/postcard';
+import { getWebSocketService } from '../services/websocket';
 
 interface ConfigurationPanelProps {
   configuration: Configuration;
@@ -100,24 +89,17 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
   };
 
   // Optimize storage handler
-  const handleOptimizeStorage = async () => {
+  const handleOptimizeStorage = () => {
     setOptimizeMessage(null);
-    try {
-      const response = await fetch('/command/optimize-configuration-storage', {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to optimize storage: ${response.statusText}`);
-      }
-
-      setOptimizeMessage({ type: 'success', text: 'Storage optimized successfully' });
-      setTimeout(() => setOptimizeMessage(null), 2000);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : 'Failed to optimize storage';
-      setOptimizeMessage({ type: 'error', text: errorMsg });
+    const ws = getWebSocketService();
+    if (!ws) {
+      setOptimizeMessage({ type: 'error', text: 'WebSocket not connected' });
       setTimeout(() => setOptimizeMessage(null), 4000);
+      return;
     }
+    ws.optimizeConfigurationStorage();
+    setOptimizeMessage({ type: 'success', text: 'Storage optimized successfully' });
+    setTimeout(() => setOptimizeMessage(null), 2000);
   };
 
   // Breadcrumb display
@@ -471,32 +453,35 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
       | KalmanParameters
       | null;
 
-    const handleSave = async (data: EditorData) => {
+    const handleSave = (data: EditorData) => {
+      const ws = getWebSocketService();
+      if (!ws) {
+        alert('WebSocket not connected');
+        return;
+      }
+
       // Handle special cases for boiler and group control
       if (navigation.parameterCategory === 'boiler_control' && navigation.entityType === 'boilers' && navigation.entityKey !== null) {
-        try {
-          const boilerData = data as BoilerControlEditorData;
-          const request: SetBoilerControlRequest = {
-            boiler_index: navigation.entityKey,
-            mode: boilerData.mode,
-            target_temperature: boilerData.target_temperature ?? null,
-            target_pressure: boilerData.target_pressure ?? null
-          };
-          await postPostcard('/command/set-boiler-control', request, SetBoilerControlRequestSchema);
-          alert('Boiler control updated successfully!');
-          goBack();
-        } catch (err) {
-          alert(err instanceof Error ? err.message : 'Failed to update boiler control');
-        }
+        const boilerData = data as BoilerControlEditorData;
+        ws.setBoilerControlTarget(
+          navigation.entityKey,
+          boilerData.mode,
+          {
+            temperature: boilerData.target_temperature ?? null,
+            pressure: boilerData.target_pressure ?? null
+          }
+        );
+        alert('Boiler control updated successfully!');
+        goBack();
         return;
       }
 
       if (navigation.parameterCategory === 'group_control' && navigation.entityType === 'groups' && navigation.entityKey !== null) {
-        try {
-          const groupData = data as GroupControlEditorData;
-          const request: SetGroupControlRequest = {
-            group_index: navigation.entityKey,
-            mode: groupData.mode,
+        const groupData = data as GroupControlEditorData;
+        ws.setGroupBrewControlTarget(
+          navigation.entityKey,
+          groupData.mode,
+          {
             duty_cycle: groupData.duty_cycle ?? null,
             flow_rate: groupData.flow_rate ?? null,
             pressure: groupData.pressure ?? null,
@@ -505,92 +490,64 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
             flow_rate_curve: groupData.flow_rate_curve ?? null,
             pressure_curve: groupData.pressure_curve ?? null,
             output_flow_rate_curve: groupData.output_flow_rate_curve ?? null
-          };
-          await postPostcard('/command/set-group-control', request, SetGroupControlRequestSchema);
-          alert('Group control updated successfully!');
-          goBack();
-        } catch (err) {
-          alert(err instanceof Error ? err.message : 'Failed to update group control');
-        }
+          }
+        );
+        alert('Group control updated successfully!');
+        goBack();
         return;
       }
 
       // Handle PID parameter saves
       if (navigation.parameterCategory?.endsWith('_pid') && navigation.entityKey !== null) {
-        try {
-          let targetType: string;
+        let target: PidParameterTarget;
 
-          if (navigation.entityType === 'boilers') {
-            targetType = navigation.parameterCategory === 'temperature_pid'
-              ? 'BoilerTemperature'
-              : 'BoilerPressure';
-          } else if (navigation.entityType === 'groups') {
-            if (navigation.parameterCategory === 'flow_rate_pid') {
-              targetType = 'GroupFlowRate';
-            } else if (navigation.parameterCategory === 'output_flow_rate_pid') {
-              targetType = 'GroupOutputFlowRate';
-            } else {
-              targetType = 'GroupPressure';
-            }
+        if (navigation.entityType === 'boilers') {
+          target = navigation.parameterCategory === 'temperature_pid'
+            ? { type: 'BoilerTemperature', value: navigation.entityKey }
+            : { type: 'BoilerPressure', value: navigation.entityKey };
+        } else if (navigation.entityType === 'groups') {
+          if (navigation.parameterCategory === 'flow_rate_pid') {
+            target = { type: 'GroupFlowRate', value: navigation.entityKey };
+          } else if (navigation.parameterCategory === 'output_flow_rate_pid') {
+            target = { type: 'GroupOutputFlowRate', value: navigation.entityKey };
           } else {
-            throw new Error('Invalid entity type for PID parameters');
+            target = { type: 'GroupPressure', value: navigation.entityKey };
           }
-
-          const request: SetPidParametersRequest = {
-            target_type: targetType,
-            index: navigation.entityKey,
-            pid_parameters: data as PidParameters_for_float
-          };
-          await postPostcard('/command/set-pid-parameters', request, SetPidParametersRequestSchema);
-          alert('PID parameters updated successfully!');
-          goBack();
-        } catch (err) {
-          alert(err instanceof Error ? err.message : 'Failed to update PID parameters');
+        } else {
+          alert('Invalid entity type for PID parameters');
+          return;
         }
+
+        ws.setPidParameters(target, data as PidParameters_for_float);
+        alert('PID parameters updated successfully!');
+        goBack();
         return;
       }
 
       // Handle pump configuration saves
       if (navigation.parameterCategory === 'pump_config' && navigation.entityKey !== null) {
-        try {
-          if (navigation.entityType === 'groups') {
-            const request: SetGroupPumpConfigurationRequest = {
-              group_index: navigation.entityKey,
-              pump_configuration: (data as PumpConfiguration | null) || { tacho_pulses_per_liter: null, max_duty_cycle: null, min_duty_cycle: null, ramp_up_time_ms: null, ramp_down_time_ms: null }
-            };
-            await postPostcard('/command/set-group-pump-configuration', request, SetGroupPumpConfigurationRequestSchema);
-            alert('Group pump configuration updated successfully!');
-            goBack();
-          } else if (navigation.entityType === 'water_taps') {
-            const request: SetWaterTapPumpConfigurationRequest = {
-              water_tap_index: navigation.entityKey,
-              pump_configuration: (data as PumpConfiguration | null) || { tacho_pulses_per_liter: null, max_duty_cycle: null, min_duty_cycle: null, ramp_up_time_ms: null, ramp_down_time_ms: null }
-            };
-            await postPostcard('/command/set-water-tap-pump-configuration', request, SetWaterTapPumpConfigurationRequestSchema);
-            alert('Water tap pump configuration updated successfully!');
-            goBack();
-          } else {
-            throw new Error('Invalid entity type for pump configuration');
-          }
-        } catch (err) {
-          alert(err instanceof Error ? err.message : 'Failed to update pump configuration');
+        const pumpConfig = (data as PumpConfiguration | null) || { tacho_pulses_per_liter: null, max_duty_cycle: null, min_duty_cycle: null, ramp_up_time_ms: null, ramp_down_time_ms: null };
+
+        if (navigation.entityType === 'groups') {
+          ws.setGroupPumpConfiguration(navigation.entityKey, pumpConfig);
+          alert('Group pump configuration updated successfully!');
+          goBack();
+        } else if (navigation.entityType === 'water_taps') {
+          ws.setWaterTapPumpConfiguration(navigation.entityKey, pumpConfig);
+          alert('Water tap pump configuration updated successfully!');
+          goBack();
+        } else {
+          alert('Invalid entity type for pump configuration');
         }
         return;
       }
 
       // Handle fill pump configuration saves (boiler)
       if (navigation.parameterCategory === 'fill_pump_config' && navigation.entityType === 'boilers' && navigation.entityKey !== null) {
-        try {
-          const request: SetFillPumpConfigurationRequest = {
-            boiler_index: navigation.entityKey,
-            pump_configuration: (data as PumpConfiguration | null) || { tacho_pulses_per_liter: null, max_duty_cycle: null, min_duty_cycle: null, ramp_up_time_ms: null, ramp_down_time_ms: null }
-          };
-          await postPostcard('/command/set-fill-pump-configuration', request, SetFillPumpConfigurationRequestSchema);
-          alert('Fill pump configuration updated successfully!');
-          goBack();
-        } catch (err) {
-          alert(err instanceof Error ? err.message : 'Failed to update fill pump configuration');
-        }
+        const pumpConfig = (data as PumpConfiguration | null) || { tacho_pulses_per_liter: null, max_duty_cycle: null, min_duty_cycle: null, ramp_up_time_ms: null, ramp_down_time_ms: null };
+        ws.setFillPumpConfiguration(navigation.entityKey, pumpConfig);
+        alert('Fill pump configuration updated successfully!');
+        goBack();
         return;
       }
 

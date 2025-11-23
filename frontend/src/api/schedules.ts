@@ -1,23 +1,35 @@
-import { ScheduleItem, ScheduleItemSchema } from '../schemas/schemas';
-import { postPostcard, putPostcard, deleteRequest } from '../utils/postcard';
+import { ScheduleItem } from '../schemas/schemas';
+import { getWebSocketService } from '../services/websocket';
 
 /**
  * Add a new schedule item to the machine configuration
  */
-export async function addSchedule(item: ScheduleItem): Promise<void> {
-  await postPostcard('/schedules', item, ScheduleItemSchema);
+export function addSchedule(item: ScheduleItem): void {
+  const ws = getWebSocketService();
+  if (!ws) {
+    throw new Error('WebSocket not connected');
+  }
+  ws.addScheduleItem(item);
 }
 
 /**
  * Update an existing schedule item at the given index
  */
-export async function updateSchedule(index: number, item: ScheduleItem): Promise<void> {
-  await putPostcard(`/schedules/${index}`, item, ScheduleItemSchema);
+export function updateSchedule(index: number, item: ScheduleItem): void {
+  const ws = getWebSocketService();
+  if (!ws) {
+    throw new Error('WebSocket not connected');
+  }
+  ws.updateScheduleItem(index, item);
 }
 
 /**
  * Delete a schedule item at the given index
  */
-export async function deleteSchedule(index: number): Promise<void> {
-  await deleteRequest(`/schedules/${index}`);
+export function deleteSchedule(index: number): void {
+  const ws = getWebSocketService();
+  if (!ws) {
+    throw new Error('WebSocket not connected');
+  }
+  ws.removeScheduleItem(index);
 }

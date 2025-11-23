@@ -2,6 +2,7 @@ import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
 import { useMachine } from '../contexts/MachineContext';
 import { SteamWandStatus } from '../schemas/schemas';
+import { getWebSocketService } from '../services/websocket';
 
 interface SteamWandStatusCardProps {
   index: number;
@@ -13,7 +14,6 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
   const name = getSteamWandName(index);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [isAdjusting, setIsAdjusting] = useState(false);
   const [opennessValue, setOpennessValue] = useState(status.valve_openness);
 
   const showSuccess = (message: string) => {
@@ -26,39 +26,15 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleOpennessChange = async (newOpenness: number) => {
-    try {
-      setIsAdjusting(true);
-
-      // Prepare request data
-      const requestData = {
-        steam_wand_index: index,
-        openness: newOpenness
-      };
-
-      // Serialize to postcard
-      const binary = await window.postcard.serialize(requestData);
-
-      const response = await fetch('/command/set-steam-valve-openness', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-        },
-        body: binary as BodyInit,
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to set valve openness: ${response.statusText}`);
-      }
-
-      showSuccess(`Valve openness set to ${newOpenness}%`);
-    } catch (err) {
-      showError(err instanceof Error ? err.message : 'Unknown error occurred');
-      // Revert to previous value on error
+  const handleOpennessChange = (newOpenness: number) => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      showError('WebSocket not connected');
       setOpennessValue(status.valve_openness);
-    } finally {
-      setIsAdjusting(false);
+      return;
     }
+    ws.setSteamValveOpenness(index, newOpenness);
+    showSuccess(`Valve openness set to ${newOpenness}%`);
   };
 
   // Determine status color based on steaming state
@@ -110,7 +86,6 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
           min="0"
           max="100"
           value={opennessValue}
-          disabled={isAdjusting}
           onChange={(e) => setOpennessValue(Number(e.currentTarget.value))}
           onMouseUp={() => void handleOpennessChange(opennessValue)}
           onTouchEnd={() => void handleOpennessChange(opennessValue)}
@@ -120,8 +95,7 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
             borderRadius: '3px',
             background: `linear-gradient(to right, #0066cc 0%, #0066cc ${opennessValue}%, #ddd ${opennessValue}%, #ddd 100%)`,
             outline: 'none',
-            opacity: isAdjusting ? 0.5 : 1,
-            cursor: isAdjusting ? 'wait' : 'pointer'
+            cursor: 'pointer'
           }}
         />
       </div>
