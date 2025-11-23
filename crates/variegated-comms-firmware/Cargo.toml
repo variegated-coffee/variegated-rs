@@ -20,6 +20,7 @@ variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" 
 variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
 bt-hci = "0.6.0"
 postcard = { version = "1.1.1", features = ["alloc", "use-crc"] }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 embassy-sync = { version = "0.7", features = ["defmt"] }
 portable-atomic = { version = "1.11", features = ["critical-section"] }
 heapless = "0.8"
@@ -72,6 +73,7 @@ defmt = "1.0.1"
 sntpc = { version = "0.6.1", default-features = false, features = ["embassy-socket", "embassy-socket-ipv6"] }
 jiff = { version = "0.2.10", default-features = false, features = ["static"] }
 log = "0.4.28"
+esphome-device = { path = "../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
 
 #[patch."https://github.com/vpetrigo/sntpc"]
 #sntpc = { git = "https://github.com/vpetrigo/sntpc", branch = "master" }

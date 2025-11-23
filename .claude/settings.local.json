@@ -9,7 +9,8 @@
       "WebFetch(domain:docs.embassy.dev)",
       "Read(/Users/magnus/Developer/open-lcc/variegated-umbrella/**)",
       "WebFetch(domain:docs.rs)",
-      "WebFetch(domain:docs.espressif.com)"
+      "WebFetch(domain:docs.espressif.com)",
+      "WebFetch(domain:lib.rs)"
     ],
     "deny": [],
     "ask": []

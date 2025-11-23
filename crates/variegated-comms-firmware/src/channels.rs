@@ -1,10 +1,14 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use embassy_sync::signal::Signal;
-use embassy_sync::channel::Channel;
+use embassy_sync::channel::{Channel, Sender, Receiver};
 use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use variegated_controller_types::{CommsStatus, Configuration, MachineCommand, MachineDefinition, RoutineList, Status};
+use esphome_device::{ClientEvent, StateChange};
+
+// Re-export Sender type for convenience
+pub type MachineCommandSender = Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>;
 
 // Application Status Channel
 pub const APPLICATION_STATUS_RECEIVERS: usize = 4;
@@ -32,6 +36,12 @@ pub static MACHINE_DEFINITION: Mutex<CriticalSectionRawMutex, Option<MachineDefi
 // Routine Cache - periodically updated from application processor
 pub static ROUTINE_CACHE: Mutex<CriticalSectionRawMutex, Option<RoutineList>> = Mutex::new(None);
 
+// Status Cache - cached status for HTTP server
+pub static STATUS_CACHE: Mutex<CriticalSectionRawMutex, Option<Status>> = Mutex::new(None);
+
+// Configuration Cache - cached configuration for HTTP server
+pub static CONFIG_CACHE: Mutex<CriticalSectionRawMutex, Option<Configuration>> = Mutex::new(None);
+
 // Machine Command Channel - commands to send to application processor
 pub const MACHINE_COMMAND_CAPACITY: usize = 8;
 pub static MACHINE_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>> = StaticCell::new();
@@ -45,3 +55,15 @@ pub enum CommsStatusCommand {
 
 pub const COMMS_STATUS_COMMAND_CAPACITY: usize = 8;
 pub static COMMS_STATUS_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, CommsStatusCommand, COMMS_STATUS_COMMAND_CAPACITY>> = StaticCell::new();
+
+// ESPHome State Change Channel (commands/state changes to ESPHome server)
+pub const MAX_QUEUED_STATE_CHANGES: usize = 70;
+pub type StateChangeChannel = Channel<CriticalSectionRawMutex, StateChange<'static>, MAX_QUEUED_STATE_CHANGES>;
+pub type StateChangeSender = Sender<'static, CriticalSectionRawMutex, StateChange<'static>, MAX_QUEUED_STATE_CHANGES>;
+pub type StateChangeReceiver = Receiver<'static, CriticalSectionRawMutex, StateChange<'static>, MAX_QUEUED_STATE_CHANGES>;
+
+pub static STATE_CHANGE_CHANNEL: StaticCell<StateChangeChannel> = StaticCell::new();
+
+// ESPHome Client Event Channel (commands from ESPHome clients)
+pub const CLIENT_EVENT_CAPACITY: usize = 8;
+pub static CLIENT_EVENT_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, ClientEvent, CLIENT_EVENT_CAPACITY>> = StaticCell::new();

@@ -43,13 +43,17 @@ use variegated_comms_firmware::{
     channels::{
         ApplicationConfigurationChannel, ApplicationStatusChannel,
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL,
+        MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL,
+        StateChangeChannel, CLIENT_EVENT_CAPACITY,
     },
     config::{uart_config, acaia_address, belka_address},
-    http::http_server_task,
+    esphome::esphome_server_task,
+    http::{http_server_task, cache_update_task},
     mk_static,
     time::sntp_task,
     wifi::{connection_task, net_task},
 };
+use esphome_device::ClientEvent;
 use variegated_trouble_connection_manager::BleConnectionManager;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -67,7 +71,7 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
     info!("Status listener task started");
     loop {
         let status = subscriber.next_message_pure().await;
-        info!("Status: {:?}", status);
+//        info!("Status: {:?}", status);
     }
 }
 
@@ -80,7 +84,7 @@ async fn comms_status_signaller_task() {
     loop {
         let comms_status = CommsStatus {
             wifi_connected: true,
-            timestamp: Some(0),
+            timestamp: None,
             wifi_rssi: Some(-50),
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);
@@ -131,6 +135,10 @@ async fn main(spawner: Spawner) -> ! {
     let config_channel = CONFIGURATION_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
 
+    // Initialize ESPHome channels
+    let state_change_channel = STATE_CHANGE_CHANNEL.init(embassy_sync::channel::Channel::new());
+    let client_event_channel = CLIENT_EVENT_CHANNEL.init(embassy_sync::channel::Channel::new());
+
     // Create UART for application processor communication
     let uart = esp_hal::uart::Uart::new(peripherals.UART1, uart_config())
         .expect("Failed to create UART")
@@ -155,7 +163,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Initialize radio controller
     let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
-
+/*
     // Initialize BLE (before WiFi for stability)
     let connector = BleConnector::new(&esp_radio_ctrl, peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
@@ -204,7 +212,7 @@ async fn main(spawner: Spawner) -> ! {
     info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;
-
+*/
     // Initialize WiFi
     let (controller, interfaces) =
         esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
@@ -219,7 +227,7 @@ async fn main(spawner: Spawner) -> ! {
     let (net_stack, runner) = embassy_net::new(
         wifi_interface,
         net_config,
-        mk_static!(StackResources<8>, StackResources::<8>::new()),
+        mk_static!(StackResources<16>, StackResources::<16>::new()),
         seed,
     );
 
@@ -253,12 +261,37 @@ async fn main(spawner: Spawner) -> ! {
     info!("Network ready");
 
     // Create TCP stack for HTTP
-    let tcp_buffers = mk_static!(TcpBuffers<8, 1024, 1024>, TcpBuffers::new());
-    let tcp_stack = mk_static!(Tcp<'static, 8, 1024, 1024>, Tcp::new(net_stack, tcp_buffers));
+    let tcp_buffers = mk_static!(TcpBuffers<16, 1024, 1024>, TcpBuffers::new());
+    let tcp_stack = mk_static!(Tcp<'static, 16, 1024, 1024>, Tcp::new(net_stack, tcp_buffers));
 
-    // Spawn HTTP server
-    spawner.spawn(http_server_task(tcp_stack)).ok();
-    info!("HTTP server task spawned");
+    // Get command sender for HTTP server
+    let command_sender = mk_static!(MachineCommandSender, command_channel.sender());
+
+    // Create subscribers for cache update task
+    let http_status_subscriber = status_channel.subscriber().unwrap();
+    let http_config_subscriber = config_channel.subscriber().unwrap();
+
+    // Spawn HTTP server and cache update tasks
+    spawner.spawn(http_server_task(tcp_stack, command_sender)).ok();
+    spawner.spawn(cache_update_task(http_status_subscriber, http_config_subscriber)).ok();
+    info!("HTTP server and cache update tasks spawned");
+
+    // Create subscribers for ESPHome server
+    let esphome_status_subscriber = status_channel.subscriber().unwrap();
+    let esphome_config_subscriber = config_channel.subscriber().unwrap();
+    let esphome_command_config_subscriber = config_channel.subscriber().unwrap();
+
+    // Spawn ESPHome server task
+    spawner.spawn(esphome_server_task(
+        stack_static,
+        esphome_status_subscriber,
+        esphome_config_subscriber,
+        esphome_command_config_subscriber,
+        state_change_channel,
+        client_event_channel,
+        command_channel,
+    )).ok();
+    info!("ESPHome server task spawned on port 6053");
 
     // Main loop - periodic HTTP client requests
     loop {
