@@ -3,8 +3,10 @@
 use defmt::{error, info};
 use embassy_net::Runner as NetRunner;
 use embassy_time::{Duration, Timer};
+use embassy_futures::select::{select, Either};
 use esp_radio::wifi::{ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent, WifiStaState};
 
+use crate::channels::WIFI_RSSI_SIGNAL;
 use crate::config::{PASSWORD, SSID};
 
 /// WiFi connection management task
@@ -16,10 +18,30 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
     loop {
         match esp_radio::wifi::sta_state() {
             WifiStaState::Connected => {
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                Timer::after(Duration::from_millis(5000)).await
+                // While connected, periodically update RSSI and wait for disconnect
+                loop {
+                    match select(
+                        controller.wait_for_event(WifiEvent::StaDisconnected),
+                        Timer::after(Duration::from_secs(1)),
+                    ).await {
+                        Either::First(_) => {
+                            // Disconnected - clear RSSI and break to reconnect
+                            WIFI_RSSI_SIGNAL.signal(None);
+                            Timer::after(Duration::from_millis(5000)).await;
+                            break;
+                        }
+                        Either::Second(_) => {
+                            // Timer fired - update RSSI (convert i32 to i8)
+                            let rssi = controller.rssi().ok().map(|r| r as i8);
+                            WIFI_RSSI_SIGNAL.signal(rssi);
+                        }
+                    }
+                }
             }
-            _ => {}
+            _ => {
+                // Not connected - clear RSSI
+                WIFI_RSSI_SIGNAL.signal(None);
+            }
         }
         if !matches!(controller.is_started(), Ok(true)) {
             let client_config = ModeConfig::Client(

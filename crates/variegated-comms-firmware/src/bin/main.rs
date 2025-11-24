@@ -77,19 +77,38 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
 }
 
 #[embassy_executor::task]
-async fn comms_status_signaller_task() {
-    use variegated_comms_firmware::channels::COMMS_STATUS_SIGNAL;
+async fn comms_status_signaller_task(
+    rtc: &'static esp_hal::rtc_cntl::Rtc<'static>,
+) {
+    use variegated_comms_firmware::channels::{COMMS_STATUS_SIGNAL, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::config::USEC_IN_SEC;
     use variegated_controller_types::CommsStatus;
+    use esp_radio::wifi::WifiStaState;
 
     info!("CommsStatus signaller task started");
     loop {
+        // Get real WiFi connection status
+        let wifi_connected = matches!(esp_radio::wifi::sta_state(), WifiStaState::Connected);
+
+        // Get real timestamp from RTC (convert microseconds to seconds)
+        let timestamp = {
+            let time_us = rtc.current_time_us();
+            if time_us > 0 {
+                Some(time_us / USEC_IN_SEC)
+            } else {
+                None
+            }
+        };
+
+        // Get WiFi RSSI from signal (updated by connection_task)
+        let wifi_rssi = WIFI_RSSI_SIGNAL.try_take().unwrap_or(None);
+
         let comms_status = CommsStatus {
-            wifi_connected: true,
-            timestamp: None,
-            wifi_rssi: Some(-50),
+            wifi_connected,
+            timestamp,
+            wifi_rssi,
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);
-        info!("Signalled CommsStatus");
         Timer::after(Duration::from_secs(1)).await;
     }
 }
@@ -158,13 +177,14 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn application processor tasks
     spawner.spawn(application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel)).ok();
     spawner.spawn(status_listener_task(status_channel)).ok();
-    spawner.spawn(comms_status_signaller_task()).ok();
     info!("Application processor tasks spawned");
 
     // Initialize esp-rtos
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+
+    info!("Initializing radio");
 
     // Initialize radio controller
     let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
@@ -218,11 +238,15 @@ async fn main(spawner: Spawner) -> ! {
 
     Timer::after_secs(5).await;
 */
+    info!("Initializing Wifi");
+
     // Initialize WiFi
     let (controller, interfaces) =
         esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
 
     let wifi_interface = interfaces.sta;
+
+    info!("Creating network stack");
 
     // Create network stack
     let net_config = embassy_net::Config::dhcpv4(Default::default());
@@ -240,10 +264,14 @@ async fn main(spawner: Spawner) -> ! {
     let stack_static = mk_static!(embassy_net::Stack<'static>, net_stack);
     let rtc_static = mk_static!(Rtc<'static>, rtc);
 
+    info!("Spawning network tasks");
+
     // Spawn network tasks
     spawner.spawn(connection_task(controller)).ok();
     spawner.spawn(net_task(runner)).ok();
     spawner.spawn(sntp_task(rtc_static, *stack_static)).ok();
+    spawner.spawn(comms_status_signaller_task(rtc_static)).ok();
+    info!("Network and CommsStatus tasks spawned");
 
     // Wait for network
     info!("Waiting for link...");

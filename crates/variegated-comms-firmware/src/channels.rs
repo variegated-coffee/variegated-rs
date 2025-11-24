@@ -29,6 +29,9 @@ pub static CONFIGURATION_CHANNEL: StaticCell<ApplicationConfigurationChannel> = 
 // Comms Status Signal - used to send CommsStatus to application processor
 pub static COMMS_STATUS_SIGNAL: Signal<CriticalSectionRawMutex, CommsStatus> = Signal::new();
 
+// WiFi RSSI Signal - updated by connection_task, read by comms_status_signaller_task
+pub static WIFI_RSSI_SIGNAL: Signal<CriticalSectionRawMutex, Option<i8>> = Signal::new();
+
 // Machine Definition - set once at startup, then read-only
 // Using Mutex<Option<>> since OnceLock is std-only
 pub static MACHINE_DEFINITION: Mutex<CriticalSectionRawMutex, Option<MachineDefinition>> = Mutex::new(None);
