@@ -496,6 +496,8 @@ async fn main_task(spawner: Spawner) -> ! {
         None, // input_volume_sensor
         None, // output_flow_sig has different raw type (i32) than flow_meter_sig (f32)
         Some(output_weight_sig.receiver().unwrap()),
+        None,
+        None
     );
 
     // Create peripheral registry and register peripherals

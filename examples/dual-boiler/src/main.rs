@@ -135,6 +135,9 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 #[cfg(feature = "gravity")]
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 
+#[cfg(feature = "belka")]
+pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
+
 // Embassy task wrapper for ESP transceiver (dual-boiler)
 #[embassy_executor::task]
 async fn esp_transceiver_task(
@@ -148,17 +151,19 @@ async fn esp_transceiver_task(
     let mut config = uart::Config::default();
     config.baudrate = 576_000;
 
-    let mut uart = Uart::new(
+    let mut uart = Uart::new_with_rtscts(
         esp_p.uart,
         esp_p.tx_pin,
         esp_p.rx_pin,
+        esp_p.rts_pin,
+        esp_p.cts_pin,
         Irqs,
         esp_p.dma_rx,
         esp_p.dma_tx,
         config
     );
-
     let (uart_tx, uart_rx) = uart.split();
+
     esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition).await;
 }
 
@@ -1159,6 +1164,8 @@ async fn main_task(
         Some(output_weight_sig.receiver().unwrap()),
         #[cfg(not(feature = "gravity"))]
         None,
+        None,
+        None,
     );
 
     // Create water tap with dual boiler mechanism
@@ -1329,6 +1336,23 @@ async fn main_task(
             via_comms_mcu: false,
         };
         let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
+    }
+
+    // Add scale peripheral if present
+    #[cfg(feature = "belka")]
+    if let Some(scale_controller) = &group.scale_controller {
+        let mut portal_capabilities = heapless::Vec::new();
+        let _ = portal_capabilities.push(SensorCapability::ElectricalConductivity);
+        let _ = portal_capabilities.push(SensorCapability::Temperature);
+
+        let scale_def = PeripheralDefinition {
+            peripheral_type: PeripheralType::BrewSensor,
+            location: heapless::String::try_from("Cup").unwrap(),
+            capabilities: portal_capabilities,
+            support_calibration: false,
+            via_comms_mcu: false,
+        };
+        let _ = machine_definition.add_peripheral(BELKA_PERIPHERAL_ID, scale_def);
     }
 
     // Add function routine descriptions (for the 4 routine buttons)

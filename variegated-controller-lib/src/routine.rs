@@ -9,7 +9,7 @@ use defmt::{info, Format};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
-use embedded_storage_async::nor_flash::NorFlash;
+use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
 use heapless::FnvIndexMap;
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
@@ -654,7 +654,7 @@ pub trait RoutineRepository {
     async fn optimize_storage(&mut self) -> Result<(), &'static str>;
 }
 
-pub struct SequentialStorageRoutineRepository<'a, M: RawMutex, T: NorFlash> {
+pub struct SequentialStorageRoutineRepository<'a, M: RawMutex, T: MultiwriteNorFlash> {
     flash: &'a Mutex<M, T>,
     range: Range<u32>,
     deserialization_buffer: [u8; 2048],
@@ -662,7 +662,7 @@ pub struct SequentialStorageRoutineRepository<'a, M: RawMutex, T: NorFlash> {
     cache_initialized: bool
 }
 
-impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T> {
+impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository<'a, M, T> {
     pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
         Self {
             flash,
@@ -698,7 +698,7 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T>
         while let Some((key, value)) = iterator
             .next::<Option<Routine>>(&mut self.deserialization_buffer)
             .await
-            .unwrap()
+            .unwrap_or(None)
         {
             // Skip Internal routines - they are never persisted to flash
             if let Some(idx) = RoutineIndex::from_storage_index(key) {
@@ -747,7 +747,7 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageRoutineRepository<'a, M, T>
     }
 }
 
-impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRoutineRepository<'a, M, T> {
+impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialStorageRoutineRepository<'a, M, T> {
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine> {
         info!("Getting routine at index {:?}", index);
         self.load_from_flash().await.ok()?;
@@ -878,12 +878,17 @@ impl <'a, M: RawMutex, T: NorFlash> RoutineRepository for SequentialStorageRouti
             .map(|(index, routine)| (*index, routine.clone()))
             .collect();
 
-        // Erase the entire flash range
+        // Remove everything
         {
+            let mut cache = NoCache::new();
+
             let mut flash = self.flash.lock().await;
-            info!("Erasing routine storage range");
-            flash.erase(self.range.start, self.range.end).await
-                .map_err(|_| "Failed to erase flash range")?;
+            sequential_storage::map::remove_all_items::<u16, _>(
+                flash.deref_mut(),
+                self.range.clone(),
+                &mut cache,
+                &mut self.deserialization_buffer,
+            ).await.map_err(|_| "Failed to remove all routines from flash")?;
         }
 
         // Yield to allow other tasks (like watchdog feeding) to run after long erase operation

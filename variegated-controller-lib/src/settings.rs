@@ -3,7 +3,7 @@ use core::ops::{Deref, DerefMut, Range};
 use defmt::info;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
-use embedded_storage_async::nor_flash::{ErrorType, NorFlash};
+use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash};
 use serde_json_core::ser::Error;
 use variegated_controller_types::{BoilerConfiguration, GroupConfiguration};
 use heapless::Vec;
@@ -17,7 +17,7 @@ pub trait SettingsStorage<SettingsT: Default> {
     async fn optimize_storage(&mut self) -> Result<(), &'static str>;
 }
 
-pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> {
+pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> {
     _phantom: core::marker::PhantomData<SettingsT>,
     flash: &'a Mutex<M, T>,
     range: Range<u32>,
@@ -25,7 +25,7 @@ pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: NorFlash, Settin
     cached_value: Option<SettingsT>,
 }
 
-impl <'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+impl <'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
     pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
         Self {
             _phantom: core::marker::PhantomData,
@@ -37,7 +37,7 @@ impl <'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clo
     }
 }
 
-impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SettingsStorage<SettingsT> for SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SettingsStorage<SettingsT> for SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>
     {
         // Return cached value if available
@@ -147,12 +147,17 @@ impl<'a, M: RawMutex, T: NorFlash, SettingsT: for<'b> Value<'b> + Default + Clon
             .ok_or("Failed to load settings for optimization")?
             .clone();
 
-        // Erase the entire flash range
+        // Remove everything
         {
+            let mut cache = NoCache::new();
+
             let mut flash = self.flash.lock().await;
-            info!("Erasing configuration storage range");
-            flash.erase(self.range.start, self.range.end).await
-                .map_err(|_| "Failed to erase flash range")?;
+            sequential_storage::map::remove_all_items::<u8, _>(
+                flash.deref_mut(),
+                self.range.clone(),
+                &mut cache,
+                &mut self.deserialization_buffer,
+            ).await.map_err(|e| "Failed to remove all")?;
         }
 
         // Write the current settings back

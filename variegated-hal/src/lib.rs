@@ -56,7 +56,7 @@ pub struct SensorReading<Transformed> {
 }
 pub use pump::{Pump, PumpError};
 use heapless::FnvIndexMap;
-use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS};
+use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS, ECType, Output};
 use crate::scale::ScaleConfiguration;
 
 pub mod gpio;
@@ -209,6 +209,8 @@ pub struct Group<'a, M: RawMutex, const N: usize> {
     pub input_volume_sensor: Option<Receiver<'a, M, SensorReading<InputVolumeType>, N>>,
     pub output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
     pub output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
+    pub output_temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+    pub output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>
 }
 
 impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
@@ -222,6 +224,8 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         input_volume_sensor: Option<Receiver<'a, M, SensorReading<InputVolumeType>, N>>,
         output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
         output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
+        output_temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
+        output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>
     ) -> Self {
         Self {
             brew_mechanism,
@@ -233,6 +237,8 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             input_volume_sensor,
             output_flow_sensor,
             output_weight_sensor,
+            output_temperature_sensor,
+            output_electrical_conductivity_sensor,
         }
     }
 

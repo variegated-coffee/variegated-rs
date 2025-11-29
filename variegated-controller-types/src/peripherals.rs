@@ -10,6 +10,7 @@ pub enum PeripheralType {
     PressureSensor,
     FlowMeter,
     LevelSensor,
+    BrewSensor,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

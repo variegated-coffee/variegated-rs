@@ -36,6 +36,7 @@ pub type RPMType = f32; // RPM
 pub type DutyCycleType = u8; // Percent
 pub type ValveOpenType = u8; // Percent
 pub type MixingProportionType = u8; // Percent
+pub type ECType = f32; // Electrical Conductivity
 
 // Index types
 pub type BoilerIndex = u8;

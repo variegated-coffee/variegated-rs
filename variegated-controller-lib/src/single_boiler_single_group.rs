@@ -596,6 +596,7 @@ impl<
                 timestamp: current_timestamp,
                 wifi_connected: status.wifi_connected,
                 wifi_rssi: status.wifi_rssi,
+                peripheral_connection_status: FnvIndexMap::default(),
             })
         } else {
             self.comms_status.clone()

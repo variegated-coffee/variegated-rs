@@ -158,7 +158,7 @@ pub struct PumpConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct FillConfiguration {
     pub fill_threshold: Option<WaterLevelType>, // If none, filling is disabled
     pub pump_configuration: Option<PumpConfiguration>,
@@ -166,7 +166,7 @@ pub struct FillConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoilerConfiguration {
     pub temperature_pid_parameters: PidParameters,
     pub pressure_pid_parameters: PidParameters,
@@ -198,7 +198,7 @@ pub struct KalmanParameters {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupConfiguration {
     pub flow_rate_pid_parameters: PidParameters,
     pub output_flow_rate_pid_parameters: PidParameters,
@@ -216,7 +216,7 @@ pub struct GroupConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MachineConfiguration {
     pub heating_element_interlock: bool,
     /// Maximum number of shot logs to keep in history
@@ -245,7 +245,7 @@ impl Default for MachineConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WaterTapConfiguration {
     pub pump_strategy: WaterDispersalPumpStrategy,
     pub temperature_target: Option<TemperatureType>,
@@ -259,7 +259,7 @@ pub struct WaterTapConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SteamWandConfiguration {
     pub temperature_target: Option<TemperatureType>,
     pub openness: Option<ValveOpenType>,
@@ -273,7 +273,7 @@ pub struct SteamWandConfiguration {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TankConfiguration {
     pub low_level_warning_threshold: Option<WaterLevelType>,
     pub water_level_sensor_kalman_parameters: Option<KalmanParameters>,

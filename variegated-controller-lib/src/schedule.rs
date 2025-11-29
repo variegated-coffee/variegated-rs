@@ -7,7 +7,7 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
-use embedded_storage_async::nor_flash::NorFlash;
+use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{fetch_all_items, store_item};
 use variegated_controller_types::{MachineCommand, ScheduleItem};
@@ -252,7 +252,7 @@ impl ScheduleStore for InMemoryScheduleStore {
     }
 }
 
-pub struct SequentialStorageScheduleStore<'a, M: RawMutex, T: NorFlash> {
+pub struct SequentialStorageScheduleStore<'a, M: RawMutex, T: MultiwriteNorFlash> {
     flash: &'a Mutex<M, T>,
     range: Range<u32>,
     deserialization_buffer: [u8; 2048],
@@ -261,7 +261,7 @@ pub struct SequentialStorageScheduleStore<'a, M: RawMutex, T: NorFlash> {
     next_index: usize,
 }
 
-impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
+impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a, M, T> {
     pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
         Self {
             flash,
@@ -363,7 +363,7 @@ impl <'a, M: RawMutex, T: NorFlash> SequentialStorageScheduleStore<'a, M, T> {
     }
 }
 
-impl <'a, M: RawMutex, T: NorFlash> ScheduleStore for SequentialStorageScheduleStore<'a, M, T> {
+impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorageScheduleStore<'a, M, T> {
     async fn add_schedule(&mut self, item: ScheduleItem) {
         self.load_from_flash().await.ok().unwrap();
 
@@ -437,12 +437,17 @@ impl <'a, M: RawMutex, T: NorFlash> ScheduleStore for SequentialStorageScheduleS
         // Clear the cache as we'll rebuild it with new indices
         self.cache.clear();
 
-        // Erase the entire flash range
+        // Remove everything
         {
+            let mut cache = NoCache::new();
+
             let mut flash = self.flash.lock().await;
-            info!("Erasing schedule storage range");
-            flash.erase(self.range.start, self.range.end).await
-                .map_err(|_| "Failed to erase flash range")?;
+            sequential_storage::map::remove_all_items::<u16, _>(
+                flash.deref_mut(),
+                self.range.clone(),
+                &mut cache,
+                &mut self.deserialization_buffer,
+            ).await.map_err(|_| "Failed to remove schedule item in flash")?;
         }
 
         // Re-store all schedules with consecutive indices starting from 0

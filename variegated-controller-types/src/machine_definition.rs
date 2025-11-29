@@ -54,6 +54,7 @@ pub enum SensorCapability {
     InputFlowRate,
     OutputFlowRate,
     Weight,
+    ElectricalConductivity
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -187,7 +188,7 @@ pub struct MachineDefinition {
     pub steam_wands: FnvIndexMap<SteamWandIndex, SteamWandDefinition, 4>,
     pub environmental_sensors: FnvIndexMap<EnvironmentalSensorId, EnvironmentalSensorDefinition, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>,
     pub peripherals: FnvIndexMap<PeripheralId, PeripheralDefinition, MAX_PERIPHERALS>,
-    pub function_routines: FnvIndexMap<usize, heapless::String<32>, MAX_FUNCTION_ROUTINES>,
+    pub function_routines: FnvIndexMap<u32, heapless::String<32>, MAX_FUNCTION_ROUTINES>,
 }
 
  impl MachineDefinition {
@@ -219,12 +220,12 @@ pub struct MachineDefinition {
         self.environmental_sensors.insert(id, definition).map(|_| ()).map_err(|_| ())
     }
 
-    pub fn add_function_routine_description(&mut self, index: usize, description: &str) -> Result<(), ()> {
+    pub fn add_function_routine_description(&mut self, index: u32, description: &str) -> Result<(), ()> {
         let s = heapless::String::try_from(description).map_err(|_| ())?;
         self.function_routines.insert(index, s).map(|_| ()).map_err(|_| ())
     }
 
-    pub fn get_function_routine_description(&self, index: usize) -> Option<&str> {
+    pub fn get_function_routine_description(&self, index: u32) -> Option<&str> {
         self.function_routines.get(&index).map(|s| s.as_str())
     }
 }

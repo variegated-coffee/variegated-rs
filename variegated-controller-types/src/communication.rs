@@ -4,18 +4,41 @@ use alloc::vec::Vec;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone,  Debug)]
-pub struct ExternalSensorData {
-    pub id: EnvironmentalSensorId,
+pub struct ExternalPeripheralSensorReading {
+    pub id: PeripheralId,
+    pub endpoint: u8,
     pub value: f32,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CommsStatus {
     pub timestamp: Option<u64>, // Unix timestamp in seconds
     pub wifi_connected: bool,
     pub wifi_rssi: Option<i8>, // RSSI in dBm, None when disconnected
+    pub peripheral_connection_status: FnvIndexMap<PeripheralId, WirelessConnectionStatus, 8>
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for CommsStatus {
+    fn format(&self, f: defmt::Formatter) {
+        defmt::write!(
+            f,
+            "CommsStatus {{ timestamp: {:?}, wifi_connected: {}, wifi_rssi: {:?}, peripherals: {} }}",
+            self.timestamp,
+            self.wifi_connected,
+            self.wifi_rssi,
+            self.peripheral_connection_status.len()
+        )
+    }
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone,  Debug, Copy)]
+pub struct WirelessConnectionStatus {
+    pub connected: bool,
+    pub rssi: Option<i8>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -28,7 +51,7 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     RequestMachineDefinition,
     RequestConfiguration,
     RequestRoutines,
-    ExternalSensorUpdate(ExternalSensorData),
+    ExternalPeripheralSensorReading(ExternalPeripheralSensorReading),
     RequestShotLogList,
     RequestShotLogEntry(u32),
 }

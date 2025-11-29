@@ -22,6 +22,7 @@ use variegated_controller_types::{
     Status
 };
 use embassy_sync::channel::{Channel, Sender};
+use postcard::accumulator::{CobsAccumulator, FeedResult};
 use variegated_controller_lib::routine::RoutineRepository;
 use variegated_timekeeping::TimeKeeper;
 
@@ -71,14 +72,29 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             }
         },
         async {
-            let mut buf = [0u8; 1024];
+            // Currently esp-hal doesn't support sending breaks. This has been fixed in main,
+            // but until then, we just use a short buffer, an accumulator, and hope for the best. Since we're
+            // using HW flow control, we won't miss any bytes.
+
+            let mut cobs_buf: CobsAccumulator<1024> = CobsAccumulator::new();
+
+            //let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 8];
             loop {
-                let res = uart_rx.read_to_break(&mut buf).await;
-                if let Ok(len) = res {
-                    if len > 0 {
-                        let received_data = &mut buf[..len];
-                        info!("Received {} bytes", len);
-                        if let Ok(message) = from_bytes_cobs::<CommsProcessorToApplicationProcessorMessage>(received_data) {
+                let res = uart_rx.read(&mut buf).await;
+
+                let mut window = &buf[..];
+
+                'cobs: while !window.is_empty() {
+                    window = match cobs_buf.feed::<CommsProcessorToApplicationProcessorMessage>(&window) {
+                        FeedResult::Consumed => break 'cobs,
+                        FeedResult::OverFull(new_wind) => new_wind,
+                        FeedResult::DeserError(new_wind) => new_wind,
+                        FeedResult::Success { data, remaining } => {
+                            // Do something with `data: MyData` here.
+
+                            let message = data;
+
                             info!("Received message, {:?}", message);
 
                             match message {
@@ -92,7 +108,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
                                         if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
                                             // Set time and sync to RTC if available
-                                           if TimeKeeper::set_time(now_datetime).is_ok() {
+                                            if TimeKeeper::set_time(now_datetime).is_ok() {
                                                 info!("System time synchronized to UTC (timestamp: {})", now_unix);
                                             } else {
                                                 info!("Failed to set system time");
@@ -159,17 +175,19 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         info!("Failed to serialize routines");
                                     }
                                 }
+                                CommsProcessorToApplicationProcessorMessage::ExternalPeripheralSensorReading(reading) => {
+                                    info!("External peripheral sensor reading: {:?}", reading);
+                                }
                                 _ => {
                                     info!("Received unknown message type");
                                 }
                             }
-                        } else {
-                            error!("Failed to deserialize received data");
-                            info!("Data: {:x}", received_data);
+
+
+
+                            remaining
                         }
-                    }
-                } else {
-                    info!("Error reading from UART");
+                    };
                 }
             }
         },
