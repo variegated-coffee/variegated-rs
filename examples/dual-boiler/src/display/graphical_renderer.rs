@@ -24,10 +24,12 @@ use u8g2_fonts::{
     types::{FontColor, HorizontalAlignment, VerticalPosition}
 };
 
-use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState};
+use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState};
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
 use crate::GRAVITY_PERIPHERAL_ID;
+#[cfg(feature = "belka")]
+use crate::BELKA_PERIPHERAL_ID;
 use variegated_timekeeping::DateTimeInZone;
 use core::time::Duration;
 
@@ -139,7 +141,7 @@ impl GraphicalDisplayState {
             variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
         );
 
-        match group_status.and_then(|g| g.shot_state) {
+        match group_status.and_then(|g| g.current_brew.as_ref().and_then(|b| b.shot_state)) {
             Some(ShotState::HeadspaceFill) => ("HEADSPACE FILL", Rgb565::CSS_LIGHT_BLUE),
             Some(ShotState::Saturation) => ("SATURATION", Rgb565::CSS_ORANGE),
             Some(ShotState::PostFirstDrop) => ("POST FIRST DROP", Rgb565::CSS_GREEN),
@@ -319,6 +321,25 @@ impl GraphicalDisplayState {
             display
         ).ok();
 
+        // Portal status (P) - only if belka feature is enabled
+        #[cfg(feature = "belka")]
+        {
+            y += 15;
+            let portal_connected = self.shared_state.status.peripheral_status.peripherals
+                .get(&BELKA_PERIPHERAL_ID)
+                .map(|info| info.is_available)
+                .unwrap_or(false);
+            let portal_color = if portal_connected { Rgb565::GREEN } else { Rgb565::RED };
+            small_font.render_aligned(
+                format_args!("P"),
+                Point::new(x, y),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(portal_color),
+                display
+            ).ok();
+        }
+
         Ok(())
     }
 
@@ -363,6 +384,58 @@ impl GraphicalDisplayState {
             FontColor::Transparent(Rgb565::CSS_YELLOW),
             display
         ).ok();
+
+        Ok(())
+    }
+
+    /// Render extraction information (EC, output temp, extraction rate, extracted solids)
+    fn render_extraction_info<D>(&self, group: &GroupStatus, x: i32, y: i32, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+
+        // Line 1: EC and output temperature
+        let mut line1 = String::new();
+        if let Some(ec) = group.output_electrical_conductivity {
+            line1.push_str(&format!("EC:{:.1}", ec));
+        }
+        if let Some(out_temp) = group.output_temperature {
+            if !line1.is_empty() { line1.push_str("  "); }
+            line1.push_str(&format!("OutT:{:.1}C", out_temp));
+        }
+
+        if !line1.is_empty() {
+            small_font.render_aligned(
+                format_args!("{}", line1),
+                Point::new(x, y),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Rgb565::CSS_CYAN),
+                display
+            ).ok();
+        }
+
+        // Line 2: Extraction rate and extracted solids
+        let mut line2 = String::new();
+        if let Some(rate) = group.extraction_rate {
+            line2.push_str(&format!("ExRate:{:.1}", rate));
+        }
+        if let Some(solids) = group.current_brew.as_ref().and_then(|b| b.extracted_solids) {
+            if !line2.is_empty() { line2.push_str("  "); }
+            line2.push_str(&format!("Solids:{:.1}", solids));
+        }
+
+        if !line2.is_empty() {
+            small_font.render_aligned(
+                format_args!("{}", line2),
+                Point::new(x, y + 14),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Rgb565::CSS_YELLOW),
+                display
+            ).ok();
+        }
 
         Ok(())
     }
@@ -649,8 +722,8 @@ impl GraphicalDisplayState {
         if let Some(group) = group_status {
             // === COLUMN 1: BREW TIME (Left) ===
             let col1_x = LEFT_PANEL_X + 60;
-            if let Some(brew_time) = group.brew_time {
-                let secs = brew_time.as_secs_f32();
+            if let Some(ref current_brew) = group.current_brew {
+                let secs = current_brew.brew_time.as_secs_f32();
                 large_font.render_aligned(
                     format_args!("{:.1}", secs),
                     Point::new(col1_x, EFFECTIVE_Y + 22),
@@ -720,7 +793,7 @@ impl GraphicalDisplayState {
 
             // Brew input volume and output weight on same line
             let mut top_line = String::new();
-            if let Some(volume) = group.brew_input_volume {
+            if let Some(volume) = group.current_brew.as_ref().and_then(|b| b.brew_input_volume) {
                 top_line.push_str(&format!("{:.0}ml", volume));
             }
             if let Some(weight) = group.output_weight {
@@ -753,14 +826,16 @@ impl GraphicalDisplayState {
                 ).ok();
             }
 
-            // === PID INFO (at bottom if using PID control) ===
-            if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
-                self.render_pid_info(
-                    pid_out.p, pid_out.i, pid_out.d, pid_out.out,
-                    pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
-                    EFFECTIVE_X + 10, EFFECTIVE_Y + 84, display
-                ).ok();
-            }
+            // === EXTRACTION INFO (at bottom) ===
+            // Commented out PID display in favor of extraction metrics
+            // if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
+            //     self.render_pid_info(
+            //         pid_out.p, pid_out.i, pid_out.d, pid_out.out,
+            //         pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
+            //         EFFECTIVE_X + 10, EFFECTIVE_Y + 84, display
+            //     ).ok();
+            // }
+            self.render_extraction_info(group, EFFECTIVE_X + 10, EFFECTIVE_Y + 84, display).ok();
         }
 
         Ok(())
@@ -891,7 +966,7 @@ impl GraphicalDisplayState {
                     }
                     StateCondition::InputVolumeAboveRelativeToStart(_, _) => {
                         // Use brew_input_volume (relative to brew start), not input_volume (absolute)
-                        group_status.brew_input_volume.map(|v| v as f32)
+                        group_status.current_brew.as_ref().and_then(|b| b.brew_input_volume).map(|v| v as f32)
                     }
                     StateCondition::GroupPressureAbove(_, _) | StateCondition::GroupPressureBelow(_, _) => {
                         group_status.pressure
@@ -1009,8 +1084,8 @@ impl GraphicalDisplayState {
             y_offset += 12;
 
             // Time elapsed
-            if let Some(brew_time) = group.brew_time {
-                let secs = brew_time.as_secs_f32();
+            if let Some(ref current_brew) = group.current_brew {
+                let secs = current_brew.brew_time.as_secs_f32();
                 small_font.render_aligned(
                     format_args!("Time: {:.1}s", secs),
                     Point::new(RIGHT_PANEL_X + 5, y_offset),
@@ -1047,7 +1122,7 @@ impl GraphicalDisplayState {
 
             // Volume and weight on same line
             let mut vol_weight = String::new();
-            if let Some(volume) = group.brew_input_volume {
+            if let Some(volume) = group.current_brew.as_ref().and_then(|b| b.brew_input_volume) {
                 vol_weight.push_str(&format!("Vol: {:.0}ml", volume));
             }
             if let Some(weight) = group.output_weight {
@@ -1081,19 +1156,19 @@ impl GraphicalDisplayState {
                 y_offset += 12;
             }
 
-            // PID info if using PID control (only if there's space)
-            if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
-                // Render PID with tighter spacing to fit with more metrics
-                // EFFECTIVE_Y = 34, EFFECTIVE_HEIGHT = 115, so bottom is at 149
-                // We need y_offset + 3 + 28 (2 lines * 14) <= 149
-                // So y_offset <= 118
-                if y_offset <= EFFECTIVE_Y + 84 {
-                    self.render_pid_info(
-                        pid_out.p, pid_out.i, pid_out.d, pid_out.out,
-                        pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
-                        RIGHT_PANEL_X + 5, y_offset + 3, display
-                    ).ok();
-                }
+            // Extraction info (replaces PID info)
+            // Commented out PID display in favor of extraction metrics
+            // if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
+            //     if y_offset <= EFFECTIVE_Y + 84 {
+            //         self.render_pid_info(
+            //             pid_out.p, pid_out.i, pid_out.d, pid_out.out,
+            //             pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
+            //             RIGHT_PANEL_X + 5, y_offset + 3, display
+            //         ).ok();
+            //     }
+            // }
+            if y_offset <= EFFECTIVE_Y + 84 {
+                self.render_extraction_info(group, RIGHT_PANEL_X + 5, y_offset + 3, display).ok();
             }
         }
 

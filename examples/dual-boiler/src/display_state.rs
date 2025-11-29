@@ -71,7 +71,7 @@ impl DisplayState {
         if self.was_brewing && !current_brewing {
             // Brewing just stopped, capture the brew time
             if let Some(group_status) = new_status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index()) {
-                self.last_brew_time = group_status.brew_time;
+                self.last_brew_time = group_status.current_brew.as_ref().map(|b| b.brew_time);
             }
         }
         self.was_brewing = current_brewing;

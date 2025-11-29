@@ -79,9 +79,19 @@ use variegated_instrumentation::async_task_loop;
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
 use variegated_comms::esp_transceiver_main;
+use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
+use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId};
 use crate::rotary::{UIStatus};
 
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
+
+// NoopDispatcher for single-boiler without external sensors
+pub struct NoopDispatcher;
+
+impl ExternalSensorDispatcher for NoopDispatcher {
+    fn dispatch_reading(&self, _reading: &ExternalPeripheralSensorReading) {}
+    fn dispatch_connection_status(&self, _peripheral_id: PeripheralId, _connected: bool) {}
+}
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
@@ -106,7 +116,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -496,8 +506,8 @@ async fn main_task(spawner: Spawner) -> ! {
         None, // input_volume_sensor
         None, // output_flow_sig has different raw type (i32) than flow_meter_sig (f32)
         Some(output_weight_sig.receiver().unwrap()),
-        None,
-        None
+        None, // output_temperature_sensor
+        None  // output_ec_sensor
     );
 
     // Create peripheral registry and register peripherals

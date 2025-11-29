@@ -153,6 +153,8 @@ pub struct GroupSample {
     pub temperature: Option<TemperatureType>,
     pub pump_output: Output,
     pub shot_state: Option<ShotState>,
+    pub extracted_solids: Option<ExtractedSolidsType>,
+    pub output_volume: Option<OutputVolumeType>,
 }
 
 /// Water tap sensor readings at a point in time

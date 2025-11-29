@@ -753,8 +753,8 @@ impl DisplayController {
 
             // Current brew time and pressure on first line
             let mut line1_parts = Vec::new();
-            if let Some(brew_time) = group_status.brew_time {
-                line1_parts.push(format!("{}s", brew_time.as_secs()));
+            if let Some(ref current_brew) = group_status.current_brew {
+                line1_parts.push(format!("{}s", current_brew.brew_time.as_secs()));
             } else {
                 line1_parts.push("0s".to_string());
             }
@@ -901,8 +901,8 @@ impl DisplayController {
                     if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
                         if group_status.is_brewing {
                             // Total brew time
-                            if let Some(brew_time) = group_status.brew_time {
-                                let brew_secs = brew_time.as_secs();
+                            if let Some(ref current_brew) = group_status.current_brew {
+                                let brew_secs = current_brew.brew_time.as_secs();
                                 Text::with_baseline(
                                     &format!("{}s", brew_secs),
                                     Point::new(0, 48),
@@ -1098,8 +1098,8 @@ impl DisplayController {
             RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
                 let target_secs = self.resolve_parameter_value(param_value) as u64;
                 if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
-                    if let Some(brew_time) = group_status.brew_time {
-                        let elapsed = brew_time.as_secs();
+                    if let Some(ref current_brew) = group_status.current_brew {
+                        let elapsed = current_brew.brew_time.as_secs();
                         Some(format!("{}>{}s", elapsed, target_secs))
                     } else {
                         Some(format!(">{}s", target_secs))

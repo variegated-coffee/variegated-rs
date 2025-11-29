@@ -67,6 +67,7 @@ pub mod scale;
 pub mod noop;
 pub mod pump;
 pub mod heating_element;
+pub mod external_sensor;
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {
@@ -319,7 +320,27 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
     pub fn get_output_weight_reading(&mut self) -> Option<SensorReading<WeightType>> {
         self.output_weight_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
-    
+
+    pub fn get_output_temperature(&mut self) -> Option<TemperatureType> {
+        self.output_temperature_sensor
+            .as_mut()
+            .and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_output_temperature_reading(&mut self) -> Option<SensorReading<TemperatureType>> {
+        self.output_temperature_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
+    pub fn get_output_electrical_conductivity(&mut self) -> Option<ECType> {
+        self.output_electrical_conductivity_sensor
+            .as_mut()
+            .and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_output_electrical_conductivity_reading(&mut self) -> Option<SensorReading<ECType>> {
+        self.output_electrical_conductivity_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
     pub async fn scale_tare(&mut self) -> Result<(), scale::ScaleError> {
         if let Some(scale_controller) = &mut self.scale_controller {
             scale_controller.tare().await

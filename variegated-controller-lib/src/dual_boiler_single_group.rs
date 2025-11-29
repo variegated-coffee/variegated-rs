@@ -21,7 +21,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, TemperatureType, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankIndex, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, BrewStatus, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, TemperatureType, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankIndex, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
@@ -476,6 +476,8 @@ pub struct DualBoilerSingleGroupController<
     steam_temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
     brew_start_input_volume: Option<InputVolumeType>,
+    accumulated_extracted_solids: Option<f32>,
+    last_extraction_time: Option<Instant>,
     previous_brew: Option<crate::PreviousBrewInfo>,
     curve_start_time: Option<Instant>,
     comms_status: Option<CommsStatus>,
@@ -493,6 +495,7 @@ pub struct DualBoilerSingleGroupController<
     pressure_history: MovAvg<f32, f32, 10>,
     saturation_start_time: Option<Instant>,
     last_shot_state_sample_time: Option<Instant>,
+    input_volume_at_first_drop: Option<InputVolumeType>,
 }
 
 impl<
@@ -602,6 +605,8 @@ impl<
             steam_temperature_movavg: MovAvg::default(),
             brew_start_time: None,
             brew_start_input_volume: None,
+            accumulated_extracted_solids: None,
+            last_extraction_time: None,
             previous_brew: None,
             curve_start_time: None,
             comms_status: None,
@@ -617,6 +622,7 @@ impl<
             pressure_history: MovAvg::default(),
             saturation_start_time: None,
             last_shot_state_sample_time: None,
+            input_volume_at_first_drop: None,
         }
     }
 
@@ -1113,26 +1119,67 @@ impl<
             control_state: self.configuration.persistent.steam_boiler.control_state,
         };
 
-        let brew_input_volume = match (self.brew_start_input_volume, self.group.get_input_volume()) {
-            (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
-            _ => None,
+        // Calculate extraction_rate first (needed for both GroupStatus and extracted_solids accumulation)
+        let extraction_rate = {
+            let ec = self.group.get_output_electrical_conductivity();
+            let flow = self.group.get_output_flow_rate()
+                .or_else(|| self.group.get_input_flow_rate());
+            match (ec, flow) {
+                (Some(ec), Some(flow)) => Some(ec * flow),
+                _ => None,
+            }
         };
+
+        // Accumulate extracted_solids during brew
+        if let (Some(accumulated), Some(last_time), Some(rate)) =
+            (self.accumulated_extracted_solids, self.last_extraction_time, extraction_rate) {
+            let now = Instant::now();
+            let delta_millis = now.saturating_duration_since(last_time).as_millis();
+            let delta_secs = delta_millis as f32 / 1000.0;
+            self.accumulated_extracted_solids = Some(accumulated + rate * delta_secs);
+            self.last_extraction_time = Some(now);
+        }
+
+        let current_brew = self.brew_start_time.map(|start| {
+            let brew_input_volume = match (self.brew_start_input_volume, self.group.get_input_volume()) {
+                (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
+                _ => None,
+            };
+            // Calculate output_volume:
+            // 1. If output_weight exists, use it (assuming density ~1 g/ml)
+            // 2. Else if input_volume_at_first_drop exists, use current_input_volume - first_drop_volume
+            let output_volume = if let Some(weight) = self.group.get_output_weight() {
+                Some(weight as OutputVolumeType)
+            } else if let (Some(first_drop_vol), Some(current_vol)) = (self.input_volume_at_first_drop, self.group.get_input_volume()) {
+                Some(current_vol - first_drop_vol)
+            } else {
+                None
+            };
+            BrewStatus {
+                brew_time: start.elapsed().into(),
+                brew_input_volume,
+                shot_state: self.current_shot_state,
+                extracted_solids: self.accumulated_extracted_solids,
+                output_volume,
+            }
+        });
 
         let group_status = GroupStatus {
             is_brewing: self.group_brewing,
             three_way_valve_open: self.group.get_three_way_valve_open(),
-            brew_time: self.brew_start_time.map(|start| start.elapsed().into()),
-            brew_input_volume,
+            current_brew,
             input_flow_rate: self.group.get_input_flow_rate(),
             input_volume: self.group.get_input_volume(),
             output_flow_rate: self.group.get_output_flow_rate(),
             output_weight: self.group.get_output_weight(),
             pressure: self.group.get_pressure(),
             temperature: self.group.get_temperature(),
+            output_temperature: self.group.get_output_temperature(),
+            output_electrical_conductivity: self.group.get_output_electrical_conductivity(),
+            extraction_rate,
             pump_output: pump_output.clone(),
             control_state: self.configuration.ephemeral.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
-            shot_state: self.current_shot_state,
         };
 
         // Calculate current timestamp if we have comms_status
@@ -1841,6 +1888,8 @@ impl<
             self.group_brewing = true;
             self.brew_start_time = Some(Instant::now());
             self.brew_start_input_volume = current_volume;
+            self.accumulated_extracted_solids = Some(0.0);
+            self.last_extraction_time = Some(Instant::now());
             info!("brew_start_input_volume set to: {:?}", self.brew_start_input_volume);
 
             // Initialize shot state tracking
@@ -1849,6 +1898,7 @@ impl<
             self.pressure_history = MovAvg::default(); // Reset history
             self.saturation_start_time = None;
             self.last_shot_state_sample_time = None; // Reset sampling timer
+            self.input_volume_at_first_drop = None; // Will be set when transitioning to PostFirstDrop
             info!("Shot state initialized to HeadspaceFill");
 
             self.group.set_brewing_state(true, 0).await;
@@ -1896,11 +1946,14 @@ impl<
             self.group_brewing = false;
             self.brew_start_time = None;
             self.brew_start_input_volume = None;
+            self.accumulated_extracted_solids = None;
+            self.last_extraction_time = None;
             self.curve_start_time = None;
 
             // Clear shot state tracking
             self.current_shot_state = None;
             self.saturation_start_time = None;
+            self.input_volume_at_first_drop = None;
             info!("Shot state cleared");
 
             info!("brew_start_input_volume now: {:?}", self.brew_start_input_volume);
@@ -1916,6 +1969,7 @@ impl<
     fn update_shot_state(&mut self) {
         // Constants for shot state detection
         const FIRST_DROP_WEIGHT_THRESHOLD: f32 = 1.0; // grams
+        const EC_POST_FIRST_DROP_THRESHOLD: f32 = 1.0; // EC > 1.0 definitively indicates coffee is flowing
         const FLOW_DECREASE_THRESHOLD: f32 = 3.0; // ml/s below average (dramatic change at saturation)
         const PRESSURE_INCREASE_THRESHOLD: f32 = 3.0; // bar above average (dramatic change at saturation)
         const SAMPLE_INTERVAL_MS: u64 = 333; // Sample every 333ms (3 samples/sec, 10 samples = 3.33 seconds history)
@@ -1946,6 +2000,18 @@ impl<
         let flow_avg = self.flow_rate_history.try_feed(current_flow).unwrap_or(current_flow);
         let pressure_avg = self.pressure_history.try_feed(current_pressure).unwrap_or(current_pressure);
 
+        // Early transition to PostFirstDrop if EC > 1.0 (definitive first-drop detection)
+        if let Some(ec) = self.group.get_output_electrical_conductivity() {
+            if ec > EC_POST_FIRST_DROP_THRESHOLD && self.current_shot_state != Some(variegated_controller_types::ShotState::PostFirstDrop) {
+                // Capture input volume at first drop for output volume calculation
+                self.input_volume_at_first_drop = self.group.get_input_volume();
+                info!("Shot state transition: {:?} -> PostFirstDrop (EC: {} > {}, input_vol: {:?})",
+                      self.current_shot_state, ec, EC_POST_FIRST_DROP_THRESHOLD, self.input_volume_at_first_drop);
+                self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
+                return;
+            }
+        }
+
         match self.current_shot_state {
             Some(variegated_controller_types::ShotState::HeadspaceFill) => {
                 // Check for transition to Saturation
@@ -1968,7 +2034,10 @@ impl<
                 // Check for transition to PostFirstDrop
                 if let Some(output_weight) = self.group.get_output_weight() {
                     if output_weight > FIRST_DROP_WEIGHT_THRESHOLD {
-                        info!("Shot state transition: Saturation -> PostFirstDrop (weight: {}g)", output_weight);
+                        // Capture input volume at first drop for output volume calculation
+                        self.input_volume_at_first_drop = self.group.get_input_volume();
+                        info!("Shot state transition: Saturation -> PostFirstDrop (weight: {}g, input_vol: {:?})",
+                              output_weight, self.input_volume_at_first_drop);
                         self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
                     }
                 }

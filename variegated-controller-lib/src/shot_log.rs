@@ -159,8 +159,8 @@ impl ShotLogger {
         for (&index, group_status) in status.group_statuses.iter() {
             let _ = group_samples.insert(index, GroupSample {
                 is_brewing: group_status.is_brewing,
-                brew_time: group_status.brew_time,
-                brew_input_volume: group_status.brew_input_volume,
+                brew_time: group_status.current_brew.as_ref().map(|b| b.brew_time),
+                brew_input_volume: group_status.current_brew.as_ref().and_then(|b| b.brew_input_volume),
                 input_flow_rate: group_status.input_flow_rate,
                 input_volume: group_status.input_volume,
                 output_flow_rate: group_status.output_flow_rate,
@@ -168,7 +168,9 @@ impl ShotLogger {
                 pressure: group_status.pressure,
                 temperature: group_status.temperature,
                 pump_output: group_status.pump_output,
-                shot_state: group_status.shot_state,
+                shot_state: group_status.current_brew.as_ref().and_then(|b| b.shot_state),
+                extracted_solids: group_status.current_brew.as_ref().and_then(|b| b.extracted_solids),
+                output_volume: group_status.current_brew.as_ref().and_then(|b| b.output_volume),
             });
         }
 

@@ -1,5 +1,6 @@
 use crate::*;
 use alloc::vec::Vec;
+use defmt::Debug2Format;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -28,7 +29,7 @@ impl defmt::Format for CommsStatus {
             self.timestamp,
             self.wifi_connected,
             self.wifi_rssi,
-            self.peripheral_connection_status.len()
+            Debug2Format(&self.peripheral_connection_status),
         )
     }
 }

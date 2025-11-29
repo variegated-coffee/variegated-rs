@@ -5,6 +5,7 @@ pub mod settings;
 pub mod single_boiler_single_group;
 pub mod dual_boiler_single_group;
 pub mod schedule;
+pub mod external_sensor_dispatcher;
 mod shot_log;
 
 pub use shot_log::{ShotLogger, ShotLoggerConfig};

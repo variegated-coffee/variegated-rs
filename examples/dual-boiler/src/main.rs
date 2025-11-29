@@ -109,8 +109,11 @@ use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBre
 use variegated_hal::noop::NoopOutputPin;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
+#[cfg(feature = "belka")]
+use variegated_hal::external_sensor::belka::{BelkaDevice, BelkaUpdate, BelkaStatusProvider};
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
+use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_controller_lib::schedule::{run_schedule, InMemoryScheduleStore, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
 #[cfg(feature = "gravity")]
 use variegated_gravity_driver::Gravity;
@@ -138,7 +141,39 @@ pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 #[cfg(feature = "belka")]
 pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
 
-// Embassy task wrapper for ESP transceiver (dual-boiler)
+// Embassy task wrapper for ESP transceiver (dual-boiler) with Belka dispatcher
+#[cfg(feature = "belka")]
+#[embassy_executor::task]
+async fn esp_transceiver_task(
+    esp_p: Esp32Peripherals,
+    status_receiver: Subscriber<'static, SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>,
+    configuration_receiver: Subscriber<'static, SyncSendRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>,
+    command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
+    machine_definition: MachineDefinition,
+    routine_repository: &'static RoutineRepositoryMutex,
+    dispatcher: &'static BelkaDispatcher,
+) {
+    let mut config = uart::Config::default();
+    config.baudrate = 576_000;
+
+    let mut uart = Uart::new_with_rtscts(
+        esp_p.uart,
+        esp_p.tx_pin,
+        esp_p.rx_pin,
+        esp_p.rts_pin,
+        esp_p.cts_pin,
+        Irqs,
+        esp_p.dma_rx,
+        esp_p.dma_tx,
+        config
+    );
+    let (uart_tx, uart_rx) = uart.split();
+
+    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher)).await;
+}
+
+// Embassy task wrapper for ESP transceiver (dual-boiler) without Belka
+#[cfg(not(feature = "belka"))]
 #[embassy_executor::task]
 async fn esp_transceiver_task(
     esp_p: Esp32Peripherals,
@@ -164,7 +199,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None).await;
 }
 
 
@@ -528,6 +563,20 @@ static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::
 #[cfg(feature = "gravity")]
 static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
 
+// Belka Portal external sensor statics
+#[cfg(feature = "belka")]
+static BELKA_UPDATE_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, BelkaUpdate, 10>> = StaticCell::new();
+#[cfg(feature = "belka")]
+static BELKA_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
+#[cfg(feature = "belka")]
+static OUTPUT_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
+#[cfg(feature = "belka")]
+static OUTPUT_EC_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<variegated_controller_types::ECType>, 3>> = StaticCell::new();
+#[cfg(feature = "belka")]
+static BELKA_STATUS_PROVIDER: StaticCell<BelkaStatusProvider<'static>> = StaticCell::new();
+#[cfg(feature = "belka")]
+static BELKA_DISPATCHER: StaticCell<BelkaDispatcher> = StaticCell::new();
+
 // Heating element coordination signals
 static INTERLOCK_ENABLED_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, bool>> = StaticCell::new();
 static CONTENTION_STRATEGY_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>> = StaticCell::new();
@@ -610,6 +659,47 @@ async fn storage_task(
             }
         }
     }
+}
+
+// Belka Portal dispatcher implementation
+#[cfg(feature = "belka")]
+struct BelkaDispatcher {
+    belka_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, BelkaUpdate, 10>,
+    belka_peripheral_id: variegated_controller_types::PeripheralId,
+}
+
+#[cfg(feature = "belka")]
+impl ExternalSensorDispatcher for BelkaDispatcher {
+    fn dispatch_reading(&self, reading: &variegated_controller_types::ExternalPeripheralSensorReading) {
+        if reading.id == self.belka_peripheral_id {
+            let _ = self.belka_sender.try_send(BelkaUpdate::Reading(reading.clone()));
+        }
+    }
+
+    fn dispatch_connection_status(&self, peripheral_id: variegated_controller_types::PeripheralId, connected: bool) {
+        if peripheral_id == self.belka_peripheral_id {
+            let _ = self.belka_sender.try_send(BelkaUpdate::ConnectionChanged(connected));
+        }
+    }
+}
+
+// Belka Portal device task
+#[cfg(feature = "belka")]
+#[embassy_executor::task]
+async fn belka_task(
+    mut device: BelkaDevice<'static, CriticalSectionRawMutex, 3, 10>,
+) {
+    device.task().await;
+}
+
+// No-op dispatcher for when Belka is not enabled
+#[cfg(not(feature = "belka"))]
+struct NoopDispatcher;
+
+#[cfg(not(feature = "belka"))]
+impl ExternalSensorDispatcher for NoopDispatcher {
+    fn dispatch_reading(&self, _reading: &variegated_controller_types::ExternalPeripheralSensorReading) {}
+    fn dispatch_connection_status(&self, _peripheral_id: variegated_controller_types::PeripheralId, _connected: bool) {}
 }
 
 #[embassy_executor::task]
@@ -815,6 +905,27 @@ async fn main_task(
 
     #[cfg(not(feature = "gravity"))]
     let scale_controller: Option<Box<dyn ScaleController>> = None;
+
+    // Belka Portal external sensor initialization
+    #[cfg(feature = "belka")]
+    let belka_update_channel: &'static Channel<CriticalSectionRawMutex, BelkaUpdate, 10> = BELKA_UPDATE_CHANNEL.init(Channel::new());
+    #[cfg(feature = "belka")]
+    let belka_connected_sig: &'static Signal<NoopRawMutex, bool> = BELKA_CONNECTED_SIGNAL.init(Signal::new());
+    #[cfg(feature = "belka")]
+    let output_temp_watch: &'static Watch<NoopRawMutex, SensorReading<TemperatureType>, 3> = OUTPUT_TEMP_WATCH.init(Watch::new());
+    #[cfg(feature = "belka")]
+    let output_ec_watch: &'static Watch<NoopRawMutex, SensorReading<variegated_controller_types::ECType>, 3> = OUTPUT_EC_WATCH.init(Watch::new());
+
+    #[cfg(feature = "belka")]
+    let belka_device = BelkaDevice::new(
+        BELKA_PERIPHERAL_ID,
+        belka_update_channel.receiver(),
+        Some(output_temp_watch.sender()),
+        Some(output_ec_watch.sender()),
+    ).with_connected_signal(belka_connected_sig);
+
+    #[cfg(feature = "belka")]
+    info!("Belka Portal device initialized");
 
     let mut fdc1004_dev = I2cDevice::new(internal_i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
@@ -1164,7 +1275,13 @@ async fn main_task(
         Some(output_weight_sig.receiver().unwrap()),
         #[cfg(not(feature = "gravity"))]
         None,
+        #[cfg(feature = "belka")]
+        Some(output_temp_watch.receiver().unwrap()),
+        #[cfg(not(feature = "belka"))]
         None,
+        #[cfg(feature = "belka")]
+        Some(output_ec_watch.receiver().unwrap()),
+        #[cfg(not(feature = "belka"))]
         None,
     );
 
@@ -1185,6 +1302,18 @@ async fn main_task(
         let gravity_status_provider = GRAVITY_STATUS_PROVIDER.init(GravityStatusProvider::new(GRAVITY_PERIPHERAL_ID, gravity_connected_sig));
         peripheral_registry.register(gravity_status_provider);
     }
+    #[cfg(feature = "belka")]
+    {
+        let belka_status_provider = BELKA_STATUS_PROVIDER.init(BelkaStatusProvider::new(BELKA_PERIPHERAL_ID, belka_connected_sig));
+        peripheral_registry.register(belka_status_provider);
+    }
+
+    // Initialize Belka dispatcher
+    #[cfg(feature = "belka")]
+    let belka_dispatcher: &'static BelkaDispatcher = BELKA_DISPATCHER.init(BelkaDispatcher {
+        belka_sender: belka_update_channel.sender(),
+        belka_peripheral_id: BELKA_PERIPHERAL_ID,
+    });
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
@@ -1410,7 +1539,14 @@ async fn main_task(
     let esp_command_sender = command_channel.sender();
 
     // Spawn the ESP transceiver task
+    #[cfg(feature = "belka")]
+    unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, belka_dispatcher)));
+    #[cfg(not(feature = "belka"))]
     unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
+
+    // Spawn the Belka Portal device task
+    #[cfg(feature = "belka")]
+    unwrap!(spawner.spawn(belka_task(belka_device)));
 
     // Create configuration subscriber for debug logger and spawn the task
     let debug_configuration_receiver = configuration_channel.subscriber().expect("Failed to get debug configuration subscriber");

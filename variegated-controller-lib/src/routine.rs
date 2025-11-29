@@ -13,7 +13,7 @@ use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
 use heapless::FnvIndexMap;
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType, ValveOpenType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
 
 // Re-export types that are commonly used by consumers of this module
 pub use variegated_controller_types::{
@@ -616,7 +616,9 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             StateCondition::InputVolumeAboveRelativeToStart(idx, pv) => {
                 let threshold = self.resolve_value(&pv);
                 status.get_group_status(idx).map_or(false, |s| {
-                    s.brew_input_volume.map_or(false, |volume| volume > threshold as f64)
+                    s.current_brew.as_ref()
+                        .and_then(|b| b.brew_input_volume)
+                        .map_or(false, |volume| volume > threshold as OutputVolumeType)
                 })
             }
         }

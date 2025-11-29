@@ -24,6 +24,7 @@ use variegated_controller_types::{
 use embassy_sync::channel::{Channel, Sender};
 use postcard::accumulator::{CobsAccumulator, FeedResult};
 use variegated_controller_lib::routine::RoutineRepository;
+use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_timekeeping::TimeKeeper;
 
 /// Generic ESP32-C6 transceiver task that handles bidirectional communication
@@ -33,14 +34,15 @@ use variegated_timekeeping::TimeKeeper;
 /// 2. Message receiving from comms processor and command forwarding
 /// 3. UART TX coordination for all outgoing data
 /// 4. Configuration monitoring and proactive broadcasting
-pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
+pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
     mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
     mut status_receiver: Subscriber<'static, M, Status, 1, STATUS_SUBS, 1>,
     mut configuration_receiver: Subscriber<'static, M, Configuration, 1, CONFIG_SUBS, 1>,
     routine_repository: &'static embassy_sync::mutex::Mutex<M, R>,
     command_sender: Sender<'static, M, MachineCommand, 10>,
-    machine_definition: MachineDefinition
+    machine_definition: MachineDefinition,
+    external_sensor_dispatcher: Option<&D>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -95,7 +97,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
                             let message = data;
 
-                            info!("Received message, {:?}", message);
+                            //info!("Received message, {:?}", message);
 
                             match message {
                                 CommsProcessorToApplicationProcessorMessage::CommsStatus(status) => {
@@ -113,6 +115,13 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                             } else {
                                                 info!("Failed to set system time");
                                             }
+                                        }
+                                    }
+
+                                    // Dispatch connection status changes to external sensor handlers
+                                    if let Some(dispatcher) = external_sensor_dispatcher {
+                                        for (peripheral_id, conn_status) in status.peripheral_connection_status.iter() {
+                                            dispatcher.dispatch_connection_status(*peripheral_id, conn_status.connected);
                                         }
                                     }
 
@@ -176,7 +185,10 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::ExternalPeripheralSensorReading(reading) => {
-                                    info!("External peripheral sensor reading: {:?}", reading);
+                                    //info!("External peripheral sensor reading: {:?}", reading);
+                                    if let Some(dispatcher) = external_sensor_dispatcher {
+                                        dispatcher.dispatch_reading(&reading);
+                                    }
                                 }
                                 _ => {
                                     info!("Received unknown message type");

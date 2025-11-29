@@ -126,23 +126,23 @@ impl defmt::Format for Status {
         for (index, group_status) in self.group_statuses.iter() {
             defmt::write!(f, " G{}(", index);
             defmt::write!(f, "brewing:{}", group_status.is_brewing);
-            if let Some(shot_state) = group_status.shot_state {
-                defmt::write!(f, " state:{:?}", shot_state);
-            }
-            if let Some(brew_time) = group_status.brew_time {
-                defmt::write!(f, " time:{}s", brew_time.as_secs());
+            if let Some(ref current_brew) = group_status.current_brew {
+                if let Some(shot_state) = current_brew.shot_state {
+                    defmt::write!(f, " state:{:?}", shot_state);
+                }
+                defmt::write!(f, " time:{}s", current_brew.brew_time.as_secs());
+                // IMPORTANT: brew_input_volume is the volume relative to brew start
+                if let Some(brew_volume) = current_brew.brew_input_volume {
+                    defmt::write!(f, " brew_vol:{}ml", brew_volume);
+                } else {
+                    defmt::write!(f, " brew_vol:None");
+                }
             }
             if let Some(in_flow) = group_status.input_flow_rate {
                 defmt::write!(f, " in_flow:{}", in_flow);
             }
             if let Some(volume) = group_status.input_volume {
                 defmt::write!(f, " volume:{}ml", volume);
-            }
-            // IMPORTANT: brew_input_volume is the volume relative to brew start
-            if let Some(brew_volume) = group_status.brew_input_volume {
-                defmt::write!(f, " brew_vol:{}ml", brew_volume);
-            } else {
-                defmt::write!(f, " brew_vol:None");
             }
             if let Some(out_flow) = group_status.output_flow_rate {
                 defmt::write!(f, " out_flow:{}", out_flow);
@@ -155,6 +155,12 @@ impl defmt::Format for Status {
             }
             if let Some(temp) = group_status.temperature {
                 defmt::write!(f, " T:{}°C", temp);
+            }
+            if let Some(out_temp) = group_status.output_temperature {
+                defmt::write!(f, " outT:{}°C", out_temp);
+            }
+            if let Some(ec) = group_status.output_electrical_conductivity {
+                defmt::write!(f, " EC:{}", ec);
             }
             match group_status.pump_output {
                 Output::Off => defmt::write!(f, " PUMP:Off"),
@@ -233,22 +239,34 @@ pub struct PreviousBrewInfo {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug)]
+pub struct BrewStatus {
+    pub brew_time: Duration,
+    pub brew_input_volume: Option<InputVolumeType>,
+    pub shot_state: Option<ShotState>,
+    pub extracted_solids: Option<ExtractedSolidsType>,
+    pub output_volume: Option<OutputVolumeType>,
+}
+
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default)]
 pub struct GroupStatus {
     pub is_brewing: bool,
     pub three_way_valve_open: Option<bool>,
-    pub brew_time: Option<Duration>,
-    pub brew_input_volume: Option<InputVolumeType>,
+    pub current_brew: Option<BrewStatus>,
     pub input_flow_rate: Option<FlowRateType>,
     pub input_volume: Option<InputVolumeType>,
     pub output_flow_rate: Option<FlowRateType>,
     pub output_weight: Option<WeightType>,
     pub pressure: Option<PressureType>,
     pub temperature: Option<TemperatureType>,
+    pub output_temperature: Option<TemperatureType>,
+    pub output_electrical_conductivity: Option<ECType>,
+    pub extraction_rate: Option<ExtractionRateType>,
     pub pump_output: Output,
     pub control_state: GroupBrewControlState,
     pub previous_brew: Option<PreviousBrewInfo>,
-    pub shot_state: Option<ShotState>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -18,7 +18,7 @@ use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankIndex, TankStatus, WaterLevelType, RoutineParameters};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankIndex, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -224,6 +224,8 @@ pub struct SingleBoilerSingleGroupController<
     temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
     brew_start_input_volume: Option<InputVolumeType>,
+    accumulated_extracted_solids: Option<f32>,
+    last_extraction_time: Option<Instant>,
     previous_brew: Option<crate::PreviousBrewInfo>,
     curve_start_time: Option<Instant>,
     comms_status: Option<CommsStatus>,
@@ -287,6 +289,8 @@ impl<
             temperature_movavg: MovAvg::default(),
             brew_start_time: None,
             brew_start_input_volume: None,
+            accumulated_extracted_solids: None,
+            last_extraction_time: None,
             previous_brew: None,
             curve_start_time: None,
             comms_status: None,
@@ -562,26 +566,60 @@ impl<
             control_state: self.persistent_configuration.steam_boiler_control_state,
         };
 
-        let brew_input_volume = match (self.brew_start_input_volume, self.group.get_input_volume()) {
-            (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
-            _ => None,
+        // Calculate extraction_rate first (needed for both GroupStatus and extracted_solids accumulation)
+        let extraction_rate = {
+            let ec = self.group.get_output_electrical_conductivity();
+            let flow = self.group.get_output_flow_rate()
+                .or_else(|| self.group.get_input_flow_rate());
+            match (ec, flow) {
+                (Some(ec), Some(flow)) => Some(ec * flow),
+                _ => None,
+            }
         };
+
+        // Accumulate extracted_solids during brew
+        if let (Some(accumulated), Some(last_time), Some(rate)) =
+            (self.accumulated_extracted_solids, self.last_extraction_time, extraction_rate) {
+            let now = Instant::now();
+            let delta_millis = now.saturating_duration_since(last_time).as_millis();
+            let delta_secs = delta_millis as f32 / 1000.0;
+            self.accumulated_extracted_solids = Some(accumulated + rate * delta_secs);
+            self.last_extraction_time = Some(now);
+        }
+
+        let current_brew = self.brew_start_time.map(|start| {
+            let brew_input_volume = match (self.brew_start_input_volume, self.group.get_input_volume()) {
+                (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
+                _ => None,
+            };
+            // Calculate output_volume from output_weight (assuming density ~1 g/ml)
+            // Shot state tracking not implemented for single boiler, so no input-volume-based fallback
+            let output_volume = self.group.get_output_weight().map(|w| w as OutputVolumeType);
+            BrewStatus {
+                brew_time: start.elapsed().into(),
+                brew_input_volume,
+                shot_state: None, // Not yet implemented for single boiler controller
+                extracted_solids: self.accumulated_extracted_solids,
+                output_volume,
+            }
+        });
 
         let group_status = GroupStatus {
             is_brewing: self.state == SingleBoilerSingleGroupControllerState::Brewing,
             three_way_valve_open: self.group.get_three_way_valve_open(),
-            brew_time: self.brew_start_time.map(|start| start.elapsed().into()),
-            brew_input_volume,
+            current_brew,
             input_flow_rate: self.group.get_input_flow_rate(),
             input_volume: self.group.get_input_volume(),
             output_flow_rate: self.group.get_output_flow_rate(),
             output_weight: self.group.get_output_weight(),
             pressure: self.group.get_pressure(),
             temperature: self.group.get_temperature(),
+            output_temperature: self.group.get_output_temperature(),
+            output_electrical_conductivity: self.group.get_output_electrical_conductivity(),
+            extraction_rate,
             pump_output: pump_output.clone(),
             control_state: self.ephemeral_configuration.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
-            shot_state: None, // Not yet implemented for single boiler controller
         };
 
         // Calculate current timestamp if we have comms_status
@@ -1066,6 +1104,8 @@ impl<
     async fn started_brewing(&mut self) {
         self.brew_start_time = Some(Instant::now());
         self.brew_start_input_volume = self.group.get_input_volume();
+        self.accumulated_extracted_solids = Some(0.0);
+        self.last_extraction_time = Some(Instant::now());
         self.boiler_pid.ki.accumulate += 50.0; // Initial accumulation to compensate for initial temperature drop
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(false),
@@ -1095,6 +1135,8 @@ impl<
 
         self.brew_start_time = None;
         self.brew_start_input_volume = None;
+        self.accumulated_extracted_solids = None;
+        self.last_extraction_time = None;
         self.curve_start_time = None;  // Reset curve start time when brewing stops
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(true),

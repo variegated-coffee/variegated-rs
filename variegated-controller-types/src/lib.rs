@@ -28,7 +28,7 @@ pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
 pub type WaterLevelType = u8; // Percent
 pub type FlowRateType = f32; // ml/s
-pub type InputVolumeType = f64; // ml
+pub type InputVolumeType = f32; // ml
 pub type WeightType = f32; // g
 pub type WeightChangeType  = f32; // g/s
 pub type FrequencyType = f32; // Hz
@@ -37,6 +37,9 @@ pub type DutyCycleType = u8; // Percent
 pub type ValveOpenType = u8; // Percent
 pub type MixingProportionType = u8; // Percent
 pub type ECType = f32; // Electrical Conductivity
+pub type ExtractionRateType = f32;
+pub type ExtractedSolidsType = f32;
+pub type OutputVolumeType = f32; // ml
 
 // Index types
 pub type BoilerIndex = u8;

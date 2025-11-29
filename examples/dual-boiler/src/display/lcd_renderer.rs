@@ -233,7 +233,7 @@ impl LcdDisplayState {
 
         let flow_rate = group_status.and_then(|status| status.input_flow_rate);
         let weight = group_status.and_then(|status| status.output_weight);
-        let brew_time = group_status.and_then(|status| status.brew_time);
+        let brew_time = group_status.and_then(|status| status.current_brew.as_ref().map(|b| b.brew_time));
 
         let flow_str = self.shared_state.format_flow_rate(flow_rate);
         let weight_str = self.shared_state.format_weight(weight);
@@ -446,7 +446,7 @@ impl LcdDisplayState {
                     StateCondition::InputVolumeAboveRelativeToStart(group_idx, target) => {
                         let target_value = self.resolve_parameter_value(target, routine_execution);
                         if let Some(group_status) = self.shared_state.status.get_group_status(*group_idx) {
-                            if let Some(relative) = group_status.brew_input_volume {
+                            if let Some(relative) = group_status.current_brew.as_ref().and_then(|b| b.brew_input_volume) {
                                 format!("{:.1}>{:.1}ml", relative, target_value)
                             } else {
                                 format!("?>{:.1}ml", target_value)
@@ -472,8 +472,8 @@ impl LcdDisplayState {
             RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
                 let target_secs = self.resolve_parameter_value(param_value, routine_execution) as u64;
                 if let Some(group_status) = self.shared_state.status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index()) {
-                    if let Some(brew_time) = group_status.brew_time {
-                        let elapsed = brew_time.as_secs();
+                    if let Some(ref current_brew) = group_status.current_brew {
+                        let elapsed = current_brew.brew_time.as_secs();
                         format!("{}>{}", elapsed, target_secs)
                     } else {
                         format!("Total {}s", target_secs)
