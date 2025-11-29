@@ -44,7 +44,7 @@ use variegated_comms_firmware::{
         ApplicationConfigurationChannel, ApplicationStatusChannel, ApplicationRoutineChannel,
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
         MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL,
-        StateChangeChannel, CLIENT_EVENT_CAPACITY,
+        StateChangeChannel, CLIENT_EVENT_CAPACITY, SENSOR_READING_CHANNEL,
     },
     config::{uart_config, acaia_address, belka_address},
     esphome::esphome_server_task,
@@ -80,10 +80,12 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
 async fn comms_status_signaller_task(
     rtc: &'static esp_hal::rtc_cntl::Rtc<'static>,
 ) {
-    use variegated_comms_firmware::channels::{COMMS_STATUS_SIGNAL, WIFI_RSSI_SIGNAL};
-    use variegated_comms_firmware::config::USEC_IN_SEC;
-    use variegated_controller_types::CommsStatus;
+    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::config::{BELKA_PERIPHERAL_ID, USEC_IN_SEC};
+    use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
     use esp_radio::wifi::WifiStaState;
+    use heapless::FnvIndexMap;
+    use portable_atomic::Ordering;
 
     info!("CommsStatus signaller task started");
     loop {
@@ -103,10 +105,24 @@ async fn comms_status_signaller_task(
         // Get WiFi RSSI from signal (updated by connection_task)
         let wifi_rssi = WIFI_RSSI_SIGNAL.try_take().unwrap_or(None);
 
+        // Get Belka connection status (updated by belka_measurement_loop)
+        let belka_connected = BELKA_CONNECTION_STATUS.load(Ordering::Relaxed);
+
+        // Build peripheral connection status map
+        let mut peripheral_connection_status = FnvIndexMap::new();
+        let _ = peripheral_connection_status.insert(
+            BELKA_PERIPHERAL_ID,
+            WirelessConnectionStatus {
+                connected: belka_connected,
+                rssi: None,
+            }
+        );
+
         let comms_status = CommsStatus {
             wifi_connected,
             timestamp,
             wifi_rssi,
+            peripheral_connection_status,
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);
         Timer::after(Duration::from_secs(1)).await;
@@ -125,11 +141,17 @@ async fn application_processor_task(
         variegated_controller_types::MachineCommand,
         8,
     >,
+    sensor_reading_channel: &'static embassy_sync::channel::Channel<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::ExternalPeripheralSensorReading,
+        16,
+    >,
 ) {
     let status_publisher = status_channel.publisher().unwrap();
     let config_publisher = config_channel.publisher().unwrap();
     let routine_publisher = routine_channel.publisher().unwrap();
     let command_receiver = command_channel.receiver();
+    let sensor_reading_receiver = sensor_reading_channel.receiver();
 
     application_processor::start(
         rx,
@@ -138,6 +160,7 @@ async fn application_processor_task(
         config_publisher,
         routine_publisher,
         command_receiver,
+        sensor_reading_receiver,
     )
     .await;
 }
@@ -158,6 +181,7 @@ async fn main(spawner: Spawner) -> ! {
     let config_channel = CONFIGURATION_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let routine_channel = ROUTINE_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
+    let sensor_reading_channel = SENSOR_READING_CHANNEL.init(embassy_sync::channel::Channel::new());
 
     // Initialize ESPHome channels
     let state_change_channel = STATE_CHANGE_CHANNEL.init(embassy_sync::channel::Channel::new());
@@ -175,7 +199,7 @@ async fn main(spawner: Spawner) -> ! {
     let (rx, tx) = uart.split();
 
     // Spawn application processor tasks
-    spawner.spawn(application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel)).ok();
+    spawner.spawn(application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel)).ok();
     spawner.spawn(status_listener_task(status_channel)).ok();
     info!("Application processor tasks spawned");
 
@@ -188,7 +212,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Initialize radio controller
     let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
-/*
+
     // Initialize BLE (before WiFi for stability)
     let connector = BleConnector::new(&esp_radio_ctrl, peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
@@ -231,13 +255,16 @@ async fn main(spawner: Spawner) -> ! {
         BleConnectionManager::new(central)
     );
 
+    // Get sensor reading sender for BLE devices
+    let sensor_reading_sender = sensor_reading_channel.sender();
+
     // Spawn BLE tasks
     spawner.spawn(ble_runner_task(runner, printer)).ok();
-    spawner.spawn(ble_devices_task(connection_manager, stack, belka_address(), acaia_address())).ok();
+    spawner.spawn(ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender)).ok();
     info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;
-*/
+
     info!("Initializing Wifi");
 
     // Initialize WiFi

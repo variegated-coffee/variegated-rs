@@ -3,8 +3,9 @@ use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use embassy_sync::signal::Signal;
 use embassy_sync::channel::{Channel, Sender, Receiver};
 use embassy_sync::mutex::Mutex;
+use portable_atomic::AtomicBool;
 use static_cell::StaticCell;
-use variegated_controller_types::{CommsStatus, Configuration, MachineCommand, MachineDefinition, RoutineList, Status};
+use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, RoutineList, Status};
 use esphome_device::{ClientEvent, StateChange};
 
 // Re-export Sender type for convenience
@@ -78,3 +79,10 @@ pub static STATE_CHANGE_CHANNEL: StaticCell<StateChangeChannel> = StaticCell::ne
 // ESPHome Client Event Channel (commands from ESPHome clients)
 pub const CLIENT_EVENT_CAPACITY: usize = 8;
 pub static CLIENT_EVENT_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, ClientEvent, CLIENT_EVENT_CAPACITY>> = StaticCell::new();
+
+// External Peripheral Sensor Reading Channel - sensor readings from BLE devices to send to application processor
+pub const SENSOR_READING_CAPACITY: usize = 16;
+pub static SENSOR_READING_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>> = StaticCell::new();
+
+// Belka Connection Status - updated by belka_measurement_loop, read by comms_status_signaller_task
+pub static BELKA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);

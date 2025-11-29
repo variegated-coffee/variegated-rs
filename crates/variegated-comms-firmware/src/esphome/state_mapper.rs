@@ -221,7 +221,7 @@ pub async fn status_task(
                 }));
                 send_if_valid!(brew_time_key, StateChange::SensorStateChange(SensorState::new(
                     brew_time_key,
-                    group_status.brew_time.map(|d| d.as_secs_f32())
+                    group_status.current_brew.as_ref().map(|ref s| s.brew_time.as_secs_f32())
                 )));
                 send_if_valid!(pump_duty_key, StateChange::SensorStateChange(SensorState::new(
                     pump_duty_key,

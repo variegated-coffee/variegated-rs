@@ -1,7 +1,7 @@
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select4, Either4};
 use embassy_futures::join::join;
 use esp_hal::uart::{UartRx, UartTx};
 use esp_hal::Async;
@@ -10,12 +10,13 @@ use postcard::accumulator::{CobsAccumulator, FeedResult};
 use portable_atomic::{AtomicBool, Ordering};
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage, CommsProcessorToApplicationProcessorMessage,
-    MachineCommand,
+    ExternalPeripheralSensorReading, MachineCommand,
 };
 
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, MACHINE_DEFINITION, ROUTINE_CACHE,
+    SENSOR_READING_CAPACITY,
 };
 
 /// Start the application processor communication
@@ -26,6 +27,7 @@ pub async fn start(
     config_publisher: ApplicationConfigurationPublisher,
     routine_publisher: ApplicationRoutinePublisher,
     command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
+    sensor_reading_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
     info!("Starting UART transceiver");
 
@@ -178,12 +180,13 @@ pub async fn start(
                 .min(time_until_delayed_request);
 
             // Select between different events
-            match select3(
+            match select4(
                 COMMS_STATUS_SIGNAL.wait(),
                 command_receiver.receive(),
+                sensor_reading_receiver.receive(),
                 Timer::after(timeout),
             ).await {
-                Either3::First(comms_status) => {
+                Either4::First(comms_status) => {
                     let message = CommsProcessorToApplicationProcessorMessage::CommsStatus(comms_status.clone());
 
                     // Serialize the message to bytes
@@ -194,7 +197,7 @@ pub async fn start(
 
                     info!("Sent CommsStatus");
                 }
-                Either3::Second(machine_command) => {
+                Either4::Second(machine_command) => {
                     // Check if this command requires a delayed refresh
                     let needs_delayed_request = match &machine_command {
                         MachineCommand::AddScheduleItem(_) |
@@ -228,7 +231,20 @@ pub async fn start(
                         info!("Scheduled delayed request for 500ms from now");
                     }
                 }
-                Either3::Third(_) => {
+                Either4::Third(sensor_reading) => {
+                    // Log before moving the value
+                    /*info!("Sending ExternalPeripheralSensorReading from peripheral 0x{:04X}, endpoint {}, value {}",
+                        sensor_reading.id, sensor_reading.endpoint, sensor_reading.value);*/
+
+                    let message = CommsProcessorToApplicationProcessorMessage::ExternalPeripheralSensorReading(sensor_reading);
+
+                    // Serialize the message to bytes
+                    let serialized_message = postcard::to_allocvec_cobs(&message)
+                        .expect("Failed to serialize sensor reading");
+                    tx.write_async(&serialized_message).await
+                        .expect("Failed to write sensor reading");
+                }
+                Either4::Fourth(_) => {
                     // Check if delayed request is due
                     if let Some((when, message)) = delayed_request.take() {
                         if Instant::now() >= when {

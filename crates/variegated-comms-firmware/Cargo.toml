@@ -13,7 +13,7 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [dependencies]
-trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-32", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-16", "l2cap-rx-queue-size-16"] } # Git revision to get fix for multiple peripherals
+trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] } # Git revision to get fix for multiple peripherals
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
 variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }

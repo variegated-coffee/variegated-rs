@@ -24,20 +24,6 @@ impl<'a, C: Controller, P: PacketPool> ManagerHandle<'a, C, P> {
         }
     }
 
-    /// Scan for BLE devices
-    ///
-    /// Note: Scanning requires &mut access to the BleConnectionManager to temporarily
-    /// convert Central to Scanner. Since the handle only has shared access, you need to:
-    /// 1. Call manager.scan() directly (requires &mut access)
-    /// 2. OR scan before creating the connection manager
-    ///
-    /// Additionally, note that connect() already scans for devices using filter accept lists,
-    /// so explicit scanning is primarily useful for device discovery.
-    pub async fn scan(&self, _duration_ms: u32) -> heapless::Vec<BdAddr, 16> {
-        defmt::warn!("Scanning not available from handle - use BleConnectionManager::scan() directly");
-        heapless::Vec::new()
-    }
-
     /// Register a device with the connection manager
     ///
     /// Returns a DeviceHandle that can be used to interact with the specific device.

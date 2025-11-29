@@ -144,6 +144,8 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                     scan_config: ScanConfig {
                         active: false,
                         filter_accept_list: &[(AddrKind::PUBLIC, address), (AddrKind::RANDOM, address)],
+                        interval: Duration::from_secs(2),
+                        window: Duration::from_millis(400),
                         ..Default::default()
                     },
                 };

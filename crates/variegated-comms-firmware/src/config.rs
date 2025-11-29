@@ -15,6 +15,9 @@ pub fn belka_address() -> BdAddr {
     BdAddr::new([0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78])
 }
 
+// BLE peripheral IDs
+pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
+
 pub fn acaia_address() -> BdAddr {
     BdAddr::new([0x2f, 0xa0, 0x1a, 0x97, 0x1c, 0x00])
 }
