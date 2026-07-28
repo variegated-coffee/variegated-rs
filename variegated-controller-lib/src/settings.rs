@@ -4,7 +4,6 @@ use defmt::info;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash};
-use serde_json_core::ser::Error;
 use variegated_controller_types::{BoilerConfiguration, GroupConfiguration};
 use heapless::Vec;
 use postcard::to_slice;

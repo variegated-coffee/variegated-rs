@@ -1,7 +1,7 @@
 use crate::*;
 use alloc::vec;
 use alloc::vec::Vec;
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Default)]

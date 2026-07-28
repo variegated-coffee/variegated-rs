@@ -20,7 +20,7 @@ crc = { workspace = true, optional = true }
 [features]
 serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "heapless/serde"]
 std = []
-defmt = ["dep:defmt", "heapless/defmt-03"]
+defmt = ["dep:defmt", "heapless/defmt"]
 double_boiler = []
 single_boiler = []
 single_group = []

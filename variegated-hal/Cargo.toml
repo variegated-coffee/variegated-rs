@@ -30,7 +30,7 @@ async-trait.workspace = true
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
 movavg.workspace = true
 log.workspace = true
-heapless = { workspace = true, features = ["defmt-03"] }
+heapless = { workspace = true, features = ["defmt"] }
 fixed.workspace = true
 pio.workspace = true
 

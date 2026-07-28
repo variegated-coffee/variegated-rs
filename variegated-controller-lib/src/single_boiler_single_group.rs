@@ -12,7 +12,7 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_sync::watch;
 use embassy_time::{Instant, Timer};
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};

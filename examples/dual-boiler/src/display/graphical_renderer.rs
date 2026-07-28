@@ -909,7 +909,7 @@ impl GraphicalDisplayState {
     }
 
     /// Format an exit condition for display with target value
-    fn format_exit_condition(&self, condition: &RoutineExitCondition, resolved_params: &heapless::FnvIndexMap<u8, f32, 8>) -> Option<(String, String, f32)> {
+    fn format_exit_condition(&self, condition: &RoutineExitCondition, resolved_params: &heapless::index_map::FnvIndexMap<u8, f32, 8>) -> Option<(String, String, f32)> {
         match condition {
             RoutineExitCondition::After(pv) => {
                 let duration_secs = self.resolve_parameter_value(pv, resolved_params);
@@ -941,7 +941,7 @@ impl GraphicalDisplayState {
     }
 
     /// Resolve a parameter value to f32
-    fn resolve_parameter_value(&self, pv: &ParameterValue, resolved_params: &heapless::FnvIndexMap<u8, f32, 8>) -> f32 {
+    fn resolve_parameter_value(&self, pv: &ParameterValue, resolved_params: &heapless::index_map::FnvIndexMap<u8, f32, 8>) -> f32 {
         match pv {
             ParameterValue::Static(val) => *val,
             ParameterValue::Parameter(idx) => resolved_params.get(idx).copied().unwrap_or(0.0),

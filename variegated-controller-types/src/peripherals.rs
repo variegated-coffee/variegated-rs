@@ -1,5 +1,5 @@
 use crate::*;
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

@@ -2,7 +2,7 @@ use crate::*;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 pub type UserActionIndex = u8;
 pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;

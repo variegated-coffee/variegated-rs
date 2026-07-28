@@ -1,5 +1,5 @@
 use crate::*;
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 /// Commands for storage operations that may take a long time
 /// These are handled by a separate task to avoid blocking the main control loop

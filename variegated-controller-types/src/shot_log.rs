@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use chrono::{DateTime, Utc};
 use core::time::Duration;
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 // ============================================================================
 // Serialization types (for external API/storage)

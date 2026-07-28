@@ -144,7 +144,7 @@ impl ShotLogger {
         let timestamp_millis = start_time.elapsed().as_millis();
 
         // Extract boiler samples
-        let mut boiler_samples = heapless::FnvIndexMap::new();
+        let mut boiler_samples = heapless::index_map::FnvIndexMap::new();
         for (&index, boiler_status) in status.boiler_statuses.iter() {
             let _ = boiler_samples.insert(index, BoilerSample {
                 temperature: boiler_status.temperature,
@@ -155,7 +155,7 @@ impl ShotLogger {
         }
 
         // Extract group samples
-        let mut group_samples = heapless::FnvIndexMap::new();
+        let mut group_samples = heapless::index_map::FnvIndexMap::new();
         for (&index, group_status) in status.group_statuses.iter() {
             let _ = group_samples.insert(index, GroupSample {
                 is_brewing: group_status.is_brewing,
@@ -175,7 +175,7 @@ impl ShotLogger {
         }
 
         // Extract water tap samples
-        let mut water_tap_samples = heapless::FnvIndexMap::new();
+        let mut water_tap_samples = heapless::index_map::FnvIndexMap::new();
         for (&index, water_tap_status) in status.water_tap_statuses.iter() {
             let _ = water_tap_samples.insert(index, WaterTapSample {
                 is_dispensing: water_tap_status.is_dispensing,

@@ -1,7 +1,7 @@
 use crate::*;
 use chrono::NaiveDateTime;
 use core::time::Duration;
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug)]

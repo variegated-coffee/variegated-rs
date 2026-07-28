@@ -55,7 +55,7 @@ pub struct SensorReading<Transformed> {
     pub transformed: Transformed,
 }
 pub use pump::{Pump, PumpError};
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS, ECType, Output};
 use crate::scale::ScaleConfiguration;
 

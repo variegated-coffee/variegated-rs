@@ -27,7 +27,6 @@ movavg.workspace = true
 defmt.workspace = true
 
 serde = { workspace = true, features = ["derive"] }
-serde-json-core = { version = "0.6.0", default-features = false, features = ["defmt"] }
 postcard = { workspace = true, features = ["alloc", "use-crc"] }
 
 cfg-if.workspace = true

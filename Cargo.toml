@@ -43,10 +43,10 @@ embassy-time = "0.5.1"
 embassy-usb-logger = "0.6.0"
 
 # Logging / panic handling. defmt, defmt-rtt and panic-probe are a set.
-defmt = "0.3"
-defmt-rtt = "0.4"
+defmt = "1.1.1"
+defmt-rtt = "1.3.0"
 log = "0.4.27"
-panic-probe = "0.3"
+panic-probe = "1.0.0"
 
 # embedded-hal ecosystem
 embedded-graphics = "0.8.1"
@@ -71,9 +71,11 @@ chrono = { version = "0.4", default-features = false }
 chrono-tz = { version = "0.10", default-features = false }
 cortex-m = "0.7.6"
 cortex-m-rt = "0.7.5"
-embedded-alloc = "0.5.1"
+# 0.6 renamed `Heap` to `LlffHeap` and gated it behind `llff`; `tlsf` is a
+# second allocator we don't use, so keep it out rather than compiling rlsf.
+embedded-alloc = { version = "0.7.0", default-features = false, features = ["llff"] }
 fixed = "1.23.1"
-heapless = "0.8.0"
+heapless = "0.9.3"
 micromath = "2.0.0"
 movavg = { version = "2.1.0", default-features = false }
 num-traits = { version = "0.2.19", default-features = false }

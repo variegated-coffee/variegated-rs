@@ -10,7 +10,7 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 use sequential_storage::cache::NoCache;
 use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
 use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};

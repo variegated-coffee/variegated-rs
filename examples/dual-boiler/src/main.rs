@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::pin::Pin;
 use chrono::{FixedOffset, NaiveDateTime};
 use defmt::{error, info, unwrap};
-use heapless::FnvIndexMap;
+use heapless::index_map::FnvIndexMap;
 
 #[cfg(feature = "tft-display")]
 use display_interface_spi::SPIInterface;
@@ -23,7 +23,7 @@ use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{SPI0, SPI1};
 use embassy_rp::{adc, dma, i2c, pio, pwm, spi, uart, watchdog, Peri, Peripherals};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
-use embedded_alloc::Heap;
+use embedded_alloc::LlffHeap as Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
 use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
