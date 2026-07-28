@@ -11,7 +11,7 @@ bench = false
 defmt.workspace = true
 defmt-rtt.workspace = true
 log.workspace = true
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-usb-logger.workspace = true
 embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 

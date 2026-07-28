@@ -764,7 +764,7 @@ impl<
 
             // Feed the watchdog to prevent system reset
             if let Some(ref mut watchdog) = self.watchdog {
-                watchdog.feed();
+                watchdog.feed(crate::WATCHDOG_TIMEOUT);
             }
 
             Timer::after_millis(100).await;

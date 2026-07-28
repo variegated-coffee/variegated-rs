@@ -1585,6 +1585,7 @@ pub async fn display_task(
         disp_p.miso_pin,
         disp_p.dma_tx,
         disp_p.dma_rx,
+        crate::Irqs,
         spi_config
     );
     static SPI0_BUS: static_cell::StaticCell<DisplayBus> = static_cell::StaticCell::new();

@@ -193,6 +193,7 @@ pub async fn graphical_display_task(
         disp_p.miso_pin,
         disp_p.dma_tx,
         disp_p.dma_rx,
+        crate::Irqs,
         spi_config,
     );
 

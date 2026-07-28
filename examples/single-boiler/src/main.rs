@@ -21,7 +21,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
-use embassy_rp::{i2c, pio, pwm, spi, uart, Peri};
+use embassy_rp::{dma, i2c, pio, pwm, spi, uart, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -97,6 +97,20 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
     RotaryEncoderPioIrq => pio::InterruptHandler<RotaryEncoderPeripheralsPio>;
     QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
+    // embassy-rp 0.10 made async DMA interrupt-driven, so every DMA channel
+    // passed to `Spi::new`/`Uart::new` needs a handler. All RP2350 channels
+    // share DMA_IRQ_0, and they must be bound in this struct because only one
+    // struct may bind a given interrupt and `Uart::new_with_rtscts` wants a
+    // single type covering both the UART and its DMA interrupts.
+    //
+    // Channels track the `dma_tx`/`dma_rx` entries in board-cfg.toml:
+    //   CH0/CH1 internal_spi_bus, CH2/CH3 display, CH4/CH5 esp32 uart.
+    DmaIrq => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH3>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>;
 });
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
@@ -231,7 +245,7 @@ static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 fn main() -> ! {
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        unwrap!(spawner.spawn(main_task(spawner)))
+        spawner.spawn(unwrap!(main_task(spawner)))
     });
 }
 
@@ -387,7 +401,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let spi_p = internal_spi_bus_peripherals!(p);
     let ads_p = ads124s08_peripherals!(p);
 
-    let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, spi_config);
+    let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, Irqs, spi_config);
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
     let ads_spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
@@ -706,15 +720,15 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating display task");
     let disp_p = display_peripherals!(p);
 
-    spawner.spawn(display::display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver(), routine_repository_ref)).unwrap();
+    spawner.spawn(display::display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver(), routine_repository_ref).unwrap());
 
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition)).unwrap();
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition).unwrap());
 
     info!("Creating heap stat tasks");
-    spawner.spawn(heap_stats_task()).unwrap();
+    spawner.spawn(heap_stats_task().unwrap());
 
     info!("Creating huge future join task");
 

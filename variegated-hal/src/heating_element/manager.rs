@@ -149,8 +149,8 @@ where
     let steam_he_control = GpioBinaryHeatingElementControl::new(steam_he_sig);
 
     // Spawn background tasks
-    unwrap!(spawner.spawn(brew_heating_element_task(brew_he)));
-    unwrap!(spawner.spawn(steam_heating_element_task(steam_he)));
+    spawner.spawn(unwrap!(brew_heating_element_task(brew_he)));
+    spawner.spawn(unwrap!(steam_heating_element_task(steam_he)));
 
     HeatingElementControls {
         brew_he_control,

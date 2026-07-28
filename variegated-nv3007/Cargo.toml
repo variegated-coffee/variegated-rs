@@ -30,7 +30,7 @@ embedded-graphics-core = { workspace = true, optional = true }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
 
 [dev-dependencies]
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-rp = { workspace = true, features = ["defmt", "time-driver", "rp235xb"] }
 display-interface-spi.workspace = true
 cortex-m-rt.workspace = true

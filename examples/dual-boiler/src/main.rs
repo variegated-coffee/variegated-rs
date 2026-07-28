@@ -21,7 +21,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{adc, i2c, pio, pwm, spi, uart, watchdog, Peri, Peripherals};
+use embassy_rp::{adc, dma, i2c, pio, pwm, spi, uart, watchdog, Peri, Peripherals};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -133,6 +133,28 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
     QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
     FlowMeterPioIrq => pio::InterruptHandler<PulseCounterPioPeripheralsPio>;
+    // embassy-rp 0.10 made async DMA interrupt-driven: `dma::Channel::new`,
+    // used internally by `Spi::new`/`Uart::new`, now requires a binding for the
+    // channel's interrupt. Every DMA channel handed to an embassy constructor
+    // therefore needs a handler here, and all 16 RP2350 channels share
+    // DMA_IRQ_0 -- hence one interrupt with several handlers.
+    //
+    // They must live in this struct rather than a separate one: only one struct
+    // may bind a given interrupt (the macro emits its ISR symbol), and
+    // `Uart::new_with_rtscts` wants a single type that binds both the UART
+    // interrupt and its two DMA interrupts.
+    //
+    // Channels must match the `dma_tx`/`dma_rx` entries in board-cfg.toml:
+    //   CH0/CH1 internal_spi_bus, CH4/CH5 esp32 uart, CH6/CH7 eyespi_display.
+    // CH8 (flow_meter) and CH9 (gear_pump tacho) are intentionally absent: the
+    // PIO pulse counter drives those through the raw PAC and never enables
+    // their interrupt or awaits a Transfer, so they need no waker.
+    DmaIrq => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH7>;
 });
 
 #[cfg(feature = "gravity")]
@@ -470,10 +492,10 @@ fn main() -> ! {
                 let executor1 = EXECUTOR1.init(Executor::new());
                 executor1.run(|spawner| {
                     info!("Spawning display task on core 1");
-                    unwrap!(spawner.spawn(graphical_display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
+                    spawner.spawn(unwrap!(graphical_display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
 
                     info!("Spawning backlight task on core 1");
-                    unwrap!(spawner.spawn(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
+                    spawner.spawn(unwrap!(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
                 });
             },
         );
@@ -520,7 +542,7 @@ fn main() -> ! {
 
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
-        unwrap!(spawner.spawn(main_task(
+        spawner.spawn(unwrap!(main_task(
             spawner,
             peripherals,
             status_channel,
@@ -758,7 +780,7 @@ async fn main_task(
     spi_config.phase = Phase::CaptureOnSecondTransition;
     spi_config.polarity = Polarity::IdleLow;
 
-    let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, spi_config);
+    let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, Irqs, spi_config);
     let spi_bus = INTERNAL_SPI_BUS.init(Mutex::new(spi));
     let spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
@@ -998,8 +1020,11 @@ async fn main_task(
 
     // Initialize watchdog
     let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
-    watchdog.start(Duration::from_secs(15)); // 5 second timeout
-    info!("Watchdog initialized with 5 second timeout");
+    watchdog.start(variegated_controller_lib::WATCHDOG_TIMEOUT);
+    info!(
+        "Watchdog initialized with {} ms timeout",
+        variegated_controller_lib::WATCHDOG_TIMEOUT.as_millis()
+    );
 
     let settings_storage: SequentialStorageSettingsStorage<SyncSendRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let settings_storage_ref = SETTINGS_STORAGE.init(Mutex::new(settings_storage));
@@ -1059,7 +1084,7 @@ async fn main_task(
     let storage_command_receiver = storage_command_channel.receiver();
 
     // Spawn storage task to handle optimize operations without blocking main loop
-    unwrap!(spawner.spawn(storage_task(
+    spawner.spawn(unwrap!(storage_task(
         storage_command_receiver,
         routine_repository_ref,
         schedule_store_ref,
@@ -1183,7 +1208,7 @@ async fn main_task(
         contention_strategy_signal,
     );
 
-    unwrap!(spawner.spawn(coordinated_heating_element_task(coordinated_heating_device)));
+    spawner.spawn(unwrap!(coordinated_heating_element_task(coordinated_heating_device)));
 
     let brew_boiler = Boiler::new(
         Box::new(brew_he_control),
@@ -1518,20 +1543,20 @@ async fn main_task(
     let display_status_receiver = status_channel.subscriber().expect("Failed to get display status subscriber");
 
     // Spawn the LCD display task
-    unwrap!(spawner.spawn(lcd_display_task(lcd_device, display_status_receiver, routine_repository_ref)));
+    spawner.spawn(unwrap!(lcd_display_task(lcd_device, display_status_receiver, routine_repository_ref)));
 
     // Create status subscriber for button controller and spawn the task
     let button_status_receiver = status_channel.subscriber().expect("Failed to get button status subscriber");
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    unwrap!(spawner.spawn(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver)));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver)));
 
     // Create status subscriber for LED controller and spawn the task
     let led_status_receiver = status_channel.subscriber().expect("Failed to get LED status subscriber");
 
     // Spawn the LED breathing controller task
-    unwrap!(spawner.spawn(led_controller_task(tlc, led_status_receiver)));
+    spawner.spawn(unwrap!(led_controller_task(tlc, led_status_receiver)));
 
     // Create status and configuration subscribers for ESP transceiver and spawn the task
     let esp_status_receiver = status_channel.subscriber().expect("Failed to get ESP status subscriber");
@@ -1540,25 +1565,25 @@ async fn main_task(
 
     // Spawn the ESP transceiver task
     #[cfg(feature = "belka")]
-    unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, belka_dispatcher)));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, belka_dispatcher)));
     #[cfg(not(feature = "belka"))]
-    unwrap!(spawner.spawn(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]
-    unwrap!(spawner.spawn(belka_task(belka_device)));
+    spawner.spawn(unwrap!(belka_task(belka_device)));
 
     // Create configuration subscriber for debug logger and spawn the task
     let debug_configuration_receiver = configuration_channel.subscriber().expect("Failed to get debug configuration subscriber");
 
     // Spawn the configuration debug logger task
-    unwrap!(spawner.spawn(configuration_debug_logger(debug_configuration_receiver)));
+    spawner.spawn(unwrap!(configuration_debug_logger(debug_configuration_receiver)));
 
     // Spawn the instrumentation monitor task
-    unwrap!(spawner.spawn(instrumentation_monitor_task()));
+    spawner.spawn(unwrap!(instrumentation_monitor_task()));
 
     // Spawn the SD detect pin toggle task
-    //unwrap!(spawner.spawn(sd_det_toggle_task(sd_det_pin)));
+    //spawner.spawn(unwrap!(sd_det_toggle_task(sd_det_pin)));
 
     info!("Creating huge future join task");
 

@@ -10,7 +10,7 @@ bench = false
 [dependencies]
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
 embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 embassy-embedded-hal = { workspace = true, features = ["defmt"] }

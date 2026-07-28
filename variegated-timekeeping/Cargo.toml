@@ -26,7 +26,7 @@ chrono-tz = { workspace = true, optional = true }
 defmt = { workspace = true, optional = true }
 
 [dev-dependencies]
-embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { workspace = true, features = ["defmt"] }
 embassy-rp = { workspace = true, features = ["defmt", "time-driver", "rp235xb"] }
 cortex-m-rt.workspace = true

@@ -12,6 +12,18 @@ pub use shot_log::{ShotLogger, ShotLoggerConfig};
 
 extern crate alloc;
 
+/// Watchdog period used by the controllers.
+///
+/// embassy-rp 0.10 changed `Watchdog::feed` to take the new timeout as an
+/// argument (`start` is just `feed` followed by enabling the counter), so the
+/// value passed when starting the watchdog and the value passed on every feed
+/// have to agree. Keeping it here means callers configure the hardware with the
+/// same period the control loop refreshes it with, instead of the two drifting
+/// apart across crate boundaries.
+///
+/// Note the RP2350 ceiling is 0xFFFFFF microseconds (~16.7 s).
+pub const WATCHDOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(15);
+
 use core::time::Duration;
 use embassy_time::Instant;
 use variegated_control_algorithm::pid::PidCtrl;

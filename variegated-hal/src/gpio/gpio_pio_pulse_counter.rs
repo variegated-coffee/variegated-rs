@@ -63,7 +63,7 @@ fn get_wrap_counter(pio_num: u8, sm_num: u8) -> &'static AtomicU32 {
 }
 
 
-pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel> {
+pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance> {
     pio_num: u8,
     sm_num: u8,
     sm: StateMachine<'d, P, SM>,
@@ -81,7 +81,7 @@ pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: 
     wrap_counter: &'static AtomicU32,
 }
 
-impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
+impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance>
     GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
     pub fn new(
@@ -183,8 +183,10 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
             _ => panic!("Invalid PIO number"),
         };
 
-        // Configure DMA channel for infinite transfer
-        let dma_regs = dma_channel.regs();
+        // Configure DMA channel for infinite transfer.
+        // embassy-rp 0.10 made `regs`/`number` associated functions on the
+        // `ChannelInstance` trait rather than methods on the channel value.
+        let dma_regs = C::regs();
 
         {
             // Set source: PIO RX FIFO
@@ -208,7 +210,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                 w.set_data_size(DataSize::SIZE_WORD);
                 w.set_incr_read(false);  // Don't increment read address (always read from FIFO)
                 w.set_incr_write(false); // Don't increment write address (always write to same location)
-                w.set_chain_to(dma_channel.number()); // Chain to self for continuous operation
+                w.set_chain_to(C::number()); // Chain to self for continuous operation
                 w.set_en(true); // Enable DMA
             });
         }
@@ -277,13 +279,13 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
     }
 }
 
-impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
+impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance>
     Drop for GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
     fn drop(&mut self) {
         // Stop DMA using low-level abort
-        let dma_regs = self.dma_channel.regs();
-        let channel_num = self.dma_channel.number();
+        let dma_regs = C::regs();
+        let channel_num = C::number();
 
         // Abort the DMA transfer
         embassy_rp::pac::DMA
@@ -295,7 +297,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
     }
 }
 
-impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::Channel>
+impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance>
     WithTask for GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
     async fn task(&mut self) {
