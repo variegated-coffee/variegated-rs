@@ -157,7 +157,15 @@ struct BindInterruptField {
     left_ident: Ident,
     #[allow(dead_code)]
     arrow_token: Token![=>],
-    right_type: Type,
+    /// One or more handler types for this interrupt.
+    ///
+    /// `bind_interrupts!` accepts `IRQ => H1, H2, ...;` and emits a single ISR
+    /// per interrupt that dispatches to each handler in turn. That matters for
+    /// shared interrupts: on RP2350 every DMA channel raises DMA_IRQ_0, so an
+    /// async SPI/UART using channels 0 and 1 needs both
+    /// `dma::InterruptHandler<DMA_CH0>` and `dma::InterruptHandler<DMA_CH1>`
+    /// bound to the same interrupt, in the same struct.
+    right_types: Punctuated<Type, Token![,]>,
 }
 
 // Implement the Parse trait for AliasedBindInterrupts
@@ -183,12 +191,23 @@ impl Parse for BindInterruptField {
     fn parse(input: ParseStream) -> SynResult<Self> {
         let left_ident = input.parse()?;
         let arrow_token = input.parse()?;
-        let right_type = input.parse()?;
+
+        // Parse a comma-separated list of handler types. Stop at `;` (the field
+        // separator) or end of input, so a single handler still parses exactly
+        // as it did before.
+        let mut right_types = Punctuated::new();
+        loop {
+            right_types.push_value(input.parse::<Type>()?);
+            if !input.peek(Token![,]) {
+                break;
+            }
+            right_types.push_punct(input.parse::<Token![,]>()?);
+        }
 
         Ok(BindInterruptField {
             left_ident,
             arrow_token,
-            right_type,
+            right_types,
         })
     }
 }
@@ -220,7 +239,7 @@ pub fn aliased_bind_interrupts(input: TS1) -> TS1
     // Process each field, replacing identifiers according to the map
     let updated_fields = aliased_input.fields.iter().map(|field| {
         let left_ident_str = field.left_ident.to_string();
-        let right_type = &field.right_type;
+        let right_types = field.right_types.iter();
 
         // Check if the identifier is in our map and replace it if it is
         let mapped_ident = if let Some(new_ident) = alias_map.get(left_ident_str.as_str()) {
@@ -230,7 +249,7 @@ pub fn aliased_bind_interrupts(input: TS1) -> TS1
         };
 
         quote! {
-            #mapped_ident => #right_type
+            #mapped_ident => #(#right_types),*
         }
     });
 
