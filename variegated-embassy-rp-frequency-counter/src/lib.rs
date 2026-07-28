@@ -2,6 +2,7 @@
 
 use defmt::info;
 use embassy_rp::pio::{Common, Config, Direction, FifoJoin, Instance, LoadedProgram, Pin, Pio, PioPin, ShiftDirection, StateMachine};
+use embassy_rp::Peri;
 use embassy_time::{Instant, Timer};
 use log::log;
 use variegated_log::log_info;
@@ -15,11 +16,11 @@ pub struct PioFrequencyCounter<'a, P: Instance> {
 
 impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
     pub fn new<Pin1T: PioPin, Pin2T: PioPin, Pin3T: PioPin, Pin4T: PioPin>(
-            mut pio: Pio<'a, P>, 
-            pin1: Option<Pin1T>, 
-            pin2: Option<Pin2T>,
-            pin3: Option<Pin3T>,
-            pin4: Option<Pin4T>,
+            mut pio: Pio<'a, P>,
+            pin1: Option<Peri<'a, Pin1T>>,
+            pin2: Option<Peri<'a, Pin2T>>,
+            pin3: Option<Peri<'a, Pin3T>>,
+            pin4: Option<Peri<'a, Pin4T>>,
     ) -> Self {
         let program = pio::pio_asm!(
     "mov y, ~null"        //Initialize Y all 1s

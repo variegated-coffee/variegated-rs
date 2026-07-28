@@ -1,6 +1,5 @@
 //! Graphics mode with embedded-graphics support and optional delta updates
 
-use defmt::debug;
 use crate::{
     command::{self, Command},
     display::{self, DisplayVariant},
