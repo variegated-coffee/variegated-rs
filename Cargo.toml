@@ -6,6 +6,16 @@ members = [
     "crates/variegated-belka-portal-trouble-driver",
     "crates/variegated-scale-trouble-driver",
 ]
+# Sibling repos are symlinked into this directory (variegated-rs, idf-port,
+# esphome-device-rs). Without excluding them, cargo treats every package under
+# those symlinks as a member of *this* workspace, so their `workspace = true`
+# dependency inheritance resolves against this manifest instead of their own
+# workspace root and fails with "`workspace.dependencies` was not defined".
+exclude = [
+    "variegated-rs",
+    "idf-port",
+    "esphome-device-rs",
+]
 
 [workspace.package]
 edition = "2024"
