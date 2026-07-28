@@ -94,6 +94,28 @@ lto = true              # Disable link-time optimization
 [profile.release]
 debug = true             # Keep debug info in release builds too
 
+# NOTE: the graph contains embassy-hal-internal 0.4.0 and 0.5.0 side by side.
+# This is an upstream packaging bug: the *published* embassy-embedded-hal 0.6.0
+# requires embassy-hal-internal "0.4.0", while the git tag it was cut from
+# (embassy-embedded-hal-v0.6.0) correctly says "0.5.0" -- which is what
+# embassy-rp 0.10.0 uses.
+#
+# Patching embassy-embedded-hal to that tag does NOT work in isolation: the git
+# crate resolves its siblings by path, dragging in embassy-time from git, whose
+# embassy-time-driver declares `links = "embassy-time"`. Only one package in a
+# graph may claim a given `links` value, so it collides with the crates.io
+# embassy-time-driver that embassy-rp depends on. Fixing it that way means
+# sourcing the *entire* embassy family from git, trading a harmless duplicate
+# for a large git-sourced dependency surface.
+#
+# Left alone deliberately, because the duplicate is inert: embassy-embedded-hal
+# touches embassy-hal-internal in exactly one place -- `drop::OnDrop`, an RAII
+# guard used inside two function bodies in shared_bus/asynch/spi.rs. It appears
+# in no signature, and `SetConfig`/`GetConfig` are defined in
+# embassy-embedded-hal itself, so no type crosses between the two versions.
+# The cost is compiling one small extra crate. Revisit if upstream publishes a
+# fixed embassy-embedded-hal.
+#
 # NOTE: the embassy-rp [patch.crates-io] fork (variegated-coffee/embassy, branch
 # psram-0.8.0) was removed here. It existed only because `psram`/`qmi_cs1` were
 # merged upstream but not yet published; its single commit just stripped
