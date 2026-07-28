@@ -8,5 +8,5 @@ test = false
 bench = false
 
 [dependencies]
-micromath = "2.0.0"
-heapless = "0.8.0"
+micromath.workspace = true
+heapless.workspace = true

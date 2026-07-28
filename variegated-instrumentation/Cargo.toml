@@ -8,16 +8,9 @@ test = false
 bench = false
 
 [dependencies]
-portable-atomic = { version = "1.9", default-features = false }
-
-[dependencies.defmt]
-version = "0.3"
-optional = true
-
-[dependencies.serde]
-version = "1.0"
-default-features = false
-optional = true
+portable-atomic.workspace = true
+defmt = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 
 [features]
 default = []

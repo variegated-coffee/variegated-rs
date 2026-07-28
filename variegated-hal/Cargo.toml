@@ -9,15 +9,15 @@ bench = false
 
 [dependencies]
 variegated-soft-pwm = { version = "0.1.0", path = "../variegated-soft-pwm" }
-embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embedded-hal = "1.0.0"
-embedded-hal-async = "1.0.0"
-embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
-embassy-sync = { version = "0.7.2", features = ["defmt"] }
-embassy-futures = { version = "0.1.1" }
-embassy-rp = { version = "0.8.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
-static_cell = "2"
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embassy-embedded-hal = { workspace = true, features = ["defmt"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-futures.workspace = true
+embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+static_cell.workspace = true
 variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", optional = true }
 variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08" }
 variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
@@ -25,14 +25,14 @@ variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", featur
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 variegated-gravity-driver = { version = "0.1.0", path = "../variegated-gravity-driver", features = ["defmt"] }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
-defmt = "0.3"
-async-trait = "0.1.88"
+defmt.workspace = true
+async-trait.workspace = true
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
-movavg = { version = "2.1.0", default-features = false }
-log = "0.4.27"
-heapless = { version = "0.8", features = ["defmt-03"] }
-fixed = "1.23.1"
-pio = "0.3"
+movavg.workspace = true
+log.workspace = true
+heapless = { workspace = true, features = ["defmt-03"] }
+fixed.workspace = true
+pio.workspace = true
 
 [features]
 rp2040 = ["embassy-rp/rp2040"]

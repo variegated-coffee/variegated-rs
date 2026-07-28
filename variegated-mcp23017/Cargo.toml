@@ -18,11 +18,11 @@ defmt = ["dep:defmt"]
 async-digital-pins = ["dep:embedded-hal-async-git"]
 
 [dependencies]
-embedded-hal = "1.0"
-embedded-hal-async = "1.0"
-embassy-sync = "0.7.2"
-embassy-futures = "0.1.1"
-defmt = { version = "0.3", optional = true }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embassy-sync.workspace = true
+embassy-futures.workspace = true
+defmt = { workspace = true, optional = true }
 
 # Use git version when async-digital-pins feature is enabled
 [dependencies.embedded-hal-async-git]
@@ -32,11 +32,11 @@ branch = "master"
 optional = true
 
 [dev-dependencies]
-embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-time = { version = "0.5.0", features = ["defmt"] }
-embassy-rp = { version = "0.8.0", features = ["defmt", "time-driver", "rp235xb"] }
-embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
-cortex-m-rt = "0.7.0"
-defmt = "0.3"
-defmt-rtt = "0.4"
-panic-probe = { version = "0.3", features = ["print-defmt"] }
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { workspace = true, features = ["defmt"] }
+embassy-rp = { workspace = true, features = ["defmt", "time-driver", "rp235xb"] }
+embassy-embedded-hal = { workspace = true, features = ["defmt"] }
+cortex-m-rt.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+panic-probe = { workspace = true, features = ["print-defmt"] }

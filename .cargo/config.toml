@@ -15,6 +15,15 @@ rustflags = ["--cfg", "test"]
 [alias]
 test-aarch64 = "test --target aarch64-apple-darwin"  # Run tests with this target
 
+# WARNING: this `rustflags` key is INERT. It sits under `[alias]`, so cargo reads
+# it as an alias named "rustflags" rather than as build flags -- verified with
+# `cargo build -v`, which shows no `inline-threshold` in any rustc invocation.
+#
+# Left as-is deliberately: moving it under `[build]` would newly apply
+# `-C no-vectorize-loops` and change code size/performance, which is a decision
+# to make on purpose rather than as a side effect of a dependency upgrade.
+# Note that `-C inline-threshold` has also been a deprecated no-op since Rust
+# 1.78, so only `no-vectorize-loops` would actually take effect.
 rustflags = [
 #    "-C", "linker=flip-link",
 #    "-C", "link-arg=--nmagic",

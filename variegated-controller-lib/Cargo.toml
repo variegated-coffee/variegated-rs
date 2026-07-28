@@ -2,7 +2,7 @@
 name = "variegated-controller-lib"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,37 +11,37 @@ test = false
 bench = false
 
 [dependencies]
-heapless = "0.8.0"
-async-trait = "0.1.80"
-embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
-embedded-hal = "1.0.0"
-embedded-hal-async = "1.0.0"
-embassy-embedded-hal = { version = "0.4.0", features = ["defmt"] }
-embassy-sync = { version = "0.7.2", features = ["defmt"] }
-embassy-futures = { version = "0.1.1" }
-embassy-rp = { version = "0.8.0",  features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
-num-traits = { version ="0.2.19", default-features = false, features = ["libm"] }
+heapless.workspace = true
+async-trait.workspace = true
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embassy-embedded-hal = { workspace = true, features = ["defmt"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-futures.workspace = true
+embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+num-traits = { workspace = true, features = ["libm"] }
 
-movavg = { version = "2.1.0", default-features = false }
+movavg.workspace = true
 
-defmt = "0.3"
+defmt.workspace = true
 
-serde = { version = "1.0.219", default-features = false, features = ["derive"]}
-serde-json-core = { version = "0.6.0", default-features = false, features = ["defmt"]}
-postcard = { version = "1.1.1", features = ["alloc", "use-crc"] }
+serde = { workspace = true, features = ["derive"] }
+serde-json-core = { version = "0.6.0", default-features = false, features = ["defmt"] }
+postcard = { workspace = true, features = ["alloc", "use-crc"] }
 
-cfg-if = "1.0.0"
+cfg-if.workspace = true
 variegated-hal = { version = "0.1.0", path = "../variegated-hal" }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt", "serde"] }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", features = ["defmt", "serde", "sequential-storage"] }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
-chrono = { version = "0.4", default-features = false, features = [] }
+chrono.workspace = true
 
-sequential-storage = { version = "5.0.0", features = ["defmt-03"] }
-embedded-storage-async = "0.4.1"
-log = "0.4.27"
+sequential-storage = { workspace = true, features = ["defmt-03"] }
+embedded-storage-async.workspace = true
+log.workspace = true
 
-crc = "3.3.0"
+crc.workspace = true
 
 [features]
 rp2040 = ["embassy-rp/rp2040"]

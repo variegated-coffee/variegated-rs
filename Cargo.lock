@@ -468,24 +468,6 @@ checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
 
 [[package]]
 name = "embassy-embedded-hal"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1611b7a7ab5d1fbed84c338df26d56fd9bded58006ebb029075112ed2c5e039"
-dependencies = [
- "defmt 1.0.1",
- "embassy-futures",
- "embassy-hal-internal",
- "embassy-sync",
- "embedded-hal 0.2.7",
- "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-storage",
- "embedded-storage-async",
- "nb 1.1.0",
-]
-
-[[package]]
-name = "embassy-embedded-hal"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "554e3e840696f54b4c9afcf28a0f24da431c927f4151040020416e7393d6d0d8"
@@ -582,7 +564,7 @@ dependencies = [
  "critical-section",
  "defmt 1.0.1",
  "document-features",
- "embassy-embedded-hal 0.5.0",
+ "embassy-embedded-hal",
  "embassy-futures",
  "embassy-hal-internal",
  "embassy-sync",
@@ -848,7 +830,7 @@ dependencies = [
  "display-interface",
  "display-interface-spi",
  "ds3231",
- "embassy-embedded-hal 0.5.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
@@ -2085,7 +2067,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
@@ -2146,7 +2128,7 @@ dependencies = [
  "chrono",
  "crc",
  "defmt 0.3.100",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-futures",
  "embassy-rp",
  "embassy-sync",
@@ -2216,7 +2198,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-rp",
  "embassy-time",
@@ -2239,7 +2221,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "defmt 0.3.100",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
@@ -2292,7 +2274,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",
@@ -2323,7 +2305,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-rp",
  "embassy-time",
@@ -2391,7 +2373,7 @@ dependencies = [
  "cortex-m-rt",
  "defmt 0.3.100",
  "defmt-rtt",
- "embassy-embedded-hal 0.4.0",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-rp",
  "embassy-time",

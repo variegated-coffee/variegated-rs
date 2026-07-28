@@ -9,13 +9,13 @@ keywords = ["thermocouple","I2C","embedded"]
 categories = ["embedded"]
 
 [dependencies]
-embedded-hal = "1.0.0"
-embedded-hal-async = "1.0.0"
-embassy-futures = { version = "0.1.1" }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embassy-futures.workspace = true
 
-defmt = { version = "0.3", optional = true }
+defmt = { workspace = true, optional = true }
 
-bitvec = { version = "1", default-features = false }
+bitvec.workspace = true
 
 [features]
 default = []

@@ -17,5 +17,5 @@ default = []
 defmt = ["dep:defmt"]
 
 [dependencies]
-embedded-hal-async = "1.0"
-defmt = { version = "0.3", optional = true }
+embedded-hal-async.workspace = true
+defmt = { workspace = true, optional = true }

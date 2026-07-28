@@ -8,12 +8,12 @@ test = false
 bench = false
 
 [dependencies]
-defmt = "0.3"
-defmt-rtt = "0.4"
-log = "0.4"
-embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
-embassy-usb-logger = { version = "0.5.0"}
-embassy-rp = { version = "0.8.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+defmt.workspace = true
+defmt-rtt.workspace = true
+log.workspace = true
+embassy-executor = { workspace = true, features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-usb-logger.workspace = true
+embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 
 [features]
 default = []
