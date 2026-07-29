@@ -1396,10 +1396,11 @@ dependencies = [
 
 [[package]]
 name = "oled_async"
-version = "0.1.0-alpha1"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5ecd3867866c39f465758812f5da8c9c3047686a4a881b6be717a649563eaea"
+checksum = "459f0aec254d6506e17928b6fee53bbf294bc37af9dbab75652fc74dc2c06b6c"
 dependencies = [
+ "defmt 0.3.100",
  "display-interface",
  "embedded-graphics-core",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2165,9 +2166,9 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "u8g2-fonts"
-version = "0.7.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "825f57be1429fd60f335a4aade11e128a7ae4f89d75ca3a003cb8410a91093f7"
+checksum = "3ce3199e4c7d98a0a47ddd5ae9cde5a4e944d316319e3208527de504f4e76032"
 dependencies = [
  "embedded-graphics-core",
 ]
