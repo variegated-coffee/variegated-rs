@@ -1,6 +1,7 @@
 use core::cell::RefCell;
 use embassy_time::{Duration, Timer};
-use heapless::{FnvIndexMap, Vec};
+use heapless::Vec;
+use heapless::index_map::FnvIndexMap;
 use trouble_host::prelude::*;
 use trouble_host::PacketPool;
 use bt_hci::controller::ControllerCmdSync;

@@ -6,9 +6,9 @@ rust-version = "1.88"
 
 [dependencies]
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
-trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["defmt"] }
-defmt = "1.0.1"
-embassy-time = { version = "0.5.0", features = ["defmt"] }
+trouble-host = { workspace = true, features = ["defmt"] }
+defmt.workspace = true
+embassy-time = { workspace = true, features = ["defmt"] }
 
 [lib]
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors

@@ -29,11 +29,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 use esp_println::println;
-use esp_radio::{
-    Controller,
-    ble::controller::BleConnector,
-    wifi::WifiDevice,
-};
+use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
 
 // Library imports
@@ -80,17 +76,16 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
 async fn comms_status_signaller_task(
     rtc: &'static esp_hal::rtc_cntl::Rtc<'static>,
 ) {
-    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, WIFI_CONNECTED, WIFI_RSSI_SIGNAL};
     use variegated_comms_firmware::config::{BELKA_PERIPHERAL_ID, USEC_IN_SEC};
     use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
-    use esp_radio::wifi::WifiStaState;
-    use heapless::FnvIndexMap;
+    use heapless::index_map::FnvIndexMap;
     use portable_atomic::Ordering;
 
     info!("CommsStatus signaller task started");
     loop {
         // Get real WiFi connection status
-        let wifi_connected = matches!(esp_radio::wifi::sta_state(), WifiStaState::Connected);
+        let wifi_connected = WIFI_CONNECTED.load(Ordering::Relaxed);
 
         // Get real timestamp from RTC (convert microseconds to seconds)
         let timestamp = {
@@ -198,9 +193,14 @@ async fn main(spawner: Spawner) -> ! {
 
     let (rx, tx) = uart.split();
 
-    // Spawn application processor tasks
-    spawner.spawn(application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel)).ok();
-    spawner.spawn(status_listener_task(status_channel)).ok();
+    // Spawn application processor tasks.
+    //
+    // embassy-executor 0.10 moved the fallibility from `Spawner::spawn` (which
+    // now returns `()`) onto the `#[task]` function itself, so every one of
+    // these grew an inner `if let Ok`. The previous `.ok()` discarded a failed
+    // spawn, and that is preserved here rather than switched to `unwrap`.
+    if let Ok(t) = application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel) { spawner.spawn(t); }
+    if let Ok(t) = status_listener_task(status_channel) { spawner.spawn(t); }
     info!("Application processor tasks spawned");
 
     // Initialize esp-rtos
@@ -210,11 +210,11 @@ async fn main(spawner: Spawner) -> ! {
 
     info!("Initializing radio");
 
-    // Initialize radio controller
-    let esp_radio_ctrl = &*mk_static!(Controller<'static>, esp_radio::init().unwrap());
+    // esp-radio 0.18 removed `esp_radio::init()` and the `Controller` handle;
+    // the radio is brought up implicitly by the BLE/WiFi constructors.
 
     // Initialize BLE (before WiFi for stability)
-    let connector = BleConnector::new(&esp_radio_ctrl, peripherals.BT, Default::default()).unwrap();
+    let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
     // Create BLE host resources
@@ -259,19 +259,22 @@ async fn main(spawner: Spawner) -> ! {
     let sensor_reading_sender = sensor_reading_channel.sender();
 
     // Spawn BLE tasks
-    spawner.spawn(ble_runner_task(runner, printer)).ok();
-    spawner.spawn(ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender)).ok();
+    if let Ok(t) = ble_runner_task(runner, printer) { spawner.spawn(t); }
+    if let Ok(t) = ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender) { spawner.spawn(t); }
     info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;
 
     info!("Initializing Wifi");
 
-    // Initialize WiFi
+    // Initialize WiFi. The radio controller handle is gone in 0.18, and
+    // `interfaces.sta` was renamed `interfaces.station`. Configuration stays in
+    // `connection_task`, which now calls `set_config` -- that both configures
+    // and starts the controller, since `start_async` was removed.
     let (controller, interfaces) =
-        esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+        esp_radio::wifi::new(peripherals.WIFI, Default::default()).unwrap();
 
-    let wifi_interface = interfaces.sta;
+    let wifi_interface = interfaces.station;
 
     info!("Creating network stack");
 
@@ -294,10 +297,10 @@ async fn main(spawner: Spawner) -> ! {
     info!("Spawning network tasks");
 
     // Spawn network tasks
-    spawner.spawn(connection_task(controller)).ok();
-    spawner.spawn(net_task(runner)).ok();
-    spawner.spawn(sntp_task(rtc_static, *stack_static)).ok();
-    spawner.spawn(comms_status_signaller_task(rtc_static)).ok();
+    if let Ok(t) = connection_task(controller) { spawner.spawn(t); }
+    if let Ok(t) = net_task(runner) { spawner.spawn(t); }
+    if let Ok(t) = sntp_task(rtc_static, *stack_static) { spawner.spawn(t); }
+    if let Ok(t) = comms_status_signaller_task(rtc_static) { spawner.spawn(t); }
     info!("Network and CommsStatus tasks spawned");
 
     // Wait for network
@@ -322,7 +325,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Create TCP stack for HTTP
     let tcp_buffers = mk_static!(TcpBuffers<16, 1024, 1024>, TcpBuffers::new());
-    let tcp_stack = mk_static!(Tcp<'static, 16, 1024, 1024>, Tcp::new(net_stack, tcp_buffers));
+    let tcp_stack = mk_static!(Tcp<'static>, Tcp::new(net_stack, tcp_buffers));
 
     // Get command sender for HTTP server
     let command_sender = mk_static!(MachineCommandSender, command_channel.sender());
@@ -332,8 +335,8 @@ async fn main(spawner: Spawner) -> ! {
     let http_config_subscriber = config_channel.subscriber().unwrap();
 
     // Spawn HTTP server and cache update tasks
-    spawner.spawn(http_server_task(tcp_stack, command_sender)).ok();
-    spawner.spawn(cache_update_task(http_status_subscriber, http_config_subscriber)).ok();
+    if let Ok(t) = http_server_task(tcp_stack, command_sender) { spawner.spawn(t); }
+    if let Ok(t) = cache_update_task(http_status_subscriber, http_config_subscriber) { spawner.spawn(t); }
     info!("HTTP server and cache update tasks spawned");
 
     // Create subscribers for ESPHome server
@@ -342,7 +345,7 @@ async fn main(spawner: Spawner) -> ! {
     let esphome_command_config_subscriber = config_channel.subscriber().unwrap();
 
     // Spawn ESPHome server task
-    spawner.spawn(esphome_server_task(
+    if let Ok(t) = esphome_server_task(
         stack_static,
         esphome_status_subscriber,
         esphome_config_subscriber,
@@ -350,7 +353,7 @@ async fn main(spawner: Spawner) -> ! {
         state_change_channel,
         client_event_channel,
         command_channel,
-    )).ok();
+    ) { spawner.spawn(t); }
     info!("ESPHome server task spawned on port 6053");
 
     // Create subscribers for WebSocket server
@@ -359,13 +362,13 @@ async fn main(spawner: Spawner) -> ! {
     let ws_routine_subscriber = routine_channel.subscriber().unwrap();
 
     // Spawn WebSocket server task
-    spawner.spawn(websocket_server_task(
+    if let Ok(t) = websocket_server_task(
         stack_static,
         ws_status_subscriber,
         ws_config_subscriber,
         ws_routine_subscriber,
         command_channel,
-    )).ok();
+    ) { spawner.spawn(t); }
     info!("WebSocket server task spawned on port 8080");
 
     // Main loop - periodic HTTP client requests

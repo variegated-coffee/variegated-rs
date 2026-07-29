@@ -6,9 +6,31 @@ use defmt::{error, info};
 use embassy_net::{dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
 use embassy_time::{Duration, Timer};
 use esp_hal::rtc_cntl::Rtc;
-use sntpc::{get_time, NtpContext, NtpTimestampGenerator};
+use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 
 use crate::config::{NTP_SERVER, USEC_IN_SEC};
+
+/// Adapter making an embassy-net `UdpSocket` usable by sntpc.
+///
+/// sntpc 0.11 dropped its bundled embassy socket integration (the
+/// `embassy-socket` features are gone), so the `NtpUdpSocket` impl lives here
+/// now. The trait takes `&self`, which lines up with embassy-net's UDP API.
+struct SntpSocket<'a>(UdpSocket<'a>);
+
+impl NtpUdpSocket for SntpSocket<'_> {
+    async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> sntpc::Result<usize> {
+        self.0
+            .send_to(buf, addr)
+            .await
+            .map(|()| buf.len())
+            .map_err(|_| sntpc::Error::Network)
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> sntpc::Result<(usize, SocketAddr)> {
+        let (len, meta) = self.0.recv_from(buf).await.map_err(|_| sntpc::Error::Network)?;
+        Ok((len, SocketAddr::from((meta.endpoint.addr, meta.endpoint.port))))
+    }
+}
 
 /// Timestamp generator for SNTP using RTC
 #[derive(Clone, Copy)]
@@ -90,6 +112,8 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     );
 
     socket.bind(123).unwrap();
+
+    let socket = SntpSocket(socket);
 
     // Display initial RTC time
     info!("Initial RTC time: {} us", rtc.current_time_us());

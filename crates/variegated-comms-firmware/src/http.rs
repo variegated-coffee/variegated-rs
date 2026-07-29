@@ -1327,7 +1327,7 @@ pub async fn cache_update_task(
 /// HTTP server task
 #[embassy_executor::task]
 pub async fn http_server_task(
-    tcp_stack: &'static Tcp<'static, 16, 1024, 1024>,
+    tcp_stack: &'static Tcp<'static>,
     command_sender: &'static MachineCommandSender,
 ) {
     info!("Starting HTTP server on port 80...");

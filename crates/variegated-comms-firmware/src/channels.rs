@@ -86,3 +86,10 @@ pub static SENSOR_READING_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, E
 
 // Belka Connection Status - updated by belka_measurement_loop, read by comms_status_signaller_task
 pub static BELKA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
+
+// WiFi Connection Status - updated by connection_task, read by comms_status_signaller_task.
+//
+// esp-radio 0.18 removed the free function `wifi::sta_state()`, so connection
+// state is only reachable through the `WifiController`, which connection_task
+// owns. Mirror it here the same way the Belka status is mirrored.
+pub static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);

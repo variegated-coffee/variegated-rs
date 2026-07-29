@@ -8,14 +8,14 @@ rust-version = "1.88"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [dependencies]
-trouble-host = { git = "https://github.com/embassy-rs/trouble", features = ["default-packet-pool", "central", "scan", "defmt"] }
-bt-hci = "0.6"
-embassy-sync = "0.7.2"
-embassy-time = { version = "0.5.0", features = ["defmt"] }
-embassy-futures = "0.1"
-defmt = "1.0.1"
-heapless = "0.8"
-static_cell = "2.1.1"
+trouble-host = { workspace = true, features = ["default-packet-pool", "central", "scan", "defmt"] }
+bt-hci.workspace = true
+embassy-sync.workspace = true
+embassy-time = { workspace = true, features = ["defmt"] }
+embassy-futures.workspace = true
+defmt.workspace = true
+heapless.workspace = true
+static_cell.workspace = true
 
 [features]
 default = ["defmt"]
