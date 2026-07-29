@@ -99,7 +99,7 @@ impl<'a> Value<'a> for ScheduleItem {
         slice
     }
 
-    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError>
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError>
     where
         Self: Sized
     {
@@ -118,6 +118,10 @@ impl<'a> Value<'a> for ScheduleItem {
             },
         };
 
-        v
+        // sequential-storage 6.0 made `deserialize_from` also report how much of
+        // the buffer was consumed. `from_bytes_crc32` reads the whole slice (the
+        // trailing four bytes being the CRC), and the slice we are handed is
+        // exactly what `serialize_into` produced, so that is `buffer.len()`.
+        v.map(|value| (value, buffer.len()))
     }
 }

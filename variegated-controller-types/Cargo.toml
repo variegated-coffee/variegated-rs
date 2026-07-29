@@ -13,7 +13,7 @@ heapless.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"], optional = true }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
-sequential-storage = { workspace = true, optional = true, features = ["defmt-03"] }
+sequential-storage = { workspace = true, optional = true, features = ["defmt"] }
 postcard = { workspace = true, optional = true, features = ["alloc", "use-crc"] }
 crc = { workspace = true, optional = true }
 

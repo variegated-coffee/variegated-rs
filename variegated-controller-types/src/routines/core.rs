@@ -123,7 +123,7 @@ impl<'a> Value<'a> for Routine {
         slice
     }
 
-    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError>
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError>
     where
         Self: Sized
     {
@@ -142,6 +142,7 @@ impl<'a> Value<'a> for Routine {
             },
         };
 
-        v
+        // See the note on `ScheduleItem`: the consumed length is the whole slice.
+        v.map(|value| (value, buffer.len()))
     }
 }

@@ -8,8 +8,9 @@ use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
-use sequential_storage::cache::NoCache;
-use sequential_storage::map::{fetch_all_items, store_item};
+use sequential_storage::cache::Cache;
+use sequential_storage::map::{MapConfig, MapStorage};
+use crate::flash::BorrowedFlash;
 use variegated_controller_types::{MachineCommand, ScheduleItem};
 use variegated_timekeeping::TimeKeeper;
 
@@ -279,21 +280,19 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
             return Ok(());
         }
 
-        let mut cache = NoCache::new();
-
         let mut guard = self.flash.lock().await;
-        let flash_ref = guard.deref_mut();
+        let mut storage = MapStorage::<u16, _, _>::new(
+            BorrowedFlash(guard.deref_mut()),
+            MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid schedule flash range")?,
+            Cache::new_uncached(),
+        );
 
         info!("Loading schedules from flash...");
         // Create the iterator of map items
-        let mut iterator = fetch_all_items::<u16, _, _>(
-            flash_ref,
-            self.range.clone(),
-            &mut cache,
-            &mut self.deserialization_buffer
-        )
-        .await
-        .unwrap();
+        let mut iterator = storage
+            .fetch_all_items(&mut self.deserialization_buffer)
+            .await
+            .unwrap();
 
         let mut max_index = 0usize;
         while let item = iterator
@@ -339,16 +338,15 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
 
     async fn store_in_flash(&mut self, index: usize, schedule: &Option<ScheduleItem>) -> Result<(), &'static str> {
         let mut guard = self.flash.lock().await;
-        let flash_ref = guard.deref_mut();
-
-        let mut cache = NoCache::new();
+        let mut storage = MapStorage::<u16, _, _>::new(
+            BorrowedFlash(guard.deref_mut()),
+            MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid schedule flash range")?,
+            Cache::new_uncached(),
+        );
 
         let key = index as u16;
 
-        store_item(
-            flash_ref,
-            self.range.clone(),
-            &mut cache,
+        storage.store_item(
             &mut self.deserialization_buffer,
             &key,
             schedule
@@ -439,15 +437,17 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
 
         // Remove everything
         {
-            let mut cache = NoCache::new();
-
             let mut flash = self.flash.lock().await;
-            sequential_storage::map::remove_all_items::<u16, _>(
-                flash.deref_mut(),
-                self.range.clone(),
-                &mut cache,
-                &mut self.deserialization_buffer,
-            ).await.map_err(|_| "Failed to remove schedule item in flash")?;
+            let mut storage = MapStorage::<u16, _, _>::new(
+                BorrowedFlash(flash.deref_mut()),
+                MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid schedule flash range")?,
+                Cache::new_uncached(),
+            );
+
+            storage
+                .remove_all_items(&mut self.deserialization_buffer)
+                .await
+                .map_err(|_| "Failed to remove schedule item in flash")?;
         }
 
         // Re-store all schedules with consecutive indices starting from 0

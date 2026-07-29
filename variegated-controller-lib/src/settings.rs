@@ -7,8 +7,9 @@ use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash}
 use variegated_controller_types::{BoilerConfiguration, GroupConfiguration};
 use heapless::Vec;
 use postcard::to_slice;
-use sequential_storage::cache::NoCache;
-use sequential_storage::map::{fetch_item, store_item, Key, SerializationError, Value};
+use sequential_storage::cache::Cache;
+use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError, Value};
+use crate::flash::BorrowedFlash;
 
 pub trait SettingsStorage<SettingsT: Default> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
@@ -46,9 +47,14 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 
         // Otherwise load from flash
         let mut flash = self.flash.lock().await;
-        let mut cache = NoCache::new();
+        let mut storage = MapStorage::<u8, _, _>::new(
+            BorrowedFlash(flash.deref_mut()),
+            MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid settings flash range")?,
+            Cache::new_uncached(),
+        );
 
-        let item = fetch_item::<u8, SettingsT, _>(flash.deref_mut(), self.range.clone(), &mut cache, &mut self.deserialization_buffer, &0)
+        let item = storage
+            .fetch_item::<SettingsT>(&mut self.deserialization_buffer, &0)
             .await;
 
         if let Ok(Some(data)) = item {
@@ -105,7 +111,11 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
         }
 
         let mut flash = self.flash.lock().await;
-        let mut cache = NoCache::new();
+        let mut storage = MapStorage::<u8, _, _>::new(
+            BorrowedFlash(flash.deref_mut()),
+            MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid settings flash range")?,
+            Cache::new_uncached(),
+        );
 
 //        let mut serialization_buffer = [0u8; 1024];
         let mut data_buffer = vec![0u8; 40*1024];
@@ -116,10 +126,7 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 
     //    info!("Storing settings to flash, actual len = {}", s.len());
 
-        store_item(
-            flash.deref_mut(),
-            self.range.clone(),
-            &mut cache,
+        storage.store_item(
             &mut data_buffer,
             &0u8,
             settings
@@ -148,15 +155,17 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 
         // Remove everything
         {
-            let mut cache = NoCache::new();
-
             let mut flash = self.flash.lock().await;
-            sequential_storage::map::remove_all_items::<u8, _>(
-                flash.deref_mut(),
-                self.range.clone(),
-                &mut cache,
-                &mut self.deserialization_buffer,
-            ).await.map_err(|e| "Failed to remove all")?;
+            let mut storage = MapStorage::<u8, _, _>::new(
+                BorrowedFlash(flash.deref_mut()),
+                MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid settings flash range")?,
+                Cache::new_uncached(),
+            );
+
+            storage
+                .remove_all_items(&mut self.deserialization_buffer)
+                .await
+                .map_err(|_| "Failed to remove all")?;
         }
 
         // Write the current settings back

@@ -1,5 +1,6 @@
 #![no_std]
 
+pub mod flash;
 pub mod routine;
 pub mod settings;
 pub mod single_boiler_single_group;

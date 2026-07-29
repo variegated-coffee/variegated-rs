@@ -36,7 +36,7 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
 chrono.workspace = true
 
-sequential-storage = { workspace = true, features = ["defmt-03"] }
+sequential-storage = { workspace = true, features = ["defmt"] }
 embedded-storage-async.workspace = true
 log.workspace = true
 

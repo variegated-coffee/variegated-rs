@@ -82,7 +82,7 @@ impl<'a> Value<'a> for SingleBoilerSingleGroupPersistentConfiguration {
         slice
     }
 
-    fn deserialize_from(buffer: &'a [u8]) -> Result<Self, SerializationError>
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError>
     where
         Self: Sized
     {
@@ -108,16 +108,17 @@ impl<'a> Value<'a> for SingleBoilerSingleGroupPersistentConfiguration {
             },
         };
 
-        let vc = v.clone();
-        if vc.is_err() {
-            warn!("Deserialization failed");
+        match v {
+            Ok(value) => {
+                info!("Deserialized configuration");
+                // See `ScheduleItem`'s impl: the whole slice is consumed.
+                Ok((value, buffer.len()))
+            }
+            Err(e) => {
+                warn!("Deserialization failed");
+                Err(e)
+            }
         }
-
-        if let Ok(vc) = vc {
-            info!("Deserialized configuration");
-        }
-
-        v
     }
 }
 

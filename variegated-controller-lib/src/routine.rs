@@ -11,8 +11,9 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
 use heapless::index_map::FnvIndexMap;
-use sequential_storage::cache::NoCache;
-use sequential_storage::map::{fetch_all_items, remove_item, store_item, Key, SerializationError, Value};
+use sequential_storage::cache::Cache;
+use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError, Value};
+use crate::flash::BorrowedFlash;
 use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
 
 // Re-export types that are commonly used by consumers of this module
@@ -681,21 +682,19 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
             return Ok(());
         }
 
-        let mut cache = NoCache::new();
-
         let mut guard = self.flash.lock().await;
-        let flash_ref = guard.deref_mut();
+        let mut storage = MapStorage::<u16, _, _>::new(
+            BorrowedFlash(guard.deref_mut()),
+            MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid routine flash range")?,
+            Cache::new_uncached(),
+        );
 
         info!("Loading routines from flash...");
         // Create the iterator of map items
-        let mut iterator = fetch_all_items::<u16, _, _>(
-            flash_ref,
-            self.range.clone(),
-            &mut cache,
-            &mut self.deserialization_buffer
-        )
-        .await
-        .unwrap();
+        let mut iterator = storage
+            .fetch_all_items(&mut self.deserialization_buffer)
+            .await
+            .unwrap();
 
         while let Some((key, value)) = iterator
             .next::<Option<Routine>>(&mut self.deserialization_buffer)
@@ -725,16 +724,15 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
 
     async fn store_in_flash(&mut self, index: u16, routine: &Option<Routine>) -> Result<(), &'static str> {
         let mut guard = self.flash.lock().await;
-        let flash_ref = guard.deref_mut();
-
-        let mut cache = NoCache::new();
+        let mut storage = MapStorage::<u16, _, _>::new(
+            BorrowedFlash(guard.deref_mut()),
+            MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid routine flash range")?,
+            Cache::new_uncached(),
+        );
 
         let key = index;
 
-        store_item(
-            flash_ref,
-            self.range.clone(),
-            &mut cache,
+        storage.store_item(
             &mut self.deserialization_buffer,
             &key,
             routine
@@ -882,15 +880,17 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
 
         // Remove everything
         {
-            let mut cache = NoCache::new();
-
             let mut flash = self.flash.lock().await;
-            sequential_storage::map::remove_all_items::<u16, _>(
-                flash.deref_mut(),
-                self.range.clone(),
-                &mut cache,
-                &mut self.deserialization_buffer,
-            ).await.map_err(|_| "Failed to remove all routines from flash")?;
+            let mut storage = MapStorage::<u16, _, _>::new(
+                BorrowedFlash(flash.deref_mut()),
+                MapConfig::try_new(self.range.clone()).map_err(|_| "Invalid routine flash range")?,
+                Cache::new_uncached(),
+            );
+
+            storage
+                .remove_all_items(&mut self.deserialization_buffer)
+                .await
+                .map_err(|_| "Failed to remove all routines from flash")?;
         }
 
         // Yield to allow other tasks (like watchdog feeding) to run after long erase operation
