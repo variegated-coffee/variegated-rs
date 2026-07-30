@@ -1,4 +1,5 @@
-//! The application processor's debug bus.
+//! The debug bus, shared by whichever processor this build targets (see
+//! `SOURCE`).
 //!
 //! `publish_immediate` is deliberate: an absent or lagging consumer loses old
 //! frames instead of backpressuring a control task. Nothing on this path may ever
@@ -45,11 +46,25 @@ pub fn subscriber() -> Option<Subscriber<'static, CriticalSectionRawMutex, Debug
     BUS.subscriber().ok()
 }
 
+// Which processor this build stamps its frames with. Selected at compile time so the
+// same crate serves both firmwares with no runtime init step and no wrong-default
+// risk -- a mislabelled source would silently corrupt the host's per-source sequence
+// accounting.
+#[cfg(all(feature = "source-application", feature = "source-comms"))]
+compile_error!("enable exactly one of `source-application` / `source-comms`, not both");
+#[cfg(not(any(feature = "source-application", feature = "source-comms")))]
+compile_error!("enable exactly one of `source-application` / `source-comms`");
+
+#[cfg(feature = "source-application")]
+pub const SOURCE: DebugSource = DebugSource::Application;
+#[cfg(feature = "source-comms")]
+pub const SOURCE: DebugSource = DebugSource::Comms;
+
 /// Publish with an explicit timestamp. This is the primitive so the accounting is
 /// testable on a host, where `embassy_time` has no driver installed.
 pub fn publish_with(uptime_ms: u64, payload: DebugPayload) {
     let frame = DebugFrame {
-        source: DebugSource::Application,
+        source: SOURCE,
         seq: SEQ.fetch_add(1, Ordering::Relaxed),
         uptime_ms,
         payload,
@@ -75,6 +90,14 @@ pub fn emit_text(severity: Severity, message: DebugText) {
 mod tests {
     use super::*;
     use variegated_controller_types::debug::{DebugEvent, DebugPayload};
+
+    #[test]
+    fn frames_are_stamped_with_the_compiled_in_source() {
+        let mut sub = BUS.subscriber().unwrap();
+        publish_with(0, DebugPayload::Event(DebugEvent::Boot));
+        let frame = sub.try_next_message_pure().unwrap();
+        assert_eq!(frame.source, DebugSource::Application);
+    }
 
     #[test]
     fn sequence_numbers_increase_per_frame() {
