@@ -11,7 +11,6 @@ use embassy_futures::join::join4;
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::blocking_mutex::Mutex;
-use embassy_time::Instant;
 use postcard::{from_bytes_cobs, to_allocvec_cobs};
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage,
@@ -26,6 +25,13 @@ use postcard::accumulator::{CobsAccumulator, FeedResult};
 use variegated_controller_lib::routine::RoutineRepository;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_timekeeping::TimeKeeper;
+
+/// Earliest Unix timestamp we will accept from the comms processor as a real
+/// wall-clock time: 2020-01-01T00:00:00Z.
+///
+/// Anything below this is the comms processor's RTC counting up from zero
+/// before SNTP has synced, not an actual date.
+const MIN_PLAUSIBLE_UNIX_TIME: u64 = 1_577_836_800;
 
 /// Generic ESP32-C6 transceiver task that handles bidirectional communication
 ///
@@ -101,19 +107,27 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
                             match message {
                                 CommsProcessorToApplicationProcessorMessage::CommsStatus(status) => {
-                                    if let Some(timestamp) = status.timestamp {
-                                        // Calculate system boot time
-                                        let now_unix = timestamp;
-                                        let seconds_since_boot = Instant::now().as_secs();
-
-                                        let _boot_time = now_unix - seconds_since_boot;
-
-                                        if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
-                                            // Set time and sync to RTC if available
-                                            if TimeKeeper::set_time(now_datetime).is_ok() {
-                                                info!("System time synchronized to UTC (timestamp: {})", now_unix);
-                                            } else {
-                                                info!("Failed to set system time");
+                                    if let Some(now_unix) = status.timestamp {
+                                        // The comms processor's RTC starts at zero and only
+                                        // becomes a real wall-clock time once SNTP has synced,
+                                        // so a small value here means "not synced yet" rather
+                                        // than "it is 1970". Ignore those instead of dragging
+                                        // our clock back to the epoch.
+                                        //
+                                        // This also used to compute
+                                        // `now_unix - Instant::now().as_secs()` into a discarded
+                                        // binding, which panicked on underflow whenever the comms
+                                        // processor rebooted (reflash, brownout, watchdog) while
+                                        // this processor kept running -- its uptime then exceeds
+                                        // the freshly-booted RTC. The value was never used.
+                                        if now_unix >= MIN_PLAUSIBLE_UNIX_TIME {
+                                            if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
+                                                // Set time and sync to RTC if available
+                                                if TimeKeeper::set_time(now_datetime).is_ok() {
+                                                    info!("System time synchronized to UTC (timestamp: {})", now_unix);
+                                                } else {
+                                                    info!("Failed to set system time");
+                                                }
                                             }
                                         }
                                     }
