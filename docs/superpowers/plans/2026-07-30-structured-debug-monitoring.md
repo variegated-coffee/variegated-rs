@@ -381,9 +381,15 @@ pub struct CommsState {
 
 use crate::commands::MachineCommand;
 
+/// Derives exactly what `MachineCommand` and the two inter-processor message enums
+/// derive -- `Clone` plus serde -- and deliberately no more. `MachineCommand` has no
+/// `Debug`, no `PartialEq`, and a *hand-written* `defmt::Format` (deriving it would
+/// demand `Format` on every nested type), so anything more here would force those
+/// traits onto ~8 types across the command tree to satisfy traits nothing needs:
+/// no test compares or prints a `DebugCommand`, embassy channels don't require it,
+/// and `label()` below covers logging and the TUI palette.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub enum DebugCommand {
     /// Forwarded to the application processor's command channel, exactly as the
     /// WebSocket and ESPHome paths already do.
