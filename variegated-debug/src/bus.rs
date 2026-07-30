@@ -55,9 +55,9 @@ compile_error!("enable exactly one of `source-application` / `source-comms`, not
 #[cfg(not(any(feature = "source-application", feature = "source-comms")))]
 compile_error!("enable exactly one of `source-application` / `source-comms`");
 
-#[cfg(feature = "source-application")]
+#[cfg(all(feature = "source-application", not(feature = "source-comms")))]
 pub const SOURCE: DebugSource = DebugSource::Application;
-#[cfg(feature = "source-comms")]
+#[cfg(all(feature = "source-comms", not(feature = "source-application")))]
 pub const SOURCE: DebugSource = DebugSource::Comms;
 
 /// Publish with an explicit timestamp. This is the primitive so the accounting is
@@ -96,7 +96,7 @@ mod tests {
         let mut sub = BUS.subscriber().unwrap();
         publish_with(0, DebugPayload::Event(DebugEvent::Boot));
         let frame = sub.try_next_message_pure().unwrap();
-        assert_eq!(frame.source, DebugSource::Application);
+        assert_eq!(frame.source, SOURCE);
     }
 
     #[test]
