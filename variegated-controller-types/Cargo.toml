@@ -18,8 +18,18 @@ postcard = { workspace = true, optional = true, features = ["alloc", "use-crc"] 
 crc = { workspace = true, optional = true }
 
 [features]
-serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "heapless/serde"]
-std = []
+# `serde/alloc` is required, not optional: the derives in this crate cover types
+# containing `alloc::vec::Vec` and `alloc::string::String`, whose serde impls live
+# behind that feature. Without it the crate only compiled when some other member of
+# the graph happened to enable serde's alloc/std, so `cargo check -p
+# variegated-controller-types` failed on its own for both targets.
+serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "serde/alloc", "heapless/serde"]
+# The serde derives in this crate use `alloc::vec::Vec` and `alloc::string::String`,
+# whose Serialize/Deserialize impls live behind serde's own `alloc`/`std` feature.
+# This feature was previously `[]`, which meant the crate only ever built when some
+# *other* member of the dependency graph happened to turn serde's std on -- it did
+# not build standalone for a host target.
+std = ["serde?/std"]
 defmt = ["dep:defmt", "heapless/defmt"]
 double_boiler = []
 single_boiler = []

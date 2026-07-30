@@ -1,5 +1,9 @@
 use crate::*;
 use alloc::vec::Vec;
+// Only used by the hand-written `defmt::Format` impl for `CommsStatus` below, so it
+// has to carry the same gate -- an unconditional import made the crate fail to build
+// with the `defmt` feature off.
+#[cfg(feature = "defmt")]
 use defmt::Debug2Format;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
