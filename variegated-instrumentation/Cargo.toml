@@ -7,7 +7,16 @@ edition = "2024"
 bench = false
 
 [dependencies]
-portable-atomic.workspace = true
+# `fallback` is portable-atomic's own default feature, stripped by the
+# workspace's `default-features = false`. This crate stores `AtomicU64`
+# unconditionally under `instrumentation` (see counters.rs/indicators.rs), and
+# its primary target, thumbv8m.main-none-eabihf (RP2350, Cortex-M33), has no
+# native 64-bit atomics -- without `fallback` the crate cannot build standalone
+# for that target at all. It previously "worked" only because some other crate
+# elsewhere in a larger dependency graph (e.g. the examples build, via
+# static_cell) happened to pull `fallback` in and Cargo unified the feature
+# across the whole graph; that was a graph-shape accident, not a guarantee.
+portable-atomic = { workspace = true, features = ["fallback"] }
 defmt = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
