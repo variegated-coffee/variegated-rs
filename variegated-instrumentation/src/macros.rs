@@ -206,8 +206,6 @@ macro_rules! indicate {
 
 #[cfg(test)]
 mod tests {
-    use crate::{define_counters, define_indicators};
-
     define_counters! {
         enum TestCounterId {
             LoopIterations = 0,
@@ -235,6 +233,8 @@ mod tests {
 
     #[test]
     fn ids_still_convert_to_u8() {
+        assert_eq!(u8::from(TestCounterId::LoopIterations), 0);
         assert_eq!(u8::from(TestCounterId::SensorReads), 1);
+        assert_eq!(u8::from(TestIndicatorId::BoilerTemp), 0);
     }
 }
