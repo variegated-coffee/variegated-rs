@@ -17,9 +17,16 @@ use serde::{Deserialize, Serialize};
 use variegated_controller_types::debug::DebugFrame;
 use variegated_controller_types::debug_command::DebugCommand;
 
-/// Largest COBS-encoded message we emit or accept. `DebugFrame` is ~150 bytes; the
-/// headroom covers `DebugCommand::Machine`, which wraps the much larger
-/// `MachineCommand`.
+/// Largest COBS-encoded message we emit or accept.
+///
+/// This comfortably bounds every `DebugFrame` we emit (~150 bytes). It does **not**
+/// bound every `DebugCommand` we can be asked to encode: `MachineCommand::AddRoutine`
+/// and `::UpdateRoutine` carry a `Routine`, whose `alloc::Vec` fields (steps,
+/// parameters) are unbounded, so no finite `MAX_FRAME` can guarantee headroom for
+/// them. When an injected command doesn't fit, `encode_command` returns
+/// `Err(CodecError::TooLarge)` rather than emitting a truncated or corrupt frame --
+/// that is a clean, safe refusal, but callers must check for and surface it rather
+/// than discard it silently.
 pub const MAX_FRAME: usize = 512;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -108,7 +115,9 @@ mod tests {
     // `extern crate std` in lib.rs (Step 8).
     use std::vec;
     use std::vec::Vec;
+    use variegated_controller_types::commands::MachineCommand;
     use variegated_controller_types::debug::*;
+    use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
 
     fn frame(seq: u32, payload: DebugPayload) -> DebugFrame {
         DebugFrame { source: DebugSource::Application, seq, uptime_ms: 1234, payload }
@@ -191,5 +200,31 @@ mod tests {
         let f = frame(1, DebugPayload::Event(DebugEvent::Boot));
         let mut tiny = [0u8; 2];
         assert_eq!(encode_frame(&f, &mut tiny), Err(CodecError::TooLarge));
+    }
+
+    /// `DebugCommand` has no `PartialEq` (deliberately -- it wraps `MachineCommand`,
+    /// which doesn't have one either, and cascading the derive would ripple across
+    /// ~8 unrelated types), so this asserts on the decoded shape by pattern match
+    /// instead of `assert_eq!`. Covers `encode_command`/`CommandDecoder`, which
+    /// otherwise have no test at all: a `Machine`-wrapped command (the common case,
+    /// forwarded straight to the app processor's command channel) and an `App` op.
+    #[test]
+    fn round_trips_debug_commands() {
+        let machine = DebugCommand::Machine(MachineCommand::StartBrewing(0));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded_machine = encode_command(&machine, &mut buf).unwrap().to_vec();
+
+        let app = DebugCommand::App(AppDebugOp::ForceSnapshot);
+        let mut buf2 = [0u8; MAX_FRAME];
+        let encoded_app = encode_command(&app, &mut buf2).unwrap().to_vec();
+
+        let mut decoder: CommandDecoder = Decoder::new();
+        let mut got: Vec<DebugCommand> = Vec::new();
+        decoder.feed(&encoded_machine, |c| got.push(c));
+        decoder.feed(&encoded_app, |c| got.push(c));
+
+        assert_eq!(got.len(), 2);
+        assert!(matches!(&got[0], DebugCommand::Machine(MachineCommand::StartBrewing(0))));
+        assert!(matches!(&got[1], DebugCommand::App(AppDebugOp::ForceSnapshot)));
     }
 }

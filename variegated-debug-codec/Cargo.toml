@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# `default-features = false` keeps this alloc-free: `postcard::accumulator` is not
-# feature-gated and `to_slice_cobs` needs no allocator.
-postcard = { workspace = true, default-features = false }
+# Plain workspace inheritance, no `default-features` override: postcard's default
+# feature is `heapless-cas` (heapless + its CAS support), which has nothing to do
+# with alloc -- `alloc` is a separate opt-in postcard feature we don't enable
+# either. This crate stays alloc-free because `to_slice_cobs` and the
+# `accumulator` module are both unconditional, not because of this line.
+postcard.workspace = true
 serde = { workspace = true, default-features = false }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "double_boiler", "single_group"] }
 defmt = { workspace = true, optional = true }

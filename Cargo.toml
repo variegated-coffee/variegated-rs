@@ -72,15 +72,7 @@ display-interface-spi = "0.5"
 
 # Serialization / storage
 crc = "3.4.0"
-# `default-features` is explicit (rather than the `"1.1.3"` shorthand) so that
-# member crates inheriting via `workspace = true` are allowed to override it --
-# Cargo only permits a member's inherited `dep.workspace = true` entry to set
-# `default-features` if the workspace declaration states it explicitly. This is
-# set to `false` for `variegated-debug-codec`'s sake, but per the note in
-# `variegated-comms/Cargo.toml`, every sibling crate still depends on postcard
-# with defaults on (`heapless-cas`, no-std safe), so Cargo's feature
-# unification turns it on for the whole graph regardless.
-postcard = { version = "1.1.3", default-features = false }
+postcard = "1.1.3"
 # NOTE: the `postcard` feature is deliberately NOT enabled. It brings a blanket
 # `impl<T: PostcardValue> Value for T`, which both collides with our hand-written
 # `Value` impls and, more importantly, serializes with plain postcard. Ours use
