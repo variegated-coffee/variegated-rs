@@ -900,7 +900,11 @@ major versions, so the channel types are unrelated and cannot be shared.
 ```bash
 cargo test-aarch64 -p variegated-instrumentation --features instrumentation
 ```
-Expected: PASS, 6 tests (3 pre-existing + 3 new).
+Expected: PASS, 17 tests (14 pre-existing across all modules + 3 new). Note the
+crate's doctests were already failing before this task — `[lib] test = false` gates
+only the unit-test target, not doctests — so this step also fences the two `rust`
+blocks in `README.md` as `ignore`, matching what `src/lib.rs` already does for its
+own examples. Without that, this command stays red and Task 14's gate fails.
 
 - [ ] **Step 6: Verify the examples still build**
 
