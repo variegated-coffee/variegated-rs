@@ -2366,6 +2366,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-debug"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt 1.1.1",
+ "embassy-futures",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "heapless 0.9.3",
+ "portable-atomic",
+ "variegated-controller-types",
+ "variegated-debug-codec",
+ "variegated-instrumentation",
+]
+
+[[package]]
 name = "variegated-debug-codec"
 version = "0.1.0"
 dependencies = [

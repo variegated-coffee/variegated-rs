@@ -1,0 +1,44 @@
+[package]
+name = "variegated-debug"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+bench = false
+
+[dependencies]
+embassy-sync.workspace = true
+embassy-time.workspace = true
+# `fallback` is portable-atomic's default feature, off at the workspace level
+# (`default-features = false`). thumbv8m.main-none-eabihf (Cortex-M33) has no
+# native 64-bit CAS, so without it `AtomicU64` (used by
+# `variegated-instrumentation`'s counters/indicators, pulled in under the
+# `instrumentation` feature) doesn't exist at all. The full examples build
+# never notices because `static_cell` happens to pull `fallback` in anyway; a
+# standalone check of this crate does not have that crutch, so request it here.
+portable-atomic = { workspace = true, features = ["fallback"] }
+heapless.workspace = true
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "double_boiler", "single_group"] }
+variegated-debug-codec = { version = "0.1.0", path = "../variegated-debug-codec" }
+variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
+defmt = { workspace = true, optional = true }
+embassy-usb = { workspace = true, optional = true }
+embassy-futures = { workspace = true, optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt", "variegated-controller-types/defmt", "variegated-debug-codec/defmt"]
+instrumentation = ["variegated-instrumentation/instrumentation"]
+# RP2350 USB CDC-ACM transport (Task 4).
+usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures"]
+std = ["variegated-controller-types/std"]
+
+[dev-dependencies]
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "std", "double_boiler", "single_group"] }
+variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation", features = ["instrumentation"] }
+# Host tests link `embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex`,
+# which needs a `critical_section::Impl` registered at link time. On real
+# hardware that comes from embassy-rp's `critical-section-impl` feature (pulled
+# in by the firmware binary, not this library crate); on the host test target
+# there is no such crate in the graph, so we register one here, test-only.
+critical-section = { version = "1.2", features = ["std"] }

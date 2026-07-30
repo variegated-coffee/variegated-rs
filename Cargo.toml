@@ -22,6 +22,7 @@ members = [
     "variegated-timekeeping",
     "variegated-rp235x-atomic-raw-mutex",
     "variegated-debug-codec",
+    "variegated-debug",
 ]
 resolver = "2"
 package = { rust-version = "1.88" }
@@ -42,6 +43,9 @@ embassy-rp = "0.10.0"
 embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
 embassy-usb-logger = "0.6.0"
+# embassy-usb 0.6.0 is already in Cargo.lock via embassy-usb-logger; this promotes it
+# to a direct dependency for the CDC-ACM debug transport.
+embassy-usb = "0.6.0"
 
 # Logging / panic handling. defmt, defmt-rtt and panic-probe are a set.
 defmt = "1.1.1"
