@@ -823,9 +823,16 @@ fn publish_snapshot(psram_heap: bool) {
         frames_emitted: stats.emitted,
         frames_dropped: stats.dropped,
         source_state: SourceState::Application(ApplicationState {
-            watchdog_fed_ms_ago: 0,
+            // Not plumbed: the watchdog is fed inside variegated-controller-lib's run
+            // loop, which has no handle to this snapshot. `None` renders as "unknown"
+            // rather than a plausible-looking "fed 0 ms ago".
+            watchdog_fed_ms_ago: None,
             psram_heap,
+            // Not determined: reading it would mean locking the routine repository
+            // from the snapshot path. `None` currently conflates "no routine" with
+            // "not determined" -- acceptable while nothing consumes it.
             routine_running: None,
+            // Accurate as zero until Task 8 adds the relay that produces them.
             link_frames_relayed: 0,
             link_frames_dropped: 0,
         }),

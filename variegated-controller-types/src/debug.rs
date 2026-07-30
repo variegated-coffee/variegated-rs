@@ -214,9 +214,16 @@ pub enum SourceState {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApplicationState {
-    pub watchdog_fed_ms_ago: u32,
+    /// `None` while the watchdog's feed time is not plumbed through to this
+    /// snapshot. Deliberately an `Option` rather than a `0` sentinel: a zero here
+    /// reads as "fed just now", which is a plausible-looking lie, and watchdog feed
+    /// age is one of the things the hardware checkpoint exists to observe.
+    pub watchdog_fed_ms_ago: Option<u32>,
     pub psram_heap: bool,
+    /// `None` means "no routine running, or not determined" -- see the comment at the
+    /// construction site.
     pub routine_running: Option<u16>,
+    /// Filled by the relay in Task 8. Zero is accurate before then: there is no relay.
     pub link_frames_relayed: u32,
     pub link_frames_dropped: u32,
 }
