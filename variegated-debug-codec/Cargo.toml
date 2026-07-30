@@ -1,0 +1,25 @@
+[package]
+name = "variegated-debug-codec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# `default-features = false` keeps this alloc-free: `postcard::accumulator` is not
+# feature-gated and `to_slice_cobs` needs no allocator.
+postcard = { workspace = true, default-features = false }
+serde = { workspace = true, default-features = false }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "double_boiler", "single_group"] }
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt", "variegated-controller-types/defmt"]
+# Host tests need serde's std impls for the `alloc` types in controller-types.
+std = ["variegated-controller-types/std"]
+
+[dev-dependencies]
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "std", "double_boiler", "single_group"] }
+# The test module builds a `heapless::Vec` directly (`debug::Vec` is a private
+# import in `variegated-controller-types`, not re-exported), so it needs its own
+# handle on the crate. Version comes from the workspace pin used everywhere else.
+heapless.workspace = true

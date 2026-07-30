@@ -76,6 +76,8 @@ pub mod communication;
 pub mod configuration;
 pub mod control;
 pub mod controller_variants;
+pub mod debug;
+pub mod debug_command;
 pub mod machine_definition;
 pub mod machine_mode;
 pub mod peripherals;
