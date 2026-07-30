@@ -76,7 +76,7 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
 async fn comms_status_signaller_task(
     rtc: &'static esp_hal::rtc_cntl::Rtc<'static>,
 ) {
-    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, WIFI_CONNECTED, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, TIME_SYNCED, WIFI_CONNECTED, WIFI_RSSI_SIGNAL};
     use variegated_comms_firmware::config::{BELKA_PERIPHERAL_ID, USEC_IN_SEC};
     use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
     use heapless::index_map::FnvIndexMap;
@@ -87,14 +87,17 @@ async fn comms_status_signaller_task(
         // Get real WiFi connection status
         let wifi_connected = WIFI_CONNECTED.load(Ordering::Relaxed);
 
-        // Get real timestamp from RTC (convert microseconds to seconds)
-        let timestamp = {
-            let time_us = rtc.current_time_us();
-            if time_us > 0 {
-                Some(time_us / USEC_IN_SEC)
-            } else {
-                None
-            }
+        // Get real timestamp from RTC (convert microseconds to seconds).
+        //
+        // The RTC counts up from zero at boot, so `> 0` was true within a
+        // microsecond of startup and we reported seconds-since-boot as though
+        // it were a Unix timestamp. The application processor takes this as
+        // wall-clock time, so until SNTP synced it was being told the date was
+        // just after the epoch. Only report once SNTP has actually set the RTC.
+        let timestamp = if TIME_SYNCED.load(Ordering::Relaxed) {
+            Some(rtc.current_time_us() / USEC_IN_SEC)
+        } else {
+            None
         };
 
         // Get WiFi RSSI from signal (updated by connection_task)

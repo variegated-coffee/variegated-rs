@@ -6,8 +6,10 @@ use defmt::{error, info};
 use embassy_net::{dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
 use embassy_time::{Duration, Timer};
 use esp_hal::rtc_cntl::Rtc;
+use portable_atomic::Ordering;
 use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 
+use crate::channels::TIME_SYNCED;
 use crate::config::{NTP_SERVER, USEC_IN_SEC};
 
 /// Adapter making an embassy-net `UdpSocket` usable by sntpc.
@@ -135,6 +137,10 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
                     (time.sec() as u64 * USEC_IN_SEC)
                         + ((time.sec_fraction() as u64 * USEC_IN_SEC) >> 32),
                 );
+
+                // The RTC now holds a real wall-clock time, so it is safe to
+                // report it to the application processor.
+                TIME_SYNCED.store(true, Ordering::Relaxed);
 
                 // Log synchronized time
                 info!(
