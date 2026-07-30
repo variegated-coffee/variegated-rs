@@ -31,7 +31,23 @@ Design spec: `docs/superpowers/specs/2026-07-30-structured-debug-monitoring-desi
 Three deviations, all discovered while pinning down exact types. They are already reflected in the tasks below.
 
 1. **Debug types live in `variegated-controller-types`, not a new `variegated-debug-types` crate.** `DebugCommand` wraps `MachineCommand` while `communication.rs` must wrap `DebugFrame` — a separate crate makes the dependency circular. Only the codec becomes a new crate (`variegated-debug-codec`), which depends on the types in one direction.
-2. **The device-side bus cannot be shared between the firmwares.** `variegated-rs` resolves embassy-sync 0.7.2; `variegated-comms-rs` resolves 0.8.0 (its `Cargo.toml` documents two coexisting versions and warns "don't pass a channel across that boundary"). So `variegated-debug` is RP2350-only and the comms firmware gets its own ~40-line bus, as the design already assumed.
+2. ~~**The device-side bus cannot be shared between the firmwares.**~~ **RETRACTED — this
+   was wrong.** The original claim was that `variegated-rs` resolves embassy-sync 0.7.2
+   while `variegated-comms-rs` resolves 0.8.0. Both workspaces in fact declare
+   `embassy-sync = "0.8.0"` and `embassy-time = "0.5.1"`, and `variegated-rs`'s
+   lockfile contains exactly one embassy-sync entry, at 0.8.0. (The 0.7.2 figure came
+   from a stale crates registry directory, never from the manifest. The "two versions
+   coexist" comment in comms-rs is about `trouble-host` wanting ^0.7 while esp-hal
+   wants ^0.8 — it does not describe the firmware crate's own dependency, which is
+   0.8.0.)
+
+   **Therefore the bus IS shared.** `variegated-debug` is used by both firmwares, with
+   the emitting source selected at compile time by a required feature —
+   `source-application` or `source-comms`, exactly one, enforced by `compile_error!`.
+   The comms firmware depends on it by path, as it already does for
+   `variegated-controller-types`. This keeps sequence numbering, drop accounting and
+   emission semantics identical across the two processors by construction rather than
+   by a comment asking humans to keep two copies in sync.
 3. **One item from the approved injection scope is deferred, not implemented:**
    "dump settings/routines/schedules". Everything else in that scope is covered.
    The reason is a genuine conflict with the frame-size design: `DebugFrame` is kept
@@ -981,6 +997,11 @@ instrumentation = ["variegated-instrumentation/instrumentation"]
 # RP2350 USB CDC-ACM transport (Task 4).
 usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures"]
 std = ["variegated-controller-types/std"]
+# Exactly one of these must be enabled -- it stamps every frame this firmware emits.
+# Both workspaces resolve the same embassy-sync, so this one crate serves both
+# processors; the feature is what distinguishes them.
+source-application = []
+source-comms = []
 
 [dev-dependencies]
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "std", "double_boiler", "single_group"] }
@@ -1116,7 +1137,7 @@ mod tests {
 - [ ] **Step 3: Run to verify they fail**
 
 ```bash
-cargo test-aarch64 -p variegated-debug --features std,instrumentation
+cargo test-aarch64 -p variegated-debug --features std,instrumentation,source-application
 ```
 Expected: FAIL to compile — the modules don't exist yet.
 
@@ -1194,6 +1215,20 @@ pub type DebugBus = PubSubChannel<CriticalSectionRawMutex, DebugFrame, BUS_CAPAC
 
 pub static BUS: DebugBus = PubSubChannel::new();
 
+// Which processor this build stamps its frames with. Selected at compile time so the
+// same crate serves both firmwares with no runtime init step and no wrong-default
+// risk -- a mislabelled source would silently corrupt the host's per-source sequence
+// accounting.
+#[cfg(all(feature = "source-application", feature = "source-comms"))]
+compile_error!("enable exactly one of `source-application` / `source-comms`, not both");
+#[cfg(not(any(feature = "source-application", feature = "source-comms")))]
+compile_error!("enable exactly one of `source-application` / `source-comms`");
+
+#[cfg(feature = "source-application")]
+pub const SOURCE: DebugSource = DebugSource::Application;
+#[cfg(feature = "source-comms")]
+pub const SOURCE: DebugSource = DebugSource::Comms;
+
 static SEQ: AtomicU32 = AtomicU32::new(0);
 static EMITTED: AtomicU32 = AtomicU32::new(0);
 static DROPPED: AtomicU32 = AtomicU32::new(0);
@@ -1224,7 +1259,7 @@ pub fn subscriber() -> Option<Subscriber<'static, CriticalSectionRawMutex, Debug
 /// testable on a host, where `embassy_time` has no driver installed.
 pub fn publish_with(uptime_ms: u64, payload: DebugPayload) {
     let frame = DebugFrame {
-        source: DebugSource::Application,
+        source: SOURCE,
         seq: SEQ.fetch_add(1, Ordering::Relaxed),
         uptime_ms,
         payload,
@@ -1345,11 +1380,16 @@ impl<const NC: usize, const NI: usize> Sampler<NC, NI> {
 
 ```rust
 #![no_std]
-//! Device-side structured debug emission for the RP2350 application processor.
+//! Device-side structured debug emission, shared by both firmwares.
 //!
-//! Not shared with the comms firmware: that workspace resolves embassy-sync 0.8
-//! while this one resolves 0.7, so the channel types are different crates. The
-//! comms firmware has its own equivalent bus.
+//! Both workspaces declare `embassy-sync = "0.8.0"` and `embassy-time = "0.5.1"`, so
+//! the channel types are the same crate on the RP2350 and the ESP32-C6. The emitting
+//! processor is selected at compile time by the `source-application` /
+//! `source-comms` feature; enabling both, or neither, is a `compile_error!`.
+//!
+//! Sharing this rather than duplicating it is what keeps sequence numbering, drop
+//! accounting and the non-blocking publish contract identical on both sides of the
+//! link -- the host's gap detection depends on those matching.
 
 // The test harness needs std even though the crate itself is no_std.
 #[cfg(test)]
@@ -1368,14 +1408,14 @@ pub use bus::{emit_event, emit_text, publish, publish_with};
 - [ ] **Step 7: Run the tests to verify they pass**
 
 ```bash
-cargo test-aarch64 -p variegated-debug --features std,instrumentation
+cargo test-aarch64 -p variegated-debug --features std,instrumentation,source-application
 ```
 Expected: PASS, 8 tests.
 
 - [ ] **Step 8: Verify the embedded build**
 
 ```bash
-cargo check -p variegated-debug --target thumbv8m.main-none-eabihf --features instrumentation
+cargo check -p variegated-debug --target thumbv8m.main-none-eabihf --features instrumentation,source-application
 ```
 
 - [ ] **Step 9: Commit**
@@ -1410,11 +1450,18 @@ then on hardware in Task 7's checkpoint.
 In `variegated-debug/Cargo.toml`:
 
 ```toml
+# No chip feature here on purpose. rp-pac needs one to compile, but a library shared
+# by two firmwares must not dictate the board -- hardcoding one would collide via
+# feature unification the day anything targets another variant. Selection is passed
+# through to the binary, exactly as variegated-hal/Cargo.toml:19,38-40 does.
 embassy-rp = { workspace = true, optional = true }
 ```
-and extend the feature:
+and extend the features:
 ```toml
 usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures", "dep:embassy-rp"]
+rp2040 = ["embassy-rp/rp2040"]
+rp235xa = ["embassy-rp/rp235xa"]
+rp235xb = ["embassy-rp/rp235xb"]
 ```
 
 - [ ] **Step 2: Write the transport**
@@ -1518,7 +1565,21 @@ pub async fn run(
             };
             let mut buf = [0u8; MAX_FRAME];
             loop {
-                let frame = subscriber.next_message_pure().await;
+                // `next_message`, not `next_message_pure`: the latter silently swallows
+                // `WaitResult::Lagged`, so frames the publisher recycled while this
+                // writer was busy would go uncounted -- and a slow-but-connected host
+                // is exactly the case `WRITE_TIMEOUT` is designed to tolerate
+                // (worst case ceil(512/64) * 50ms = 400ms per frame). The counter has
+                // to be honest, since it is what the hardware checkpoint reads.
+                let frame = match subscriber.next_message().await {
+                    WaitResult::Message(frame) => frame,
+                    WaitResult::Lagged(n) => {
+                        for _ in 0..n {
+                            bus::note_dropped();
+                        }
+                        continue;
+                    }
+                };
 
                 // No host has opened the port: drop rather than queue.
                 if !cdc_tx.dtr() {
@@ -1576,7 +1637,7 @@ pub async fn run(
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
 ```
 ```bash
-cargo check -p variegated-debug --target thumbv8m.main-none-eabihf --features usb-cdc-rp,instrumentation
+cargo check -p variegated-debug --target thumbv8m.main-none-eabihf --features usb-cdc-rp,instrumentation,source-application,rp235xb
 ```
 Expected: no errors.
 
@@ -1641,7 +1702,7 @@ struct UsbDebugPeripherals {
 In `examples/Cargo.toml`:
 
 ```toml
-variegated-debug = { version = "0.1.0", path = "../variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt"] }
+variegated-debug = { version = "0.1.0", path = "../variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt", "source-application", "rp235xb"] }
 ```
 
 - [ ] **Step 3: Replace the hand-written instrumentation monitor**
@@ -2699,22 +2760,28 @@ Add:
 variegated-debug-codec = { path = "../../variegated-rs/variegated-debug-codec" }
 ```
 
-- [ ] **Step 3: Write the bus**
+- [ ] **Step 3: Depend on the shared bus — do not write a second one**
 
-`src/debug/bus.rs` — the same shape as `variegated_debug::bus`, but with
-`DebugSource::Comms`, `esp_hal::time::Instant` (or `embassy_time::Instant`) for
-uptime, and embassy-sync 0.8 types. Add a module comment explaining that it is a
-deliberate duplicate:
+There is no `src/debug/bus.rs`. Both workspaces declare `embassy-sync = "0.8.0"` and
+`embassy-time = "0.5.1"`, so `variegated_debug::bus` is the same types here as on the
+RP2350. Add to `crates/variegated-comms-firmware/Cargo.toml`:
 
-```rust
-//! The comms processor's debug bus.
-//!
-//! Duplicates `variegated_debug::bus` rather than sharing it: this workspace
-//! resolves embassy-sync 0.8 while variegated-rs resolves 0.7, so the channel
-//! types are unrelated. Keep the two in sync by hand -- they are both small.
+```toml
+# Same crate the application processor uses. `source-comms` stamps every frame this
+# firmware emits with DebugSource::Comms; enabling both source features (or neither)
+# is a compile_error. The `usb-cdc-rp` feature stays off -- that transport is
+# embassy-rp and RP2350-only.
+variegated-debug = { path = "../../variegated-rs/variegated-debug", default-features = false, features = ["source-comms", "defmt"] }
 ```
 
-Capacity: `BUS_CAPACITY = 16`, `BUS_SUBSCRIBERS = 2` (USB writer + TCP server).
+`src/debug/mod.rs` re-exports what the transports need so call sites stay short:
+
+```rust
+pub use variegated_debug::bus;
+```
+
+`BUS_CAPACITY = 16` and `BUS_SUBSCRIBERS = 2` (USB writer + TCP server) already match
+what the shared crate declares, so nothing needs sizing here.
 
 Also declare the TCP client counter here, so Task 10's snapshot can read it before
 Task 11 exists to increment it:
@@ -3089,7 +3156,7 @@ cargo build --manifest-path examples/Cargo.toml --bin dual_boiler --features=dua
 cargo test-aarch64 -p variegated-debug-codec --features std
 ```
 ```bash
-cargo test-aarch64 -p variegated-debug --features std,instrumentation
+cargo test-aarch64 -p variegated-debug --features std,instrumentation,source-application
 ```
 ```bash
 cargo test-aarch64 -p variegated-instrumentation --features instrumentation
