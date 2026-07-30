@@ -911,6 +911,7 @@ dependencies = [
  "variegated-comms",
  "variegated-controller-lib",
  "variegated-controller-types",
+ "variegated-debug",
  "variegated-fdc1004",
  "variegated-gravity-driver",
  "variegated-hal",

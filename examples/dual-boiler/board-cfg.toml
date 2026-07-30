@@ -91,6 +91,9 @@ watchdog = "embassy_rp::peripherals::WATCHDOG"
 pwm = "embassy_rp::peripherals::PWM_SLICE0"
 pin = "embassy_rp::peripherals::PIN_1"
 
+[usb_debug_peripherals]
+usb = "embassy_rp::peripherals::USB"
+
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 AdcIrq = "ADC_IRQ_FIFO"
@@ -98,3 +101,4 @@ InternalI2cIrq = "I2C1_IRQ"
 QwiicI2cIrq = "I2C0_IRQ"
 FlowMeterPioIrq = "PIO0_IRQ_0"
 DmaIrq = "DMA_IRQ_0"
+UsbIrq = "USBCTRL_IRQ"

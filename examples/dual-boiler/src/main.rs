@@ -21,7 +21,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{adc, dma, i2c, pio, pwm, spi, uart, watchdog, Peri, Peripherals};
+use embassy_rp::{adc, dma, i2c, pio, pwm, spi, uart, usb, watchdog, Peri, Peripherals};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::LlffHeap as Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -84,7 +84,6 @@ mod buttons;
 mod led_controller;
 mod backlight_controller;
 mod ads_measurement_coordinator;
-mod instrumentation_monitor;
 
 use mcp23017_hd44780::Mcp23017HD44780Device;
 use display::lcd_display_task;
@@ -95,7 +94,6 @@ use led_controller::led_controller_task;
 #[cfg(feature = "tft-display")]
 use backlight_controller::{backlight_task, BacklightPeripherals};
 use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
-use instrumentation_monitor::instrumentation_monitor_task;
 use variegated_hal::SyncSendRawMutex;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
@@ -123,6 +121,11 @@ use variegated_hal::scale::ScaleController;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity;
 use variegated_instrumentation::{async_task_loop, instrumented_section, PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
+use variegated_controller_types::debug::{ApplicationState, DebugEvent, DebugPayload, DebugStateSnapshot, SourceState};
+use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
+use variegated_debug::bus;
+use variegated_debug::sampler::{sample_interval_ms, set_sample_interval_ms, Sampler, SCHEMA_INTERVAL_MS};
+use variegated_debug::usb_cdc::{self, DebugUsbResources};
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -155,6 +158,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH7>;
+    UsbIrq => usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
 
 #[cfg(feature = "gravity")]
@@ -344,6 +348,11 @@ struct WatchdogPeripherals {
     watchdog: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("usb_debug_peripherals")]
+struct UsbDebugPeripherals {
+    usb: Peri<'static, ()>,
+}
+
 #[cfg(feature = "pwm-steam-valve")]
 #[variegated_board_cfg::board_cfg("steam_solenoid_peripherals")]
 struct SteamSolenoidPeripherals {
@@ -369,6 +378,7 @@ struct MainTaskPeripherals {
     esp_p: Esp32Peripherals,
     #[cfg(feature = "pwm-steam-valve")]
     steam_solenoid_p: SteamSolenoidPeripherals,
+    usb_debug_p: UsbDebugPeripherals,
 }
 
 type InternalSPIBus = Mutex<SyncSendRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
@@ -449,6 +459,7 @@ fn main() -> ! {
     defmt::info!("Initing!");
 
     let psram = embassy_rp::psram::Psram::new(QmiCs1::new(p.QMI_CS1, p.PIN_0), psram_config);
+    let psram_heap = psram.is_ok();
 
     if let Ok(psram) = psram {
         info!("PSRAM initialized successfully, using PSRAM for heap");
@@ -519,6 +530,7 @@ fn main() -> ! {
     let esp_p = esp32_peripherals!(p);
     #[cfg(feature = "pwm-steam-valve")]
     let steam_solenoid_p = steam_solenoid_peripherals!(p);
+    let usb_debug_p = usb_debug_peripherals!(p);
 
     let peripherals = MainTaskPeripherals {
         spi_p,
@@ -538,6 +550,7 @@ fn main() -> ! {
         esp_p,
         #[cfg(feature = "pwm-steam-valve")]
         steam_solenoid_p,
+        usb_debug_p,
     };
 
     let executor0 = EXECUTOR0.init(Executor::new());
@@ -546,6 +559,7 @@ fn main() -> ! {
             spawner,
             peripherals,
             status_channel,
+            psram_heap,
         )))
     });
 }
@@ -608,6 +622,12 @@ static STEAM_DUTY_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleTy
 static MECHANISM_MUTEX: StaticCell<Mutex<SyncSendRawMutex, DualBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, MachineCommand, 10>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
+
+static DEBUG_USB: StaticCell<DebugUsbResources> = StaticCell::new();
+// `usb_cdc::CommandSink` is hardcoded to `CriticalSectionRawMutex` (it is shared by
+// both firmwares and must not depend on which mutex `SyncSendRawMutex` resolves to
+// here), so this channel must match rather than use `SyncSendRawMutex`.
+static DEBUG_COMMANDS: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand, 4>> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
@@ -746,10 +766,108 @@ async fn configuration_debug_logger(mut configuration_receiver: ConfigurationSub
 }
 
 #[embassy_executor::task]
+async fn debug_usb_task(
+    usb_p: UsbDebugPeripherals,
+    sink: usb_cdc::CommandSink,
+) {
+    let driver = embassy_rp::usb::Driver::new(usb_p.usb, Irqs);
+    let resources = DEBUG_USB.init(DebugUsbResources::new());
+    usb_cdc::run(driver, resources, sink).await;
+}
+
+#[embassy_executor::task]
+async fn debug_sampler_task() {
+    let sampler = Sampler::new(
+        &COUNTERS,
+        &INDICATORS,
+        CounterId::NAMES,
+        IndicatorId::NAMES,
+        "dual-boiler",
+    );
+
+    bus::emit_event(DebugEvent::Boot);
+
+    let mut since_schema_ms = SCHEMA_INTERVAL_MS;
+    loop {
+        // Re-emit the schema periodically: with always-on emission there is no
+        // handshake, so this is how a client that attaches later learns names.
+        if since_schema_ms >= SCHEMA_INTERVAL_MS {
+            for payload in sampler.schema_payloads() {
+                bus::publish(payload);
+            }
+            since_schema_ms = 0;
+        }
+
+        bus::publish(sampler.counter_payload());
+        bus::publish(sampler.indicator_payload());
+
+        let interval = sample_interval_ms();
+        Timer::after_millis(interval as u64).await;
+        since_schema_ms = since_schema_ms.saturating_add(interval);
+    }
+}
+
+#[embassy_executor::task]
+async fn debug_snapshot_task(psram_heap: bool) {
+    loop {
+        publish_snapshot(psram_heap);
+        Timer::after_secs(1).await;
+    }
+}
+
+fn publish_snapshot(psram_heap: bool) {
+    let stats = bus::stats();
+    bus::publish(DebugPayload::StateSnapshot(DebugStateSnapshot {
+        heap_used: HEAP.used() as u32,
+        heap_free: HEAP.free() as u32,
+        frames_emitted: stats.emitted,
+        frames_dropped: stats.dropped,
+        source_state: SourceState::Application(ApplicationState {
+            watchdog_fed_ms_ago: 0,
+            psram_heap,
+            routine_running: None,
+            link_frames_relayed: 0,
+            link_frames_dropped: 0,
+        }),
+    }));
+}
+
+#[embassy_executor::task]
+async fn debug_command_task(
+    receiver: embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, DebugCommand, 4>,
+    command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
+    psram_heap: bool,
+) {
+    loop {
+        let command = receiver.receive().await;
+        bus::emit_event(DebugEvent::CommandReceived {
+            label: variegated_controller_types::debug::name(command.label()),
+        });
+        match command {
+            DebugCommand::Machine(machine) => {
+                let _ = command_sender.try_send(machine);
+            }
+            DebugCommand::App(AppDebugOp::ForceSnapshot) => publish_snapshot(psram_heap),
+            DebugCommand::App(AppDebugOp::SetSampleIntervalMs(ms)) => set_sample_interval_ms(ms),
+            DebugCommand::App(AppDebugOp::ResetCounters) => {
+                // PerformanceCounters is deliberately increment-only, so "reset"
+                // is host-side: emit the event and let the TUI rebase its
+                // baseline against the next sample.
+                bus::emit_event(DebugEvent::CountersReset);
+            }
+            DebugCommand::App(AppDebugOp::Ping) => {}
+            // Comms ops arrive only via the ESP32-C6, which handles them itself.
+            DebugCommand::Comms(_) => {}
+        }
+    }
+}
+
+#[embassy_executor::task]
 async fn main_task(
     spawner: Spawner,
     peripherals: MainTaskPeripherals,
-    status_channel: &'static StatusChannel
+    status_channel: &'static StatusChannel,
+    psram_heap: bool,
 ) -> ! {
     // Destructure peripherals
     let MainTaskPeripherals {
@@ -770,6 +888,7 @@ async fn main_task(
         esp_p,
         #[cfg(feature = "pwm-steam-valve")]
         steam_solenoid_p,
+        usb_debug_p,
     } = peripherals;
 
     Timer::after_millis(1000).await;
@@ -1579,8 +1698,17 @@ async fn main_task(
     // Spawn the configuration debug logger task
     spawner.spawn(unwrap!(configuration_debug_logger(debug_configuration_receiver)));
 
-    // Spawn the instrumentation monitor task
-    spawner.spawn(unwrap!(instrumentation_monitor_task()));
+    // Wire up the structured debug bus: USB CDC transport, periodic sampler,
+    // periodic state snapshot, and injected-command handling.
+    let debug_commands_channel: &'static Channel<CriticalSectionRawMutex, DebugCommand, 4> =
+        DEBUG_COMMANDS.init(Channel::new());
+    let debug_command_sender = debug_commands_channel.sender();
+    let debug_command_receiver = debug_commands_channel.receiver();
+
+    spawner.spawn(unwrap!(debug_usb_task(usb_debug_p, debug_command_sender)));
+    spawner.spawn(unwrap!(debug_sampler_task()));
+    spawner.spawn(unwrap!(debug_snapshot_task(psram_heap)));
+    spawner.spawn(unwrap!(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap)));
 
     // Spawn the SD detect pin toggle task
     //spawner.spawn(unwrap!(sd_det_toggle_task(sd_det_pin)));
