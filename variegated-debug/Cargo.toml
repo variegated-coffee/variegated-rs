@@ -17,7 +17,7 @@ variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrume
 defmt = { workspace = true, optional = true }
 embassy-usb = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
-embassy-rp = { workspace = true, optional = true, features = ["rp235xb"] }
+embassy-rp = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -25,6 +25,13 @@ defmt = ["dep:defmt", "variegated-controller-types/defmt", "variegated-debug-cod
 instrumentation = ["variegated-instrumentation/instrumentation"]
 # RP2350 USB CDC-ACM transport (Task 4).
 usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures", "dep:embassy-rp"]
+# `embassy-rp` itself carries no chip feature: this is a shared library, like
+# `variegated-hal`, and must not dictate the board its consumer targets. Hardcoding
+# one here would collide via feature unification the moment anything in the build
+# graph targets a different variant. The binary crate selects one of these.
+rp2040 = ["embassy-rp/rp2040"]
+rp235xa = ["embassy-rp/rp235xa"]
+rp235xb = ["embassy-rp/rp235xb"]
 std = ["variegated-controller-types/std"]
 # Exactly one of these must be enabled -- it stamps every frame this firmware emits.
 # Both workspaces resolve the same embassy-sync, so this one crate serves both

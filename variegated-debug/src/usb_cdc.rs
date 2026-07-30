@@ -12,6 +12,7 @@ use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
+use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config};
@@ -55,11 +56,21 @@ impl Default for DebugUsbResources {
     }
 }
 
+// This crate is shared by both firmwares, so the serial number follows `bus::SOURCE`
+// the same way, and the two can never collide on a host that has both plugged in.
+// In practice the comms firmware never reaches this module -- it uses
+// `esp_hal::usb_serial_jtag`, and `usb-cdc-rp` pulls in `embassy-rp`, which cannot
+// build for riscv32 -- so this is belt-and-braces rather than a live bug.
+#[cfg(all(feature = "source-application", not(feature = "source-comms")))]
+const USB_SERIAL: &str = "app";
+#[cfg(all(feature = "source-comms", not(feature = "source-application")))]
+const USB_SERIAL: &str = "comms";
+
 fn usb_config() -> Config<'static> {
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Variegated");
     config.product = Some("Variegated Debug");
-    config.serial_number = Some("app");
+    config.serial_number = Some(USB_SERIAL);
     config.max_power = 100;
     config.max_packet_size_0 = 64;
     config
@@ -96,7 +107,20 @@ pub async fn run(
             };
             let mut buf = [0u8; MAX_FRAME];
             loop {
-                let frame = subscriber.next_message_pure().await;
+                let frame = match subscriber.next_message().await {
+                    // The publisher lapped us and recycled ring entries we hadn't
+                    // read yet. Each lagged message is a genuinely dropped frame --
+                    // count all `n` of them, not just one per lag event, so
+                    // `bus::stats().dropped` stays honest about how many frames
+                    // were actually lost.
+                    WaitResult::Lagged(n) => {
+                        for _ in 0..n {
+                            bus::note_dropped();
+                        }
+                        continue;
+                    }
+                    WaitResult::Message(frame) => frame,
+                };
 
                 // No host has opened the port: drop rather than queue.
                 if !cdc_tx.dtr() {
