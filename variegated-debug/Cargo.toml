@@ -17,13 +17,14 @@ variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrume
 defmt = { workspace = true, optional = true }
 embassy-usb = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
+embassy-rp = { workspace = true, optional = true, features = ["rp235xb"] }
 
 [features]
 default = []
 defmt = ["dep:defmt", "variegated-controller-types/defmt", "variegated-debug-codec/defmt"]
 instrumentation = ["variegated-instrumentation/instrumentation"]
 # RP2350 USB CDC-ACM transport (Task 4).
-usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures"]
+usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures", "dep:embassy-rp"]
 std = ["variegated-controller-types/std"]
 # Exactly one of these must be enabled -- it stamps every frame this firmware emits.
 # Both workspaces resolve the same embassy-sync, so this one crate serves both

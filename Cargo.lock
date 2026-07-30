@@ -2372,6 +2372,7 @@ dependencies = [
  "critical-section",
  "defmt 1.1.1",
  "embassy-futures",
+ "embassy-rp",
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
