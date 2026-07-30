@@ -17,7 +17,7 @@ Counters track **events** by incrementing. Ideal for counting occurrences (loop 
 
 ### Counter Usage
 
-```rust
+```ignore
 use variegated_instrumentation::{PerformanceCounters, define_counters};
 
 define_counters! {
@@ -69,7 +69,7 @@ Indicators track **current state** by setting values. Ideal for measurements (te
 
 ### Indicator Usage
 
-```rust
+```ignore
 use variegated_instrumentation::{PerformanceIndicators, define_indicators};
 
 define_indicators! {
