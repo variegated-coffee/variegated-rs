@@ -371,9 +371,16 @@ pub enum SourceState {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApplicationState {
-    pub watchdog_fed_ms_ago: u32,
+    /// `None` while the watchdog's feed time is not plumbed through to this
+    /// snapshot. Deliberately an `Option` rather than a `0` sentinel: a zero here
+    /// reads as "fed just now", which is a plausible-looking lie, and watchdog feed
+    /// age is one of the things the hardware checkpoint exists to observe.
+    pub watchdog_fed_ms_ago: Option<u32>,
     pub psram_heap: bool,
+    /// `None` means "no routine running, or not determined" -- see the comment at the
+    /// construction site.
     pub routine_running: Option<u16>,
+    /// Filled by the relay in Task 8. Zero is accurate before then: there is no relay.
     pub link_frames_relayed: u32,
     pub link_frames_dropped: u32,
 }
@@ -1781,9 +1788,16 @@ fn publish_snapshot(psram_heap: bool) {
         frames_emitted: stats.emitted,
         frames_dropped: stats.dropped,
         source_state: SourceState::Application(ApplicationState {
-            watchdog_fed_ms_ago: 0,
+            // Not plumbed: the watchdog is fed inside variegated-controller-lib's run
+            // loop, which has no handle to this snapshot. `None` renders as "unknown"
+            // rather than a plausible-looking "fed 0 ms ago".
+            watchdog_fed_ms_ago: None,
             psram_heap,
+            // Not determined: reading it would mean locking the routine repository
+            // from the snapshot path. `None` currently conflates "no routine" with
+            // "not determined" -- acceptable while nothing consumes it.
             routine_running: None,
+            // Accurate as zero until Task 8 adds the relay that produces them.
             link_frames_relayed: 0,
             link_frames_dropped: 0,
         }),
@@ -1868,7 +1882,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Produces:
   - `variegated_cli::model::{DebugModel, SourceModel, CounterCell, IndicatorCell, EventRecord}` with `DebugModel::apply(&mut self, frame: DebugFrame, at_ms: u64)`, `DebugModel::source(&self, DebugSource) -> Option<&SourceModel>`, `SourceModel::counter_label(&self, u8) -> String`.
-  - `variegated_cli::transport::{spawn_serial, spawn_tcp, Incoming, Outgoing}` where `Incoming = tokio::sync::mpsc::UnboundedReceiver<DebugFrame>` and `Outgoing = tokio::sync::mpsc::UnboundedSender<DebugCommand>`.
+  - `variegated_cli::transport::{spawn_serial, spawn_tcp, Incoming, Outgoing, Notices}`. Both spawn functions return the **3-tuple** `(Incoming, Outgoing, Notices)`, where `Incoming = UnboundedReceiver<DebugFrame>`, `Outgoing = UnboundedSender<DebugCommand>`, and `Notices = UnboundedReceiver<String>` carrying host-side events: connect, disconnect, retry, and `encode_command` failures (which is how `CodecError::TooLarge` on an oversized `MachineCommand` reaches the user instead of vanishing).
+  - `SourceModel` also exposes `restarts: u32`, incremented when a source's `seq` jumps backwards — a device reboot, distinguished from `gaps` so a restart cannot be misread as billions of lost frames.
 
 - [ ] **Step 1: Initialise the repo**
 
@@ -2485,7 +2500,15 @@ Requirements for the render loop:
   against now — stale after 3 s), firmware name, device uptime, frames received,
   and `gaps` alongside the device's own `frames_dropped` from the latest snapshot.
   Showing both matters: they answer different questions ("the link lost frames"
-  versus "the device threw frames away because no host was reading").
+  versus "the device threw frames away because no host was reading"). Show `restarts`
+  too — a device reboot mid-session is exactly what you are hunting when chasing
+  watchdog resets, and it is not a gap.
+- **Drain `Notices` every tick** into the event pane, tagged as host-side rather than
+  device-side. It is an unbounded channel, so a caller that holds the receiver without
+  draining it accumulates strings during a reconnect storm. This is also the only path
+  by which a rejected oversized command becomes visible to the user.
+- **Render `watchdog_fed_ms_ago: Option<u32>` honestly** — "unknown" when `None`, never
+  "0 ms". It is an `Option` precisely so the UI cannot present a stub as a reading.
 - **Events tab:** newest-last scrolling list from both sources merged on `at_ms`,
   with `s` cycling a severity floor and `/` entering a substring filter. Colour by
   severity.
@@ -2635,6 +2658,14 @@ pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
 ```
 
 Add `variegated-debug` to `variegated-comms/Cargo.toml`.
+
+**Also fill in the link counters this task owns.** `ApplicationState::link_frames_relayed`
+and `link_frames_dropped` are constructed as zero in `examples/dual-boiler/src/main.rs`'s
+`publish_snapshot`, with a comment saying they are accurate as zero only until this
+task exists. Expose them from `debug_relay` — two `AtomicU32`s incremented on the
+send and the drop paths respectively, with a `relay_stats()` getter — and read them at
+that construction site instead of hardcoding zero. Otherwise the snapshot silently
+under-reports exactly the traffic this task adds.
 
 - [ ] **Step 3: Add the relay to `esp_transceiver_main` and handle inbound commands**
 
@@ -3172,6 +3203,166 @@ git commit -m "single-boiler: structured debug over USB CDC
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+---
+
+# Milestone 1.5 — checkpoint findings
+
+Added after the Milestone 1 hardware checkpoint. Named metrics, the drop-policy test
+and command injection all passed; three gaps surfaced, all of them scoping errors in
+this plan rather than implementation defects. **These run before Milestone 2** (Tasks
+8-14), because they block the tool being useful and because Task 16's log bridge is
+what makes the ESP-side work worth watching.
+
+### Task 15: Relay full machine Status to the debug stream
+
+The State tab showed heap, drops and link stats but no boiler temperatures or
+pressures — because this plan deliberately excluded `Status`, reasoning that
+`variegated-tui` already displays it. That reasoning fails in exactly the case the
+debug tool exists for: correlating a sensor-read-rate drop against a temperature spike
+requires both on one screen, and the WebSocket viewer needs an ESP32-C6 that may be the
+thing that is broken.
+
+**Files:**
+- Modify: `variegated-rs/variegated-controller-types/src/debug.rs` (new payload variant)
+- Modify: `variegated-rs/variegated-debug-codec/src/lib.rs` (`MAX_FRAME`)
+- Modify: `variegated-rs/examples/dual-boiler/src/main.rs` (emit it)
+- Modify: `variegated-cli/src/bin/variegated-debug-tui.rs` (render it)
+- Test: `variegated-rs/variegated-debug-codec/src/lib.rs`
+
+**Interfaces:**
+- Produces: `DebugPayload::Status(alloc::boxed::Box<Status>)`; `MAX_FRAME = 2048`.
+
+- [ ] **Step 1: Add the boxed payload variant**
+
+`Status` holds five `FnvIndexMap`s (capacities 8/4/4/4/2) of per-device status structs,
+so it is on the order of 1-2 kB. Inlining it as an enum variant would grow `DebugFrame`
+from ~150 bytes to Status-sized and multiply the 16-slot bus by that on both MCUs.
+Box it instead:
+
+```rust
+    /// The machine's full published status, boxed.
+    ///
+    /// Boxed because an enum is as large as its largest variant: inline, this one
+    /// variant would grow every frame on the bus to ~1-2 kB and blow the static RAM
+    /// budget on both MCUs. The allocation happens in the 1 Hz snapshot task before
+    /// `publish_immediate`, never on a control path and never inside the publish
+    /// itself, so the non-blocking contract is unaffected.
+    Status(alloc::boxed::Box<Status>),
+```
+
+`postcard` serializes `Box<T>` transparently, so the wire encoding is just `Status`'s.
+
+- [ ] **Step 2: Raise `MAX_FRAME` to 2048**
+
+A fully-populated `Status` can serialize past 512 bytes. Update the doc comment: the
+buffer now bounds `Status` frames too, and `Routine`-carrying `MachineCommand`s remain
+unbounded and still fail cleanly with `CodecError::TooLarge`.
+
+- [ ] **Step 3: Write the failing test**
+
+Round-trip a `Status` frame through `encode_frame` and `Decoder`, using a `Status` with
+at least two boiler entries and one group entry populated, and assert the decoded
+values match. Also assert `size_of::<DebugFrame>()` stays under 256 bytes — that pins
+the RAM constraint the whole always-on design rests on, and would have caught an
+un-boxed variant immediately.
+
+- [ ] **Step 4: Emit it**
+
+In `debug_snapshot_task`, publish `DebugPayload::Status(Box::new(status))` alongside the
+existing `StateSnapshot`, reading from the status channel the example already
+subscribes to. Emit at the same 1 Hz.
+
+- [ ] **Step 5: Render it**
+
+Add the machine state to the State tab above the existing diagnostics: per-boiler
+temperature/target/duty, per-group pressure/flow/weight, machine mode, and routine
+execution when present. Keep rendering `Option` fields as "unknown" rather than zero.
+
+- [ ] **Step 6: Verify and commit**
+
+Codec tests, both example builds, `cargo test` in variegated-cli, and the TUI build.
+
+### Task 16: Bridge existing logging into the debug stream
+
+The event log showed almost nothing: three emission sites exist app-side, against 42
+`defmt` calls in `dual-boiler/src/main.rs` alone and ~19 more files across
+`variegated-controller-lib` and `variegated-hal`. This plan's porting step only ever
+covered `variegated-comms` and the ESP firmware.
+
+Do both halves, as decided: a bridge for coverage now, typed events where structure
+earns its keep.
+
+**Files:**
+- Modify: `variegated-rs/variegated-log/src/lib.rs` (bus sink)
+- Modify: `variegated-rs/examples/dual-boiler/src/main.rs` and the logging sites in
+  `variegated-controller-lib` / `variegated-hal`
+- Modify: `variegated-rs/variegated-controller-types/src/debug.rs` (new event variants)
+
+- [ ] **Step 1: Implement a `log::Log` sink over the debug bus**
+
+`variegated-log`'s `log_*!` macros already dual-emit to `log` and `defmt`. Add a
+`log::Log` implementation that publishes `DebugPayload::Text(severity, msg)`, mapping
+`log::Level` to `Severity`, formatting into a `heapless::String<TEXT_LEN>` and
+truncating on overflow rather than allocating. Install it behind a feature so the
+bridge is opt-in per firmware. `defmt` output over the probe is unchanged — the two
+coexist by design.
+
+- [ ] **Step 2: Convert call sites to the `log_*!` macros**
+
+Mechanically replace bare `defmt::info!`/`warn!`/`error!` with
+`variegated_log::log_info!`/`log_warn!`/`log_error!` in `dual-boiler/src/main.rs` and
+in the `variegated-controller-lib` / `variegated-hal` files that log. Do not reword
+messages; this step should be reviewable as a pure mechanical substitution.
+
+- [ ] **Step 3: Promote high-value sites to typed events**
+
+Bounded list, so this does not sprawl: brew start/stop, steam start/stop, routine
+start/complete/cancel, storage writes, sensor faults, and interlock trips. Add the
+corresponding `DebugEvent` variants with structured fields, and REMOVE the log call at
+each promoted site so the event does not arrive twice — that double-emission is the
+one real hazard of running both mechanisms.
+
+- [ ] **Step 4: Verify and commit**
+
+Both example builds, and confirm in the TUI that text events appear with correct
+severities.
+
+### Task 17: Full command coverage with parameter entry
+
+The palette exposes 12 of `MachineCommand`'s ~33 variants, because the brief specified
+"representative" commands. Add a parameter-entry mode so any command can be
+constructed.
+
+**Files:**
+- Modify: `variegated-cli/src/bin/variegated-debug-tui.rs`
+- Test: `variegated-cli/src/model.rs` or a new `src/command_form.rs`
+
+- [ ] **Step 1: Model the forms as data, and test them**
+
+Represent each command as a name plus a list of typed parameter fields (index, float
+setpoint, enum choice), with a constructor that builds the `MachineCommand` from
+entered values. Put this in its own module as a pure function of the entered values so
+it is unit-testable without a terminal — the TUI has no automated tests, and this is
+the part with real logic. Test: each form produces the expected command; out-of-range
+and unparseable input is rejected rather than silently coerced.
+
+- [ ] **Step 2: Add the entry UI**
+
+Selecting a parameterised command opens a field editor: Tab between fields, type
+values, Enter to submit, Esc to cancel. Show the parameter name, type and range.
+
+- [ ] **Step 3: Confirmation for state-changing commands**
+
+Commands that move the machine — anything that starts brewing, steaming or pumping,
+changes a setpoint, or writes storage — require a second Enter to confirm, with the
+fully-constructed command echoed. A mistyped setpoint reaching a live machine is the
+failure this prevents.
+
+- [ ] **Step 4: Verify and commit**
+
+`cargo test` including the new form tests, the TUI build, and a pty run confirming the
+editor opens, accepts input, and cancels cleanly.
 
 ---
 
