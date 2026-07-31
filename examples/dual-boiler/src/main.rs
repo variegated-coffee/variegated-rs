@@ -399,7 +399,11 @@ type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'stati
 #[cfg(feature = "tft-display")]
 type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
 
-const STATUS_RECEIVERS: usize = 7; // Includes: display, LCD, button controller, LED controller, ESP transceiver, and backlight
+// All seven slots are now taken: TFT display, backlight, LCD, button controller, LED
+// controller, ESP transceiver, and the debug snapshot task. `subscriber()` is
+// `.expect()`ed at every call site, so an eighth consumer panics at boot rather than
+// degrading -- raise this constant before adding one.
+const STATUS_RECEIVERS: usize = 7;
 type StatusChannel = PubSubChannel<SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 type StatusSubscriber = Subscriber<'static, SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
@@ -808,9 +812,32 @@ async fn debug_sampler_task() {
 }
 
 #[embassy_executor::task]
-async fn debug_snapshot_task(psram_heap: bool) {
+async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscriber) {
+    // The last status seen on the channel. Retained across ticks because the channel
+    // holds one message and the controller publishes on its own cadence: without
+    // this, any tick that happened to land between publishes would emit nothing and
+    // the State tab would blink empty.
+    let mut latest: Option<Status> = None;
+
     loop {
         publish_snapshot(psram_heap);
+
+        // Drain rather than await. `try_next_message_pure` is what every other
+        // consumer on this channel uses, and it matters more here: the snapshot task
+        // must never make its 1 Hz cadence depend on the controller's, and must never
+        // hold up a channel the control path publishes to.
+        while let Some(status) = status_receiver.try_next_message_pure() {
+            latest = Some(status);
+        }
+
+        if let Some(status) = latest.as_ref() {
+            // The allocation is here, on a 1 Hz task, deliberately: `Status` is 1-2 kB
+            // and boxing it is what keeps `DebugFrame` at ~160 bytes for the 16-slot
+            // static bus. `publish` itself still only moves a pointer and never
+            // blocks, so the non-blocking contract is untouched.
+            bus::publish(DebugPayload::Status(Box::new(status.clone())));
+        }
+
         Timer::after_secs(1).await;
     }
 }
@@ -1714,7 +1741,9 @@ async fn main_task(
 
     spawner.spawn(unwrap!(debug_usb_task(usb_debug_p, debug_command_sender)));
     spawner.spawn(unwrap!(debug_sampler_task()));
-    spawner.spawn(unwrap!(debug_snapshot_task(psram_heap)));
+    // Seventh and last status subscriber -- see STATUS_RECEIVERS.
+    let debug_status_receiver = status_channel.subscriber().expect("Failed to get debug status subscriber");
+    spawner.spawn(unwrap!(debug_snapshot_task(psram_heap, debug_status_receiver)));
     spawner.spawn(unwrap!(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap)));
 
     // Spawn the SD detect pin toggle task

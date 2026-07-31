@@ -16,7 +16,10 @@ pub struct ExternalPeripheralSensorReading {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug)]
+// `PartialEq` is needed because `Status` reaches this type and `Status` now travels
+// inside `DebugPayload`, whose `PartialEq` derive is what the codec round-trip tests
+// assert on.
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommsStatus {
     pub timestamp: Option<u64>, // Unix timestamp in seconds
     pub wifi_connected: bool,
@@ -40,7 +43,7 @@ impl defmt::Format for CommsStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone,  Debug, Copy)]
+#[derive(Clone,  Debug, Copy, PartialEq)]
 pub struct WirelessConnectionStatus {
     pub connected: bool,
     pub rssi: Option<i8>,

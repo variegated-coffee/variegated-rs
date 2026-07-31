@@ -30,7 +30,11 @@ serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "ser
 # *other* member of the dependency graph happened to turn serde's std on -- it did
 # not build standalone for a host target.
 std = ["serde?/std"]
-defmt = ["dep:defmt", "heapless/defmt"]
+# `defmt/alloc` is required, not optional: `DebugPayload::Status` holds an
+# `alloc::boxed::Box<Status>` (boxed to keep `DebugFrame` small), and defmt's
+# `impl Format for Box<T>` lives behind that feature. Without it the `defmt::Format`
+# derive on `DebugPayload` fails to resolve a bound for the boxed variant.
+defmt = ["dep:defmt", "heapless/defmt", "defmt/alloc"]
 double_boiler = []
 single_boiler = []
 single_group = []

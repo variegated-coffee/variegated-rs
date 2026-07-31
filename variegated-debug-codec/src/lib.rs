@@ -19,15 +19,23 @@ use variegated_controller_types::debug_command::DebugCommand;
 
 /// Largest COBS-encoded message we emit or accept.
 ///
-/// This comfortably bounds every `DebugFrame` we emit (~150 bytes). It does **not**
-/// bound every `DebugCommand` we can be asked to encode: `MachineCommand::AddRoutine`
-/// and `::UpdateRoutine` carry a `Routine`, whose `alloc::Vec` fields (steps,
-/// parameters) are unbounded, so no finite `MAX_FRAME` can guarantee headroom for
-/// them. When an injected command doesn't fit, `encode_command` returns
-/// `Err(CodecError::TooLarge)` rather than emitting a truncated or corrupt frame --
-/// that is a clean, safe refusal, but callers must check for and surface it rather
-/// than discard it silently.
-pub const MAX_FRAME: usize = 512;
+/// Sized for the largest frame we emit, which is no longer a sample frame (~150
+/// bytes) but a `DebugPayload::Status`: `Status` carries five `FnvIndexMap`s of
+/// per-device status (capacities 8/4/4/4/2) plus a routine-execution block. Filled to
+/// capacity it comes to 1607 bytes COBS-encoded -- measured, not estimated, by
+/// `a_fully_populated_status_frame_fits_in_max_frame` -- so the old 512-byte bound
+/// would have silently dropped Status frames on a real machine. Note this bounds the
+/// *encoded* form only: in RAM `Status` is behind a `Box`, so `DebugFrame` itself
+/// stays at 160 bytes (see `debug_frame_stays_small`).
+///
+/// It does **not** bound every `DebugCommand` we can be asked to encode:
+/// `MachineCommand::AddRoutine` and `::UpdateRoutine` carry a `Routine`, whose
+/// `alloc::Vec` fields (steps, parameters) are unbounded, so no finite `MAX_FRAME`
+/// can guarantee headroom for them. When an injected command doesn't fit,
+/// `encode_command` returns `Err(CodecError::TooLarge)` rather than emitting a
+/// truncated or corrupt frame -- that is a clean, safe refusal, but callers must
+/// check for and surface it rather than discard it silently.
+pub const MAX_FRAME: usize = 2048;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum CodecError {
@@ -113,11 +121,21 @@ mod tests {
     use super::*;
     // This crate is `#![no_std]`, but the test harness links std anyway -- see the
     // `extern crate std` in lib.rs (Step 8).
+    use std::boxed::Box;
     use std::vec;
     use std::vec::Vec;
     use variegated_controller_types::commands::MachineCommand;
     use variegated_controller_types::debug::*;
     use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
+    use core::time::Duration;
+    use variegated_control_algorithm::pid::PidOut;
+    use variegated_controller_types::{
+        BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus,
+        CommsStatus, GroupBrewControlState, GroupStatus, MachineMode, Output, PeripheralInfo,
+        PeripheralType, PreviousBrewInfo, RoutineExecutionStatus, RoutineIndex, ShotState, Status,
+        SteamWandStatus, TankStatus, WaterTapStatus, WirelessConnectionStatus, MAX_BOILERS,
+        MAX_GROUPS, MAX_PERIPHERALS, MAX_STEAM_WANDS, MAX_TANKS, MAX_WATER_TAPS,
+    };
 
     fn frame(seq: u32, payload: DebugPayload) -> DebugFrame {
         DebugFrame { source: DebugSource::Application, seq, uptime_ms: 1234, payload }
@@ -200,6 +218,267 @@ mod tests {
         let f = frame(1, DebugPayload::Event(DebugEvent::Boot));
         let mut tiny = [0u8; 2];
         assert_eq!(encode_frame(&f, &mut tiny), Err(CodecError::TooLarge));
+    }
+
+    /// The frame the raised `MAX_FRAME` exists for. Two boilers and one group are
+    /// populated with distinct values so a round-trip that silently zeroed a map, or
+    /// collapsed the two boilers onto one key, would fail rather than pass on an
+    /// all-default `Status`.
+    #[test]
+    fn round_trips_a_status_frame() {
+        let mut status = Status::new();
+        status.mode = MachineMode::On;
+        status
+            .boiler_statuses
+            .insert(
+                0,
+                BoilerStatus {
+                    temperature: Some(93.5),
+                    pressure: Some(1.2),
+                    water_level: Some(80),
+                    output: Output::FixedDutyCycle(42),
+                    control_state: BoilerControlState {
+                        mode: BoilerControlMode::Temperature,
+                        values: BoilerControlTargetValues {
+                            target_temperature: 94.0,
+                            target_pressure: 1.0,
+                        },
+                    },
+                },
+            )
+            .unwrap();
+        status
+            .boiler_statuses
+            .insert(
+                1,
+                BoilerStatus {
+                    temperature: Some(124.0),
+                    pressure: Some(1.8),
+                    // Deliberately `None`: `Option` fields must survive as `None`
+                    // rather than come back as a zero that reads like a reading.
+                    water_level: None,
+                    output: Output::Off,
+                    control_state: BoilerControlState {
+                        mode: BoilerControlMode::Pressure,
+                        values: BoilerControlTargetValues {
+                            target_temperature: 125.0,
+                            target_pressure: 1.9,
+                        },
+                    },
+                },
+            )
+            .unwrap();
+        status
+            .group_statuses
+            .insert(
+                0,
+                GroupStatus {
+                    is_brewing: true,
+                    pressure: Some(9.1),
+                    input_flow_rate: Some(2.4),
+                    output_weight: Some(18.6),
+                    temperature: Some(92.8),
+                    pump_output: Output::FixedDutyCycle(70),
+                    ..GroupStatus::default()
+                },
+            )
+            .unwrap();
+
+        let original = frame(11, DebugPayload::Status(Box::new(status)));
+
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
+
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut got = Vec::new();
+        decoder.feed(&encoded, |f| got.push(f));
+
+        assert_eq!(got, vec![original]);
+
+        // Spot-check the values through the decoded frame as well: `assert_eq!` on
+        // the whole frame would also pass if `PartialEq` were ever hand-written to
+        // ignore the maps.
+        let DebugPayload::Status(decoded) = &got[0].payload else {
+            panic!("expected a Status payload");
+        };
+        assert_eq!(decoded.boiler_statuses.len(), 2);
+        assert_eq!(decoded.get_boiler_status(0).unwrap().temperature, Some(93.5));
+        assert_eq!(decoded.get_boiler_status(1).unwrap().temperature, Some(124.0));
+        assert_eq!(decoded.get_boiler_status(1).unwrap().water_level, None);
+        assert_eq!(decoded.get_group_status(0).unwrap().pressure, Some(9.1));
+        assert_eq!(decoded.get_group_status(0).unwrap().output_weight, Some(18.6));
+        assert!(decoded.get_group_status(0).unwrap().is_brewing);
+        assert_eq!(decoded.mode, MachineMode::On);
+    }
+
+    /// Justifies the `MAX_FRAME` value rather than taking it on trust.
+    ///
+    /// A `Status` frame that does not fit is not a loud failure: `encode_frame`
+    /// returns `TooLarge` and the USB writer calls `note_dropped()`, so on hardware
+    /// it would look like "machine state never appears" with the drop counter as the
+    /// only clue. This fills every map to capacity, populates every `Option`, and
+    /// asserts the encoded frame still fits -- so shrinking `MAX_FRAME`, or adding a
+    /// field to any per-device status struct, fails here instead of at a bench.
+    #[test]
+    fn a_fully_populated_status_frame_fits_in_max_frame() {
+        let mut status = Status::new();
+        status.mode = MachineMode::On;
+        for i in 0..MAX_BOILERS as u8 {
+            status
+                .boiler_statuses
+                .insert(
+                    i,
+                    BoilerStatus {
+                        temperature: Some(93.0 + i as f32),
+                        pressure: Some(1.0 + i as f32),
+                        water_level: Some(50 + i),
+                        // The largest `Output` variant.
+                        output: Output::PidOutput(PidOut::new(
+                            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,
+                        )),
+                        control_state: BoilerControlState {
+                            mode: BoilerControlMode::Temperature,
+                            values: BoilerControlTargetValues {
+                                target_temperature: 94.0,
+                                target_pressure: 1.0,
+                            },
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        for i in 0..MAX_GROUPS as u8 {
+            status
+                .group_statuses
+                .insert(
+                    i,
+                    GroupStatus {
+                        is_brewing: true,
+                        three_way_valve_open: Some(true),
+                        current_brew: Some(BrewStatus {
+                            brew_time: Duration::from_millis(25_400),
+                            brew_input_volume: Some(40.0),
+                            shot_state: Some(ShotState::HeadspaceFill),
+                            extracted_solids: Some(1.8),
+                            output_volume: Some(36.0),
+                        }),
+                        input_flow_rate: Some(2.4),
+                        input_volume: Some(40.0),
+                        output_flow_rate: Some(2.0),
+                        output_weight: Some(18.6),
+                        pressure: Some(9.1),
+                        temperature: Some(92.8),
+                        output_temperature: Some(88.0),
+                        output_electrical_conductivity: Some(0.4),
+                        extraction_rate: Some(0.9),
+                        pump_output: Output::PidOutput(PidOut::new(
+                            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,
+                        )),
+                        control_state: GroupBrewControlState::default(),
+                        previous_brew: Some(PreviousBrewInfo {
+                            brew_time: Duration::from_millis(24_000),
+                            brew_input_volume: Some(39.0),
+                            output_weight: Some(18.0),
+                            started_at_millis: u64::MAX,
+                            stopped_at_millis: u64::MAX,
+                        }),
+                    },
+                )
+                .unwrap();
+        }
+        for i in 0..MAX_WATER_TAPS as u8 {
+            status
+                .water_tap_statuses
+                .insert(i, WaterTapStatus { is_dispensing: true })
+                .unwrap();
+        }
+        for i in 0..MAX_STEAM_WANDS as u8 {
+            status
+                .steam_wand_statuses
+                .insert(i, SteamWandStatus { is_steaming: true, valve_openness: 100 })
+                .unwrap();
+        }
+        for i in 0..MAX_TANKS as u8 {
+            status
+                .tank_statuses
+                .insert(i, TankStatus { water_level: Some(90) })
+                .unwrap();
+        }
+
+        let mut resolved_parameters = heapless::index_map::FnvIndexMap::new();
+        for i in 0..8u8 {
+            resolved_parameters.insert(i, i as f32).unwrap();
+        }
+        status.routine_execution = Some(RoutineExecutionStatus {
+            routine_index: RoutineIndex::Custom(usize::MAX),
+            current_step: Some(usize::MAX),
+            step_elapsed_time: Some(Duration::from_millis(12_000)),
+            total_elapsed_time: Some(Duration::from_millis(120_000)),
+            resolved_parameters,
+        });
+
+        let mut peripheral_connection_status = heapless::index_map::FnvIndexMap::new();
+        for i in 0..8u16 {
+            peripheral_connection_status
+                .insert(0xF000 + i, WirelessConnectionStatus { connected: true, rssi: Some(-70) })
+                .unwrap();
+        }
+        status.comms_status = Some(CommsStatus {
+            timestamp: Some(u64::MAX),
+            wifi_connected: true,
+            wifi_rssi: Some(-70),
+            peripheral_connection_status,
+        });
+
+        for i in 0..MAX_PERIPHERALS as u16 {
+            status
+                .peripheral_status
+                .peripherals
+                .insert(
+                    0xE000 + i,
+                    PeripheralInfo { peripheral_type: PeripheralType::Scale, is_available: true },
+                )
+                .unwrap();
+        }
+        status.current_local_time = Some(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 30)
+                .unwrap()
+                .and_hms_milli_opt(23, 59, 59, 999)
+                .unwrap(),
+        );
+
+        let original = frame(u32::MAX, DebugPayload::Status(Box::new(status)));
+
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&original, &mut buf).expect("worst-case Status must fit");
+        std::eprintln!(
+            "worst-case Status frame = {} bytes COBS-encoded (MAX_FRAME = {MAX_FRAME})",
+            encoded.len()
+        );
+
+        // It must also survive the decoder, whose accumulator is the same size.
+        let owned = encoded.to_vec();
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut got = Vec::new();
+        decoder.feed(&owned, |f| got.push(f));
+        assert_eq!(decoder.decode_errors, 0);
+        assert_eq!(got, vec![original]);
+    }
+
+    /// Pins the RAM constraint the whole always-on design rests on.
+    ///
+    /// The bus is a 16-slot static `PubSubChannel<_, DebugFrame, 16, ..>` on each
+    /// MCU, so every byte added to `DebugFrame` costs 16 bytes of static RAM per
+    /// device -- and an enum is as large as its largest variant. `DebugPayload`'s
+    /// biggest inline variant is `CounterSamples`, a `Vec<u64, 16>` at 136 bytes.
+    /// `Status` is on the order of 1-2 kB, so if it were ever inlined rather than
+    /// boxed this assertion would fail immediately instead of the overflow only
+    /// showing up on hardware.
+    #[test]
+    fn debug_frame_stays_small() {
+        let size = core::mem::size_of::<DebugFrame>();
+        std::eprintln!("size_of::<DebugFrame>() = {size}");
+        assert!(size < 256, "DebugFrame grew to {size} bytes; keep large payloads boxed");
     }
 
     /// `DebugCommand` has no `PartialEq` (deliberately -- it wraps `MachineCommand`,

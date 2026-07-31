@@ -8,9 +8,13 @@
 //! is static RAM on both MCUs. `CounterSamples` is the largest at 16 * 8 bytes, so
 //! `DebugFrame` lands around 150 bytes. Keep it that way -- in particular, metric
 //! names are sent one at a time via `MetricName` rather than as a table, which is
-//! also what lets a late-attaching client learn them under always-on emission.
+//! also what lets a late-attaching client learn them under always-on emission, and
+//! `Status` is carried behind a `Box` rather than inline. `debug_frame_stays_small`
+//! in `variegated-debug-codec` guards the bound.
 
 use heapless::{String, Vec};
+
+use crate::Status;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 pub const MAX_SAMPLES: usize = 16;
@@ -104,6 +108,17 @@ pub enum DebugPayload {
         counters: u8,
         indicators: u8,
     },
+    /// The machine's full published status, boxed.
+    ///
+    /// Boxed because an enum is as large as its largest variant: inline, this one
+    /// variant would grow every frame on the bus to ~1-2 kB and blow the static RAM
+    /// budget on both MCUs. The allocation happens in the 1 Hz snapshot task before
+    /// `publish_immediate`, never on a control path and never inside the publish
+    /// itself, so the non-blocking contract is unaffected.
+    ///
+    /// `postcard` serializes `Box<T>` transparently, so the wire encoding is just
+    /// `Status`'s own.
+    Status(alloc::boxed::Box<Status>),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -189,8 +204,11 @@ impl DebugEvent {
     }
 }
 
-/// Deliberately not a copy of `Status` -- that already has a viewer in
-/// `variegated-tui`. This carries what is otherwise invisible.
+/// The diagnostics that have no other viewer: heap, frame accounting and per-source
+/// link state. `Status` itself travels separately as `DebugPayload::Status` -- the
+/// two are emitted from the same 1 Hz task so a host can correlate them, but they
+/// are kept as distinct payloads so a `Status` that fails to encode cannot take the
+/// diagnostics down with it.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, PartialEq)]

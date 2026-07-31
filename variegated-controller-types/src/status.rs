@@ -4,7 +4,7 @@ use core::time::Duration;
 use heapless::index_map::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
     pub current_step: Option<usize>,
@@ -26,8 +26,11 @@ impl defmt::Format for RoutineExecutionStatus {
     }
 }
 
+/// `PartialEq` is derived across this whole tree because `Status` now travels on the
+/// debug bus inside `DebugPayload::Status`, and `DebugPayload`/`DebugFrame` derive
+/// `PartialEq` for the codec round-trip tests. Nothing compares `Status` at runtime.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
     pub group_statuses: FnvIndexMap<GroupIndex, GroupStatus, MAX_GROUPS>,
@@ -217,7 +220,7 @@ impl defmt::Format for Status {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoilerStatus {
     pub temperature: Option<TemperatureType>,
     pub pressure: Option<PressureType>,
@@ -227,7 +230,7 @@ pub struct BoilerStatus {
 }
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PreviousBrewInfo {
     pub brew_time: Duration,
@@ -239,7 +242,7 @@ pub struct PreviousBrewInfo {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BrewStatus {
     pub brew_time: Duration,
     pub brew_input_volume: Option<InputVolumeType>,
@@ -250,7 +253,7 @@ pub struct BrewStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupStatus {
     pub is_brewing: bool,
     pub three_way_valve_open: Option<bool>,
@@ -271,14 +274,14 @@ pub struct GroupStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WaterTapStatus {
     pub is_dispensing: bool,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SteamWandStatus {
     pub is_steaming: bool,
     pub valve_openness: ValveOpenType,
@@ -286,7 +289,7 @@ pub struct SteamWandStatus {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TankStatus {
     pub water_level: Option<WaterLevelType>,
 }

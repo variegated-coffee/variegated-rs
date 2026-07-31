@@ -26,3 +26,8 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 # import in `variegated-controller-types`, not re-exported), so it needs its own
 # handle on the crate. Version comes from the workspace pin used everywhere else.
 heapless.workspace = true
+# Same reason, for the worst-case `Status` fixture: `Output::PidOutput` wraps a
+# `PidOut<f32>` from the control-algorithm crate, and `Status::current_local_time` a
+# `chrono::NaiveDateTime`. Neither is re-exported from controller-types.
+variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["serde"] }
+chrono.workspace = true
