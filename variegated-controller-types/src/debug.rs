@@ -112,9 +112,16 @@ pub enum DebugPayload {
     ///
     /// Boxed because an enum is as large as its largest variant: inline, this one
     /// variant would grow every frame on the bus to ~1-2 kB and blow the static RAM
-    /// budget on both MCUs. The allocation happens in the 1 Hz snapshot task before
-    /// `publish_immediate`, never on a control path and never inside the publish
-    /// itself, so the non-blocking contract is unaffected.
+    /// budget on both MCUs.
+    ///
+    /// The *allocation* happens in the 1 Hz snapshot task before `publish_immediate`,
+    /// never on a control path and never inside the publish itself. Publishing still
+    /// never awaits and never back-pressures a producer, so the non-blocking contract
+    /// holds -- but it is not allocator-free: `publish_immediate` evicts the oldest
+    /// frame inside the bus's `CriticalSectionRawMutex`, and if that frame is a
+    /// `Status` the `Box` is freed there, inside a critical section. It only happens
+    /// once the ring is full of unread frames (a stalled or absent transport). Bear it
+    /// in mind before adding boxed variants that could be evicted at a higher rate.
     ///
     /// `postcard` serializes `Box<T>` transparently, so the wire encoding is just
     /// `Status`'s own.

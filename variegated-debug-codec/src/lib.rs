@@ -22,9 +22,12 @@ use variegated_controller_types::debug_command::DebugCommand;
 /// Sized for the largest frame we emit, which is no longer a sample frame (~150
 /// bytes) but a `DebugPayload::Status`: `Status` carries five `FnvIndexMap`s of
 /// per-device status (capacities 8/4/4/4/2) plus a routine-execution block. Filled to
-/// capacity it comes to 1607 bytes COBS-encoded -- measured, not estimated, by
+/// capacity, with every varint field at its encoding-widest, it comes to 1721 bytes
+/// COBS-encoded -- measured, not estimated, by
 /// `a_fully_populated_status_frame_fits_in_max_frame` -- so the old 512-byte bound
-/// would have silently dropped Status frames on a real machine. Note this bounds the
+/// would have silently dropped Status frames on a real machine. That leaves 327 bytes
+/// (16%) of headroom, which is not much: adding a few `Option<f32>`s to `GroupStatus`
+/// would consume it, and the test is what will tell you. Note this bounds the
 /// *encoded* form only: in RAM `Status` is behind a `Box`, so `DebugFrame` itself
 /// stays at 160 bytes (see `debug_frame_stays_small`).
 ///
@@ -311,6 +314,12 @@ mod tests {
         assert_eq!(decoded.mode, MachineMode::On);
     }
 
+    /// The widest `Duration` postcard can be handed. Its varint encoding of the
+    /// seconds field is 10 bytes here against 1-2 for a realistic brew time, and the
+    /// fixture below holds ten `Duration`s, so using plausible values instead would
+    /// overstate the headroom by ~90 bytes.
+    const MAX_DURATION: Duration = Duration::new(u64::MAX, 999_999_999);
+
     /// Justifies the `MAX_FRAME` value rather than taking it on trust.
     ///
     /// A `Status` frame that does not fit is not a loud failure: `encode_frame`
@@ -319,6 +328,11 @@ mod tests {
     /// only clue. This fills every map to capacity, populates every `Option`, and
     /// asserts the encoded frame still fits -- so shrinking `MAX_FRAME`, or adding a
     /// field to any per-device status struct, fails here instead of at a bench.
+    ///
+    /// Every field is at its encoding-widest, not merely populated: `u64::MAX`
+    /// timestamps, `usize::MAX` indices, `MAX_DURATION`, and the largest `Output`
+    /// variant. That matters because postcard varint-encodes integers, so a fixture
+    /// built from realistic values would silently claim more headroom than exists.
     #[test]
     fn a_fully_populated_status_frame_fits_in_max_frame() {
         let mut status = Status::new();
@@ -356,7 +370,7 @@ mod tests {
                         is_brewing: true,
                         three_way_valve_open: Some(true),
                         current_brew: Some(BrewStatus {
-                            brew_time: Duration::from_millis(25_400),
+                            brew_time: MAX_DURATION,
                             brew_input_volume: Some(40.0),
                             shot_state: Some(ShotState::HeadspaceFill),
                             extracted_solids: Some(1.8),
@@ -376,7 +390,7 @@ mod tests {
                         )),
                         control_state: GroupBrewControlState::default(),
                         previous_brew: Some(PreviousBrewInfo {
-                            brew_time: Duration::from_millis(24_000),
+                            brew_time: MAX_DURATION,
                             brew_input_volume: Some(39.0),
                             output_weight: Some(18.0),
                             started_at_millis: u64::MAX,
@@ -412,8 +426,8 @@ mod tests {
         status.routine_execution = Some(RoutineExecutionStatus {
             routine_index: RoutineIndex::Custom(usize::MAX),
             current_step: Some(usize::MAX),
-            step_elapsed_time: Some(Duration::from_millis(12_000)),
-            total_elapsed_time: Some(Duration::from_millis(120_000)),
+            step_elapsed_time: Some(MAX_DURATION),
+            total_elapsed_time: Some(MAX_DURATION),
             resolved_parameters,
         });
 

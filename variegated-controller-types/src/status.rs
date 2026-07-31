@@ -26,9 +26,23 @@ impl defmt::Format for RoutineExecutionStatus {
     }
 }
 
-/// `PartialEq` is derived across this whole tree because `Status` now travels on the
-/// debug bus inside `DebugPayload::Status`, and `DebugPayload`/`DebugFrame` derive
-/// `PartialEq` for the codec round-trip tests. Nothing compares `Status` at runtime.
+/// `PartialEq` is derived across this whole tree so that `DebugPayload::Status` can
+/// sit inside `DebugPayload`/`DebugFrame`, which derive `PartialEq` for the codec
+/// round-trip tests. It is a convenience, not a necessity -- the tests could assert on
+/// the decoded shape instead (see `round_trips_debug_commands`) -- but dropping it
+/// would mean removing `PartialEq` from `DebugFrame`, which several tests across both
+/// repos rely on.
+///
+/// **This comparison is not an equivalence relation.** Nearly every field is `f32`, so
+/// a `Status` carrying a NaN temperature -- entirely plausible from a disconnected
+/// PT100 or a bad ADC read -- is not equal to itself. Consequences:
+///
+/// - Never use it to suppress duplicate publishes or to decide "nothing changed": a
+///   faulted sensor would defeat the check exactly when updates matter most.
+/// - Never add `Eq` on top. `Eq` promises reflexivity, which this cannot honour, and
+///   the compiler will not stop you from claiming it.
+///
+/// Nothing compares `Status` at runtime today; it exists for tests.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {

@@ -399,11 +399,13 @@ type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'stati
 #[cfg(feature = "tft-display")]
 type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
 
-// All seven slots are now taken: TFT display, backlight, LCD, button controller, LED
-// controller, ESP transceiver, and the debug snapshot task. `subscriber()` is
-// `.expect()`ed at every call site, so an eighth consumer panics at boot rather than
-// degrading -- raise this constant before adding one.
-const STATUS_RECEIVERS: usize = 7;
+// Seven consumers exist: TFT display, backlight, LCD, button controller, LED
+// controller, ESP transceiver, and the debug snapshot task. The eighth slot is
+// deliberate headroom -- `subscriber()` is `.expect()`ed at every call site, so
+// running out is a boot panic rather than a degradation, and a spare slot costs only
+// a waker's worth of per-subscriber bookkeeping (not a `Status` copy: the queue is
+// shared and holds one message regardless).
+const STATUS_RECEIVERS: usize = 8;
 type StatusChannel = PubSubChannel<SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 type StatusSubscriber = Subscriber<'static, SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
@@ -833,8 +835,18 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
         if let Some(status) = latest.as_ref() {
             // The allocation is here, on a 1 Hz task, deliberately: `Status` is 1-2 kB
             // and boxing it is what keeps `DebugFrame` at ~160 bytes for the 16-slot
-            // static bus. `publish` itself still only moves a pointer and never
-            // blocks, so the non-blocking contract is untouched.
+            // static bus.
+            //
+            // `publish` never awaits and never back-pressures a producer -- that much
+            // is unchanged. It is *not*, however, merely a pointer move any more:
+            // `publish_immediate` calls `queue.pop_front()` inside
+            // `inner.lock(..)`, the bus mutex is `CriticalSectionRawMutex`, and
+            // dropping an evicted `DebugPayload::Status` frees a `Box` through
+            // `LlffHeap::dealloc`, whose free-list insert is O(n) and takes a critical
+            // section of its own. That only fires once the 16-slot ring is already
+            // full, i.e. when the USB writer is stalled behind `WRITE_TIMEOUT` and
+            // frames are being evicted unread -- so it is not a live hazard today, but
+            // it is a real critical-section cost and must not be described as absent.
             bus::publish(DebugPayload::Status(Box::new(status.clone())));
         }
 
@@ -1741,7 +1753,7 @@ async fn main_task(
 
     spawner.spawn(unwrap!(debug_usb_task(usb_debug_p, debug_command_sender)));
     spawner.spawn(unwrap!(debug_sampler_task()));
-    // Seventh and last status subscriber -- see STATUS_RECEIVERS.
+    // Seventh status subscriber -- see STATUS_RECEIVERS.
     let debug_status_receiver = status_channel.subscriber().expect("Failed to get debug status subscriber");
     spawner.spawn(unwrap!(debug_snapshot_task(psram_heap, debug_status_receiver)));
     spawner.spawn(unwrap!(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap)));
