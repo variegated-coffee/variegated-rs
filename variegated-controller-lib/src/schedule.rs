@@ -4,7 +4,6 @@ use core::ops::{DerefMut, Range};
 use chrono::{DateTime, Datelike, Duration, Timelike, TimeZone};
 use variegated_log::{log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
-use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
@@ -357,7 +356,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
 
         // @todo Handle full storage by erasing the range and rewriting all items
 
-        bus::emit_event(DebugEvent::StorageWrite { store: name("schedules"), index: index as u16 });
+        variegated_log::emit_event(DebugEvent::StorageWrite { store: name("schedules"), index: index as u16 });
 
         Ok(())
     }

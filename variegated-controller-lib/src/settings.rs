@@ -2,7 +2,6 @@ use alloc::vec;
 use core::ops::{Deref, DerefMut, Range};
 use variegated_log::log_info;
 use variegated_controller_types::debug::{name, DebugEvent};
-use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash};
@@ -137,7 +136,7 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
         // Update the cache with the new settings
         self.cached_value = Some(settings.clone());
 
-        bus::emit_event(DebugEvent::StorageWrite { store: name("settings"), index: 0 });
+        variegated_log::emit_event(DebugEvent::StorageWrite { store: name("settings"), index: 0 });
 
         Ok(())
     }

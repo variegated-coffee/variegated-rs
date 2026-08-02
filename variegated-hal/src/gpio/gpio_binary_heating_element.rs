@@ -1,5 +1,4 @@
 use alloc::boxed::Box;
-use variegated_log::log_info;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
@@ -56,7 +55,9 @@ impl<O: OutputPin, M: RawMutex + 'static> WithTask for GpioBinaryHeatingElement<
             let new_duty_cycle = self.signal.try_take();
             if let Some(duty_cycle) = new_duty_cycle {
                 if duty_cycle != self.soft_pwm.get_duty_cycle() {
-                    log_info!("Duty cycle changed to: {}", duty_cycle);
+                    // Not logged: the duty cycle reaches the host as
+                    // `BoilerStatus::output`, and logging it here put a line on the
+                    // bus on most control iterations.
                     self.soft_pwm.set_duty_cycle(duty_cycle);
                 }
             }

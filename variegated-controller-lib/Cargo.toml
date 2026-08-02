@@ -40,13 +40,12 @@ sequential-storage = { workspace = true, features = ["defmt"] }
 embedded-storage-async.workspace = true
 log.workspace = true
 # Supplies the `log_*!` macros, which dual-emit to `defmt` (probe) and the `log`
-# facade (bridged onto the debug bus by the binary).
+# facade, plus `emit_event` for the promoted typed events. Deliberately *not* a
+# dependency on `variegated-debug`: that crate `compile_error!`s until a
+# `source-application` / `source-comms` feature is picked, and a debug feature
+# must not impose that on everyone who links this library. `variegated-log`
+# keeps it optional behind its own `debug-bus` feature.
 variegated-log = { version = "0.1.0", path = "../variegated-log" }
-# For the promoted typed events (brew/steam/routine/storage/interlock). Note that
-# `variegated-debug` refuses to compile until exactly one of its
-# `source-application` / `source-comms` features is selected -- that choice belongs
-# to the firmware binary, and every build that reaches this crate makes it.
-variegated-debug = { version = "0.1.0", path = "../variegated-debug" }
 
 crc.workspace = true
 

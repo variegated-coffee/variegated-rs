@@ -8,7 +8,6 @@ use crc::{Crc, CRC_32_ISCSI};
 use defmt::Format;
 use variegated_log::{log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
-use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::Receiver;
 use embassy_sync::mutex::Mutex;
@@ -335,8 +334,7 @@ impl<
 
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
-                    log_info!("Routine finished executing");
-                    self.handle_routine_exit().await;
+                    self.handle_routine_exit(false).await;
                 } else if let Some(status) = self.previous_status.as_ref() {
                     // Record shot log sample
                     self.shot_logger.record_sample(status);
@@ -449,18 +447,14 @@ impl<
             GroupBrewControlMode::FixedDutyCycle => {
                 let duty_cycle = actual_pump_control_state.values.duty_cycle;
                 self.group.set_brewing_state(true, duty_cycle).await;
-                log_info!("Fixed duty cycle target: {}", duty_cycle);
                 Output::FixedDutyCycle(duty_cycle)
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
                 let target_duty_cycle = actual_pump_control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
-                log_info!("Fixed duty cycle curve target: {}", target_duty_cycle);
-                log_info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
                 self.group.set_brewing_state(true, target_duty_cycle).await;
                 Output::FixedDutyCycle(target_duty_cycle)
             }
             _ => {
-                log_info!("PID target: {}", pump_pid_out.out);
                 self.group.set_brewing_state(true, pump_pid_out.out as u8).await;
                 Output::PidOutput(pump_pid_out)
             },
@@ -758,8 +752,7 @@ impl<
                 self.handle_routine_start(index, params).await;
             }
             MachineCommand::CancelRoutine => {
-                bus::emit_event(DebugEvent::RoutineCancelled);
-                self.handle_routine_exit().await;
+                self.handle_routine_exit(true).await;
             }
             _ => {
                 // All other commands delegate to the finally handler
@@ -776,7 +769,7 @@ impl<
             MachineCommand::StartBrewing(_) => {
                 // Validate tank status before starting brewing
                 if self.should_block_water_operation() {
-                    bus::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
                     return;
                 }
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::Brewing).await;
@@ -1091,12 +1084,12 @@ impl<
 
             match (old_state, new_state) {
                 (SingleBoilerSingleGroupControllerState::BrewModeIdle, SingleBoilerSingleGroupControllerState::Brewing) => {
-                    bus::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
+                    variegated_log::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
                     self.group.set_brewing_state(true, 0).await;
                     self.started_brewing().await;
                 }
                 (SingleBoilerSingleGroupControllerState::Brewing, SingleBoilerSingleGroupControllerState::BrewModeIdle) => {
-                    bus::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
+                    variegated_log::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
                     self.group.set_brewing_state(false, 0).await;
                     self.stopped_brewing().await;
                 }
@@ -1156,7 +1149,7 @@ impl<
 
         // Validate tank status before starting routine
         if self.should_block_water_operation() {
-            bus::emit_event(DebugEvent::InterlockTripped { interlock: name("run_routine_water_tank_low") });
+            variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("run_routine_water_tank_low") });
             return;
         }
         let mut repo = self.routine_repository.lock().await;
@@ -1193,15 +1186,23 @@ impl<
             self.previous_routine_step = None;
 
             self.current_routine = Some(routine_execution_context);
-            bus::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
+            variegated_log::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
         } else {
             log_error!("Routine not found: {}", routine_index);
         }
     }
 
-    async fn handle_routine_exit(&mut self) {
+    /// `cancelled` distinguishes the two ways a routine can end. The event is
+    /// emitted here rather than at the call sites so the two stay mutually
+    /// exclusive: a cancel is not a completion, and a host counting completions
+    /// must not see both for one routine.
+    async fn handle_routine_exit(&mut self, cancelled: bool) {
         if let Some(routine) = self.current_routine.take() {
-            bus::emit_event(DebugEvent::RoutineCompleted);
+            variegated_log::emit_event(if cancelled {
+                DebugEvent::RoutineCancelled
+            } else {
+                DebugEvent::RoutineCompleted
+            });
 
             // Get finally commands
             let default_status = Status::default();

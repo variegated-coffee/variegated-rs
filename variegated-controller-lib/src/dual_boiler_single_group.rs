@@ -4,9 +4,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::Format;
-use variegated_log::{log_debug, log_error, log_info, log_warn};
+use variegated_log::{log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
-use variegated_debug::bus;
 use embassy_rp::adc::Config;
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
@@ -664,7 +663,6 @@ impl<
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
         let mut last_published_configuration = self.configuration.clone();
-        let mut last_debug_print = Instant::now();
         let mut last_configuration_publish = Instant::now();
 
         loop {
@@ -697,8 +695,7 @@ impl<
             // Handle routine execution
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
-                    log_info!("Routine finished executing");
-                    self.handle_routine_exit().await;
+                    self.handle_routine_exit(false).await;
                 } else if let Some(status) = self.previous_status.as_ref() {
                     // Record shot log sample
                     self.shot_logger.record_sample(status);
@@ -748,14 +745,11 @@ impl<
 
             self.send_status(brew_boiler_output, steam_boiler_output, pump_output).await;
 
-            // Debug print status every 10 seconds
+            // The 1 Hz `Status: {:?}` dump that used to live here is gone: status
+            // now travels verbatim as `DebugPayload::Status`, also at 1 Hz, so the
+            // text form carried nothing the structured payload does not -- and it
+            // truncated to 96 characters on the bus, so it did not even carry that.
             let now = Instant::now();
-            if now.saturating_duration_since(last_debug_print).as_secs() >= 1 {
-                if let Some(ref status) = self.previous_status {
-                    log_debug!("Status: {:?}", status);
-                }
-                last_debug_print = now;
-            }
 
             // Publish configuration every 10 seconds regardless of changes
             if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
@@ -1030,7 +1024,6 @@ impl<
             }
             _ => {
                 let duty_cycle = self.apply_pump_configuration_limits(pump_pid_out.out as u8, false);
-                log_info!("PID target: {}", duty_cycle);
                 self.group.set_brewing_state(true, duty_cycle).await;
                 Output::PidOutput(PidOut { out: duty_cycle as f32, ..pump_pid_out })
             },
@@ -1338,8 +1331,7 @@ impl<
                 self.handle_routine_start(index, params).await;
             }
             MachineCommand::CancelRoutine => {
-                bus::emit_event(DebugEvent::RoutineCancelled);
-                self.handle_routine_exit().await;
+                self.handle_routine_exit(true).await;
             }
             _ => {
                 // All other commands delegate to the finally handler
@@ -1361,7 +1353,7 @@ impl<
 
                 // Validate tank status before starting brewing
                 if self.should_block_water_operation() {
-                    bus::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
                     return;
                 }
 
@@ -1888,13 +1880,12 @@ impl<
     async fn start_brewing(&mut self) {
         if !self.group_brewing {
             let current_volume = self.group.get_input_volume();
-            bus::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
+            variegated_log::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
             self.group_brewing = true;
             self.brew_start_time = Some(Instant::now());
             self.brew_start_input_volume = current_volume;
             self.accumulated_extracted_solids = Some(0.0);
             self.last_extraction_time = Some(Instant::now());
-            log_info!("brew_start_input_volume set to: {:?}", self.brew_start_input_volume);
 
             // Initialize shot state tracking
             self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
@@ -1903,7 +1894,6 @@ impl<
             self.saturation_start_time = None;
             self.last_shot_state_sample_time = None; // Reset sampling timer
             self.input_volume_at_first_drop = None; // Will be set when transitioning to PostFirstDrop
-            log_info!("Shot state initialized to HeadspaceFill");
 
             self.group.set_brewing_state(true, 0).await;
 
@@ -1924,7 +1914,7 @@ impl<
         if self.group_brewing {
             // `current_volume` was read only to log it; the promoted event carries
             // the group instead, and the volume is already in `Status`.
-            bus::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
+            variegated_log::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
 
             // Capture previous brew data before clearing
             if let Some(started_at) = self.brew_start_time {
@@ -1935,8 +1925,6 @@ impl<
                 );
                 let output_weight = self.group.get_output_weight();
 
-                log_info!("Final brew_input_volume: {:?}", brew_input_volume);
-
                 self.previous_brew = Some(crate::PreviousBrewInfo {
                     brew_time,
                     brew_input_volume,
@@ -1946,7 +1934,6 @@ impl<
                 });
             }
 
-            log_info!("Clearing brew_start_input_volume (was: {:?})", self.brew_start_input_volume);
             self.group_brewing = false;
             self.brew_start_time = None;
             self.brew_start_input_volume = None;
@@ -1958,9 +1945,6 @@ impl<
             self.current_shot_state = None;
             self.saturation_start_time = None;
             self.input_volume_at_first_drop = None;
-            log_info!("Shot state cleared");
-
-            log_info!("brew_start_input_volume now: {:?}", self.brew_start_input_volume);
             self.group.set_brewing_state(false, 0).await;
 
             let _ = self.group.scale_set_configuration(ScaleConfiguration {
@@ -2081,7 +2065,7 @@ impl<
 
     #[cfg(feature = "pwm-steam-valve")]
     async fn start_steaming(&mut self) {
-        bus::emit_event(DebugEvent::SteamStarted);
+        variegated_log::emit_event(DebugEvent::SteamStarted);
         if let Err(e) = self.steam_wand.set_steaming_state(true) {
             log_error!("Failed to start steaming: {:?}", e);
         }
@@ -2089,7 +2073,7 @@ impl<
 
     #[cfg(feature = "pwm-steam-valve")]
     async fn stop_steaming(&mut self) {
-        bus::emit_event(DebugEvent::SteamStopped);
+        variegated_log::emit_event(DebugEvent::SteamStopped);
         if let Err(e) = self.steam_wand.set_steaming_state(false) {
             log_error!("Failed to stop steaming: {:?}", e);
         }
@@ -2115,7 +2099,7 @@ impl<
 
         // Validate tank status before starting routine
         if self.should_block_water_operation() {
-            bus::emit_event(DebugEvent::InterlockTripped { interlock: name("run_routine_water_tank_low") });
+            variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("run_routine_water_tank_low") });
             return;
         }
         let mut repo = self.routine_repository.lock().await;
@@ -2152,15 +2136,23 @@ impl<
             self.previous_routine_step = None;
 
             self.current_routine = Some(routine_execution_context);
-            bus::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
+            variegated_log::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
         } else {
             log_error!("Routine not found: {}", routine_index);
         }
     }
 
-    async fn handle_routine_exit(&mut self) {
+    /// `cancelled` distinguishes the two ways a routine can end. The event is
+    /// emitted here rather than at the call sites so the two stay mutually
+    /// exclusive: a cancel is not a completion, and a host counting completions
+    /// must not see both for one routine.
+    async fn handle_routine_exit(&mut self, cancelled: bool) {
         if let Some(routine) = self.current_routine.take() {
-            bus::emit_event(DebugEvent::RoutineCompleted);
+            variegated_log::emit_event(if cancelled {
+                DebugEvent::RoutineCancelled
+            } else {
+                DebugEvent::RoutineCompleted
+            });
 
             // Get finally commands
             let default_status = Status::default();

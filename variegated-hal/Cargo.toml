@@ -31,11 +31,10 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 movavg.workspace = true
 log.workspace = true
 # Supplies the `log_*!` macros, which dual-emit to `defmt` (probe) and the `log`
-# facade (bridged onto the debug bus by the binary).
+# facade, plus `emit_event` for the promoted `SensorFault`. Deliberately *not* a
+# dependency on `variegated-debug` -- see the matching note in
+# variegated-controller-lib/Cargo.toml.
 variegated-log = { version = "0.1.0", path = "../variegated-log" }
-# For the promoted `SensorFault` event. See the note in variegated-controller-lib
-# about the `source-*` feature: the firmware binary selects it.
-variegated-debug = { version = "0.1.0", path = "../variegated-debug" }
 heapless = { workspace = true, features = ["defmt"] }
 fixed.workspace = true
 pio.workspace = true

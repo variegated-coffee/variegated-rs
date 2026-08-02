@@ -8,7 +8,6 @@ use core::ops::{DerefMut, Range};
 use defmt::Format;
 use variegated_log::log_info;
 use variegated_controller_types::debug::{name, DebugEvent};
-use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
@@ -744,7 +743,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
 
         // @todo Handle full storage by erasing the range and rewriting all items
 
-        bus::emit_event(DebugEvent::StorageWrite { store: name("routines"), index });
+        variegated_log::emit_event(DebugEvent::StorageWrite { store: name("routines"), index });
 
         Ok(())
     }

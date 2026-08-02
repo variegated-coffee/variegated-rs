@@ -72,8 +72,6 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
 impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize> WithTask for GpioTransformingPulseCounter<'a, M, T, U, F, G, N> {
     async fn task(&mut self) {
         let startup_time = Instant::now();
-        let mut pulse_count_in_last_100ms = 0u64;
-        let mut last_100ms_timestamp = Instant::now();
 
         loop {
             // Create a future that will trigger on the next GPIO edge or after 100ms timeout
@@ -86,17 +84,12 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
                     // GPIO edge detected - increment pulse count
                     self.total_pulses += 1;
 
-                    // Track pulses in current 100ms window for diagnostics
-                    let now = Instant::now();
-                    if now.duration_since(last_100ms_timestamp).as_millis() >= 100 {
-                        if pulse_count_in_last_100ms > 50 {
-                            log_info!("High pulse rate detected: {} pulses in 100ms", pulse_count_in_last_100ms);
-                        }
-                        pulse_count_in_last_100ms = 0;
-                        last_100ms_timestamp = now;
-                    } else {
-                        pulse_count_in_last_100ms += 1;
-                    }
+                    // The 100 ms window counter that used to live here existed only
+                    // to feed a "high pulse rate detected" log line. That was a flow
+                    // rate, which reaches the host as `GroupStatus::input_flow_rate`,
+                    // and it fired every 100 ms for the whole of any brew. Counter
+                    // and line both removed; `total_pulses` below is what the
+                    // measurement actually uses.
                 }
                 embassy_futures::select::Either::Second(_) => {
                     // Timeout - time to do measurement and reporting

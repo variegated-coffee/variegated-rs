@@ -2,7 +2,6 @@ use core::cell::Cell;
 use defmt::Format;
 use variegated_log::{log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
-use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::Receiver;
 use embassy_sync::signal::Signal;
@@ -88,7 +87,7 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
             if connected {
                 log_info!("Belka Portal connected (id: 0x{:04X})", self.peripheral_id);
             } else {
-                bus::emit_event(DebugEvent::SensorFault { sensor: name("belka_portal") });
+                variegated_log::emit_event(DebugEvent::SensorFault { sensor: name("belka_portal") });
                 // Publish zeros to indicate invalid readings
                 self.publish_zeros();
             }

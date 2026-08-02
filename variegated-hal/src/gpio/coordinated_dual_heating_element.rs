@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use variegated_log::{log_debug, log_info};
+use variegated_log::log_info;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
@@ -272,16 +272,19 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> WithTask for Coordinat
             }
 
             // 2. Check for duty cycle updates
+            // Duty cycles are not logged: both reach the host as
+            // `BoilerStatus::output`, and logging them here put two lines on the
+            // bus on most control iterations. The interlock and contention-strategy
+            // changes above are kept -- those are configuration decisions Status
+            // does not express.
             if let Some(duty) = self.brew_duty_signal.try_take() {
                 if duty != state.brew_duty_cycle {
-                    log_debug!("Brew duty cycle: {}", duty);
                     state.brew_duty_cycle = duty;
                 }
             }
 
             if let Some(duty) = self.steam_duty_signal.try_take() {
                 if duty != state.steam_duty_cycle {
-                    log_debug!("Steam duty cycle: {}", duty);
                     state.steam_duty_cycle = duty;
                 }
             }
