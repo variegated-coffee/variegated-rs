@@ -27,11 +27,11 @@
 //!
 //! The second layer is a bucket rather than a fixed window because the two cases it
 //! has to tell apart are *burst* and *sustained*, which a fixed window cannot
-//! express. A fixed window of 5 per 500 ms throttled the boot log: roughly a dozen
-//! distinct init lines arrive within a couple hundred milliseconds, and only 5 of
-//! them reached the bus. Those are first sightings with no duplicate anywhere --
-//! thinning them destroys information rather than collapsing repetition, which is
-//! the exact symptom this whole task exists to fix.
+//! express. A fixed window of 5 per 500 ms throttled the boot log: about 21 distinct
+//! init lines arrive within a few hundred milliseconds, and only 5 of them reached
+//! the bus. Those are first sightings with no duplicate anywhere -- thinning them
+//! destroys information rather than collapsing repetition, which is the exact
+//! symptom this whole task exists to fix.
 //!
 //! Exempting first sightings would not work either: a message thrashing in and out
 //! of the [`TRACKED`] slots presents as a first sighting on every re-insertion, so
@@ -71,12 +71,24 @@ pub const TRACKED: usize = 16;
 
 /// Burst the global bucket absorbs from full, in frames.
 ///
-/// 24, sized off the worst legitimate burst in the tree: `main.rs` emits roughly a
-/// dozen distinct init lines within a couple hundred milliseconds of boot, and
-/// every one is a first sighting with no duplicate anywhere. Twice that leaves room
-/// for the same pattern to recur (a reconnect, a routine start) without the bucket
-/// having fully refilled.
-pub const CAP_CAPACITY: u32 = 24;
+/// Sized off the worst legitimate burst in the tree, the boot log. Enumerated from
+/// the boot path rather than estimated: `main.rs` contributes 19 lines that fire on
+/// a normal boot (5 in `main`, 1 in `storage_task`, 13 in `main_task`, with
+/// mutually-exclusive branches collapsed to one apiece and error paths excluded),
+/// and `coordinated_dual_heating_element.rs` adds 2 config-apply lines -- about 21.
+/// Every one is a first sighting with no duplicate anywhere, so any of them the
+/// bucket refuses is information destroyed.
+///
+/// 32 leaves ~11 frames of margin over that. An earlier value of 24 claimed "2x
+/// headroom" against a miscount of "roughly a dozen"; against the real 21 its true
+/// margin was about 4, which is thin for something whose failure mode is silently
+/// thinning the boot log.
+///
+/// Not larger, because capacity is also the one-time burst the sustained bound
+/// gives away: `exceeding_the_tracked_set_stays_bounded` allows
+/// `CAP_CAPACITY + CAP_REFILL_PER_SEC * secs`. Raising this weakens that bound by
+/// exactly this constant, once -- cheap at 32, less so unbounded.
+pub const CAP_CAPACITY: u32 = 32;
 
 /// Sustained rate the bucket refills at, in frames per second.
 ///
@@ -215,8 +227,8 @@ impl Suppressor {
     /// A bucket rather than the fixed window this replaced, because the two cases
     /// that matter are burst and sustained, and a fixed window cannot tell them
     /// apart: 5 per 500 ms bounded the flood correctly but also throttled the boot
-    /// log to 5 of 12 distinct lines, destroying information rather than collapsing
-    /// repetition.
+    /// log to 5 of its ~21 distinct lines, destroying information rather than
+    /// collapsing repetition.
     ///
     /// Shares `rate::TokenBucket`'s intent but not its type: that one budgets
     /// *bytes* for the inter-processor link and takes `&mut self`, while this
@@ -325,19 +337,31 @@ mod tests {
         assert!(published < 200, "{published} frames is close to un-thinned");
     }
 
-    /// The regression guard for the defect a fixed window caused: `main.rs` emits
-    /// roughly a dozen distinct init lines within a couple hundred milliseconds of
-    /// boot. Every one is a first sighting with no duplicate anywhere, so thinning
-    /// any of them destroys information rather than collapsing repetition -- and
-    /// under the old 5-per-500 ms window only 5 of 12 reached the bus, on every
-    /// single boot.
+    /// The regression guard for the defect a fixed window caused. Every line here
+    /// is a first sighting with no duplicate anywhere, so thinning any of them
+    /// destroys information rather than collapsing repetition -- and under the old
+    /// 5-per-500 ms window only 5 reached the bus, on every single boot.
     ///
-    /// This fails if the bucket is replaced by a fixed window, or if its capacity
-    /// drops below the burst.
+    /// **This guard alone does not pin bucket semantics.** It catches a window
+    /// *narrower* than the burst, but a wide one -- 32 per 500 ms, the "just raise
+    /// the count" alternative -- passes it and is caught only by
+    /// `exceeding_the_tracked_set_stays_bounded`, which a wide window blows. It
+    /// takes both: this one covers the burst side, that one covers the sustained
+    /// side, and only together do they force a bucket.
     #[test]
     fn a_boot_burst_of_distinct_messages_all_publishes() {
         let s = Suppressor::new();
+        // The enumerated boot path, in order -- see BOOT_BURST_LINES for where the
+        // count comes from. Mutually-exclusive branches appear once (the PSRAM-ok
+        // arm rather than both arms) and error-only paths are excluded, because
+        // neither contributes to a normal boot.
         let boot = [
+            "Initing!",
+            "PSRAM initialized successfully, using PSRAM for heap",
+            "Heap initialized in PSRAM",
+            "Spawning display task on core 1",
+            "Spawning backlight task on core 1",
+            "Storage task started",
             "Starting!",
             "Resetting ADS124S08",
             "Done",
@@ -346,15 +370,20 @@ mod tests {
             "RTC datetime: 2026-08-02 11:00:00",
             "Gravity sensor initialized - will attempt connection with retry",
             "Belka Portal device initialized",
+            "Watchdog initialized with 8000 ms timeout",
             "Configuration loaded",
             "Dual boiler mechanism initialized",
             "Machine definition created",
             "Creating huge future join task",
+            "Heating element interlock: true",
+            "Heating element contention strategy: Alternate",
         ];
 
         let mut published = 0;
         for (i, msg) in boot.iter().enumerate() {
-            // 15 ms apart, the spacing these actually arrive at.
+            // 15 ms apart, the tightest spacing these plausibly arrive at. The real
+            // burst is spread wider -- flash config load, ADC reset delays and the
+            // RTC read all buy back refill -- so this is the pessimistic case.
             let now = i as u32 * 15;
             if s.admit(Severity::Info, msg, now) == Admission::Publish {
                 published += 1;
@@ -442,13 +471,28 @@ mod tests {
         );
     }
 
+    /// Distinct log lines a normal dual-boiler boot emits in a burst.
+    ///
+    /// Enumerated from the boot path, not estimated: 19 in
+    /// `examples/dual-boiler/src/main.rs` -- 5 in `main`, 1 in `storage_task`,
+    /// 13 in `main_task` -- plus 2 config-apply lines in
+    /// `variegated-hal/src/gpio/coordinated_dual_heating_element.rs`.
+    /// Mutually-exclusive branches count once (PSRAM ok *or* failed, never both)
+    /// and error-only paths are excluded.
+    ///
+    /// **Revisit this if init logging grows.** Nothing checks it automatically --
+    /// the boot sequence itself is not under test -- so a few added `log_info!`
+    /// calls at startup will silently erode the margin `CAP_CAPACITY` is sized to
+    /// give, and the symptom is a quietly thinned boot log.
+    const BOOT_BURST_LINES: u32 = 21;
+
     /// Capacity has to cover the burst it was sized for, or the boot-log guard
-    /// above passes only by accident of message count.
+    /// above passes only by accident of how many lines that test happens to list.
     #[test]
     fn capacity_covers_the_boot_burst() {
         assert!(
-            CAP_CAPACITY >= 12,
-            "capacity {CAP_CAPACITY} is below the ~12-line boot burst"
+            CAP_CAPACITY >= BOOT_BURST_LINES,
+            "capacity {CAP_CAPACITY} is below the {BOOT_BURST_LINES}-line boot burst"
         );
     }
 }
