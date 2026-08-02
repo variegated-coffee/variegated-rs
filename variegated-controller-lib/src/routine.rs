@@ -5,7 +5,10 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::format;
 use core::{fmt, iter};
 use core::ops::{DerefMut, Range};
-use defmt::{info, Format};
+use defmt::Format;
+use variegated_log::log_info;
+use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
@@ -514,14 +517,14 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 }
                 RoutineExitCondition::StateConditionMet(condition) => {
                     if self.state_condition_met(condition, status) {
-                        info!("State condition met: {:?}", condition);
+                        log_info!("State condition met: {:?}", condition);
                         return self.handle_exit(exit, status);
                     }
                 }
                 RoutineExitCondition::UserAction(action_index) => {
                     if let Some(user_action_index) = user_action {
                         if user_action_index == action_index {
-                            info!("User action condition met: {:?}", action_index);
+                            log_info!("User action condition met: {:?}", action_index);
                             return self.handle_exit(exit, status);
                         }
                     }
@@ -554,7 +557,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
     }
 
     pub fn transition_to(&mut self, step: usize, status: &Status) -> Vec<MachineCommand> {
-        info!("Transitioning to step {}", step);
+        log_info!("Transitioning to step {}", step);
         self.current_step = Some(step);
         self.step_start_time = Some(Instant::now());
         self.routine.steps[step].entry_command.iter()
@@ -689,7 +692,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
             Cache::new_uncached(),
         );
 
-        info!("Loading routines from flash...");
+        log_info!("Loading routines from flash...");
         // Create the iterator of map items
         let mut iterator = storage
             .fetch_all_items(&mut self.deserialization_buffer)
@@ -704,12 +707,12 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
             // Skip Internal routines - they are never persisted to flash
             if let Some(idx) = RoutineIndex::from_storage_index(key) {
                 if matches!(idx, RoutineIndex::Internal(_)) {
-                    info!("Skipping internal routine at storage index {} during flash load", key);
+                    log_info!("Skipping internal routine at storage index {} during flash load", key);
                     continue;
                 }
             }
 
-            info!("Loaded routine at index {}: {:?}", key, value);
+            defmt::info!("Loaded routine at index {}: {:?}", key, value);
             if let Some(routine) = value {
                 self.cache.insert(key, routine);
             } else {
@@ -741,7 +744,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
 
         // @todo Handle full storage by erasing the range and rewriting all items
 
-        info!("Stored routine at index {} in flash", index);
+        bus::emit_event(DebugEvent::StorageWrite { store: name("routines"), index });
 
         Ok(())
     }
@@ -749,7 +752,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
 
 impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialStorageRoutineRepository<'a, M, T> {
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine> {
-        info!("Getting routine at index {:?}", index);
+        log_info!("Getting routine at index {:?}", index);
         self.load_from_flash().await.ok()?;
         let storage_index = index.to_storage_index();
         self.cache.get(&storage_index)
@@ -788,14 +791,14 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         // Add to cache only, never write to flash
         self.cache.insert(storage_index, routine);
 
-        info!("Added internal routine at index {:?} (not persisted to flash)", index);
+        log_info!("Added internal routine at index {:?} (not persisted to flash)", index);
         Ok(())
     }
 
     async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine> {
         // Prevent removal of Internal routines (they are read-only)
         if matches!(index, RoutineIndex::Internal(_)) {
-            info!("Cannot remove internal routine at index {:?}", index);
+            log_info!("Cannot remove internal routine at index {:?}", index);
             return None;
         }
 
@@ -831,7 +834,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         //info!("Iterating over all routines");
         let res = self.load_from_flash().await;
         if res.is_err() {
-            info!("Error loading routines from flash: {:?}", res.err());
+            log_info!("Error loading routines from flash: {:?}", res.err());
         }
 
         self.cache.values()
@@ -841,7 +844,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         //info!("Iterating over all routines with indices");
         let res = self.load_from_flash().await;
         if res.is_err() {
-            info!("Error loading routines from flash: {:?}", res.err());
+            log_info!("Error loading routines from flash: {:?}", res.err());
         }
 
         self.cache.iter().filter_map(|(storage_index, routine)| {
@@ -852,7 +855,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     async fn get_routine_count(&mut self) -> usize {
         //info!("Getting routine count");
         if let Err(e) = self.load_from_flash().await {
-            info!("Error loading routines from flash: {:?}", e);
+            log_info!("Error loading routines from flash: {:?}", e);
             return 0;
         }
 
@@ -860,7 +863,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn optimize_storage(&mut self) -> Result<(), &'static str> {
-        info!("Optimizing routine storage");
+        log_info!("Optimizing routine storage");
 
         // Load all routines into cache if not already loaded
         self.load_from_flash().await?;
@@ -897,7 +900,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         Timer::after_millis(1).await;
 
         // Re-store all routines from the collected Vec (Internal routines already filtered out)
-        info!("Rewriting {} routines (excluding internal routines)", routines_to_store.len());
+        log_info!("Rewriting {} routines (excluding internal routines)", routines_to_store.len());
         for (storage_index, routine) in routines_to_store {
             let opt = Some(routine);
             self.store_in_flash(storage_index, &opt).await?;
@@ -905,7 +908,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
             Timer::after_millis(1).await;
         }
 
-        info!("Routine storage optimization complete");
+        log_info!("Routine storage optimization complete");
         Ok(())
     }
 }

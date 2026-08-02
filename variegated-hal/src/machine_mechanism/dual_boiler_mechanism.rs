@@ -4,7 +4,8 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::Instant;
 use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
 use alloc::boxed::Box;
-use defmt::{info, warn, Format};
+use defmt::Format;
+use variegated_log::{log_info, log_warn};
 
 #[derive(Debug, Clone, Format)]
 pub struct DualBoilerConfig {
@@ -88,7 +89,7 @@ impl<'a> DualBoilerMechanism<'a> {
         }
 
         if let Some(ref mut solenoid) = self.group_solenoid {
-            info!("Opening group solenoid");
+            log_info!("Opening group solenoid");
             let _ = solenoid.set_valve_state(100);
         }
     }
@@ -108,7 +109,7 @@ impl<'a> DualBoilerMechanism<'a> {
         }
 
         if let Some(ref mut solenoid) = self.group_solenoid {
-            info!("Closing group solenoid");
+            log_info!("Closing group solenoid");
             let _ = solenoid.set_valve_state(0);
         }
 
@@ -127,7 +128,7 @@ impl<'a> DualBoilerMechanism<'a> {
         }
 
         if let Some(ref mut solenoid) = self.steam_dispersal_solenoid {
-            info!("Opening steam dispersal solenoid");
+            log_info!("Opening steam dispersal solenoid");
             let _ = solenoid.set_valve_state(100);
         }
     }
@@ -141,7 +142,7 @@ impl<'a> DualBoilerMechanism<'a> {
         }
 
         if let Some(ref mut solenoid) = self.steam_dispersal_solenoid {
-            info!("Closing steam dispersal solenoid");
+            log_info!("Closing steam dispersal solenoid");
             let _ = solenoid.set_valve_state(0);
         }
     }
@@ -319,7 +320,7 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
                 } else {
                     // Can't fill (not idle OR tank empty)
                     if should_block {
-                        warn!("Cannot fill boiler: Tank is empty");
+                        log_warn!("Cannot fill boiler: Tank is empty");
                     }
                     self.is_filling_cycle = false;
                     self.threshold_exceeded_time = None;

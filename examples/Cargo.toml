@@ -30,6 +30,9 @@ w25q32jv = { version = "0.5.1", features = ["defmt", "async", "megabits64"] }
 
 defmt.workspace = true
 defmt-rtt.workspace = true
+# `log_*!` expands to a `log::*!` call as well as a `defmt::*!` one, so the facade
+# has to be nameable from this crate.
+log.workspace = true
 
 embedded-alloc.workspace = true
 ds3231 = { version = "0.3.0", features = ["async"] }
@@ -58,6 +61,8 @@ variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", feat
 variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
 variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics", "delta-updates"], optional = true, default-features = false }
 variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
+# `debug-bus` installs the `log` -> debug bus bridge; see `bus_sink::init()` in main.
+variegated-log = { version = "0.1.0", path = "../variegated-log", features = ["debug-bus", "rp235xb"] }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
 variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
 

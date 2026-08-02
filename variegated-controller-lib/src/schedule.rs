@@ -2,7 +2,9 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::vec::Vec;
 use core::ops::{DerefMut, Range};
 use chrono::{DateTime, Datelike, Duration, Timelike, TimeZone};
-use defmt::{info, warn};
+use variegated_log::{log_info, log_warn};
+use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
@@ -75,7 +77,7 @@ fn calculate_next_trigger(trigger: &variegated_controller_types::ScheduleTrigger
 
 pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleStore, const CH_N: usize>(store: &Mutex<M1, ScheduleStoreT>, command_channel: Sender<'static, M2, MachineCommand, CH_N>) -> () {
     loop {
-        info!("Running schedule task");
+        log_info!("Running schedule task");
 
         let now = TimeKeeper::now_local();
         if let Some(now) = now {
@@ -83,11 +85,11 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
             let schedules = store_guard.schedules_triggering_at(now).await;
 
             for schedule in schedules {
-                info!("Schedule triggered: {:?}", schedule);
+                defmt::info!("Schedule triggered: {:?}", schedule);
                 for action in &schedule.commands {
                     let command = action.to_machine_command();
                     command_channel.send(command).await;
-                    info!("Sent scheduled action: {:?}", action);
+                    defmt::info!("Sent scheduled action: {:?}", action);
                 }
             }
         }
@@ -276,7 +278,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
 
     pub async fn load_from_flash(&mut self) -> Result<(), &'static str> {
         if self.cache_initialized {
-            info!("Schedule store cache already initialized, skipping load");
+            log_info!("Schedule store cache already initialized, skipping load");
             return Ok(());
         }
 
@@ -287,7 +289,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
             Cache::new_uncached(),
         );
 
-        info!("Loading schedules from flash...");
+        log_info!("Loading schedules from flash...");
         // Create the iterator of map items
         let mut iterator = storage
             .fetch_all_items(&mut self.deserialization_buffer)
@@ -300,16 +302,16 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
             .await
         {
             let Ok(item) = item else {
-                warn!("Invalid schedule item encountered in flash, stopping load");
+                log_warn!("Invalid schedule item encountered in flash, stopping load");
                 break;
             };
 
             let Some((key, value)) = item else {
-                info!("Skipping invalid schedule item in flash");
+                log_info!("Skipping invalid schedule item in flash");
                 break;
             };
 
-            info!("Loaded schedule at index {}", key);
+            log_info!("Loaded schedule at index {}", key);
             let index = key as usize;
             if index > max_index {
                 max_index = index;
@@ -355,7 +357,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
 
         // @todo Handle full storage by erasing the range and rewriting all items
 
-        info!("Stored schedule item at index {} in flash", index);
+        bus::emit_event(DebugEvent::StorageWrite { store: name("schedules"), index: index as u16 });
 
         Ok(())
     }
@@ -383,7 +385,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem> {
         let res = self.load_from_flash().await;
         if res.is_err() {
-            info!("Error loading schedules from flash: {:?}", res.err());
+            log_info!("Error loading schedules from flash: {:?}", res.err());
         }
 
         self.cache.values()
@@ -414,7 +416,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
 
     async fn get_schedule_count(&mut self) -> usize {
         if let Err(e) = self.load_from_flash().await {
-            info!("Error loading schedules from flash: {:?}", e);
+            log_info!("Error loading schedules from flash: {:?}", e);
             return 0;
         }
 
@@ -422,7 +424,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
     }
 
     async fn optimize_storage(&mut self) -> Result<(), &'static str> {
-        info!("Optimizing schedule storage");
+        log_info!("Optimizing schedule storage");
 
         // Load all schedules into cache if not already loaded
         self.load_from_flash().await?;
@@ -451,7 +453,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
         }
 
         // Re-store all schedules with consecutive indices starting from 0
-        info!("Rewriting {} schedules with compacted indices", schedules_to_store.len());
+        log_info!("Rewriting {} schedules with compacted indices", schedules_to_store.len());
         for (new_index, schedule) in schedules_to_store.iter().enumerate() {
             let opt = Some(schedule.clone());
             self.store_in_flash(new_index, &opt).await?;
@@ -461,7 +463,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
         // Reset next_index to the number of schedules
         self.next_index = schedules_to_store.len();
 
-        info!("Schedule storage optimization complete, next_index reset to {}", self.next_index);
+        log_info!("Schedule storage optimization complete, next_index reset to {}", self.next_index);
         Ok(())
     }
 }

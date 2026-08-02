@@ -1,4 +1,4 @@
-use defmt::info;
+use variegated_log::log_info;
 use embassy_rp::gpio::Output;
 use crate::{ValveMechanism, ValveMechanismError, ValveOpenType};
 
@@ -26,12 +26,12 @@ impl<'a> ValveMechanism for GpioBinarySolenoidValve<'a> {
     fn set_valve_state(&mut self, state: ValveOpenType) -> Result<(), ValveMechanismError> {
         if state > 20 {
             if self.output.is_set_low() {
-                info!("Opening solenoid");
+                log_info!("Opening solenoid");
                 self.output.set_high();
             }
         } else {
             if self.output.is_set_high() {
-                info!("Closing solenoid");
+                log_info!("Closing solenoid");
                 self.output.set_low();
             }
         }

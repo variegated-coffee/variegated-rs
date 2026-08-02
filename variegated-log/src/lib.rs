@@ -2,6 +2,10 @@
 
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::Driver;
+
+#[cfg(feature = "debug-bus")]
+pub mod bus_sink;
+
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {

@@ -14,9 +14,20 @@ log.workspace = true
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-usb-logger.workspace = true
 embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+# Both optional: only the `debug-bus` sink needs them, and pulling the debug bus
+# into every consumer of the `log_*!` macros would drag `variegated-debug`'s
+# static ring into builds that never publish to it.
+variegated-debug = { version = "0.1.0", path = "../variegated-debug", optional = true }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, optional = true }
 
 [features]
 default = []
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb"]
+# Republish every `log` record onto the debug bus as `DebugPayload::Text`.
+# Opt-in per firmware: the binary crate installs the logger by calling
+# `variegated_log::bus_sink::init()`. Deliberately does *not* select
+# `variegated-debug`'s `source-application` / `source-comms` feature -- that
+# choice belongs to the binary, exactly as it does for `variegated-debug` itself.
+debug-bus = ["dep:variegated-debug", "dep:variegated-controller-types"]

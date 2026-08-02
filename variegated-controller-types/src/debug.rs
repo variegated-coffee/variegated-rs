@@ -144,6 +144,32 @@ pub enum DebugEvent {
     RoutinesSent,
     LinkDecodeError,
     CountersReset,
+    // Application processor -- machine events.
+    //
+    // These are the sites where structure earns its keep: a host can count brews,
+    // correlate a routine against a shot log, or filter for interlocks, none of
+    // which it can do against a free-text line. Every one of them is edge
+    // triggered -- entered from a command handler or a state transition, never
+    // from a control-loop body -- so promoting them cannot flood the bus.
+    //
+    // The `log_*!` call that used to sit at each of these sites was removed, not
+    // kept alongside: with the `log` -> bus bridge installed, leaving it would put
+    // the same occurrence on the bus twice, once typed and once as text.
+    BrewStarted { group: u8 },
+    BrewStopped { group: u8 },
+    SteamStarted,
+    SteamStopped,
+    /// `index` is `RoutineIndex::to_storage_index()`, which round-trips the
+    /// Internal/Function/Custom discriminant as well as the number.
+    RoutineStarted { index: u16 },
+    RoutineCompleted,
+    RoutineCancelled,
+    /// A record was committed to flash. `index` is the slot; `0` where the store
+    /// holds a single record (settings).
+    StorageWrite { store: Name, index: u16 },
+    SensorFault { sensor: Name },
+    /// A safety interlock refused an operation.
+    InterlockTripped { interlock: Name },
     // Comms processor
     WifiAssociated,
     WifiLost,
@@ -170,10 +196,12 @@ impl DebugEvent {
             | DebugEvent::SntpFailed
             | DebugEvent::LinkDecodeError
             | DebugEvent::SpawnFailed { .. }
-            | DebugEvent::CommandRejected { .. } => Severity::Error,
+            | DebugEvent::CommandRejected { .. }
+            | DebugEvent::SensorFault { .. } => Severity::Error,
             DebugEvent::WifiLost
             | DebugEvent::TimeSyncIgnoredImplausible { .. }
-            | DebugEvent::BlePeripheralDisconnected { .. } => Severity::Warn,
+            | DebugEvent::BlePeripheralDisconnected { .. }
+            | DebugEvent::InterlockTripped { .. } => Severity::Warn,
             _ => Severity::Info,
         }
     }
@@ -192,6 +220,16 @@ impl DebugEvent {
             DebugEvent::RoutinesSent => "routines_sent",
             DebugEvent::LinkDecodeError => "link_decode_error",
             DebugEvent::CountersReset => "counters_reset",
+            DebugEvent::BrewStarted { .. } => "brew_started",
+            DebugEvent::BrewStopped { .. } => "brew_stopped",
+            DebugEvent::SteamStarted => "steam_started",
+            DebugEvent::SteamStopped => "steam_stopped",
+            DebugEvent::RoutineStarted { .. } => "routine_started",
+            DebugEvent::RoutineCompleted => "routine_completed",
+            DebugEvent::RoutineCancelled => "routine_cancelled",
+            DebugEvent::StorageWrite { .. } => "storage_write",
+            DebugEvent::SensorFault { .. } => "sensor_fault",
+            DebugEvent::InterlockTripped { .. } => "interlock_tripped",
             DebugEvent::WifiAssociated => "wifi_associated",
             DebugEvent::WifiLost => "wifi_lost",
             DebugEvent::WifiReconnectRequested => "wifi_reconnect_requested",

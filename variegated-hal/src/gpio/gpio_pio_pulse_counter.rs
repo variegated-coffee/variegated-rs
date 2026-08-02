@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicU32, Ordering};
-use defmt::info;
+use variegated_log::log_info;
 use embassy_futures::select::{select, Either};
 use embassy_rp::dma;
 use embassy_rp::gpio::Pull;
@@ -311,7 +311,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                 Either::First(_) => {
                     // IRQ triggered - increment wrap counter
                     self.wrap_counter.fetch_add(1, Ordering::Release);
-                    info!("PIO wrap detected, total wraps: {}", self.wrap_counter.load(Ordering::Acquire));
+                    log_info!("PIO wrap detected, total wraps: {}", self.wrap_counter.load(Ordering::Acquire));
                 }
                 Either::Second(_) => {
                     // Timer expired - take measurement
@@ -324,7 +324,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                        measurement_instant.duration_since(self.startup_time).as_secs() >= 2
                     {
                         self.startup_complete = true;
-                        info!("PIO pulse counter startup complete");
+                        log_info!("PIO pulse counter startup complete");
                     }
 
                     // Store measurement
@@ -347,7 +347,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                             if freq <= 1000.0 {
                                 freq
                             } else {
-                                info!("Rejecting impossible frequency: {} Hz", freq);
+                                log_info!("Rejecting impossible frequency: {} Hz", freq);
                                 0.0
                             }
                         } else {

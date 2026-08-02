@@ -1,7 +1,7 @@
 use embassy_rp::gpio::Output;
 use crate::DutyCycleType;
 use crate::pump::{Pump, PumpError};
-use defmt::info;
+use variegated_log::log_info;
 
 pub struct GpioBinaryPump<'a> {
     output: Output<'a>,
@@ -36,9 +36,9 @@ impl<'a> Pump for GpioBinaryPump<'a> {
         }
 
         if self.current_duty_cycle <= 20 && duty_cycle > 20 {
-            info!("Binary pump ON (duty cycle {} > threshold {})", duty_cycle, self.threshold);
+            log_info!("Binary pump ON (duty cycle {} > threshold {})", duty_cycle, self.threshold);
         } else if self.current_duty_cycle > 20 && duty_cycle <= 20 {
-            info!("Binary pump OFF (duty cycle {} <= threshold {})", duty_cycle, self.threshold);
+            log_info!("Binary pump OFF (duty cycle {} <= threshold {})", duty_cycle, self.threshold);
         }
 
         self.current_duty_cycle = duty_cycle;

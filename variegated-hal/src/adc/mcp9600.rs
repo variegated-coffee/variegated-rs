@@ -1,4 +1,5 @@
-use defmt::{error, Format};
+use defmt::Format;
+use variegated_log::log_error;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Sender;
@@ -50,7 +51,7 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for Mcp9600Sensor<'
                     self.signal.send(sensor_reading);
                     //defmt::info!("Read value: {}", transformed_val);
                 } else {
-                    error!("Failed to read value from MCP9600: {:?}", res);
+                    log_error!("Failed to read value from MCP9600: {:?}", res);
                 }
             }
 

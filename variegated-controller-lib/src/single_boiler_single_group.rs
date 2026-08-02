@@ -5,7 +5,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ops::DerefMut;
 use crc::{Crc, CRC_32_ISCSI};
-use defmt::{error, info, warn, Format};
+use defmt::Format;
+use variegated_log::{log_error, log_info, log_warn};
+use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::Receiver;
 use embassy_sync::mutex::Mutex;
@@ -61,23 +64,23 @@ impl<'a> Value<'a> for SingleBoilerSingleGroupPersistentConfiguration {
     fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
         let crc = Crc::<u32>::new(&CRC_32_ISCSI);
 
-        info!("Serializing SingleBoilerSingleGroupConfiguration");
+        log_info!("Serializing SingleBoilerSingleGroupConfiguration");
 
         let slice = match to_slice_crc32(self, buffer, crc.digest()) {
             Ok(bytes) => Ok(bytes.len()),
             Err(postcard::Error::SerializeBufferFull) => {
-                warn!("Serialization buffer too small");
+                log_warn!("Serialization buffer too small");
 
                 Err(SerializationError::BufferTooSmall)
             },
             Err(_) => {
-                warn!("Serialization error");
+                log_warn!("Serialization error");
 
                 Err(SerializationError::InvalidData)
             },
         };
 
-        info!("Serialized SingleBoilerSingleGroupConfiguration, len = {}", slice.clone().unwrap_or(0));
+        log_info!("Serialized SingleBoilerSingleGroupConfiguration, len = {}", slice.clone().unwrap_or(0));
 
         slice
     }
@@ -86,36 +89,36 @@ impl<'a> Value<'a> for SingleBoilerSingleGroupPersistentConfiguration {
     where
         Self: Sized
     {
-        info!("Deserializing configuration");
+        log_info!("Deserializing configuration");
 
         let crc = Crc::<u32>::new(&CRC_32_ISCSI);
 
         let v = match from_bytes_crc32(buffer, crc.digest()) {
             Ok(value) => Ok(value),
             Err(postcard::Error::DeserializeUnexpectedEnd) => {
-                warn!("Deserialization buffer too small");
+                log_warn!("Deserialization buffer too small");
 
                 Err(SerializationError::InvalidFormat)
             },
             Err(postcard::Error::DeserializeBadEnum) => {
-                warn!("Deserialization bad enum");
+                log_warn!("Deserialization bad enum");
 
                 Err(SerializationError::InvalidFormat)
             },
             Err(_) => {
-                warn!("Deserialization error");
+                log_warn!("Deserialization error");
                 Err(SerializationError::InvalidFormat)
             },
         };
 
         match v {
             Ok(value) => {
-                info!("Deserialized configuration");
+                log_info!("Deserialized configuration");
                 // See `ScheduleItem`'s impl: the whole slice is consumed.
                 Ok((value, buffer.len()))
             }
             Err(e) => {
-                warn!("Deserialization failed");
+                log_warn!("Deserialization failed");
                 Err(e)
             }
         }
@@ -332,7 +335,7 @@ impl<
 
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
-                    info!("Routine finished executing");
+                    log_info!("Routine finished executing");
                     self.handle_routine_exit().await;
                 } else if let Some(status) = self.previous_status.as_ref() {
                     // Record shot log sample
@@ -446,18 +449,18 @@ impl<
             GroupBrewControlMode::FixedDutyCycle => {
                 let duty_cycle = actual_pump_control_state.values.duty_cycle;
                 self.group.set_brewing_state(true, duty_cycle).await;
-                info!("Fixed duty cycle target: {}", duty_cycle);
+                log_info!("Fixed duty cycle target: {}", duty_cycle);
                 Output::FixedDutyCycle(duty_cycle)
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
                 let target_duty_cycle = actual_pump_control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
-                info!("Fixed duty cycle curve target: {}", target_duty_cycle);
-                info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
+                log_info!("Fixed duty cycle curve target: {}", target_duty_cycle);
+                log_info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
                 self.group.set_brewing_state(true, target_duty_cycle).await;
                 Output::FixedDutyCycle(target_duty_cycle)
             }
             _ => {
-                info!("PID target: {}", pump_pid_out.out);
+                log_info!("PID target: {}", pump_pid_out.out);
                 self.group.set_brewing_state(true, pump_pid_out.out as u8).await;
                 Output::PidOutput(pump_pid_out)
             },
@@ -496,7 +499,7 @@ impl<
                 // Dry-run protection: disable heating if water level too low
                 let boiler_level = self.boiler.get_water_level();
                 let duty_cycle = if !Self::is_boiler_level_safe(boiler_level, &self.boiler_config) {
-                    warn!("Boiler heating disabled: water level below minimum safe level");
+                    log_warn!("Boiler heating disabled: water level below minimum safe level");
                     0
                 } else {
                     boiler_pid_out.out as u8
@@ -751,11 +754,11 @@ impl<
     async fn handle_command(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::RunRoutine(index, params) => {
-                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
+                log_info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
                 self.handle_routine_start(index, params).await;
             }
             MachineCommand::CancelRoutine => {
-                info!("Cancelling routine");
+                bus::emit_event(DebugEvent::RoutineCancelled);
                 self.handle_routine_exit().await;
             }
             _ => {
@@ -773,7 +776,7 @@ impl<
             MachineCommand::StartBrewing(_) => {
                 // Validate tank status before starting brewing
                 if self.should_block_water_operation() {
-                    error!("Blocked StartBrewing: Insufficient water in tank");
+                    bus::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
                     return;
                 }
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::Brewing).await;
@@ -784,7 +787,7 @@ impl<
             MachineCommand::StartPumpingToWaterTap(_) => {
                 // Validate tank status before starting water dispensing
                 if self.should_block_water_operation() {
-                    error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
+                    log_error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
                     return;
                 }
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::PumpingToWaterTap).await;
@@ -793,7 +796,7 @@ impl<
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::BrewModeIdle).await;
             }
             MachineCommand::SetBoilerControlTarget(boiler_index, mode, values_update) => {
-                info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
+                log_info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
                 match boiler_index {
                     0 => {
                         self.persistent_configuration.brew_boiler_control_state.mode = mode;
@@ -820,12 +823,12 @@ impl<
                         self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
                     },
                     _ => {
-                        error!("Invalid boiler index: {}", boiler_index);
+                        log_error!("Invalid boiler index: {}", boiler_index);
                     }
                 }
             }
             MachineCommand::SetBoilerControlTargetValues(boiler_index, update) => {
-                info!("Setting boiler control values for boiler {} to {:?}", boiler_index, update);
+                log_info!("Setting boiler control values for boiler {} to {:?}", boiler_index, update);
                 match boiler_index {
                     0 => {
                         if let Some(temp) = update.temperature {
@@ -846,12 +849,12 @@ impl<
                         self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
                     },
                     _ => {
-                        error!("Invalid boiler index: {}", boiler_index);
+                        log_error!("Invalid boiler index: {}", boiler_index);
                     }
                 }
             }
             MachineCommand::SetGroupBrewControlTarget(group_index, mode, values_update) => {
-                info!("Setting group brew control mode for group {} to {:?} with values {:?}", group_index, mode, values_update);
+                log_info!("Setting group brew control mode for group {} to {:?} with values {:?}", group_index, mode, values_update);
                 if group_index == 0 {
                     // Check if this is a curve mode and record start time
                     match mode {
@@ -860,7 +863,7 @@ impl<
                         GroupBrewControlMode::OutputFlowRateCurve |
                         GroupBrewControlMode::FixedDutyCycleCurve => {
                             self.curve_start_time = Some(Instant::now());
-                            info!("Starting curve control");
+                            log_info!("Starting curve control");
                         }
                         _ => {
                             // Reset curve start time for non-curve modes
@@ -895,11 +898,11 @@ impl<
                         }
                     }
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::SetGroupBrewControlTargetValues(group_index, update) => {
-                info!("Setting group brew control values for group {} to {:?}", group_index, update);
+                log_info!("Setting group brew control values for group {} to {:?}", group_index, update);
                 if group_index == 0 {
                     if let Some(flow_rate) = update.flow_rate {
                         self.ephemeral_configuration.group_brew_control_state.values.flow_rate = flow_rate;
@@ -926,7 +929,7 @@ impl<
                         self.ephemeral_configuration.group_brew_control_state.values.duty_cycle_curve = curve;
                     }
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::SetPidParameters(target, params) => {
@@ -952,73 +955,73 @@ impl<
             }
             MachineCommand::EnableBoiler(boiler_index) => {
                 if boiler_index == 0 && self.state == SingleBoilerSingleGroupControllerState::SteamModeIdle {
-                    info!("Enabling brew boiler");
+                    log_info!("Enabling brew boiler");
                     self.transition_to_state(SingleBoilerSingleGroupControllerState::BrewModeIdle).await;
                 } else if boiler_index == 1 && self.state == SingleBoilerSingleGroupControllerState::BrewModeIdle {
-                    info!("Enabling steam boiler");
+                    log_info!("Enabling steam boiler");
                     self.transition_to_state(SingleBoilerSingleGroupControllerState::SteamModeIdle).await;
                 } else {
-                    warn!("Invalid boiler index or state for enabling boiler: {} Current state: {:?}", boiler_index, self.state);
+                    log_warn!("Invalid boiler index or state for enabling boiler: {} Current state: {:?}", boiler_index, self.state);
                 }
             }
             MachineCommand::DisableBoiler(boiler_index) => {
                 if boiler_index == 1 && self.state == SingleBoilerSingleGroupControllerState::SteamModeIdle {
-                    info!("Going back to brew mode");
+                    log_info!("Going back to brew mode");
                     self.transition_to_state(SingleBoilerSingleGroupControllerState::BrewModeIdle).await;
                 } else if boiler_index == 0 && self.state == SingleBoilerSingleGroupControllerState::BrewModeIdle {
-                    info!("Going in to power save mode");
+                    log_info!("Going in to power save mode");
                     self.transition_to_state(SingleBoilerSingleGroupControllerState::PowerSave).await;
                 } else {
-                    warn!("Invalid boiler index or state for disabling boiler: {} Current state: {:?}", boiler_index, self.state);
+                    log_warn!("Invalid boiler index or state for disabling boiler: {} Current state: {:?}", boiler_index, self.state);
                 }
             },
             MachineCommand::TareGroupScale(group_index) => {
                 if group_index == 0 {
-                    info!("Taring group scale");
+                    log_info!("Taring group scale");
                     let _ = self.group.scale_tare().await;
                 } else {
-                    error!("Invalid group index for taring scale: {}", group_index);
+                    log_error!("Invalid group index for taring scale: {}", group_index);
                 }
             }
             MachineCommand::ZeroCalibrateGroupScale(group_index) => {
                 if group_index == 0 {
-                    info!("Zero calibrating group scale");
+                    log_info!("Zero calibrating group scale");
                     let _ = self.group.scale_zero_calibration().await;
                 } else {
-                    error!("Invalid group index for zero calibrating scale: {}", group_index);
+                    log_error!("Invalid group index for zero calibrating scale: {}", group_index);
                 }
             }
             MachineCommand::CalibrateGroupScale100g(group_index) => {
                 if group_index == 0 {
-                    info!("Calibrating group scale with 100g");
+                    log_info!("Calibrating group scale with 100g");
                     let _ = self.group.scale_reference_weight_calibration(100).await;
                 } else {
-                    error!("Invalid group index for 100g calibrating scale: {}", group_index);
+                    log_error!("Invalid group index for 100g calibrating scale: {}", group_index);
                 }
             }
             MachineCommand::UpdateCommsStatus(status) => {
-                info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
+                log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }
             MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
-                warn!("Ignoring unsupported command in finally block: {:?}", command);
+                defmt::warn!("Ignoring unsupported command in finally block: {:?}", command);
             }
             MachineCommand::OptimizeConfigurationStorage => {
-                info!("Optimizing configuration storage");
+                log_info!("Optimizing configuration storage");
                 if let Err(e) = self.configuration_store.optimize_storage().await {
-                    warn!("Failed to optimize configuration storage: {}", e);
+                    log_warn!("Failed to optimize configuration storage: {}", e);
                 }
             }
             MachineCommand::OptimizeRoutineStorage => {
-                warn!("OptimizeRoutineStorage not supported for single boiler controller (no routine repository)");
+                log_warn!("OptimizeRoutineStorage not supported for single boiler controller (no routine repository)");
             }
             MachineCommand::OptimizeScheduleStorage => {
-                warn!("OptimizeScheduleStorage not supported for single boiler controller (no schedule store)");
+                log_warn!("OptimizeScheduleStorage not supported for single boiler controller (no schedule store)");
             }
             MachineCommand::InferGroupPressureIntegral(group_index, target_pressure) => {
                 if group_index == 0 {
-                    info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
+                    log_info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
 
                     // Get current duty cycle from the control state configuration
                     let current_duty_cycle = self.ephemeral_configuration.group_brew_control_state.values.duty_cycle;
@@ -1031,14 +1034,14 @@ impl<
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_pressure as f32);
 
-                    info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
+                    log_info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::InferGroupFlowRateIntegral(group_index, target_flow_rate) => {
                 if group_index == 0 {
-                    info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
+                    log_info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
 
                     // Get current duty cycle from the control state configuration
                     let current_duty_cycle = self.ephemeral_configuration.group_brew_control_state.values.duty_cycle;
@@ -1051,14 +1054,14 @@ impl<
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_flow_rate as f32);
 
-                    info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
+                    log_info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::InferGroupOutputFlowRateIntegral(group_index, target_output_flow_rate) => {
                 if group_index == 0 {
-                    info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
+                    log_info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
 
                     // Get current duty cycle from the control state configuration
                     let current_duty_cycle = self.ephemeral_configuration.group_brew_control_state.values.duty_cycle;
@@ -1071,9 +1074,9 @@ impl<
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_output_flow_rate as f32);
 
-                    info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
+                    log_info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             _ => {}
@@ -1082,18 +1085,18 @@ impl<
 
     async fn transition_to_state(&mut self, new_state: SingleBoilerSingleGroupControllerState) {
         if self.state != new_state {
-            info!("Transitioning from {:?} to {:?}", self.state, new_state);
+            log_info!("Transitioning from {:?} to {:?}", self.state, new_state);
             let old_state = self.state;
             self.state = new_state;
 
             match (old_state, new_state) {
                 (SingleBoilerSingleGroupControllerState::BrewModeIdle, SingleBoilerSingleGroupControllerState::Brewing) => {
-                    info!("Starting brewing");
+                    bus::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
                     self.group.set_brewing_state(true, 0).await;
                     self.started_brewing().await;
                 }
                 (SingleBoilerSingleGroupControllerState::Brewing, SingleBoilerSingleGroupControllerState::BrewModeIdle) => {
-                    info!("Stopping brewing");
+                    bus::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
                     self.group.set_brewing_state(false, 0).await;
                     self.stopped_brewing().await;
                 }
@@ -1153,14 +1156,14 @@ impl<
 
         // Validate tank status before starting routine
         if self.should_block_water_operation() {
-            error!("Blocked RunRoutine: Insufficient water in tank");
+            bus::emit_event(DebugEvent::InterlockTripped { interlock: name("run_routine_water_tank_low") });
             return;
         }
         let mut repo = self.routine_repository.lock().await;
         let routine = repo.get_routine(routine_index).await;
 
         if let Some(routine) = routine {
-            info!("Running routine");
+            log_info!("Running routine");
 
             // Create routine execution context
             let routine_execution_context = RoutineExecutionContext::new(
@@ -1190,15 +1193,15 @@ impl<
             self.previous_routine_step = None;
 
             self.current_routine = Some(routine_execution_context);
-            info!("Routine started");
+            bus::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
         } else {
-            error!("Routine not found: {}", routine_index);
+            log_error!("Routine not found: {}", routine_index);
         }
     }
 
     async fn handle_routine_exit(&mut self) {
         if let Some(routine) = self.current_routine.take() {
-            info!("Routine execution finished, saving state and configuration");
+            bus::emit_event(DebugEvent::RoutineCompleted);
 
             // Get finally commands
             let default_status = Status::default();
@@ -1224,7 +1227,7 @@ impl<
             self.shot_logger.finish_shot(ShotStatus::Completed);
             self.previous_routine_step = None;
         } else {
-            warn!("No routine to exit");
+            log_warn!("No routine to exit");
         }
     }
 }

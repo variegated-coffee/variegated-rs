@@ -897,6 +897,7 @@ dependencies = [
  "futures",
  "hd44780-controller",
  "heapless 0.9.3",
+ "log",
  "num-traits",
  "oled_async",
  "panic-probe",
@@ -916,6 +917,7 @@ dependencies = [
  "variegated-gravity-driver",
  "variegated-hal",
  "variegated-instrumentation",
+ "variegated-log",
  "variegated-mcp23017",
  "variegated-mcp9600",
  "variegated-nv3007",
@@ -2348,7 +2350,9 @@ dependencies = [
  "serde",
  "variegated-control-algorithm",
  "variegated-controller-types",
+ "variegated-debug",
  "variegated-hal",
+ "variegated-log",
  "variegated-timekeeping",
 ]
 
@@ -2471,9 +2475,11 @@ dependencies = [
  "variegated-adc-tools",
  "variegated-ads124s08",
  "variegated-controller-types",
+ "variegated-debug",
  "variegated-fdc1004",
  "variegated-gravity-driver",
  "variegated-instrumentation",
+ "variegated-log",
  "variegated-mcp9600",
  "variegated-rp235x-atomic-raw-mutex",
  "variegated-soft-pwm",
@@ -2498,6 +2504,8 @@ dependencies = [
  "embassy-rp",
  "embassy-usb-logger",
  "log",
+ "variegated-controller-types",
+ "variegated-debug",
 ]
 
 [[package]]

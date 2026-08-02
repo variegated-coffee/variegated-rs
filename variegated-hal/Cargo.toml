@@ -30,13 +30,19 @@ async-trait.workspace = true
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
 movavg.workspace = true
 log.workspace = true
+# Supplies the `log_*!` macros, which dual-emit to `defmt` (probe) and the `log`
+# facade (bridged onto the debug bus by the binary).
+variegated-log = { version = "0.1.0", path = "../variegated-log" }
+# For the promoted `SensorFault` event. See the note in variegated-controller-lib
+# about the `source-*` feature: the firmware binary selects it.
+variegated-debug = { version = "0.1.0", path = "../variegated-debug" }
 heapless = { workspace = true, features = ["defmt"] }
 fixed.workspace = true
 pio.workspace = true
 
 [features]
-rp2040 = ["embassy-rp/rp2040"]
-rp235xa = ["embassy-rp/rp235xa", "rp235x"]
-rp235xb = ["embassy-rp/rp235xb", "rp235x"]
+rp2040 = ["embassy-rp/rp2040", "variegated-log/rp2040"]
+rp235xa = ["embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa"]
+rp235xb = ["embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb"]
 rp235x = []
 atomic-mutex = ["dep:variegated-rp235x-atomic-raw-mutex", "rp235x"]

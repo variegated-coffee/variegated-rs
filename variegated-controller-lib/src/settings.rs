@@ -1,6 +1,8 @@
 use alloc::vec;
 use core::ops::{Deref, DerefMut, Range};
-use defmt::info;
+use variegated_log::log_info;
+use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_debug::bus;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash};
@@ -65,34 +67,34 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
             if let Err(e) = &item {
                 match e {
                     sequential_storage::Error::Storage { value: _ } => {
-                        info!("Error Storage");
+                        log_info!("Error Storage");
                     }
                     sequential_storage::Error::FullStorage => {
-                        info!("Error FullStorage");
+                        log_info!("Error FullStorage");
                     }
                     sequential_storage::Error::Corrupted {} => {
-                        info!("Error Corrupted");
+                        log_info!("Error Corrupted");
                     },
                     sequential_storage::Error::BufferTooBig => {
-                        info!("Error BufferTooBig");
+                        log_info!("Error BufferTooBig");
                     },
                     /// A provided buffer was to small to be used (usize is size needed)
                     sequential_storage::Error::BufferTooSmall(usize) => {
-                        info!("Error BufferTooSmall: {}", usize);
+                        log_info!("Error BufferTooSmall: {}", usize);
                     },
                     /// A serialization error (from the key or value)
                     sequential_storage::Error::SerializationError(SerializationError) => {
-                        info!("Error SerializationError: {:?}", SerializationError);
+                        log_info!("Error SerializationError: {:?}", SerializationError);
                     },
                     sequential_storage::Error::ItemTooBig => {
-                        info!("Error ItemTooBig");
+                        log_info!("Error ItemTooBig");
                     },
                     _ => {
-                        info!("Some other error");
+                        log_info!("Some other error");
                     }
                 }
             }
-            info!("No settings found, using default");
+            log_info!("No settings found, using default");
         }
 
         // Use default and cache it
@@ -105,7 +107,7 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
         // Check if settings are the same as cached value
         if let Some(ref cached) = self.cached_value {
             if cached == settings {
-                info!("Settings unchanged, skipping flash write");
+                log_info!("Settings unchanged, skipping flash write");
                 return Ok(());
             }
         }
@@ -120,7 +122,7 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 //        let mut serialization_buffer = [0u8; 1024];
         let mut data_buffer = vec![0u8; 40*1024];
 
-        info!("Setting settings");
+        log_info!("Setting settings");
 
   //      let s = to_slice(settings, &mut serialization_buffer).map_err(|_| "Serialization failed")?;
 
@@ -135,13 +137,13 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
         // Update the cache with the new settings
         self.cached_value = Some(settings.clone());
 
-        info!("Settings stored successfully");
+        bus::emit_event(DebugEvent::StorageWrite { store: name("settings"), index: 0 });
 
         Ok(())
     }
 
     async fn optimize_storage(&mut self) -> Result<(), &'static str> {
-        info!("Optimizing configuration storage");
+        log_info!("Optimizing configuration storage");
 
         // Ensure we have loaded/cached the current settings
         if self.cached_value.is_none() {
@@ -169,10 +171,10 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
         }
 
         // Write the current settings back
-        info!("Rewriting optimized configuration");
+        log_info!("Rewriting optimized configuration");
         self.save_settings(&current_settings).await?;
 
-        info!("Configuration storage optimization complete");
+        log_info!("Configuration storage optimization complete");
         Ok(())
     }
 }

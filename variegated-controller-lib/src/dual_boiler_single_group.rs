@@ -3,7 +3,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use crc::{Crc, CRC_32_ISCSI};
-use defmt::{debug, error, info, warn, Format};
+use defmt::Format;
+use variegated_log::{log_debug, log_error, log_info, log_warn};
+use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_debug::bus;
 use embassy_rp::adc::Config;
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
@@ -105,23 +108,23 @@ impl<'a> Value<'a> for DualBoilerSingleGroupPersistentConfiguration {
     fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
         let crc = Crc::<u32>::new(&CRC_32_ISCSI);
 
-        info!("Serializing DualBoilerSingleGroupConfiguration");
+        log_info!("Serializing DualBoilerSingleGroupConfiguration");
 
         let slice = match to_slice_crc32(self, buffer, crc.digest()) {
             Ok(bytes) => Ok(bytes.len()),
             Err(postcard::Error::SerializeBufferFull) => {
-                warn!("Serialization buffer too small");
+                log_warn!("Serialization buffer too small");
 
                 Err(SerializationError::BufferTooSmall)
             },
             Err(_) => {
-                warn!("Serialization error");
+                log_warn!("Serialization error");
 
                 Err(SerializationError::InvalidData)
             },
         };
 
-        info!("Serialized DualBoilerSingleGroupConfiguration, len = {}", slice.clone().unwrap_or(0));
+        log_info!("Serialized DualBoilerSingleGroupConfiguration, len = {}", slice.clone().unwrap_or(0));
 
         slice
     }
@@ -130,36 +133,36 @@ impl<'a> Value<'a> for DualBoilerSingleGroupPersistentConfiguration {
     where
         Self: Sized
     {
-        info!("Deserializing configuration");
+        log_info!("Deserializing configuration");
 
         let crc = Crc::<u32>::new(&CRC_32_ISCSI);
 
         let v = match from_bytes_crc32(buffer, crc.digest()) {
             Ok(value) => Ok(value),
             Err(postcard::Error::DeserializeUnexpectedEnd) => {
-                warn!("Deserialization buffer too small");
+                log_warn!("Deserialization buffer too small");
 
                 Err(SerializationError::InvalidFormat)
             },
             Err(postcard::Error::DeserializeBadEnum) => {
-                warn!("Deserialization bad enum");
+                log_warn!("Deserialization bad enum");
 
                 Err(SerializationError::InvalidFormat)
             },
             Err(_) => {
-                warn!("Deserialization error");
+                log_warn!("Deserialization error");
                 Err(SerializationError::InvalidFormat)
             },
         };
 
         match v {
             Ok(value) => {
-                info!("Deserialized configuration");
+                log_info!("Deserialized configuration");
                 // See `ScheduleItem`'s impl: the whole slice is consumed.
                 Ok((value, buffer.len()))
             }
             Err(e) => {
-                warn!("Deserialization failed");
+                log_warn!("Deserialization failed");
                 Err(e)
             }
         }
@@ -650,7 +653,7 @@ impl<
         configuration.schedules = match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
             Ok(mut store) => store.get_schedules().await.cloned().collect(),
             Err(_) => {
-                warn!("Failed to acquire schedule_store lock for configuration (timeout)");
+                log_warn!("Failed to acquire schedule_store lock for configuration (timeout)");
                 Vec::new()
             }
         };
@@ -694,7 +697,7 @@ impl<
             // Handle routine execution
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
-                    info!("Routine finished executing");
+                    log_info!("Routine finished executing");
                     self.handle_routine_exit().await;
                 } else if let Some(status) = self.previous_status.as_ref() {
                     // Record shot log sample
@@ -749,7 +752,7 @@ impl<
             let now = Instant::now();
             if now.saturating_duration_since(last_debug_print).as_secs() >= 1 {
                 if let Some(ref status) = self.previous_status {
-                    debug!("Status: {:?}", status);
+                    log_debug!("Status: {:?}", status);
                 }
                 last_debug_print = now;
             }
@@ -758,7 +761,7 @@ impl<
             if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
                 let current_config = self.configuration.clone();
                 self.publish_general_configuration().await;
-                info!("Periodic configuration published");
+                log_info!("Periodic configuration published");
                 last_configuration_publish = now;
                 last_published_configuration = current_config;
             }
@@ -824,7 +827,7 @@ impl<
         if let Some(max_temp) = self.brew_boiler_config.max_temperature {
             if let Some(current_temp) = self.brew_boiler.get_temperature() {
                 if current_temp >= max_temp {
-                    warn!("Brew boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
+                    log_warn!("Brew boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
                     brew_demand = 0.0;
                 }
             }
@@ -834,7 +837,7 @@ impl<
         if let Some(max_pressure) = self.brew_boiler_config.max_pressure {
             if let Some(current_pressure) = self.brew_boiler.get_pressure() {
                 if current_pressure >= max_pressure {
-                    warn!("Brew boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
+                    log_warn!("Brew boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
                     brew_demand = 0.0;
                 }
             }
@@ -843,7 +846,7 @@ impl<
         // Dry-run protection: disable heating if water level too low
         let brew_boiler_level = self.brew_boiler.get_water_level();
         if !Self::is_boiler_level_safe(brew_boiler_level, &self.brew_boiler_config) {
-            warn!("Brew boiler heating disabled: water level below minimum safe level");
+            log_warn!("Brew boiler heating disabled: water level below minimum safe level");
             brew_demand = 0.0;
         }
 
@@ -889,7 +892,7 @@ impl<
         if let Some(max_temp) = self.steam_boiler_config.max_temperature {
             if let Some(current_temp) = self.steam_boiler.get_temperature() {
                 if current_temp >= max_temp {
-                    warn!("Steam boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
+                    log_warn!("Steam boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
                     steam_demand = 0.0;
                 }
             }
@@ -899,7 +902,7 @@ impl<
         if let Some(max_pressure) = self.steam_boiler_config.max_pressure {
             if let Some(current_pressure) = self.steam_boiler.get_pressure() {
                 if current_pressure >= max_pressure {
-                    warn!("Steam boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
+                    log_warn!("Steam boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
                     steam_demand = 0.0;
                 }
             }
@@ -908,7 +911,7 @@ impl<
         // Dry-run protection: disable heating if water level too low
         let steam_boiler_level = self.steam_boiler.get_water_level();
         if !Self::is_boiler_level_safe(steam_boiler_level, &self.steam_boiler_config) {
-            warn!("Steam boiler heating disabled: water level below minimum safe level");
+            log_warn!("Steam boiler heating disabled: water level below minimum safe level");
             steam_demand = 0.0;
         }
 
@@ -1027,7 +1030,7 @@ impl<
             }
             _ => {
                 let duty_cycle = self.apply_pump_configuration_limits(pump_pid_out.out as u8, false);
-                info!("PID target: {}", duty_cycle);
+                log_info!("PID target: {}", duty_cycle);
                 self.group.set_brewing_state(true, duty_cycle).await;
                 Output::PidOutput(PidOut { out: duty_cycle as f32, ..pump_pid_out })
             },
@@ -1322,20 +1325,20 @@ impl<
     }
 
     async fn handle_command(&mut self, command: MachineCommand) {
-        info!("Received command: {:?}", command);
+        defmt::info!("Received command: {:?}", command);
 
         match command {
             MachineCommand::RunRoutine(index, params) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
-                    warn!("Cannot start routine while not in On mode");
+                    log_warn!("Cannot start routine while not in On mode");
                     return;
                 }
 
-                info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
+                log_info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
                 self.handle_routine_start(index, params).await;
             }
             MachineCommand::CancelRoutine => {
-                info!("Cancelling routine");
+                bus::emit_event(DebugEvent::RoutineCancelled);
                 self.handle_routine_exit().await;
             }
             _ => {
@@ -1352,20 +1355,20 @@ impl<
         match command {
             MachineCommand::StartBrewing(_) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
-                    warn!("Cannot start brewing while not in On mode");
+                    log_warn!("Cannot start brewing while not in On mode");
                     return;
                 }
 
                 // Validate tank status before starting brewing
                 if self.should_block_water_operation() {
-                    error!("Blocked StartBrewing: Insufficient water in tank");
+                    bus::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
                     return;
                 }
 
                 if self.configuration.persistent.allow_simultaneous_operations || !self.water_tap_dispensing {
                     self.start_brewing().await;
                 } else {
-                    warn!("Cannot start brewing while dispensing water (simultaneous operations disabled)");
+                    log_warn!("Cannot start brewing while dispensing water (simultaneous operations disabled)");
                 }
             }
             MachineCommand::StopBrewing(_) => {
@@ -1373,20 +1376,20 @@ impl<
             }
             MachineCommand::StartPumpingToWaterTap(_) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
-                    warn!("Cannot start pumping while not in On mode");
+                    log_warn!("Cannot start pumping while not in On mode");
                     return;
                 }
 
                 // Validate tank status before starting water dispensing
                 if self.should_block_water_operation() {
-                    error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
+                    log_error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
                     return;
                 }
 
                 if self.configuration.persistent.allow_simultaneous_operations || !self.group_brewing {
                     self.start_water_tap_dispensing().await;
                 } else {
-                    warn!("Cannot start water tap while brewing (simultaneous operations disabled)");
+                    log_warn!("Cannot start water tap while brewing (simultaneous operations disabled)");
                 }
             }
             MachineCommand::StopPumpingToWaterTap(_) => {
@@ -1395,7 +1398,7 @@ impl<
             #[cfg(feature = "pwm-steam-valve")]
             MachineCommand::StartSteaming(_) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
-                    warn!("Cannot start steaming while not in On mode");
+                    log_warn!("Cannot start steaming while not in On mode");
                     return;
                 }
 
@@ -1410,7 +1413,7 @@ impl<
                 self.set_steam_valve_openness(openness).await;
             }
             MachineCommand::SetBoilerControlTarget(boiler_index, mode, values_update) => {
-                info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
+                log_info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
                 match boiler_index {
                     0 => {
                         self.configuration.persistent.brew_boiler.control_state.mode = mode;
@@ -1424,7 +1427,7 @@ impl<
                         }
                         match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                             Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                         }
                     },
                     1 => {
@@ -1439,16 +1442,16 @@ impl<
                         }
                         match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                             Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                         }
                     },
                     _ => {
-                        error!("Invalid boiler index: {}", boiler_index);
+                        log_error!("Invalid boiler index: {}", boiler_index);
                     }
                 }
             }
             MachineCommand::SetBoilerControlTargetValues(boiler_index, update) => {
-                info!("Setting boiler control values for boiler {} to {:?}", boiler_index, update);
+                log_info!("Setting boiler control values for boiler {} to {:?}", boiler_index, update);
                 match boiler_index {
                     0 => {
                         if let Some(temp) = update.temperature {
@@ -1459,7 +1462,7 @@ impl<
                         }
                         match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                             Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                         }
                     },
                     1 => {
@@ -1471,16 +1474,16 @@ impl<
                         }
                         match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                             Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                         }
                     },
                     _ => {
-                        error!("Invalid boiler index: {}", boiler_index);
+                        log_error!("Invalid boiler index: {}", boiler_index);
                     }
                 }
             }
             MachineCommand::SetGroupBrewControlTarget(group_index, mode, values_update) => {
-                info!("Setting group brew control mode for group {} to {:?} with values {:?}", group_index, mode, values_update);
+                log_info!("Setting group brew control mode for group {} to {:?} with values {:?}", group_index, mode, values_update);
                 if group_index == 0 {
                     // Check if this is a curve mode and record start time
                     match mode {
@@ -1489,7 +1492,7 @@ impl<
                         GroupBrewControlMode::OutputFlowRateCurve |
                         GroupBrewControlMode::FixedDutyCycleCurve => {
                             self.curve_start_time = Some(Instant::now());
-                            info!("Starting curve control");
+                            log_info!("Starting curve control");
                         }
                         _ => {
                             // Reset curve start time for non-curve modes
@@ -1524,11 +1527,11 @@ impl<
                         }
                     }
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::SetGroupBrewControlTargetValues(group_index, update) => {
-                info!("Setting group brew control values for group {} to {:?}", group_index, update);
+                log_info!("Setting group brew control values for group {} to {:?}", group_index, update);
                 if group_index == 0 {
                     if let Some(flow_rate) = update.flow_rate {
                         self.configuration.ephemeral.group_brew_control_state.values.flow_rate = flow_rate;
@@ -1555,7 +1558,7 @@ impl<
                         self.configuration.ephemeral.group_brew_control_state.values.duty_cycle_curve = curve;
                     }
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::SetPidParameters(target, params) => {
@@ -1564,14 +1567,14 @@ impl<
                         match boiler_index {
                             0 => self.configuration.persistent.brew_boiler.pressure_pid_parameters = params,
                             1 => self.configuration.persistent.steam_boiler.pressure_pid_parameters = params,
-                            _ => error!("Invalid boiler index for PID parameters: {}", boiler_index),
+                            _ => log_error!("Invalid boiler index for PID parameters: {}", boiler_index),
                         }
                     }
                     PidParameterTarget::BoilerTemperature(boiler_index) => {
                         match boiler_index {
                             0 => self.configuration.persistent.brew_boiler.temperature_pid_parameters = params,
                             1 => self.configuration.persistent.steam_boiler.temperature_pid_parameters = params,
-                            _ => error!("Invalid boiler index for PID parameters: {}", boiler_index),
+                            _ => log_error!("Invalid boiler index for PID parameters: {}", boiler_index),
                         }
                     }
                     PidParameterTarget::GroupFlowRate(_) => {
@@ -1587,107 +1590,107 @@ impl<
                 // Save after updating PID parameters
                 match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                     Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
             }
             MachineCommand::EnableBoiler(boiler_index) => {
                 match boiler_index {
                     0 => {
-                        info!("Enabling brew boiler");
+                        log_info!("Enabling brew boiler");
                         self.brew_boiler_enabled = true;
                     }
                     1 => {
-                        info!("Enabling steam boiler");
+                        log_info!("Enabling steam boiler");
                         self.steam_boiler_enabled = true;
                     }
                     _ => {
-                        warn!("Invalid boiler index: {}", boiler_index);
+                        log_warn!("Invalid boiler index: {}", boiler_index);
                     }
                 }
             }
             MachineCommand::DisableBoiler(boiler_index) => {
                 match boiler_index {
                     0 => {
-                        info!("Disabling brew boiler");
+                        log_info!("Disabling brew boiler");
                         self.brew_boiler_enabled = false;
                     }
                     1 => {
-                        info!("Disabling steam boiler");
+                        log_info!("Disabling steam boiler");
                         self.steam_boiler_enabled = false;
                     }
                     _ => {
-                        warn!("Invalid boiler index: {}", boiler_index);
+                        log_warn!("Invalid boiler index: {}", boiler_index);
                     }
                 }
             }
             MachineCommand::TareGroupScale(group_index) => {
                 if group_index == 0 {
-                    info!("Taring group scale");
+                    log_info!("Taring group scale");
                     let _ = self.group.scale_tare().await;
                 } else {
-                    error!("Invalid group index for taring scale: {}", group_index);
+                    log_error!("Invalid group index for taring scale: {}", group_index);
                 }
             }
             MachineCommand::ZeroCalibrateGroupScale(group_index) => {
                 if group_index == 0 {
-                    info!("Zero calibrating group scale");
+                    log_info!("Zero calibrating group scale");
                     let _ = self.group.scale_zero_calibration().await;
                 } else {
-                    error!("Invalid group index for zero calibrating scale: {}", group_index);
+                    log_error!("Invalid group index for zero calibrating scale: {}", group_index);
                 }
             }
             MachineCommand::CalibrateGroupScale100g(group_index) => {
                 if group_index == 0 {
-                    info!("Calibrating group scale with 100g");
+                    log_info!("Calibrating group scale with 100g");
                     let _ = self.group.scale_reference_weight_calibration(100).await;
                 } else {
-                    error!("Invalid group index for 100g calibrating scale: {}", group_index);
+                    log_error!("Invalid group index for 100g calibrating scale: {}", group_index);
                 }
             }
             MachineCommand::UpdateCommsStatus(status) => {
-                info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
+                log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }
             MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
-                warn!("Ignoring unsupported command in finally block: {:?}", command);
+                defmt::warn!("Ignoring unsupported command in finally block: {:?}", command);
             }
             MachineCommand::RemoveScheduleItem(idx) => {
-                info!("Removing schedule item at index {}", idx);
+                log_info!("Removing schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
                     Ok(mut store) => {
                         let res = store.remove_schedule(idx).await;
                         if res.is_none() {
-                            warn!("Failed to remove schedule at index {}: index out of bounds", idx);
+                            log_warn!("Failed to remove schedule at index {}: index out of bounds", idx);
                         }
                     }
-                    Err(_) => warn!("Failed to acquire schedule_store lock (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::AddScheduleItem(item) => {
-                info!("Adding new schedule item");
+                log_info!("Adding new schedule item");
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
                     Ok(mut store) => store.add_schedule(item).await,
-                    Err(_) => warn!("Failed to acquire schedule_store lock (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::UpdateScheduleItem(idx, item) => {
-                info!("Updating schedule item at index {}", idx);
+                log_info!("Updating schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
                     Ok(mut store) => {
                         let res = store.update_schedule(idx, item).await;
                         if res.is_err() {
-                            warn!("Failed to update schedule at index {}: index out of bounds", idx);
+                            log_warn!("Failed to update schedule at index {}: index out of bounds", idx);
                         }
                     }
-                    Err(_) => warn!("Failed to acquire schedule_store lock (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::AddRoutine(routine) => {
-                info!("Adding new routine");
+                log_info!("Adding new routine");
                 match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
                     Ok(mut repo) => repo.add_routine(routine).await,
-                    Err(_) => warn!("Failed to acquire routine_repository lock (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
             MachineCommand::RemoveRoutine(idx) => {
@@ -1695,10 +1698,10 @@ impl<
                     Ok(mut repo) => {
                         let res = repo.remove_routine(idx).await;
                         if res.is_none() {
-                            warn!("Failed to remove routine at index {}: index out of bounds", idx);
+                            log_warn!("Failed to remove routine at index {}: index out of bounds", idx);
                         }
                     }
-                    Err(_) => warn!("Failed to acquire routine_repository lock (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
             MachineCommand::UpdateRoutine(idx, Routine) => {
@@ -1706,14 +1709,14 @@ impl<
                     Ok(mut repo) => {
                         let res = repo.update_routine(idx, Routine).await;
                         if res.is_err() {
-                            warn!("Failed to update routine at index {}: index out of bounds", idx);
+                            log_warn!("Failed to update routine at index {}: index out of bounds", idx);
                         }
                     }
-                    Err(_) => warn!("Failed to acquire routine_repository lock (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
             MachineCommand::SetMachineMode(mode) => {
-                info!("Setting machine mode to {:?}", mode);
+                log_info!("Setting machine mode to {:?}", mode);
                 self.configuration.ephemeral.mode = mode;
                 if mode != MachineMode::On {
                     // Stop brewing and water tap dispensing if not in On mode
@@ -1726,51 +1729,51 @@ impl<
                 }
             }
             MachineCommand::OptimizeConfigurationStorage => {
-                info!("Sending OptimizeConfiguration to storage task");
+                log_info!("Sending OptimizeConfiguration to storage task");
                 if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeConfiguration) {
-                    warn!("Failed to send OptimizeConfiguration command: channel full");
+                    log_warn!("Failed to send OptimizeConfiguration command: channel full");
                 }
             }
             MachineCommand::OptimizeRoutineStorage => {
-                info!("Sending OptimizeRoutines to storage task");
+                log_info!("Sending OptimizeRoutines to storage task");
                 if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeRoutines) {
-                    warn!("Failed to send OptimizeRoutines command: channel full");
+                    log_warn!("Failed to send OptimizeRoutines command: channel full");
                 }
             }
             MachineCommand::OptimizeScheduleStorage => {
-                info!("Sending OptimizeSchedules to storage task");
+                log_info!("Sending OptimizeSchedules to storage task");
                 if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeSchedules) {
-                    warn!("Failed to send OptimizeSchedules command: channel full");
+                    log_warn!("Failed to send OptimizeSchedules command: channel full");
                 }
             }
             MachineCommand::SetGroupPumpConfiguration(group_index, config) => {
                 if group_index == 0 {
-                    info!("Setting group pump configuration: {:?}", config);
+                    log_info!("Setting group pump configuration: {:?}", config);
                     self.configuration.persistent.group.pump_configuration = Some(config);
                     match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                         Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                        Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                     }
                 } else {
-                    error!("Invalid group index for pump configuration: {}", group_index);
+                    log_error!("Invalid group index for pump configuration: {}", group_index);
                 }
             }
             MachineCommand::SetWaterTapPumpConfiguration(water_tap_index, config) => {
                 if water_tap_index == 0 {
-                    info!("Setting water tap pump configuration: {:?}", config);
+                    log_info!("Setting water tap pump configuration: {:?}", config);
                     self.configuration.persistent.water_tap.pump_configuration = Some(config);
                     match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                         Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                        Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                     }
                 } else {
-                    error!("Invalid water tap index for pump configuration: {}", water_tap_index);
+                    log_error!("Invalid water tap index for pump configuration: {}", water_tap_index);
                 }
             }
             MachineCommand::SetFillPumpConfiguration(boiler_index, config) => {
                 // For dual boiler, we only support fill pump configuration for the steam/service boiler (index 1)
                 if boiler_index == 1 {
-                    info!("Setting fill pump configuration: {:?}", config);
+                    log_info!("Setting fill pump configuration: {:?}", config);
                     // Update the pump_configuration within the FillConfiguration
                     if let Some(ref mut fill_config) = self.configuration.persistent.steam_boiler.fill_config {
                         fill_config.pump_configuration = Some(config);
@@ -1783,15 +1786,15 @@ impl<
                     }
                     match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                         Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                        Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                        Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                     }
                 } else {
-                    error!("Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)", boiler_index);
+                    log_error!("Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)", boiler_index);
                 }
             }
             MachineCommand::InferGroupPressureIntegral(group_index, target_pressure) => {
                 if group_index == 0 {
-                    info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
+                    log_info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
 
                     // Get current duty cycle from the control state configuration
                     let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
@@ -1804,14 +1807,14 @@ impl<
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_pressure as f32);
 
-                    info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
+                    log_info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::InferGroupFlowRateIntegral(group_index, target_flow_rate) => {
                 if group_index == 0 {
-                    info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
+                    log_info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
 
                     // Get current duty cycle from the control state configuration
                     let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
@@ -1824,14 +1827,14 @@ impl<
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_flow_rate as f32);
 
-                    info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
+                    log_info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::InferGroupOutputFlowRateIntegral(group_index, target_output_flow_rate) => {
                 if group_index == 0 {
-                    info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
+                    log_info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
 
                     // Get current duty cycle from the control state configuration
                     let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
@@ -1844,40 +1847,40 @@ impl<
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_output_flow_rate as f32);
 
-                    info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
+                    log_info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
                 } else {
-                    error!("Invalid group index: {}", group_index);
+                    log_error!("Invalid group index: {}", group_index);
                 }
             }
             MachineCommand::SetHeatingElementInterlock(enabled) => {
-                info!("Setting heating element interlock: {}", enabled);
+                log_info!("Setting heating element interlock: {}", enabled);
                 self.configuration.persistent.machine.heating_element_interlock = enabled;
                 self.interlock_enabled_signal.signal(enabled);
                 match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                     Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
             }
             MachineCommand::SetHeatingElementContentionStrategy(strategy) => {
-                info!("Setting heating element contention strategy: {:?}", strategy);
+                log_info!("Setting heating element contention strategy: {:?}", strategy);
                 self.configuration.persistent.heating_element_contention_strategy = strategy;
                 self.contention_strategy_signal.signal(strategy);
                 match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                     Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
             }
             MachineCommand::SetWaterDispersalPumpStrategy(index, strategy) => {
-                info!("Setting water dispersal pump strategy for water tap {}: {:?}", index, strategy);
+                log_info!("Setting water dispersal pump strategy for water tap {}: {:?}", index, strategy);
                 self.configuration.persistent.water_tap.pump_strategy = strategy;
                 match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                     Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
             }
             #[cfg(not(feature = "pwm-steam-valve"))]
             MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
-                warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
+                log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
             }
         }
     }
@@ -1885,13 +1888,13 @@ impl<
     async fn start_brewing(&mut self) {
         if !self.group_brewing {
             let current_volume = self.group.get_input_volume();
-            info!("Starting brewing - capturing baseline volume: {:?}", current_volume);
+            bus::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
             self.group_brewing = true;
             self.brew_start_time = Some(Instant::now());
             self.brew_start_input_volume = current_volume;
             self.accumulated_extracted_solids = Some(0.0);
             self.last_extraction_time = Some(Instant::now());
-            info!("brew_start_input_volume set to: {:?}", self.brew_start_input_volume);
+            log_info!("brew_start_input_volume set to: {:?}", self.brew_start_input_volume);
 
             // Initialize shot state tracking
             self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
@@ -1900,7 +1903,7 @@ impl<
             self.saturation_start_time = None;
             self.last_shot_state_sample_time = None; // Reset sampling timer
             self.input_volume_at_first_drop = None; // Will be set when transitioning to PostFirstDrop
-            info!("Shot state initialized to HeadspaceFill");
+            log_info!("Shot state initialized to HeadspaceFill");
 
             self.group.set_brewing_state(true, 0).await;
 
@@ -1913,15 +1916,15 @@ impl<
             }).await;
             let _ = self.group.scale_tare().await;
         } else {
-            info!("start_brewing() called but group_brewing already true - skipping baseline capture");
+            log_info!("start_brewing() called but group_brewing already true - skipping baseline capture");
         }
     }
 
     async fn stop_brewing(&mut self) {
         if self.group_brewing {
-            let current_volume = self.group.get_input_volume();
-            info!("Stopping brewing - current volume: {:?}, brew_start_input_volume: {:?}",
-                  current_volume, self.brew_start_input_volume);
+            // `current_volume` was read only to log it; the promoted event carries
+            // the group instead, and the volume is already in `Status`.
+            bus::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
 
             // Capture previous brew data before clearing
             if let Some(started_at) = self.brew_start_time {
@@ -1932,7 +1935,7 @@ impl<
                 );
                 let output_weight = self.group.get_output_weight();
 
-                info!("Final brew_input_volume: {:?}", brew_input_volume);
+                log_info!("Final brew_input_volume: {:?}", brew_input_volume);
 
                 self.previous_brew = Some(crate::PreviousBrewInfo {
                     brew_time,
@@ -1943,7 +1946,7 @@ impl<
                 });
             }
 
-            info!("Clearing brew_start_input_volume (was: {:?})", self.brew_start_input_volume);
+            log_info!("Clearing brew_start_input_volume (was: {:?})", self.brew_start_input_volume);
             self.group_brewing = false;
             self.brew_start_time = None;
             self.brew_start_input_volume = None;
@@ -1955,9 +1958,9 @@ impl<
             self.current_shot_state = None;
             self.saturation_start_time = None;
             self.input_volume_at_first_drop = None;
-            info!("Shot state cleared");
+            log_info!("Shot state cleared");
 
-            info!("brew_start_input_volume now: {:?}", self.brew_start_input_volume);
+            log_info!("brew_start_input_volume now: {:?}", self.brew_start_input_volume);
             self.group.set_brewing_state(false, 0).await;
 
             let _ = self.group.scale_set_configuration(ScaleConfiguration {
@@ -2006,7 +2009,7 @@ impl<
             if ec > EC_POST_FIRST_DROP_THRESHOLD && self.current_shot_state != Some(variegated_controller_types::ShotState::PostFirstDrop) {
                 // Capture input volume at first drop for output volume calculation
                 self.input_volume_at_first_drop = self.group.get_input_volume();
-                info!("Shot state transition: {:?} -> PostFirstDrop (EC: {} > {}, input_vol: {:?})",
+                log_info!("Shot state transition: {:?} -> PostFirstDrop (EC: {} > {}, input_vol: {:?})",
                       self.current_shot_state, ec, EC_POST_FIRST_DROP_THRESHOLD, self.input_volume_at_first_drop);
                 self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
                 return;
@@ -2025,7 +2028,7 @@ impl<
                 let pressure_increasing = current_pressure > pressure_avg && (current_pressure - pressure_avg) > PRESSURE_INCREASE_THRESHOLD;
 
                 if flow_decreasing && pressure_increasing {
-                    info!("Shot state transition: HeadspaceFill -> Saturation (flow: {}->{}, pressure: {}->{})",
+                    log_info!("Shot state transition: HeadspaceFill -> Saturation (flow: {}->{}, pressure: {}->{})",
                           flow_avg, current_flow, pressure_avg, current_pressure);
                     self.current_shot_state = Some(variegated_controller_types::ShotState::Saturation);
                     self.saturation_start_time = Some(Instant::now());
@@ -2037,7 +2040,7 @@ impl<
                     if output_weight > FIRST_DROP_WEIGHT_THRESHOLD {
                         // Capture input volume at first drop for output volume calculation
                         self.input_volume_at_first_drop = self.group.get_input_volume();
-                        info!("Shot state transition: Saturation -> PostFirstDrop (weight: {}g, input_vol: {:?})",
+                        log_info!("Shot state transition: Saturation -> PostFirstDrop (weight: {}g, input_vol: {:?})",
                               output_weight, self.input_volume_at_first_drop);
                         self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
                     }
@@ -2048,7 +2051,7 @@ impl<
             }
             None => {
                 // Should not happen during brewing, but handle gracefully
-                warn!("Shot state is None while brewing - resetting to HeadspaceFill");
+                log_warn!("Shot state is None while brewing - resetting to HeadspaceFill");
                 self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
             }
         }
@@ -2056,7 +2059,7 @@ impl<
 
     async fn start_water_tap_dispensing(&mut self) {
         if !self.water_tap_dispensing {
-            info!("Starting water tap dispensing");
+            log_info!("Starting water tap dispensing");
             self.water_tap_dispensing = true;
             // Apply water dispersal pump strategy
             let base_duty_cycle = match self.configuration.persistent.water_tap.pump_strategy {
@@ -2070,7 +2073,7 @@ impl<
 
     async fn stop_water_tap_dispensing(&mut self) {
         if self.water_tap_dispensing {
-            info!("Stopping water tap dispensing");
+            log_info!("Stopping water tap dispensing");
             self.water_tap_dispensing = false;
             self.water_tap.set_water_dispensing_state(false, 0).await;
         }
@@ -2078,30 +2081,30 @@ impl<
 
     #[cfg(feature = "pwm-steam-valve")]
     async fn start_steaming(&mut self) {
-        info!("Starting steaming");
+        bus::emit_event(DebugEvent::SteamStarted);
         if let Err(e) = self.steam_wand.set_steaming_state(true) {
-            error!("Failed to start steaming: {:?}", e);
+            log_error!("Failed to start steaming: {:?}", e);
         }
     }
 
     #[cfg(feature = "pwm-steam-valve")]
     async fn stop_steaming(&mut self) {
-        info!("Stopping steaming");
+        bus::emit_event(DebugEvent::SteamStopped);
         if let Err(e) = self.steam_wand.set_steaming_state(false) {
-            error!("Failed to stop steaming: {:?}", e);
+            log_error!("Failed to stop steaming: {:?}", e);
         }
     }
 
     #[cfg(feature = "pwm-steam-valve")]
     async fn set_steam_valve_openness(&mut self, openness: ValveOpenType) {
-        info!("Setting steam valve openness to {}%", openness);
+        log_info!("Setting steam valve openness to {}%", openness);
 
         // Update configuration (ephemeral)
         self.configuration.ephemeral.steam_wand_control_state.valve_openness = openness;
 
         // Update HAL
         if let Err(e) = self.steam_wand.set_steam_valve_openness(openness) {
-            error!("Failed to set steam valve openness: {:?}", e);
+            log_error!("Failed to set steam valve openness: {:?}", e);
         }
     }
 
@@ -2112,14 +2115,14 @@ impl<
 
         // Validate tank status before starting routine
         if self.should_block_water_operation() {
-            error!("Blocked RunRoutine: Insufficient water in tank");
+            bus::emit_event(DebugEvent::InterlockTripped { interlock: name("run_routine_water_tank_low") });
             return;
         }
         let mut repo = self.routine_repository.lock().await;
         let routine = repo.get_routine(routine_index).await;
 
         if let Some(routine) = routine {
-            info!("Running routine");
+            log_info!("Running routine");
 
             // Create routine execution context
             let routine_execution_context = RoutineExecutionContext::new(
@@ -2149,15 +2152,15 @@ impl<
             self.previous_routine_step = None;
 
             self.current_routine = Some(routine_execution_context);
-            info!("Routine started");
+            bus::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
         } else {
-            error!("Routine not found: {}", routine_index);
+            log_error!("Routine not found: {}", routine_index);
         }
     }
 
     async fn handle_routine_exit(&mut self) {
         if let Some(routine) = self.current_routine.take() {
-            info!("Routine execution finished, saving state and configuration");
+            bus::emit_event(DebugEvent::RoutineCompleted);
 
             // Get finally commands
             let default_status = Status::default();
@@ -2177,7 +2180,7 @@ impl<
             // Save the restored persistent configuration
             match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                 Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                Err(_) => warn!("Failed to acquire configuration_store lock for save (timeout)"),
+                Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
             }
             self.curve_start_time = None;
 
@@ -2191,7 +2194,7 @@ impl<
             self.shot_logger.finish_shot(ShotStatus::Completed);
             self.previous_routine_step = None;
         } else {
-            warn!("No routine to exit");
+            log_warn!("No routine to exit");
         }
     }
 }

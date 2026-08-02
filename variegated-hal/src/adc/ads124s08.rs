@@ -1,4 +1,4 @@
-use defmt::{warn, info, error};
+use variegated_log::{log_warn, log_info, log_error};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Sender;
@@ -7,7 +7,7 @@ use embedded_hal::digital::InputPin;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
 use embedded_hal_async::digital::Wait;
-use defmt::debug;
+use variegated_log::log_debug;
 use variegated_adc_tools::ConversionParameters;
 use variegated_ads124s08::{ADS124S08, ADS124S08Error, Code};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
@@ -127,11 +127,11 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                 // Check if this is a read timeout error
                 if matches!(e, ADS124S08Error::ReadTimeoutError) {
                     self.consecutive_failures += 1;
-                    warn!("ADS124S08 read timeout ({}/{})", self.consecutive_failures, self.max_consecutive_failures);
+                    log_warn!("ADS124S08 read timeout ({}/{})", self.consecutive_failures, self.max_consecutive_failures);
 
                     // Check if we should attempt a reset
                     if self.consecutive_failures >= self.max_consecutive_failures {
-                        info!("ADS124S08: Attempting auto-reset after {} consecutive timeouts", self.consecutive_failures);
+                        log_info!("ADS124S08: Attempting auto-reset after {} consecutive timeouts", self.consecutive_failures);
 
                         // Check if we need to apply backoff
                         if let Some(last_reset) = self.last_reset_attempt {
@@ -140,7 +140,7 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
 
                             if elapsed < backoff_duration {
                                 let remaining = backoff_duration - elapsed;
-                                info!("ADS124S08: Waiting {}ms before reset (backoff)", remaining.as_millis());
+                                log_info!("ADS124S08: Waiting {}ms before reset (backoff)", remaining.as_millis());
                                 Timer::after(remaining).await;
                             }
                         }
@@ -158,11 +158,11 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                                 // Exponential backoff: double the backoff time up to 5 seconds
                                 self.reset_backoff_ms = (self.reset_backoff_ms * 2).min(5000);
 
-                                info!("ADS124S08: Reset successful (count: {}, next backoff: {}ms)",
+                                log_info!("ADS124S08: Reset successful (count: {}, next backoff: {}ms)",
                                               self.reset_count, self.reset_backoff_ms);
                             }
                             Err(_reset_error) => {
-                                error!("ADS124S08: Reset failed");
+                                log_error!("ADS124S08: Reset failed");
                                 // Reset the failure counter to prevent immediate retry
                                 self.consecutive_failures = 0;
                             }
@@ -170,7 +170,7 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                     }
                 } else {
                     // For non-timeout errors, just log them
-                    warn!("ADS124S08: Read error (non-timeout)");
+                    log_warn!("ADS124S08: Read error (non-timeout)");
                 }
             }
         }

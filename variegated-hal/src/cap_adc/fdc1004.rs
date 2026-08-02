@@ -1,4 +1,4 @@
-use defmt::{warn, info, error};
+use variegated_log::{log_warn, log_info, log_error};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Sender;
@@ -86,29 +86,29 @@ where
                     match e {
                         FDC1004Error::MeasurementNotComplete => {
                             // This is expected occasionally, don't count as failure
-                            warn!("FDC1004: Measurement not complete");
+                            log_warn!("FDC1004: Measurement not complete");
                         }
                         FDC1004Error::UnableToFindCapdacSetting => {
                             // This indicates a measurement issue, count as failure
                             self.consecutive_failures += 1;
-                            warn!("FDC1004: Unable to find CAPDAC setting ({}/{})",
+                            log_warn!("FDC1004: Unable to find CAPDAC setting ({}/{})",
                                   self.consecutive_failures, self.max_consecutive_failures);
                         }
                         FDC1004Error::InvalidMeasurementChannel => {
                             // This is a programming error, log it
-                            error!("FDC1004: Invalid measurement channel configured");
+                            log_error!("FDC1004: Invalid measurement channel configured");
                         }
                         FDC1004Error::I2CError(_) => {
                             // I2C communication error
                             self.consecutive_failures += 1;
-                            warn!("FDC1004: I2C error ({}/{})",
+                            log_warn!("FDC1004: I2C error ({}/{})",
                                   self.consecutive_failures, self.max_consecutive_failures);
                         }
                     }
 
                     // Check if we should attempt a reset
                     if self.consecutive_failures >= self.max_consecutive_failures {
-                        info!("FDC1004: Max consecutive failures reached, may need reset");
+                        log_info!("FDC1004: Max consecutive failures reached, may need reset");
 
                         // Check if we need to apply backoff
                         if let Some(last_reset) = self.last_reset_attempt {
@@ -117,7 +117,7 @@ where
 
                             if elapsed < backoff_duration {
                                 let remaining = backoff_duration - elapsed;
-                                info!("FDC1004: Waiting {}ms before retry (backoff)", remaining.as_millis());
+                                log_info!("FDC1004: Waiting {}ms before retry (backoff)", remaining.as_millis());
                                 Timer::after(remaining).await;
                             }
                         }
@@ -131,7 +131,7 @@ where
                         // Exponential backoff: double the backoff time up to 5 seconds
                         self.reset_backoff_ms = (self.reset_backoff_ms * 2).min(5000);
 
-                        info!("FDC1004: Recovery attempt {} (next backoff: {}ms)",
+                        log_info!("FDC1004: Recovery attempt {} (next backoff: {}ms)",
                               self.reset_count, self.reset_backoff_ms);
                     }
                 }

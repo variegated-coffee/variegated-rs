@@ -1,7 +1,12 @@
 use alloc::boxed::Box;
 use core::cell::Cell;
 use async_trait::async_trait;
-use defmt::{error, info, Format};
+use defmt::Format;
+// Sites that format a `variegated_gravity_driver::Channel` stay on `defmt::*!`
+// (fully qualified below): `Channel` implements `defmt::Format` but not
+// `core::fmt::Display`, so the `log` half of `log_*!` will not compile for them.
+// That is every `info!` in this file, which is why only `log_error` is imported.
+use variegated_log::log_error;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver, Sender as ChannelSender};
 use embassy_sync::mutex::Mutex;
@@ -84,9 +89,9 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<
                 signal.signal(connected);
             }
             if connected {
-                info!("Gravity scale connected on channel {}", self.channel);
+                defmt::info!("Gravity scale connected on channel {}", self.channel);
             } else {
-                error!("Gravity scale disconnected on channel {}", self.channel);
+                defmt::error!("Gravity scale disconnected on channel {}", self.channel);
             }
         }
     }
@@ -105,7 +110,7 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
                         current_retry_delay = self.retry_delay; // Reset retry delay on successful connection
                     }
                     Err(e) => {
-                        error!("Failed to connect to Gravity scale: {:?}", e);
+                        log_error!("Failed to connect to Gravity scale: {:?}", e);
 
                         // Drop any pending commands to avoid stale commands being executed after reconnect
                         self.command_signal.clear();
@@ -123,40 +128,40 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
             if let Ok(command) = self.command_signal.try_receive() {
                 match command {
                     GravityCommand::Tare => {
-                        info!("Taring channel {}", self.channel);
+                        defmt::info!("Taring channel {}", self.channel);
                         let res = dev.execute_tare_single(self.channel).await;
                         if let Err(e) = res {
-                            error!("Failed to tare channel {}: {:?}", self.channel, e);
+                            defmt::error!("Failed to tare channel {}: {:?}", self.channel, e);
                         }
                     },
                     GravityCommand::SetWeighingConfig(config) => {
                         let res = dev.write_weighing_config(self.channel, config).await;
                         if let Err(e) = res {
-                            error!("Failed to set weighing config for channel {}: {:?}", self.channel, e);
+                            defmt::error!("Failed to set weighing config for channel {}: {:?}", self.channel, e);
                         }
                     },
                     GravityCommand::ZeroCalibration => {
-                        info!("Starting zero calibration on channel {}", self.channel);
+                        defmt::info!("Starting zero calibration on channel {}", self.channel);
                         let mut channels = [false; 4];
                         channels[self.channel as usize - 1] = true;
                         let res = dev.execute_zero_calibration(channels).await;
                         if let Err(e) = res {
-                            error!("Zero calibration failed on channel {}: {:?}", self.channel, e);
+                            defmt::error!("Zero calibration failed on channel {}: {:?}", self.channel, e);
                         }
                     },
                     GravityCommand::ReferenceWeightCalibration(weight_grams) => {
-                        info!("Starting {}g calibration on channel {}", weight_grams, self.channel);
+                        defmt::info!("Starting {}g calibration on channel {}", weight_grams, self.channel);
                         let mut channels = [false; 4];
                         channels[self.channel as usize - 1] = true;
                         let res = match weight_grams {
                             100 => dev.execute_100g_calibration(channels).await,
                             _ => {
-                                error!("Unsupported calibration weight: {}g", weight_grams);
+                                log_error!("Unsupported calibration weight: {}g", weight_grams);
                                 continue;
                             }
                         };
                         if let Err(e) = res {
-                            error!("{}g calibration failed on channel {}: {:?}", weight_grams, self.channel, e);
+                            defmt::error!("{}g calibration failed on channel {}: {:?}", weight_grams, self.channel, e);
                         }
                     },
                 }
@@ -191,7 +196,7 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
                             };
                             weight_signal.send(sensor_reading);
                         } else {
-                            error!("Failed to read weight from Gravity: {:?}", res);
+                            log_error!("Failed to read weight from Gravity: {:?}", res);
                             // Drop lock before updating connection status
                             drop(dev);
                             self.update_connection_status(false).await;
@@ -220,7 +225,7 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
                             };
                             rate_of_change_signal.send(sensor_reading);
                         } else {
-                            error!("Failed to read rate of change from Gravity: {:?}", res);
+                            log_error!("Failed to read rate of change from Gravity: {:?}", res);
                             // Drop lock before updating connection status
                             drop(dev);
                             self.update_connection_status(false).await;
@@ -229,7 +234,7 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
                     }
                 }
             } else {
-                error!("Failed to read channel status for channel {}: {:?}", self.channel, status);
+                defmt::error!("Failed to read channel status for channel {}: {:?}", self.channel, status);
                 // Drop lock before updating connection status
                 drop(dev);
                 self.update_connection_status(false).await;

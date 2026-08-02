@@ -10,7 +10,8 @@ use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::pin::Pin;
 use chrono::{FixedOffset, NaiveDateTime};
-use defmt::{error, info, unwrap};
+use defmt::unwrap;
+use variegated_log::{log_error, log_info};
 use heapless::index_map::FnvIndexMap;
 
 #[cfg(feature = "tft-display")]
@@ -461,14 +462,22 @@ static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
 fn main() -> ! {
     let p = embassy_rp::init(Default::default());
 
+    // Install the `log` -> debug bus bridge before anything else logs. The
+    // `log_*!` macros throughout the firmware and its libraries emit to both
+    // `defmt` (probe, unaffected) and the `log` facade; without a logger the
+    // `log` half went nowhere, which is why the host TUI's event view was empty.
+    // `Err` means a logger was already installed -- nothing else installs one, so
+    // it cannot happen here, and it is not worth panicking over if it ever does.
+    let _ = variegated_log::bus_sink::init();
+
     let psram_config = embassy_rp::psram::Config::aps6404l();
-    defmt::info!("Initing!");
+    variegated_log::log_info!("Initing!");
 
     let psram = embassy_rp::psram::Psram::new(QmiCs1::new(p.QMI_CS1, p.PIN_0), psram_config);
     let psram_heap = psram.is_ok();
 
     if let Ok(psram) = psram {
-        info!("PSRAM initialized successfully, using PSRAM for heap");
+        log_info!("PSRAM initialized successfully, using PSRAM for heap");
 
         #[allow(static_mut_refs)]
         {
@@ -477,11 +486,11 @@ fn main() -> ! {
                 let ptr = PSRAM_ADDRESS as *mut u8; // Using u8 for byte array
                 HEAP.init(PSRAM_ADDRESS, psram.size() as usize);
 
-                info!("Heap initialized in PSRAM");
+                log_info!("Heap initialized in PSRAM");
             }
         }
     } else {
-        info!("Failed to initialize PSRAM, using internal RAM for heap");
+        log_info!("Failed to initialize PSRAM, using internal RAM for heap");
 
         #[allow(static_mut_refs)]
         unsafe {
@@ -490,7 +499,7 @@ fn main() -> ! {
             static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
             unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
 
-            info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
+            log_info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
         }
     }
 
@@ -508,10 +517,10 @@ fn main() -> ! {
             move || {
                 let executor1 = EXECUTOR1.init(Executor::new());
                 executor1.run(|spawner| {
-                    info!("Spawning display task on core 1");
+                    log_info!("Spawning display task on core 1");
                     spawner.spawn(unwrap!(graphical_display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
 
-                    info!("Spawning backlight task on core 1");
+                    log_info!("Spawning backlight task on core 1");
                     spawner.spawn(unwrap!(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
                 });
             },
@@ -674,35 +683,35 @@ async fn storage_task(
     schedule_store: &'static Mutex<SyncSendRawMutex, ScheduleStoreType>,
     configuration_store: &'static Mutex<SyncSendRawMutex, SettingsStorageType>,
 ) {
-    use defmt::info;
+    use variegated_log::log_info;
     use variegated_controller_types::StorageCommand;
 
-    info!("Storage task started");
+    log_info!("Storage task started");
 
     loop {
         let cmd = storage_command_receiver.receive().await;
-        info!("Storage task received command: {:?}", cmd);
+        log_info!("Storage task received command: {:?}", cmd);
 
         match cmd {
             StorageCommand::OptimizeRoutines => {
-                info!("Starting routine storage optimization");
+                log_info!("Starting routine storage optimization");
                 match routine_repository.lock().await.optimize_storage().await {
-                    Ok(_) => info!("Routine storage optimization complete"),
-                    Err(e) => error!("Routine storage optimization failed: {}", e),
+                    Ok(_) => log_info!("Routine storage optimization complete"),
+                    Err(e) => log_error!("Routine storage optimization failed: {}", e),
                 }
             }
             StorageCommand::OptimizeSchedules => {
-                info!("Starting schedule storage optimization");
+                log_info!("Starting schedule storage optimization");
                 match schedule_store.lock().await.optimize_storage().await {
-                    Ok(_) => info!("Schedule storage optimization complete"),
-                    Err(e) => error!("Schedule storage optimization failed: {}", e),
+                    Ok(_) => log_info!("Schedule storage optimization complete"),
+                    Err(e) => log_error!("Schedule storage optimization failed: {}", e),
                 }
             }
             StorageCommand::OptimizeConfiguration => {
-                info!("Starting configuration storage optimization");
+                log_info!("Starting configuration storage optimization");
                 match configuration_store.lock().await.optimize_storage().await {
-                    Ok(_) => info!("Configuration storage optimization complete"),
-                    Err(e) => error!("Configuration storage optimization failed: {}", e),
+                    Ok(_) => log_info!("Configuration storage optimization complete"),
+                    Err(e) => log_error!("Configuration storage optimization failed: {}", e),
                 }
             }
         }
@@ -762,9 +771,9 @@ async fn configuration_debug_logger(mut configuration_receiver: ConfigurationSub
 
         // Log the current configuration every 10 seconds
         if let Some(ref config) = last_config {
-            defmt::debug!("=== Current Configuration ===");
+            variegated_log::log_debug!("=== Current Configuration ===");
             defmt::debug!("{:?}", config);
-            defmt::debug!("============================");
+            variegated_log::log_debug!("============================");
         }
 
         Timer::after_secs(10).await;
@@ -938,7 +947,7 @@ async fn main_task(
     } = peripherals;
 
     Timer::after_millis(1000).await;
-    defmt::info!("Starting!");
+    variegated_log::log_info!("Starting!");
     // Shared SPI bus
     let mut spi_config = spi::Config::default();
     spi_config.frequency = 281_000;
@@ -950,25 +959,25 @@ async fn main_task(
     let spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
     let mut ads = ADS124S08::new(spi_dev, WaitStrategy::UseDrdyPin(Input::new(ads_p.pin_drdy, Pull::Down)), Delay);
-    info!("Resetting ADS124S08");
+    log_info!("Resetting ADS124S08");
     let res = ads.reset().await;
     if let Err(e) = res {
         match e {
-            variegated_ads124s08::ADS124S08Error::SPIError(e) => error!("SPI error during ADS124S08 reset: {:?}", e),
-            variegated_ads124s08::ADS124S08Error::PinError(e) => error!("Pin error during ADS124S08 reset: {:?}", e),
-            _ => error!("Other error during ADS124S08 reset: {:?}", e),
+            variegated_ads124s08::ADS124S08Error::SPIError(e) => log_error!("SPI error during ADS124S08 reset: {:?}", e),
+            variegated_ads124s08::ADS124S08Error::PinError(e) => log_error!("Pin error during ADS124S08 reset: {:?}", e),
+            _ => log_error!("Other error during ADS124S08 reset: {:?}", e),
         }
     }
-    info!("Done");
+    log_info!("Done");
     let dr = ads.read_datarate_reg().await;
     if let Ok(dr) = dr {
-        info!("Data rate: {:?}", dr);
+        log_info!("Data rate: {:?}", dr);
     } else {
-        info!("Error reading data rate");
+        log_info!("Error reading data rate");
     }
     let ads = ADS_MUTEX.init(Mutex::new(ads));
 
-    info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
+    log_info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
 
     let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
 
@@ -1046,10 +1055,10 @@ async fn main_task(
     let res = rtc.datetime().await;
     match res {
         Ok(datetime) => {
-            info!("RTC datetime: {:?}", datetime.format("%Y-%m-%d %H:%M:%S").to_string().as_str());
+            log_info!("RTC datetime: {:?}", datetime.format("%Y-%m-%d %H:%M:%S").to_string().as_str());
         }
         Err(e) => {
-            info!("Error reading RTC datetime");
+            log_info!("Error reading RTC datetime");
         }
     }
 
@@ -1083,7 +1092,7 @@ async fn main_task(
     ).with_connected_signal(gravity_connected_sig));
 
     #[cfg(feature = "gravity")]
-    info!("Gravity sensor initialized - will attempt connection with retry");
+    log_info!("Gravity sensor initialized - will attempt connection with retry");
 
     #[cfg(feature = "gravity")]
     let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(GravityController::new(
@@ -1112,7 +1121,7 @@ async fn main_task(
     ).with_connected_signal(belka_connected_sig);
 
     #[cfg(feature = "belka")]
-    info!("Belka Portal device initialized");
+    log_info!("Belka Portal device initialized");
 
     let mut fdc1004_dev = I2cDevice::new(internal_i2c_bus);
     let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
@@ -1186,7 +1195,7 @@ async fn main_task(
     // Initialize watchdog
     let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
     watchdog.start(variegated_controller_lib::WATCHDOG_TIMEOUT);
-    info!(
+    log_info!(
         "Watchdog initialized with {} ms timeout",
         variegated_controller_lib::WATCHDOG_TIMEOUT.as_millis()
     );
@@ -1241,7 +1250,7 @@ async fn main_task(
     // Make schedule store reference available globally for display task (cross-core safe via CriticalSectionRawMutex)
     *SCHEDULE_STORE_REF.lock().await = Some(schedule_store_ref);
 
-    info!("Configuration loaded");
+    log_info!("Configuration loaded");
 
     // Create storage command channel for async storage operations
     let storage_command_channel = STORAGE_COMMAND_CHANNEL.init(Channel::new());
@@ -1410,7 +1419,7 @@ async fn main_task(
     let brew_mechanism = DualBoilerBrewMechanism::new(mechanism_mutex);
     let mut fill_mechanism = DualBoilerFillMechanism::new(mechanism_mutex);
 
-    info!("Dual boiler mechanism initialized");
+    log_info!("Dual boiler mechanism initialized");
 
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
     let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
@@ -1680,7 +1689,7 @@ async fn main_task(
     let _ = machine_definition.add_function_routine_description(2, "Button 3");
     let _ = machine_definition.add_function_routine_description(3, "Button 4");
 
-    info!("Machine definition created: {:?}", machine_definition);
+    log_info!("Machine definition created: {:?}", machine_definition);
 
     let mut controller = DualBoilerSingleGroupController::new(
         command_channel.receiver(),
@@ -1761,7 +1770,7 @@ async fn main_task(
     // Spawn the SD detect pin toggle task
     //spawner.spawn(unwrap!(sd_det_toggle_task(sd_det_pin)));
 
-    info!("Creating huge future join task");
+    log_info!("Creating huge future join task");
 
     let scheduler = run_schedule(schedule_store_ref, command_channel.sender());
 
@@ -1789,7 +1798,7 @@ async fn main_task(
 
     join_all(futures).await;
 
-    info!("For some reason we got here");
+    log_info!("For some reason we got here");
 
     loop {
         Timer::after_millis(3000).await;
@@ -1809,8 +1818,8 @@ async fn sync_rtc(rtc: &mut DS3231<QwiicI2CDevice>) {
             let res = rtc.set_datetime(&naive).await;
 
             match res {
-                Ok(()) => info!("RTC synchronized to UTC time: {:?}", naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()),
-                Err(e) => info!("Error setting RTC datetime"),
+                Ok(()) => log_info!("RTC synchronized to UTC time: {:?}", naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()),
+                Err(e) => log_info!("Error setting RTC datetime"),
             }
         }
 

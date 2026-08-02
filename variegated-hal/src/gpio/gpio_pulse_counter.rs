@@ -2,7 +2,7 @@ use embassy_rp::gpio::Input;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::watch::Sender;
 use embassy_time::{Instant, Timer};
-use defmt::info;
+use variegated_log::log_info;
 use crate::{WithTask, SensorReading};
 
 pub struct GpioTransformingPulseCounter<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize> {
@@ -90,7 +90,7 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
                     let now = Instant::now();
                     if now.duration_since(last_100ms_timestamp).as_millis() >= 100 {
                         if pulse_count_in_last_100ms > 50 {
-                            info!("High pulse rate detected: {} pulses in 100ms", pulse_count_in_last_100ms);
+                            log_info!("High pulse rate detected: {} pulses in 100ms", pulse_count_in_last_100ms);
                         }
                         pulse_count_in_last_100ms = 0;
                         last_100ms_timestamp = now;
@@ -105,7 +105,7 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
                     // Check if we're past the startup period (2 seconds)
                     if !self.startup_complete && measurement_instant.duration_since(startup_time).as_secs() >= 2 {
                         self.startup_complete = true;
-                        info!("GPIO pulse counter startup complete");
+                        log_info!("GPIO pulse counter startup complete");
                     }
 
                     // Store measurement
@@ -141,7 +141,7 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
                             if calculated_frequency <= 1000.0 {
                                 calculated_frequency
                             } else {
-                                info!("Rejecting impossible frequency: {} Hz (pulse_count={}, elapsed={}s)",
+                                log_info!("Rejecting impossible frequency: {} Hz (pulse_count={}, elapsed={}s)",
                                       calculated_frequency, pulse_count, elapsed_seconds);
                                 0.0
                             }

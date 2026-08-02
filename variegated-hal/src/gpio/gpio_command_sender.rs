@@ -1,5 +1,5 @@
 use alloc::boxed::Box;
-use defmt::info;
+use variegated_log::log_info;
 use embassy_rp::gpio::Input;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Sender;
@@ -86,7 +86,7 @@ impl<'a, M: RawMutex, CommandT: Clone, StatusT: Clone, const N: usize, const SUB
         
         async_task_loop!("GpioStatusLambdaCommandSender", None, {
             self.input.wait_for_any_edge().await;
-            info!("Edge detected");
+            log_info!("Edge detected");
 
             Timer::after_millis(10).await;
             
