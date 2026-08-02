@@ -35,44 +35,18 @@
 use core::fmt::Write;
 
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
-use portable_atomic::{AtomicU32, Ordering};
 use variegated_controller_types::debug::{DebugText, Severity};
 use variegated_debug::bus;
+use variegated_debug::suppress::Suppressor;
 
-/// How long an identical message is suppressed after being published.
+/// Thinning for repetitive messages, so a control-loop site cannot empty the ring
+/// of everything else.
 ///
-/// The bus is a 16-slot ring and `publish_immediate` evicts to make room, so a
-/// site inside a control loop does not merely add noise -- it pushes `Status`,
-/// counter and indicator frames out before a host can read them. The worst
-/// offenders are warn-level (the boiler over-temperature / over-pressure /
-/// low-water interlocks fire on every control iteration for as long as the
-/// condition holds), so the level filter cannot help; only de-duplication can.
-///
-/// Doing it here rather than in the controllers is deliberate: the alternative
-/// is per-interlock latch state threaded through control flow, which is real
-/// surgery for a logging concern.
-const SUPPRESS_WINDOW_MS: u32 = 500;
-
-/// Number of distinct recent messages tracked for suppression.
-///
-/// More than one, because a single slot only collapses *strictly consecutive*
-/// repeats. Two sites that alternate -- the brew and steam boilers running the
-/// same interlock back to back in one control iteration, or any two repeating
-/// sites interleaved from different tasks -- produce A,B,A,B, and with one slot
-/// each record clears the other's fingerprint so neither is ever suppressed.
-/// Eight covers the plausible number of simultaneously-hot sites cheaply: the
-/// lookup is a linear scan of eight `u32` loads on the emit path.
-const TRACKED: usize = 8;
-
-/// Fingerprints of recently published records; 0 means "slot empty".
-static FINGERPRINTS: [AtomicU32; TRACKED] = [const { AtomicU32::new(0) }; TRACKED];
-/// Uptime at which each slot was last published, truncated to 32 bits. `u32`
-/// rather than `u64` because Cortex-M33 has no native 64-bit atomic and the
-/// workspace builds `portable-atomic` without its critical-section fallback.
-/// Truncation is harmless: `wrapping_sub` measures the gap correctly across the
-/// ~49-day wrap, and the worst case at the wrap itself is one un-suppressed
-/// duplicate.
-static PUBLISHED_MS: [AtomicU32; TRACKED] = [const { AtomicU32::new(0) }; TRACKED];
+/// The policy and its constants live in `variegated_debug::suppress`, which is
+/// host-testable; this crate sets `test = false` and depends on `embassy-rp`, so
+/// nothing here can be exercised off-target. Keeping the decision logic there
+/// means it is covered by real unit tests rather than by inspection.
+static SUPPRESSOR: Suppressor = Suppressor::new();
 
 /// A `core::fmt::Write` adapter that truncates rather than failing.
 ///
@@ -118,68 +92,6 @@ pub fn render(record: &Record) -> DebugText {
     msg
 }
 
-/// FNV-1a over the level and the rendered message.
-///
-/// Allocation-free and cheap enough for the emit path: one pass over at most
-/// `TEXT_LEN` bytes. Never returns 0, so 0 can mean "nothing published yet"
-/// without a separate flag.
-fn fingerprint(level: Level, msg: &str) -> u32 {
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in core::iter::once(level as u8).chain(msg.as_bytes().iter().copied()) {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    if hash == 0 { 1 } else { hash }
-}
-
-/// True if this record repeats one of the last [`TRACKED`] distinct messages
-/// inside `SUPPRESS_WINDOW_MS`.
-///
-/// A matched slot has its timestamp refreshed whether or not the record is
-/// suppressed, so a repeat that *is* published restarts its window rather than
-/// being suppressed forever by a long-ago first sighting. Refreshing in place
-/// also means a pair of alternating sites both stay resident: neither is ever
-/// re-inserted, so neither can evict the other.
-///
-/// A message not already tracked claims the slot whose last publish is oldest,
-/// so the set holds the currently-hot sites rather than the most recently
-/// discovered ones.
-///
-/// Racy by construction: two tasks logging concurrently can both observe the
-/// same prior state and both publish. That is the correct trade -- the emit path
-/// may not take a lock, and the cost of losing a suppression is one extra frame,
-/// not a correctness problem.
-fn is_suppressed_duplicate(level: Level, msg: &str, now_ms: u32) -> bool {
-    let fp = fingerprint(level, msg);
-
-    let mut oldest = 0usize;
-    let mut oldest_age = 0u32;
-
-    for slot in 0..TRACKED {
-        let seen = FINGERPRINTS[slot].load(Ordering::Relaxed);
-        // `wrapping_sub` so age is correct across the 32-bit uptime wrap.
-        let age = now_ms.wrapping_sub(PUBLISHED_MS[slot].load(Ordering::Relaxed));
-
-        if seen == fp {
-            PUBLISHED_MS[slot].store(now_ms, Ordering::Relaxed);
-            return age < SUPPRESS_WINDOW_MS;
-        }
-
-        // An empty slot is infinitely old, so it wins eviction outright.
-        if seen == 0 {
-            oldest = slot;
-            oldest_age = u32::MAX;
-        } else if age >= oldest_age {
-            oldest = slot;
-            oldest_age = age;
-        }
-    }
-
-    FINGERPRINTS[oldest].store(fp, Ordering::Relaxed);
-    PUBLISHED_MS[oldest].store(now_ms, Ordering::Relaxed);
-    false
-}
-
 struct BusLogger;
 
 impl Log for BusLogger {
@@ -192,14 +104,18 @@ impl Log for BusLogger {
 
     fn log(&self, record: &Record) {
         let msg = render(record);
+        let severity = severity_of(record.level());
         let now_ms = embassy_time::Instant::now().as_millis() as u32;
-        if is_suppressed_duplicate(record.level(), msg.as_str(), now_ms) {
-            // Counted, not silent: the host's dropped-frame figure is what tells
-            // a user their log is being thinned rather than going quiet.
-            bus::note_dropped();
+
+        if !SUPPRESSOR.admit(severity, msg.as_str(), now_ms) {
+            // Counted, but as *suppressed*, not dropped: nothing was lost, an
+            // identical frame went out moments ago. `dropped` means the transport
+            // failed to deliver something, and a user watching that climb at
+            // 10 Hz would read a working link as a broken one.
+            bus::note_suppressed();
             return;
         }
-        bus::emit_text(severity_of(record.level()), msg);
+        bus::emit_text(severity, msg);
     }
 
     fn flush(&self) {

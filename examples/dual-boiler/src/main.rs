@@ -875,6 +875,7 @@ fn publish_snapshot(psram_heap: bool) {
         heap_free: HEAP.free() as u32,
         frames_emitted: stats.emitted,
         frames_dropped: stats.dropped,
+        frames_suppressed: stats.suppressed,
         source_state: SourceState::Application(ApplicationState {
             // Not plumbed: the watchdog is fed inside variegated-controller-lib's run
             // loop, which has no handle to this snapshot. `None` renders as "unknown"

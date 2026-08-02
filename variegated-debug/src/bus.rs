@@ -23,23 +23,46 @@ pub static BUS: DebugBus = PubSubChannel::new();
 static SEQ: AtomicU32 = AtomicU32::new(0);
 static EMITTED: AtomicU32 = AtomicU32::new(0);
 static DROPPED: AtomicU32 = AtomicU32::new(0);
+static SUPPRESSED: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub emitted: u32,
+    /// Frames lost against the operator's intent -- see [`note_dropped`].
     pub dropped: u32,
+    /// Frames deliberately thinned before publication -- see [`note_suppressed`].
+    /// Kept separate from `dropped` because the two mean opposite things about the
+    /// health of the link.
+    pub suppressed: u32,
 }
 
 pub fn stats() -> Stats {
     Stats {
         emitted: EMITTED.load(Ordering::Relaxed),
         dropped: DROPPED.load(Ordering::Relaxed),
+        suppressed: SUPPRESSED.load(Ordering::Relaxed),
     }
 }
 
-/// Record that a transport threw a frame away (host not attached, buffer full).
+/// Record that a frame was **lost**: a transport threw it away because no host was
+/// attached or a buffer was full, or the bus evicted it unread.
+///
+/// This number rising means data the device wanted to send did not arrive. Do not
+/// use it for frames the device chose not to send -- that is [`note_suppressed`].
+/// Conflating them makes a working link read as a failing one.
 pub fn note_dropped() {
     DROPPED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record that a frame was **deliberately thinned** before it reached the bus,
+/// because it repeated a recent message or hit the text rate cap.
+///
+/// Distinct from [`note_dropped`]: nothing is wrong, and the information is not
+/// lost -- an identical frame was published moments earlier. A bench user watching
+/// `dropped` climb at 10 Hz would reasonably conclude the transport was failing,
+/// which is why de-duplication gets its own counter.
+pub fn note_suppressed() {
+    SUPPRESSED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn subscriber() -> Option<Subscriber<'static, CriticalSectionRawMutex, DebugFrame, BUS_CAPACITY, BUS_SUBSCRIBERS, 1>> {

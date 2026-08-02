@@ -17,6 +17,7 @@ extern crate std;
 pub mod bus;
 pub mod rate;
 pub mod sampler;
+pub mod suppress;
 
 #[cfg(feature = "usb-cdc-rp")]
 pub mod usb_cdc;

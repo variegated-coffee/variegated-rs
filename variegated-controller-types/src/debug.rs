@@ -268,7 +268,14 @@ pub struct DebugStateSnapshot {
     pub heap_used: u32,
     pub heap_free: u32,
     pub frames_emitted: u32,
+    /// Frames lost against the device's intent: no host attached, buffer full, or
+    /// evicted from the ring unread. A rising value means something is wrong.
     pub frames_dropped: u32,
+    /// Frames the device deliberately thinned before publishing, because they
+    /// repeated a recent message or hit the text rate cap. Separate from
+    /// `frames_dropped` because nothing is lost and nothing is wrong -- folding
+    /// the two together made a healthy link read as a failing one at 10 Hz.
+    pub frames_suppressed: u32,
     pub source_state: SourceState,
 }
 
