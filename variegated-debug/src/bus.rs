@@ -24,16 +24,19 @@ static SEQ: AtomicU32 = AtomicU32::new(0);
 static EMITTED: AtomicU32 = AtomicU32::new(0);
 static DROPPED: AtomicU32 = AtomicU32::new(0);
 static SUPPRESSED: AtomicU32 = AtomicU32::new(0);
+static RATE_LIMITED: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub emitted: u32,
-    /// Frames lost against the operator's intent -- see [`note_dropped`].
+    /// Frames lost in transit -- see [`note_dropped`].
     pub dropped: u32,
-    /// Frames deliberately thinned before publication -- see [`note_suppressed`].
-    /// Kept separate from `dropped` because the two mean opposite things about the
-    /// health of the link.
+    /// Duplicate frames collapsed before publication -- see [`note_suppressed`].
+    /// Costs nothing: an identical frame is already on the bus.
     pub suppressed: u32,
+    /// Frames refused by the text rate cap -- see [`note_rate_limited`]. Unlike
+    /// `suppressed`, these are **lost**: they were not duplicates of anything.
+    pub rate_limited: u32,
 }
 
 pub fn stats() -> Stats {
@@ -41,6 +44,7 @@ pub fn stats() -> Stats {
         emitted: EMITTED.load(Ordering::Relaxed),
         dropped: DROPPED.load(Ordering::Relaxed),
         suppressed: SUPPRESSED.load(Ordering::Relaxed),
+        rate_limited: RATE_LIMITED.load(Ordering::Relaxed),
     }
 }
 
@@ -54,15 +58,32 @@ pub fn note_dropped() {
     DROPPED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Record that a frame was **deliberately thinned** before it reached the bus,
-/// because it repeated a recent message or hit the text rate cap.
+/// Record that a **duplicate** frame was collapsed before it reached the bus.
 ///
-/// Distinct from [`note_dropped`]: nothing is wrong, and the information is not
-/// lost -- an identical frame was published moments earlier. A bench user watching
-/// `dropped` climb at 10 Hz would reasonably conclude the transport was failing,
-/// which is why de-duplication gets its own counter.
+/// Distinct from [`note_dropped`]: nothing is wrong and nothing is lost -- an
+/// identical frame was published moments earlier, and the repeating condition is
+/// re-announced on a heartbeat. A bench user watching `dropped` climb at 10 Hz
+/// would reasonably conclude the transport was failing, which is why
+/// de-duplication gets its own counter.
+///
+/// Only for exact repeats. A frame the sink refused for any other reason is
+/// [`note_rate_limited`], because that one really does destroy information.
 pub fn note_suppressed() {
     SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record that a frame was refused by the text rate cap.
+///
+/// This is a **loss**, not a saving: the frame was not a duplicate, so nothing
+/// else on the bus carries what it would have said. It is counted apart from both
+/// `dropped` (which means the transport failed) and `suppressed` (which costs
+/// nothing) so that neither number can be read as covering this case.
+///
+/// Should be rare -- the bucket carries enough burst capacity for the boot log,
+/// and only sustained diversity beyond the tracked set drains it. A non-zero value
+/// here is worth investigating.
+pub fn note_rate_limited() {
+    RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn subscriber() -> Option<Subscriber<'static, CriticalSectionRawMutex, DebugFrame, BUS_CAPACITY, BUS_SUBSCRIBERS, 1>> {

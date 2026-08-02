@@ -37,7 +37,7 @@ use core::fmt::Write;
 use log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
 use variegated_controller_types::debug::{DebugText, Severity};
 use variegated_debug::bus;
-use variegated_debug::suppress::Suppressor;
+use variegated_debug::suppress::{Admission, Suppressor};
 
 /// Thinning for repetitive messages, so a control-loop site cannot empty the ring
 /// of everything else.
@@ -107,15 +107,17 @@ impl Log for BusLogger {
         let severity = severity_of(record.level());
         let now_ms = embassy_time::Instant::now().as_millis() as u32;
 
-        if !SUPPRESSOR.admit(severity, msg.as_str(), now_ms) {
-            // Counted, but as *suppressed*, not dropped: nothing was lost, an
-            // identical frame went out moments ago. `dropped` means the transport
-            // failed to deliver something, and a user watching that climb at
-            // 10 Hz would read a working link as a broken one.
-            bus::note_suppressed();
-            return;
+        match SUPPRESSOR.admit(severity, msg.as_str(), now_ms) {
+            Admission::Publish => bus::emit_text(severity, msg),
+            // Nothing lost: an identical frame went out moments ago, and a
+            // persisting condition is re-announced on a heartbeat. Counted apart
+            // from `dropped`, which means the transport failed -- a user watching
+            // that climb at 10 Hz would read a working link as a broken one.
+            Admission::Duplicate => bus::note_suppressed(),
+            // Genuinely lost: not a duplicate of anything, so no other frame
+            // carries it. Counted apart from `suppressed` for exactly that reason.
+            Admission::RateLimited => bus::note_rate_limited(),
         }
-        bus::emit_text(severity, msg);
     }
 
     fn flush(&self) {

@@ -271,11 +271,18 @@ pub struct DebugStateSnapshot {
     /// Frames lost against the device's intent: no host attached, buffer full, or
     /// evicted from the ring unread. A rising value means something is wrong.
     pub frames_dropped: u32,
-    /// Frames the device deliberately thinned before publishing, because they
-    /// repeated a recent message or hit the text rate cap. Separate from
-    /// `frames_dropped` because nothing is lost and nothing is wrong -- folding
-    /// the two together made a healthy link read as a failing one at 10 Hz.
+    /// Duplicate frames the device collapsed before publishing. Separate from
+    /// `frames_dropped` because nothing is lost and nothing is wrong -- an
+    /// identical frame went out moments earlier, and a repeating condition is
+    /// re-announced on a heartbeat. Folding the two together made a healthy link
+    /// read as a failing one at 10 Hz.
     pub frames_suppressed: u32,
+    /// Frames refused by the text rate cap. Counted apart from
+    /// `frames_suppressed` because these are genuinely **lost**: they were not
+    /// duplicates, so nothing else carries what they would have said. Expected to
+    /// stay at zero -- the rate limiter has burst capacity for the boot log and
+    /// only sustained message diversity drains it.
+    pub frames_rate_limited: u32,
     pub source_state: SourceState,
 }
 

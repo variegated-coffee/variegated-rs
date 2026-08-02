@@ -20,12 +20,22 @@
 //! 1. **Per-message**, the common case: an identical message repeats at most once
 //!    per [`SUPPRESS_WINDOW_MS`]. Repetition is what a control loop produces, and
 //!    collapsing it is nearly free.
-//! 2. **A global cap**, the backstop: at most [`CAP_PER_WINDOW`] frames per
-//!    [`CAP_WINDOW_MS`] regardless of message diversity. Without it, more
-//!    simultaneously-hot messages than [`TRACKED`] does not degrade gracefully --
-//!    the surplus messages thrash over the last slot, each evicting the other, and
-//!    every one of them publishes at full loop rate. The cap turns that cliff into
-//!    a bound.
+//! 2. **A global token bucket**, the backstop. Without it, more simultaneously-hot
+//!    messages than [`TRACKED`] does not degrade gracefully -- the surplus messages
+//!    thrash over the last slot, each evicting the other, and every one of them
+//!    publishes at full loop rate. The bucket turns that cliff into a bound.
+//!
+//! The second layer is a bucket rather than a fixed window because the two cases it
+//! has to tell apart are *burst* and *sustained*, which a fixed window cannot
+//! express. A fixed window of 5 per 500 ms throttled the boot log: roughly a dozen
+//! distinct init lines arrive within a couple hundred milliseconds, and only 5 of
+//! them reached the bus. Those are first sightings with no duplicate anywhere --
+//! thinning them destroys information rather than collapsing repetition, which is
+//! the exact symptom this whole task exists to fix.
+//!
+//! Exempting first sightings would not work either: a message thrashing in and out
+//! of the [`TRACKED`] slots presents as a first sighting on every re-insertion, so
+//! the exemption would reopen the flood it is meant to bound.
 
 use portable_atomic::{AtomicU32, Ordering};
 use variegated_controller_types::debug::Severity;
@@ -59,15 +69,29 @@ pub const SUPPRESS_WINDOW_MS: u32 = 2_000;
 /// enough that headroom costs nothing measurable.
 pub const TRACKED: usize = 16;
 
-/// Length of the global cap's accounting window.
-pub const CAP_WINDOW_MS: u32 = 500;
-/// Frames admitted per [`CAP_WINDOW_MS`], across all messages.
+/// Burst the global bucket absorbs from full, in frames.
 ///
-/// 5 per 500 ms = 10/sec. Chosen to sit *above* the expected worst case (all six
-/// interlocks at 0.5 Hz is ~3/sec) so it never engages in normal operation, while
-/// still halving the pathological diversity case. It is a floor, not the primary
-/// mechanism.
-pub const CAP_PER_WINDOW: u32 = 5;
+/// 24, sized off the worst legitimate burst in the tree: `main.rs` emits roughly a
+/// dozen distinct init lines within a couple hundred milliseconds of boot, and
+/// every one is a first sighting with no duplicate anywhere. Twice that leaves room
+/// for the same pattern to recur (a reconnect, a routine start) without the bucket
+/// having fully refilled.
+pub const CAP_CAPACITY: u32 = 24;
+
+/// Sustained rate the bucket refills at, in frames per second.
+///
+/// 10/sec, comfortably above the expected steady state -- all six boiler interlocks
+/// holding at once is ~3 frames/sec -- so the bucket sits full and the cap never
+/// engages in normal operation. A genuine flood settles here rather than at the
+/// loop rate, which is the bound this layer exists to provide.
+pub const CAP_REFILL_PER_SEC: u32 = 10;
+
+/// Bucket level is tracked in thousandths of a frame so sub-frame refill is not
+/// lost to integer truncation between closely spaced records. At
+/// [`CAP_REFILL_PER_SEC`] = 10, one elapsed millisecond is worth exactly
+/// `CAP_REFILL_PER_SEC` milli-tokens, which keeps the arithmetic exact.
+const MILLI: u32 = 1_000;
+const CAP_CAPACITY_MILLI: u32 = CAP_CAPACITY * MILLI;
 
 /// FNV-1a over the severity and the message.
 ///
@@ -98,8 +122,29 @@ pub struct Suppressor {
     /// across the ~49-day wrap, and the worst case at the wrap is one un-suppressed
     /// duplicate.
     published_ms: [AtomicU32; TRACKED],
-    cap_window_start_ms: AtomicU32,
-    cap_spent: AtomicU32,
+    /// Bucket level in milli-tokens. Starts full so the boot burst passes.
+    cap_tokens_milli: AtomicU32,
+    /// Uptime the bucket was last refilled at.
+    cap_refilled_ms: AtomicU32,
+}
+
+/// Why a frame was or was not admitted.
+///
+/// The three cases mean genuinely different things to a host, so they are not
+/// collapsed into a bool: a duplicate costs nothing because an identical frame went
+/// out moments ago, whereas a rate-limited frame is information that no longer
+/// exists anywhere. Conflating them is how `frames_suppressed` would come to read
+/// as "all fine" when it is not.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// Publish it.
+    Publish,
+    /// Repeats a message published within [`SUPPRESS_WINDOW_MS`]. The information
+    /// is already on the bus; nothing is lost.
+    Duplicate,
+    /// Refused by the global bucket. This frame is **lost** -- it is not a repeat
+    /// of anything, and no other frame carries it.
+    RateLimited,
 }
 
 impl Default for Suppressor {
@@ -113,17 +158,17 @@ impl Suppressor {
         Self {
             fingerprints: [const { AtomicU32::new(0) }; TRACKED],
             published_ms: [const { AtomicU32::new(0) }; TRACKED],
-            cap_window_start_ms: AtomicU32::new(0),
-            cap_spent: AtomicU32::new(0),
+            cap_tokens_milli: AtomicU32::new(CAP_CAPACITY_MILLI),
+            cap_refilled_ms: AtomicU32::new(0),
         }
     }
 
-    /// True if this frame may be published; false if it should be thinned.
+    /// Decide whether this frame may be published, and why.
     ///
-    /// State is only advanced when the answer is true, so `published_ms` always
+    /// State is only advanced on [`Admission::Publish`], so `published_ms` always
     /// means "when this message last actually reached the bus" -- which is what
     /// makes the heartbeat work.
-    pub fn admit(&self, severity: Severity, msg: &str, now_ms: u32) -> bool {
+    pub fn admit(&self, severity: Severity, msg: &str, now_ms: u32) -> Admission {
         let fp = fingerprint(severity, msg);
 
         // Slot this message will occupy if it publishes: its own if already
@@ -138,7 +183,7 @@ impl Suppressor {
 
             if seen == fp {
                 if age < SUPPRESS_WINDOW_MS {
-                    return false;
+                    return Admission::Duplicate;
                 }
                 // Due a heartbeat. Fall through to the cap; do not refresh the
                 // timestamp unless it actually publishes.
@@ -156,31 +201,48 @@ impl Suppressor {
             }
         }
 
-        if !self.admit_globally(now_ms) {
-            return false;
+        if !self.take_token(now_ms) {
+            return Admission::RateLimited;
         }
 
         self.fingerprints[slot].store(fp, Ordering::Relaxed);
         self.published_ms[slot].store(now_ms, Ordering::Relaxed);
-        true
+        Admission::Publish
     }
 
-    /// Fixed-window cap across all messages. A hard window rather than a leaky
-    /// bucket, matching `rate::TokenBucket` -- the arithmetic stays obvious and
-    /// this only has to bound a pathological case, not shape traffic.
-    fn admit_globally(&self, now_ms: u32) -> bool {
-        let start = self.cap_window_start_ms.load(Ordering::Relaxed);
-        if now_ms.wrapping_sub(start) >= CAP_WINDOW_MS {
-            self.cap_window_start_ms.store(now_ms, Ordering::Relaxed);
-            self.cap_spent.store(1, Ordering::Relaxed);
-            return true;
+    /// Take one token from the global bucket, refilling it for elapsed time first.
+    ///
+    /// A bucket rather than the fixed window this replaced, because the two cases
+    /// that matter are burst and sustained, and a fixed window cannot tell them
+    /// apart: 5 per 500 ms bounded the flood correctly but also throttled the boot
+    /// log to 5 of 12 distinct lines, destroying information rather than collapsing
+    /// repetition.
+    ///
+    /// Shares `rate::TokenBucket`'s intent but not its type: that one budgets
+    /// *bytes* for the inter-processor link and takes `&mut self`, while this
+    /// counts frames behind a `&self` static and so has to be atomic. Duplicating
+    /// ~15 lines is cheaper than generalising over both.
+    fn take_token(&self, now_ms: u32) -> bool {
+        let last = self.cap_refilled_ms.load(Ordering::Relaxed);
+        // `wrapping_sub` so elapsed time is correct across the 32-bit uptime wrap.
+        let elapsed = now_ms.wrapping_sub(last);
+        let mut tokens = self.cap_tokens_milli.load(Ordering::Relaxed);
+
+        if elapsed > 0 {
+            // Exact at CAP_REFILL_PER_SEC tokens/sec: one ms is that many
+            // milli-tokens. Saturating so a long quiet period cannot overflow.
+            let refill = elapsed.saturating_mul(CAP_REFILL_PER_SEC);
+            tokens = tokens.saturating_add(refill).min(CAP_CAPACITY_MILLI);
+            self.cap_refilled_ms.store(now_ms, Ordering::Relaxed);
         }
 
-        let spent = self.cap_spent.load(Ordering::Relaxed);
-        if spent < CAP_PER_WINDOW {
-            self.cap_spent.store(spent + 1, Ordering::Relaxed);
+        if tokens >= MILLI {
+            self.cap_tokens_milli.store(tokens - MILLI, Ordering::Relaxed);
             true
         } else {
+            // A refusal charges nothing, so one refused frame cannot wedge the
+            // bucket -- same property `rate::TokenBucket` documents.
+            self.cap_tokens_milli.store(tokens, Ordering::Relaxed);
             false
         }
     }
@@ -190,6 +252,16 @@ impl Suppressor {
 mod tests {
     use super::*;
 
+    /// 40 distinct messages, enough for any bound this module needs to exercise.
+    /// Indexed rather than formatted so the harness stays allocation-free and
+    /// usable from a `no_std` test build.
+    const DISTINCT: [&str; 40] = [
+        "m00", "m01", "m02", "m03", "m04", "m05", "m06", "m07", "m08", "m09",
+        "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19",
+        "m20", "m21", "m22", "m23", "m24", "m25", "m26", "m27", "m28", "m29",
+        "m30", "m31", "m32", "m33", "m34", "m35", "m36", "m37", "m38", "m39",
+    ];
+
     /// Drive `admit` at `hz` for `secs` and count how many frames it lets through.
     fn run(suppressor: &Suppressor, messages: &[&str], hz: u32, secs: u32) -> u32 {
         let step_ms = 1000 / hz;
@@ -197,7 +269,7 @@ mod tests {
         for tick in 0..(hz * secs) {
             let now = tick * step_ms;
             for msg in messages {
-                if suppressor.admit(Severity::Warn, msg, now) {
+                if suppressor.admit(Severity::Warn, msg, now) == Admission::Publish {
                     published += 1;
                 }
             }
@@ -237,21 +309,84 @@ mod tests {
     #[test]
     fn exceeding_the_tracked_set_stays_bounded() {
         let s = Suppressor::new();
-        let many: [&str; TRACKED + 4] = [
-            "m00", "m01", "m02", "m03", "m04", "m05", "m06", "m07", "m08", "m09",
-            "m10", "m11", "m12", "m13", "m14", "m15", "m16", "m17", "m18", "m19",
-        ];
-        let published = run(&s, &many, 10, 10);
+        let secs = 10;
+        let many = &DISTINCT[..TRACKED + 4];
+        let published = run(&s, many, 10, secs);
         std::eprintln!("{} messages over capacity published {published} frames", many.len());
 
-        // The absolute bound is the global cap: 5 per 500 ms over 10 s.
-        let cap = CAP_PER_WINDOW * (10_000 / CAP_WINDOW_MS);
+        // A sustained flood settles at the refill rate; the bucket can additionally
+        // give away its initial capacity once.
+        let bound = CAP_CAPACITY + CAP_REFILL_PER_SEC * secs;
         assert!(
-            published <= cap,
-            "published {published} frames, cap allows {cap}"
+            published <= bound,
+            "published {published} frames, bucket allows at most {bound}"
         );
-        // And far below the un-thinned rate of 20 messages x 100 ticks.
+        // And far below the un-thinned rate of 20 messages x 100 ticks = 2000.
         assert!(published < 200, "{published} frames is close to un-thinned");
+    }
+
+    /// The regression guard for the defect a fixed window caused: `main.rs` emits
+    /// roughly a dozen distinct init lines within a couple hundred milliseconds of
+    /// boot. Every one is a first sighting with no duplicate anywhere, so thinning
+    /// any of them destroys information rather than collapsing repetition -- and
+    /// under the old 5-per-500 ms window only 5 of 12 reached the bus, on every
+    /// single boot.
+    ///
+    /// This fails if the bucket is replaced by a fixed window, or if its capacity
+    /// drops below the burst.
+    #[test]
+    fn a_boot_burst_of_distinct_messages_all_publishes() {
+        let s = Suppressor::new();
+        let boot = [
+            "Starting!",
+            "Resetting ADS124S08",
+            "Done",
+            "Data rate: 20",
+            "System clock: 150000000",
+            "RTC datetime: 2026-08-02 11:00:00",
+            "Gravity sensor initialized - will attempt connection with retry",
+            "Belka Portal device initialized",
+            "Configuration loaded",
+            "Dual boiler mechanism initialized",
+            "Machine definition created",
+            "Creating huge future join task",
+        ];
+
+        let mut published = 0;
+        for (i, msg) in boot.iter().enumerate() {
+            // 15 ms apart, the spacing these actually arrive at.
+            let now = i as u32 * 15;
+            if s.admit(Severity::Info, msg, now) == Admission::Publish {
+                published += 1;
+            }
+        }
+
+        assert_eq!(
+            published,
+            boot.len(),
+            "boot log was thinned: {published} of {} lines reached the bus",
+            boot.len()
+        );
+    }
+
+    /// Rate-limited and duplicate are reported distinctly, because only one of them
+    /// means "the information is still on the bus".
+    #[test]
+    fn the_two_thinning_reasons_are_distinguishable() {
+        let s = Suppressor::new();
+        assert_eq!(s.admit(Severity::Info, "x", 0), Admission::Publish);
+        assert_eq!(s.admit(Severity::Info, "x", 10), Admission::Duplicate);
+
+        // Drain the bucket with distinct messages, then a further new one is
+        // refused by the cap rather than reported as a duplicate.
+        let drained = Suppressor::new();
+        for msg in DISTINCT.iter().take(CAP_CAPACITY as usize) {
+            assert_eq!(drained.admit(Severity::Info, msg, 0), Admission::Publish);
+        }
+        assert_eq!(
+            drained.admit(Severity::Info, "one too many", 0),
+            Admission::RateLimited
+        );
     }
 
     /// A message that has not been seen for longer than the window publishes
@@ -259,9 +394,12 @@ mod tests {
     #[test]
     fn a_returning_message_publishes_at_once() {
         let s = Suppressor::new();
-        assert!(s.admit(Severity::Warn, "x", 0));
-        assert!(!s.admit(Severity::Warn, "x", 100));
-        assert!(s.admit(Severity::Warn, "x", SUPPRESS_WINDOW_MS));
+        assert_eq!(s.admit(Severity::Warn, "x", 0), Admission::Publish);
+        assert_eq!(s.admit(Severity::Warn, "x", 100), Admission::Duplicate);
+        assert_eq!(
+            s.admit(Severity::Warn, "x", SUPPRESS_WINDOW_MS),
+            Admission::Publish
+        );
     }
 
     /// Severity is part of the fingerprint: the same text at two levels is two
@@ -269,33 +407,48 @@ mod tests {
     #[test]
     fn severity_distinguishes_otherwise_identical_text() {
         let s = Suppressor::new();
-        assert!(s.admit(Severity::Warn, "same", 0));
-        assert!(s.admit(Severity::Error, "same", 0));
+        assert_eq!(s.admit(Severity::Warn, "same", 0), Admission::Publish);
+        assert_eq!(s.admit(Severity::Error, "same", 0), Admission::Publish);
     }
 
-    /// Distinct messages inside one window are all admitted up to the cap -- the
-    /// per-message check must not serialise unrelated sites.
+    /// Distinct messages inside one window are all admitted -- the per-message
+    /// check must not serialise unrelated sites.
     #[test]
     fn distinct_messages_are_not_blocked_by_each_other() {
         let s = Suppressor::new();
-        assert!(s.admit(Severity::Info, "a", 0));
-        assert!(s.admit(Severity::Info, "b", 0));
-        assert!(s.admit(Severity::Info, "c", 0));
+        assert_eq!(s.admit(Severity::Info, "a", 0), Admission::Publish);
+        assert_eq!(s.admit(Severity::Info, "b", 0), Admission::Publish);
+        assert_eq!(s.admit(Severity::Info, "c", 0), Admission::Publish);
     }
 
-    /// The cap must not wedge: a refused frame charges nothing, and the next
-    /// window admits again.
+    /// The bucket must not wedge: a refused frame charges nothing, and enough
+    /// elapsed time admits again.
     #[test]
-    fn the_global_cap_refills() {
+    fn the_global_bucket_refills() {
         let s = Suppressor::new();
-        for i in 0..CAP_PER_WINDOW {
-            assert!(s.admit(Severity::Info, msg_for(i), 0), "frame {i} refused");
+        for msg in DISTINCT.iter().take(CAP_CAPACITY as usize) {
+            assert_eq!(s.admit(Severity::Info, msg, 0), Admission::Publish);
         }
-        assert!(!s.admit(Severity::Info, "overflow", 0));
-        assert!(s.admit(Severity::Info, "overflow", CAP_WINDOW_MS));
+        assert_eq!(
+            s.admit(Severity::Info, "overflow", 0),
+            Admission::RateLimited
+        );
+
+        // One token is worth 1000 / CAP_REFILL_PER_SEC milliseconds.
+        let one_token_ms = 1_000 / CAP_REFILL_PER_SEC;
+        assert_eq!(
+            s.admit(Severity::Info, "overflow", one_token_ms),
+            Admission::Publish
+        );
     }
 
-    fn msg_for(i: u32) -> &'static str {
-        ["c0", "c1", "c2", "c3", "c4", "c5"][i as usize]
+    /// Capacity has to cover the burst it was sized for, or the boot-log guard
+    /// above passes only by accident of message count.
+    #[test]
+    fn capacity_covers_the_boot_burst() {
+        assert!(
+            CAP_CAPACITY >= 12,
+            "capacity {CAP_CAPACITY} is below the ~12-line boot burst"
+        );
     }
 }
