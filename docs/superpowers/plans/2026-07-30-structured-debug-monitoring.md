@@ -2659,6 +2659,51 @@ pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
 
 Add `variegated-debug` to `variegated-comms/Cargo.toml`.
 
+**First: move `Status` off the shared bus before adding this task's subscriber.**
+
+Adding the relay subscriber has a cost that filtering in the relay does NOT avoid,
+because the cost is paid inside the pubsub, before your code sees the frame.
+`embassy-sync` 0.8's `get_message` moves a message out only when it is at index 0 *and*
+the last subscriber has taken it; otherwise it `clone()`s — inside the same
+`inner.lock(..)` critical section. Today `variegated-debug`'s bus has exactly one
+subscriber (the USB writer), so nothing clones. The moment this task adds a second,
+every `DebugPayload::Status` frame is cloned at 1 Hz in steady state: a ~1.7 kB
+`LlffHeap::alloc` (first-fit, O(n)) plus a memcpy, with interrupts disabled on both
+cores. That is a jitter source for the PID loops and the PIO pulse counter, it needs no
+stall to trigger, and it is strictly worse than the eviction free already documented at
+`examples/dual-boiler/src/main.rs:836-848`.
+
+So give `Status` its own path rather than putting a 1.7 kB payload on a multi-subscriber
+bus: a dedicated single-slot channel (a `Signal`, or a `PubSubChannel` with `CAP = 1`)
+that only the transports read. Latest-wins is the correct semantic for a level anyway —
+a stale `Status` is useless. The USB writer then selects across the debug bus and the
+status channel. Update the comments at `main.rs:836-848` and at the payload variant in
+`debug.rs`, both of which currently scope the allocator-under-critical-section cost to
+eviction only; that "only" stops being true the moment a second subscriber exists.
+
+**Then: do NOT relay `DebugPayload::Status` over this link, and make that explicit.**
+
+Task 15 added `Status` to the debug stream, and it is the largest thing on it — a
+populated one is 1607 bytes COBS-encoded. Two reasons it must not go through this
+relay:
+
+1. The rate limiter cannot pass it *at all*. `WINDOW_BUDGET` is
+   `DEBUG_RELAY_BYTES_PER_SEC / (1000 / WINDOW_MS)` = 300 bytes per 100 ms window, and
+   `TokenBucket::allow` admits an item only if it fits within a single window. A
+   Status frame — even the ~250-300 byte realistic dual-boiler case — is refused every
+   window, forever. Raising the budget to fit it would hand debug traffic a fifth of
+   the whole 576 kbaud link.
+2. It is redundant. The comms processor **already receives `Status`** through
+   `ApplicationProcessorToCommsProcessorMessage::Status`, which is what feeds the
+   WebSocket and ESPHome paths. Relaying it a second time under a debug wrapper would
+   double the link cost of the machine's single largest message for no new information.
+
+So: filter `DebugPayload::Status(_)` out in the relay, with a comment explaining both
+reasons. Task 11's TCP server injects the comms processor's own copy of `Status` into
+the debug stream instead, so a TCP client still sees machine state — it just does not
+cross the link twice. Add a test asserting the relay skips `Status` frames and passes
+the others.
+
 **Also fill in the link counters this task owns.** `ApplicationState::link_frames_relayed`
 and `link_frames_dropped` are constructed as zero in `examples/dual-boiler/src/main.rs`'s
 `publish_snapshot`, with a comment saying they are accurate as zero only until this
