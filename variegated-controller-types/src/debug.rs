@@ -169,6 +169,13 @@ pub enum DebugEvent {
     StorageWrite { store: Name, index: u16 },
     SensorFault { sensor: Name },
     /// A safety interlock refused an operation.
+    ///
+    /// `Warn`, not `Error`, and deliberately: an interlock trip is the machine
+    /// correctly declining to do something unsafe, which is defensive behaviour
+    /// working as designed, not a malfunction. Some of the sites this replaced
+    /// used `error!`; they are now consistent with the boiler interlocks, which
+    /// always used `warn!`. `Error` on this event would mean a host could not
+    /// distinguish "refused to brew with an empty tank" from a genuine fault.
     InterlockTripped { interlock: Name },
     // Comms processor
     WifiAssociated,

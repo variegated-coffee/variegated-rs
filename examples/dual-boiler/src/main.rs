@@ -771,9 +771,14 @@ async fn configuration_debug_logger(mut configuration_receiver: ConfigurationSub
 
         // Log the current configuration every 10 seconds
         if let Some(ref config) = last_config {
-            variegated_log::log_debug!("=== Current Configuration ===");
+            // All three stay on `defmt`. The payload has to: `Configuration` has
+            // no `core::fmt::Debug`, so the `log` half of `log_debug!` will not
+            // compile for it. Had the delimiters stayed on `log_debug!` the bus
+            // would have received two `=== ... ===` lines wrapped around nothing
+            // at all, which is worse than not carrying the block.
+            defmt::debug!("=== Current Configuration ===");
             defmt::debug!("{:?}", config);
-            variegated_log::log_debug!("============================");
+            defmt::debug!("============================");
         }
 
         Timer::after_secs(10).await;

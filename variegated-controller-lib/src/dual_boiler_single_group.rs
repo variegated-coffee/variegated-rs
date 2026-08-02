@@ -821,7 +821,15 @@ impl<
         if let Some(max_temp) = self.brew_boiler_config.max_temperature {
             if let Some(current_temp) = self.brew_boiler.get_temperature() {
                 if current_temp >= max_temp {
-                    log_warn!("Brew boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
+                    // No interpolated reading: this fires on every iteration of a
+                    // 10 Hz control loop for as long as the interlock holds, and an
+                    // `f32` at full `Display` precision changes with ADC noise on
+                    // essentially every one -- which would defeat the bus sink's
+                    // duplicate suppression entirely. The temperature and the
+                    // configured maximum both reach the host in `Status` and
+                    // `Configuration`; what only this line can say is *which*
+                    // interlock tripped.
+                    log_warn!("Brew boiler heating disabled: temperature at or above configured maximum");
                     brew_demand = 0.0;
                 }
             }
@@ -831,7 +839,9 @@ impl<
         if let Some(max_pressure) = self.brew_boiler_config.max_pressure {
             if let Some(current_pressure) = self.brew_boiler.get_pressure() {
                 if current_pressure >= max_pressure {
-                    log_warn!("Brew boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
+                    // Constant text, for the reason given on the temperature
+                    // interlock above.
+                    log_warn!("Brew boiler heating disabled: pressure at or above configured maximum");
                     brew_demand = 0.0;
                 }
             }
@@ -886,7 +896,9 @@ impl<
         if let Some(max_temp) = self.steam_boiler_config.max_temperature {
             if let Some(current_temp) = self.steam_boiler.get_temperature() {
                 if current_temp >= max_temp {
-                    log_warn!("Steam boiler heating disabled: temperature {} >= max {}", current_temp, max_temp);
+                    // Constant text, for the reason given on the brew boiler's
+                    // temperature interlock.
+                    log_warn!("Steam boiler heating disabled: temperature at or above configured maximum");
                     steam_demand = 0.0;
                 }
             }
@@ -896,7 +908,9 @@ impl<
         if let Some(max_pressure) = self.steam_boiler_config.max_pressure {
             if let Some(current_pressure) = self.steam_boiler.get_pressure() {
                 if current_pressure >= max_pressure {
-                    log_warn!("Steam boiler heating disabled: pressure {} >= max {}", current_pressure, max_pressure);
+                    // Constant text, for the reason given on the brew boiler's
+                    // temperature interlock.
+                    log_warn!("Steam boiler heating disabled: pressure at or above configured maximum");
                     steam_demand = 0.0;
                 }
             }
@@ -1374,7 +1388,7 @@ impl<
 
                 // Validate tank status before starting water dispensing
                 if self.should_block_water_operation() {
-                    log_error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_water_tank_low") });
                     return;
                 }
 

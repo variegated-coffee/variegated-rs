@@ -35,9 +35,13 @@ impl<'a> Pump for GpioBinaryPump<'a> {
             return Err(PumpError::DutyCycleOutOfRange);
         }
 
-        if self.current_duty_cycle <= 20 && duty_cycle > 20 {
+        // These guards must use `self.threshold`, the same value the actuation
+        // below switches on. They previously hardcoded `20` while the message
+        // printed `self.threshold`, so with any non-default threshold the line
+        // both fired at the wrong moment and misreported what had been crossed.
+        if self.current_duty_cycle <= self.threshold && duty_cycle > self.threshold {
             log_info!("Binary pump ON (duty cycle {} > threshold {})", duty_cycle, self.threshold);
-        } else if self.current_duty_cycle > 20 && duty_cycle <= 20 {
+        } else if self.current_duty_cycle > self.threshold && duty_cycle <= self.threshold {
             log_info!("Binary pump OFF (duty cycle {} <= threshold {})", duty_cycle, self.threshold);
         }
 

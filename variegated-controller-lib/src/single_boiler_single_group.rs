@@ -780,7 +780,7 @@ impl<
             MachineCommand::StartPumpingToWaterTap(_) => {
                 // Validate tank status before starting water dispensing
                 if self.should_block_water_operation() {
-                    log_error!("Blocked StartPumpingToWaterTap: Insufficient water in tank");
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_water_tank_low") });
                     return;
                 }
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::PumpingToWaterTap).await;

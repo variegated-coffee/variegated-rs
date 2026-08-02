@@ -5,7 +5,7 @@ use embassy_time::Instant;
 use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
 use alloc::boxed::Box;
 use defmt::Format;
-use variegated_log::{log_info, log_warn};
+use variegated_log::log_info;
 
 #[derive(Debug, Clone, Format)]
 pub struct DualBoilerConfig {
@@ -318,10 +318,14 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
                     self.threshold_exceeded_time = None;
                     self.set_fill_state(true, 100).await;
                 } else {
-                    // Can't fill (not idle OR tank empty)
-                    if should_block {
-                        log_warn!("Cannot fill boiler: Tank is empty");
-                    }
+                    // Can't fill (not idle OR tank empty). Not logged: this runs
+                    // from the same 10 Hz loop, and an empty tank is a normal
+                    // bench state that would hold for a whole session. The
+                    // condition is carried structurally -- `TankStatus::water_level`
+                    // shows the tank empty and `BoilerStatus::water_level` shows
+                    // the boiler wanting water -- and unlike the boiler heating
+                    // interlocks there is only one possible cause here, so there is
+                    // no "which one tripped" ambiguity for text to resolve.
                     self.is_filling_cycle = false;
                     self.threshold_exceeded_time = None;
                     self.set_fill_state(false, 0).await;
