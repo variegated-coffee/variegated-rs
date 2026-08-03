@@ -145,7 +145,7 @@ where
     postcard::from_bytes(body).map_err(|_| CodecError::Deserialize)
 }
 
-/// Consecutive mismatching frames, all naming the *same* version, before a link is
+/// Consecutive mismatching **frames**, all naming the same version, before a link is
 /// declared mismatched.
 ///
 /// Not 1, because a version mismatch is not the only thing that can produce one.
@@ -160,8 +160,30 @@ where
 /// it will ever send, while noise picks a fresh one each time. Requiring three in a
 /// row at the same version leaves a ~1e-7 chance of a false block against a ~2.3e-5
 /// chance at two, and costs a stale device 0.3 s at the 10 Hz the firmwares emit at
-/// -- which is invisible next to the time it takes a human to read the banner.
-pub const MISMATCH_CORROBORATION: u32 = 3;
+/// -- invisible next to the time it takes a human to read the banner.
+///
+/// Every clause of that argument is about a continuous, high-rate stream. None of it
+/// transfers to the command direction; see [`COMMAND_CORROBORATION`].
+pub const FRAME_CORROBORATION: u32 = 3;
+
+/// Consecutive mismatching **commands** before the refusal is reported: one.
+///
+/// Corroboration is a filter against a high-rate stream, and the command direction is
+/// not one. Commands are interactive and one-shot: an operator types a command, and
+/// there is no second and third occurrence for a threshold to wait for. At 3 a stale
+/// host injecting a single mis-versioned command produces *nothing at all* -- no
+/// `CommandRejected`, no bus event -- and the refusal the whole check exists to make
+/// visible becomes silent, which is the state it was supposed to replace.
+///
+/// The cost asymmetry also runs the other way here. A spurious `CommandRejected` from
+/// a noise burst is a stray line in an event log. A silently swallowed refusal is an
+/// operator standing at a machine that is ignoring them with no indication why. There
+/// is nothing to trade off: report the first one.
+///
+/// Kept as a separate constant, and threaded through [`Decoder`]'s type rather than
+/// read from a global, so the two directions cannot silently acquire each other's
+/// value -- which is exactly what happened when there was only one constant.
+pub const COMMAND_CORROBORATION: u32 = 1;
 
 /// What the version watch concluded about a link. See [`Decoder::take_version_verdict`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -220,13 +242,16 @@ impl VersionWatch {
         }
     }
 
-    fn saw_mismatch(&mut self, found: u8) {
+    /// `corroboration` is the caller's threshold rather than a global, because the
+    /// frame and command directions need different ones and a single constant meant
+    /// the command path silently inherited the frame path's.
+    fn saw_mismatch(&mut self, found: u8, corroboration: u32) {
         let count = match self.run {
             Some((version, count)) if version == found => count + 1,
             _ => 1,
         };
         self.run = Some((found, count));
-        if count >= MISMATCH_CORROBORATION && self.reported != Some(found) {
+        if count >= corroboration && self.reported != Some(found) {
             self.reported = Some(found);
             self.announced = true;
             self.pending = Some(VersionVerdict::Mismatch {
@@ -250,7 +275,14 @@ impl VersionWatch {
 /// leaves nowhere to read the version byte. Two counters, not one: a framing error
 /// and a version mismatch call for different actions from whoever is looking at
 /// them, and the host has to be able to say which it saw.
-pub struct Decoder<T, const N: usize> {
+/// `CORROBORATION` is how many consecutive same-version mismatches must be seen
+/// before one is reported. It is a parameter of the type, not a global constant,
+/// because the two directions genuinely need different values -- see
+/// [`FRAME_CORROBORATION`] and [`COMMAND_CORROBORATION`] -- and a global meant the
+/// command path silently inherited the frame path's, which made a single
+/// mis-versioned command vanish without a word. Use the [`FrameDecoder`] and
+/// [`CommandDecoder`] aliases rather than naming the parameter at a call site.
+pub struct Decoder<T, const N: usize, const CORROBORATION: u32> {
     /// Bytes of the frame in progress, still COBS-encoded (the delimiter is not
     /// stored). Decoded in place once the delimiter arrives.
     buf: [u8; N],
@@ -274,13 +306,13 @@ pub struct Decoder<T, const N: usize> {
     _item: PhantomData<T>,
 }
 
-impl<T, const N: usize> Default for Decoder<T, N> {
+impl<T, const N: usize, const CORROBORATION: u32> Default for Decoder<T, N, CORROBORATION> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, const N: usize> Decoder<T, N> {
+impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION> {
     pub const fn new() -> Self {
         Self {
             buf: [0u8; N],
@@ -322,7 +354,7 @@ impl<T, const N: usize> Decoder<T, N> {
     }
 }
 
-impl<T, const N: usize> Decoder<T, N>
+impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION>
 where
     T: for<'de> Deserialize<'de>,
 {
@@ -378,7 +410,7 @@ where
             Err(CodecError::VersionMismatch { found, .. }) => {
                 self.version_mismatches += 1;
                 self.last_version_mismatch = Some(found);
-                self.watch.saw_mismatch(found);
+                self.watch.saw_mismatch(found, CORROBORATION);
             }
             // Framing and deserialize failures deliberately leave the run alone.
             // They are not evidence either way: they do not show the peer speaks
@@ -389,8 +421,12 @@ where
     }
 }
 
-pub type FrameDecoder = Decoder<DebugFrame, MAX_FRAME>;
-pub type CommandDecoder = Decoder<DebugCommand, MAX_FRAME>;
+/// Host-inbound. A continuous stream at ~10 Hz, so a mismatch has to corroborate
+/// before it is believed.
+pub type FrameDecoder = Decoder<DebugFrame, MAX_FRAME, FRAME_CORROBORATION>;
+/// Device-inbound. One-shot and interactive, so the first mismatch is reported --
+/// there is no second command coming for a threshold to wait for.
+pub type CommandDecoder = Decoder<DebugCommand, MAX_FRAME, COMMAND_CORROBORATION>;
 
 #[cfg(test)]
 mod tests {
@@ -426,7 +462,7 @@ mod tests {
         let mut buf = [0u8; MAX_FRAME];
         let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&encoded, |f| got.push(f));
 
@@ -443,7 +479,7 @@ mod tests {
         let mut buf2 = [0u8; MAX_FRAME];
         stream.extend_from_slice(encode_frame(&b, &mut buf2).unwrap());
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&stream, |f| got.push(f));
 
@@ -457,7 +493,7 @@ mod tests {
         let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
         let (first, second) = encoded.split_at(encoded.len() / 2);
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(first, |f| got.push(f));
         assert!(got.is_empty(), "no frame should complete on the first half");
@@ -473,7 +509,7 @@ mod tests {
         let mut stream = vec![0xAA, 0xBB, 0xCC, 0x00];
         stream.extend_from_slice(encode_frame(&good, &mut buf).unwrap());
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&stream, |f| got.push(f));
 
@@ -501,7 +537,7 @@ mod tests {
         let body: DebugFrame = postcard::from_bytes(&deframed[1..len]).unwrap();
         assert_eq!(body, original);
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&encoded, |f| got.push(f));
         assert_eq!(got, vec![original]);
@@ -520,7 +556,7 @@ mod tests {
         let mut buf = [0u8; MAX_FRAME];
         let encoded = encode_with_version(future, &original, &mut buf).unwrap().to_vec();
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&encoded, |f| got.push(f));
 
@@ -578,7 +614,7 @@ mod tests {
     fn an_empty_cobs_frame_is_a_clean_error_not_a_panic() {
         assert_eq!(decode_message::<DebugFrame>(&[]), Err(CodecError::Empty));
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&[0x01, 0x00], |f| got.push(f));
 
@@ -597,11 +633,7 @@ mod tests {
 
     /// Feed `count` frames stamped `version` into `decoder`, returning how many
     /// reached the callback.
-    fn feed_frames(
-        decoder: &mut Decoder<DebugFrame, MAX_FRAME>,
-        version: u8,
-        count: u32,
-    ) -> usize {
+    fn feed_frames(decoder: &mut FrameDecoder, version: u8, count: u32) -> usize {
         let mut delivered = 0;
         for seq in 0..count {
             let f = frame(seq, DebugPayload::Event(DebugEvent::Boot));
@@ -621,7 +653,7 @@ mod tests {
     /// screen and refuse a link that is working.
     #[test]
     fn a_single_mismatching_frame_is_not_enough_to_declare_a_mismatch() {
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         // Establish health first, so the `Healthy` edge is already spent and cannot
         // be mistaken for the `Quiet` this asserts.
         feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1);
@@ -634,12 +666,90 @@ mod tests {
         assert_eq!(decoder.version_mismatches, 1);
     }
 
+    /// The two directions must not share a threshold, and this is the pair of facts
+    /// that says so.
+    ///
+    /// A command is interactive and one-shot: an operator types it once, and there is
+    /// no second or third occurrence for corroboration to wait for. Under the frame
+    /// direction's threshold of 3 a single mis-versioned command produced *nothing* --
+    /// no verdict, and so no `CommandRejected` on the bus, since that emitter is
+    /// driven entirely by the verdict. The refusal the check exists to make visible
+    /// became silent again, which is the state it replaced.
+    ///
+    /// A frame is one of ten a second, so the same single observation there is far
+    /// more likely to be noise than news, and waiting costs 0.3 s.
+    #[test]
+    fn a_single_mismatching_command_reports_where_a_single_frame_does_not() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+
+        // Command direction: the very first one is reported.
+        let command = DebugCommand::Machine(MachineCommand::StartBrewing(0));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_with_version(future, &command, &mut buf).unwrap().to_vec();
+
+        let mut commands: CommandDecoder = Decoder::new();
+        let mut delivered: Vec<DebugCommand> = Vec::new();
+        commands.feed(&encoded, |c| delivered.push(c));
+
+        assert!(delivered.is_empty(), "and it is still refused, not merely reported");
+        assert_eq!(
+            commands.take_version_verdict(),
+            VersionVerdict::Mismatch { expected: DEBUG_PROTOCOL_VERSION, found: future },
+            "one mis-versioned command must be reported immediately -- an operator \
+             gets no second chance for a threshold to count"
+        );
+
+        // Frame direction: the very first one is not.
+        let mut frames: FrameDecoder = Decoder::new();
+        feed_frames(&mut frames, future, 1);
+        assert_eq!(frames.take_version_verdict(), VersionVerdict::Quiet);
+
+        // The thresholds are what differ, and they differ in the type.
+        assert_eq!(COMMAND_CORROBORATION, 1);
+        assert!(FRAME_CORROBORATION > COMMAND_CORROBORATION);
+    }
+
+    /// One CDC packet can carry several commands. Three mismatched ones followed by a
+    /// good one must report all the way through rather than collapsing to `Healthy`
+    /// and swallowing the refusals -- the operator sent four things and three of them
+    /// were thrown away.
+    #[test]
+    fn mismatched_commands_ahead_of_a_good_one_in_the_same_packet_are_reported() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let command = DebugCommand::Machine(MachineCommand::StartBrewing(0));
+
+        let mut packet: Vec<u8> = Vec::new();
+        for _ in 0..3 {
+            let mut buf = [0u8; MAX_FRAME];
+            packet.extend_from_slice(encode_with_version(future, &command, &mut buf).unwrap());
+        }
+
+        let mut decoder: CommandDecoder = Decoder::new();
+        let mut delivered: Vec<DebugCommand> = Vec::new();
+        decoder.feed(&packet, |c| delivered.push(c));
+
+        assert!(delivered.is_empty());
+        assert_eq!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Mismatch { expected: DEBUG_PROTOCOL_VERSION, found: future },
+            "the refusal must survive the read, not be overwritten by what follows"
+        );
+
+        // The good one that follows is accepted and reports health, so the reader is
+        // not left permanently condemning a host that has been rebuilt.
+        let mut buf = [0u8; MAX_FRAME];
+        let good = encode_command(&command, &mut buf).unwrap().to_vec();
+        decoder.feed(&good, |c| delivered.push(c));
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Healthy);
+    }
+
     /// Noise picks a fresh "version" each time; a stale device stamps the same one on
     /// every frame. That difference is the whole basis for corroboration, so a run of
     /// mismatches that never agrees must never trip the report.
     #[test]
     fn mismatches_at_differing_versions_never_corroborate() {
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         for offset in 1..=8u8 {
             feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION.wrapping_add(offset), 1);
             assert_eq!(
@@ -656,9 +766,9 @@ mod tests {
     #[test]
     fn a_corroborated_run_of_the_same_version_reports_once() {
         let future = DEBUG_PROTOCOL_VERSION + 1;
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
 
-        for _ in 1..MISMATCH_CORROBORATION {
+        for _ in 1..FRAME_CORROBORATION {
             feed_frames(&mut decoder, future, 1);
             assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
         }
@@ -680,9 +790,9 @@ mod tests {
     #[test]
     fn a_good_frame_breaks_a_mismatch_run() {
         let future = DEBUG_PROTOCOL_VERSION + 1;
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
 
-        for _ in 0..MISMATCH_CORROBORATION - 1 {
+        for _ in 0..FRAME_CORROBORATION - 1 {
             feed_frames(&mut decoder, future, 1);
         }
         assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
@@ -691,7 +801,7 @@ mod tests {
         assert_eq!(feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1), 1);
         assert_eq!(decoder.take_version_verdict(), VersionVerdict::Healthy);
 
-        for _ in 0..MISMATCH_CORROBORATION - 1 {
+        for _ in 0..FRAME_CORROBORATION - 1 {
             feed_frames(&mut decoder, future, 1);
             assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
         }
@@ -704,9 +814,9 @@ mod tests {
     #[test]
     fn a_peer_that_starts_speaking_our_version_reports_healthy() {
         let future = DEBUG_PROTOCOL_VERSION + 1;
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
 
-        feed_frames(&mut decoder, future, MISMATCH_CORROBORATION);
+        feed_frames(&mut decoder, future, FRAME_CORROBORATION);
         assert_eq!(
             decoder.take_version_verdict(),
             VersionVerdict::Mismatch { expected: DEBUG_PROTOCOL_VERSION, found: future }
@@ -725,7 +835,7 @@ mod tests {
     /// consumer whose banner outlived the connection that raised it.
     #[test]
     fn a_fresh_decoder_asserts_health_on_its_first_good_frame() {
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
 
         assert_eq!(feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1), 1);
@@ -743,9 +853,9 @@ mod tests {
     #[test]
     fn reset_drops_per_connection_state_but_keeps_the_counters() {
         let future = DEBUG_PROTOCOL_VERSION + 1;
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
 
-        feed_frames(&mut decoder, future, MISMATCH_CORROBORATION);
+        feed_frames(&mut decoder, future, FRAME_CORROBORATION);
         assert!(matches!(
             decoder.take_version_verdict(),
             VersionVerdict::Mismatch { .. }
@@ -775,7 +885,7 @@ mod tests {
         let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
         let (first_half, _) = encoded.split_at(encoded.len() / 2);
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(first_half, |f| got.push(f));
         assert!(got.is_empty());
@@ -790,12 +900,17 @@ mod tests {
     /// An *unversioned* peer -- anything built before the envelope existed -- must be
     /// refused too, and this is why `DEBUG_PROTOCOL_VERSION` has its high bit set.
     ///
-    /// Such a frame starts with the postcard encoding of `DebugFrame::source`. With
-    /// the version at `1`, `DebugSource::Comms` (discriminant 1) would have sailed
-    /// through the check and been deserialized one byte out of phase, fabricating an
-    /// event on the wrong processor -- the exact mis-decode the envelope exists to
-    /// stop. postcard varint-encodes discriminants, so no enum small enough to start
-    /// one of these messages can produce a leading byte with the high bit set.
+    /// Such a frame starts with the postcard encoding of `DebugFrame::source`, so at
+    /// a version of `1` a legacy `DebugSource::Comms` frame passed the check and the
+    /// rest was deserialized one byte out of phase.
+    ///
+    /// The fixture is chosen so that shifted parse **succeeds**, which is what makes
+    /// this a reproduction rather than a decoration. `seq: 1, uptime_ms: 1234,
+    /// Text(Info, ..)` re-reads as `Event(BrewStopped { group: 112 })` on the
+    /// *other* processor -- a fabricated brew-stop, invented out of a log line, which
+    /// is precisely the class of lie the envelope exists to stop. A fixture whose
+    /// shifted parse merely errors would let this test pass at version 1 and prove
+    /// nothing about delivery.
     #[test]
     fn an_unversioned_frame_from_either_source_is_refused() {
         assert!(
@@ -806,16 +921,33 @@ mod tests {
         for source in [DebugSource::Application, DebugSource::Comms] {
             let legacy = DebugFrame {
                 source,
-                seq: 3,
+                seq: 1,
                 uptime_ms: 1234,
-                payload: DebugPayload::Text(Severity::Warn, text("pre-envelope")),
+                payload: DebugPayload::Text(Severity::Info, text("pre-envelope")),
             };
             // Exactly what an old build put on the wire: postcard, then COBS, with
             // no envelope in front.
             let mut buf = [0u8; MAX_FRAME];
             let encoded = postcard::to_slice_cobs(&legacy, &mut buf).unwrap().to_vec();
 
-            let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+            // First establish that the hazard is real: consume the leading byte as a
+            // version, as a version-1 build would have, and the remainder still
+            // deserializes -- into something that is not what was sent.
+            let mut deframed = encoded.clone();
+            let len = cobs::decode_in_place(&mut deframed).unwrap();
+            let shifted: DebugFrame = postcard::from_bytes(&deframed[1..len])
+                .expect("this fixture must mis-decode, or the test proves nothing");
+            assert_ne!(shifted, legacy);
+            assert_eq!(shifted.source, DebugSource::Comms);
+            assert_eq!(
+                shifted.payload,
+                DebugPayload::Event(DebugEvent::BrewStopped { group: 112 }),
+                "a log line re-read as a brew-stop is the lie being prevented"
+            );
+
+            // Now the actual guarantee: with the version where it is, no such frame
+            // is ever handed to the caller.
+            let mut decoder: FrameDecoder = Decoder::new();
             let mut got = Vec::new();
             decoder.feed(&encoded, |f| got.push(f));
 
@@ -823,6 +955,7 @@ mod tests {
                 got.is_empty(),
                 "an unversioned {source:?} frame must never be delivered"
             );
+            assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
         }
     }
 
@@ -910,7 +1043,7 @@ mod tests {
         let mut buf = [0u8; MAX_FRAME];
         let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
 
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&encoded, |f| got.push(f));
 
@@ -1090,7 +1223,7 @@ mod tests {
 
         // It must also survive the decoder, whose accumulator is the same size.
         let owned = encoded.to_vec();
-        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut decoder: FrameDecoder = Decoder::new();
         let mut got = Vec::new();
         decoder.feed(&owned, |f| got.push(f));
         assert_eq!(decoder.decode_errors, 0);
