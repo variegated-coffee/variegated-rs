@@ -9,11 +9,24 @@ bench = false
 
 [dependencies]
 defmt.workspace = true
-defmt-rtt.workspace = true
 log.workspace = true
-embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
-embassy-usb-logger.workspace = true
-embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+# All four of these exist for one thing: `logger_task`, the RP2350 USB serial
+# logger, plus the defmt-RTT transport that feeds a probe. They are optional
+# because this crate is no longer RP-only -- the ESP32-C6 comms firmware installs
+# `bus_sink` too, and none of these can build for riscv32: `embassy-executor`
+# here asks for `platform-cortex-m`, and `embassy-rp` is a Cortex-M PAC.
+#
+# `defmt-rtt` had to become optional for a second, independent reason: it defines
+# a `#[defmt::global_logger]`, and so does `esp-println/defmt-espflash`. Two in
+# one binary is a duplicate-symbol link error, not a warning.
+#
+# Selected by the chip features below rather than standing alone, so every
+# existing consumer -- all of which already name a chip -- is completely
+# unaffected.
+defmt-rtt = { workspace = true, optional = true }
+embassy-executor = { workspace = true, optional = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-usb-logger = { workspace = true, optional = true }
+embassy-rp = { workspace = true, optional = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 # Optional, and gated behind `debug-bus`: this is the only thing in the tree that
 # needs `variegated-debug`, and `variegated-debug` refuses to compile until a
 # `source-application` / `source-comms` feature is chosen. Keeping it optional is
@@ -31,9 +44,13 @@ variegated-controller-types = { version = "0.1.0", path = "../variegated-control
 
 [features]
 default = []
-rp2040 = ["embassy-rp/rp2040"]
-rp235xa = ["embassy-rp/rp235xa"]
-rp235xb = ["embassy-rp/rp235xb"]
+# The RP-only half of this crate: `logger_task` and the defmt-RTT global logger.
+# Not a feature a consumer selects directly -- naming a chip is what turns it on,
+# which is why nothing downstream had to change when it appeared.
+rp-usb-logger = ["dep:defmt-rtt", "dep:embassy-executor", "dep:embassy-usb-logger", "dep:embassy-rp"]
+rp2040 = ["rp-usb-logger", "embassy-rp/rp2040"]
+rp235xa = ["rp-usb-logger", "embassy-rp/rp235xa"]
+rp235xb = ["rp-usb-logger", "embassy-rp/rp235xb"]
 # The debug-stream bridge, in both directions:
 #   * `bus_sink` republishes every `log` record as `DebugPayload::Text`
 #   * `emit_event` forwards typed `DebugEvent`s from the libraries

@@ -403,6 +403,104 @@ mod tests {
         );
     }
 
+    /// A normal boot of the **ESP32-C6 comms firmware**, as `(uptime_ms, message)`.
+    ///
+    /// The second firmware to install `variegated_log::bus_sink`, and the reason
+    /// this fixture carries timestamps where the dual boiler's does not: at 34
+    /// distinct lines it is **larger than [`CAP_CAPACITY`]**, so unlike the
+    /// 21-line dual-boiler burst it does not fit in the bucket's initial capacity
+    /// at all. What gets it through is elapsed time -- WiFi association, DHCP and
+    /// DNS each take hundreds of milliseconds to seconds, and `main` sleeps 5 s
+    /// between spawning the BLE tasks and bringing up WiFi -- which at
+    /// [`CAP_REFILL_PER_SEC`] is worth far more than the 2 tokens of shortfall.
+    ///
+    /// **So the margin here is timing, not headroom.** Adding init logging to a
+    /// *tight* run -- the pre-sleep block, or the block of server-start lines at
+    /// the end -- is what would actually thin this log, and this test is what will
+    /// tell you. Enumerated from `main.rs`, `application_processor/mod.rs`,
+    /// `wifi.rs`, `time.rs`, `ble/devices.rs`, `esphome/server.rs`, `http.rs` and
+    /// `websocket.rs`; error-only paths excluded.
+    const COMMS_BOOT: [(u32, &str); 34] = [
+        // Straight-line `main`, before its first `await`. Nothing else can run yet.
+        (0, "Debug USB-Serial-JTAG transport spawned"),
+        (15, "Application processor tasks spawned"),
+        (30, "Initializing radio"),
+        (45, "BLE: Generated random address"),
+        (60, "BLE tasks spawned"),
+        // `Timer::after_secs(5)`: the spawned tasks get their first poll here.
+        (5000, "Status listener task started"),
+        (5015, "Starting UART transceiver"),
+        (5030, "BLE Devices: Configured Belka 3e60eb3c1c78 and ACAIA 2fa01a971c00"),
+        // The UART sender arm waits 100 ms for the line to settle first.
+        (5115, "Sent initial RequestConfiguration command on startup"),
+        (5130, "Sent initial RequestMachineDefinition command on startup"),
+        (5145, "Sent initial RequestRoutines command on startup"),
+        // `main` resumes.
+        (5160, "Initializing Wifi"),
+        (5175, "Creating network stack"),
+        (5190, "Spawning network tasks"),
+        (5205, "Network and CommsStatus tasks spawned"),
+        (5220, "Waiting for link..."),
+        (5235, "Starting WiFi connection task"),
+        (5250, "Connecting to WiFi..."),
+        // Association: the first real wait.
+        (6500, "WiFi connected!"),
+        (6515, "Waiting for IP address for SNTP..."),
+        (6530, "CommsStatus signaller task started"),
+        (6545, "Waiting for IP address..."),
+        // DHCP.
+        (8000, "Got IP: 192.168.1.100/24"),
+        (8015, "Network ready"),
+        (8030, "Resolving NTP server: pool.ntp.org"),
+        // DNS.
+        (9500, "Initial RTC time: 9500123 us"),
+        (9515, "HTTP server and cache update tasks spawned"),
+        (9530, "Cache update task started"),
+        (9545, "Starting HTTP server on port 80..."),
+        (9560, "ESPHome server task spawned on port 6053"),
+        (9575, "ESPHome server task started, waiting for configuration..."),
+        (9590, "Waiting for machine definition..."),
+        (9605, "WebSocket server task spawned on port 8080"),
+        (9620, "WebSocket server listening on port 8080"),
+    ];
+
+    /// Every line of a comms-processor boot has to reach the bus, for the same
+    /// reason the dual boiler's does: each is a first sighting with no duplicate
+    /// anywhere, so a thinned one is information destroyed rather than repetition
+    /// collapsed.
+    #[test]
+    fn the_comms_boot_log_is_not_thinned() {
+        let s = Suppressor::new();
+        let mut published = 0;
+        for (now, msg) in COMMS_BOOT {
+            if s.admit(Severity::Info, msg, now) == Admission::Publish {
+                published += 1;
+            }
+        }
+        assert_eq!(
+            published,
+            COMMS_BOOT.len(),
+            "comms boot log was thinned: {published} of {} lines reached the bus",
+            COMMS_BOOT.len()
+        );
+    }
+
+    /// The claim the fixture's doc comment rests on, asserted rather than asserted
+    /// *about*: this burst really does exceed the bucket's capacity, so
+    /// `the_comms_boot_log_is_not_thinned` is exercising the refill path and not
+    /// passing for the trivial reason the dual-boiler test does. If this ever
+    /// stops holding, the timestamps in the fixture have stopped mattering and the
+    /// weaker test would no longer notice a regression in refill.
+    #[test]
+    fn the_comms_boot_burst_does_not_fit_in_capacity_alone() {
+        assert!(
+            COMMS_BOOT.len() as u32 > CAP_CAPACITY,
+            "{} comms boot lines now fit in {CAP_CAPACITY} tokens; \
+             the refill path is no longer under test here",
+            COMMS_BOOT.len()
+        );
+    }
+
     /// Rate-limited and duplicate are reported distinctly, because only one of them
     /// means "the information is still on the bus".
     #[test]
