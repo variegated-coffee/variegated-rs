@@ -47,6 +47,14 @@ const MIN_PLAUSIBLE_UNIX_TIME: u64 = 1_577_836_800;
 /// 4. Configuration monitoring and proactive broadcasting
 /// 5. Structured debug frame relaying (see [`debug_relay`])
 ///
+/// `link_baud` is the baud rate `uart_tx`/`uart_rx` were configured with. It is
+/// passed rather than read back because embassy exposes no getter, and it is needed
+/// because the debug relay's byte budget is a *fraction* of the link rather than an
+/// absolute -- `dual-boiler` runs this link at 576 kbaud and `single-boiler` at
+/// 115 200 with no hardware flow control, so one figure cannot serve both. See
+/// [`debug_relay::relay`]. Callers should pass the same binding they set on
+/// `uart::Config` so the two cannot drift apart.
+///
 /// `DM` is separate from `M` because the debug command channel's mutex is not this
 /// caller's to choose: `variegated_debug::usb_cdc::CommandSink` fixes it to
 /// `CriticalSectionRawMutex`, and injected commands from both transports have to
@@ -54,6 +62,9 @@ const MIN_PLAUSIBLE_UNIX_TIME: u64 = 1_577_836_800;
 pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
     mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
+    // The baud rate `uart_tx`/`uart_rx` were configured with -- see the note on
+    // `link_baud` in this function's docs.
+    link_baud: u32,
     mut status_receiver: Subscriber<'static, M, Status, 1, STATUS_SUBS, 1>,
     mut configuration_receiver: Subscriber<'static, M, Configuration, 1, CONFIG_SUBS, 1>,
     routine_repository: &'static embassy_sync::mutex::Mutex<M, R>,
@@ -350,6 +361,6 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
         },
         // `tx_sender` is `Copy`, so the four futures above are unaffected by this
         // one taking a handle of its own.
-        debug_relay::relay(tx_sender),
+        debug_relay::relay(tx_sender, link_baud),
     ).await;
 }

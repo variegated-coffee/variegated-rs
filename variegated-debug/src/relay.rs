@@ -13,22 +13,27 @@ use variegated_controller_types::debug::DebugPayload;
 /// allocation this exists to avoid, so a filter that ran on the encoded length would
 /// pay the cost it is meant to prevent.
 ///
-/// Only `DebugPayload::Status` is refused, for two independent reasons:
+/// Only `DebugPayload::Status` is refused, and the reason is redundancy:
 ///
-/// 1. **The rate limiter cannot pass it.** [`crate::rate::WINDOW_BUDGET`] is 300
-///    bytes per 100 ms window and [`crate::rate::TokenBucket::allow`] admits an item
-///    only if it fits inside a single window. A populated `Status` is 1722 bytes
-///    COBS-encoded, and even the modest dual-boiler case runs to several hundred, so
-///    it is refused every window, forever -- the relay would never deliver machine
-///    state, only count drops. Raising the budget to fit one would hand debug traffic
-///    a fifth of the whole 576 kbaud link.
-/// 2. **It is redundant.** The comms processor already receives `Status` through
-///    `ApplicationProcessorToCommsProcessorMessage::Status`, which is what feeds the
-///    WebSocket and ESPHome paths. Relaying it again under a debug wrapper would
-///    double the link cost of the machine's largest message for no new information.
-///    Task 11's TCP server injects the comms processor's own copy into the debug
-///    stream instead, so a TCP client still sees machine state -- it just does not
-///    cross the link twice.
+/// **The comms processor already receives `Status`** through
+/// `ApplicationProcessorToCommsProcessorMessage::Status`, which is what feeds the
+/// WebSocket and ESPHome paths. Relaying it again under a debug wrapper would double
+/// the link cost of the machine's largest message -- 1722 bytes COBS-encoded in the
+/// worst case, several hundred in the ordinary one, once a second -- for no new
+/// information. On `single-boiler`'s 115 200 baud link that alone would exceed the
+/// entire debug budget. Task 11's TCP server injects the comms processor's own copy
+/// into the debug stream instead, so a TCP client still sees machine state; it just
+/// does not cross the link twice.
+///
+/// **This function is now the only thing stopping it, and that changed.** Under the
+/// fixed window this module used to sit behind, a `Status` frame could not fit any
+/// 300-byte window and was refused by arithmetic no matter what happened here. The
+/// window has since become a token bucket with [`crate::rate::BURST_BYTES`] of
+/// capacity, deliberately sized above the codec's `MAX_FRAME` so that no legal frame
+/// is permanently unsendable -- which means a `Status` would now pass the budget. The
+/// redundancy argument was always the stronger of the two and it is unaffected, but
+/// do not weaken this filter on the assumption that the rate limiter is still a
+/// backstop behind it. It is not.
 ///
 /// On the application processor this is now belt-and-braces: [`crate::status`] moved
 /// `Status` off the shared bus entirely, so the relay's subscriber never sees one.
@@ -49,7 +54,14 @@ mod tests {
     };
     use variegated_controller_types::Status;
 
-    use crate::rate::{TokenBucket, DEBUG_RELAY_BYTES_PER_SEC, WINDOW_BUDGET, WINDOW_MS};
+    use crate::rate::{
+        bytes_per_sec_for_baud, TokenBucket, BURST_BYTES, DEBUG_RELAY_BYTES_PER_SEC,
+        REFERENCE_BAUD,
+    };
+
+    /// `single-boiler`'s link: five times slower than the reference, and with no
+    /// hardware flow control. It is the binding case for anything sized in bytes.
+    const SLOW_BAUD: u32 = 115_200;
 
     fn frame(payload: DebugPayload) -> DebugFrame {
         DebugFrame { source: DebugSource::Application, seq: 0, uptime_ms: 0, payload }
@@ -93,7 +105,7 @@ mod tests {
     /// is what leaves budget for the rest.
     #[test]
     fn a_status_in_the_stream_does_not_starve_the_others() {
-        let mut bucket = TokenBucket::new();
+        let mut bucket = TokenBucket::for_baud(SLOW_BAUD);
         let mut relayed = 0usize;
         let mut filtered = 0usize;
         let mut rate_limited = 0usize;
@@ -118,7 +130,7 @@ mod tests {
         }
 
         assert_eq!(filtered, 6, "one Status per other payload");
-        assert_eq!(relayed, 6, "every non-Status frame fits one window");
+        assert_eq!(relayed, 6, "every non-Status frame fits the bucket");
         assert_eq!(rate_limited, 0);
     }
 
@@ -196,78 +208,96 @@ mod tests {
             "steady-state relay traffic {per_second} B/s exceeds the {DEBUG_RELAY_BYTES_PER_SEC} B/s budget"
         );
 
-        // The budget is spent per 100 ms window, not per second, so a frame also has
-        // to fit one window on its own -- the trap that `Status` falls into.
+        // The same traffic has to fit `single-boiler`'s much slower link too, since
+        // Task 14 gives that example the sampler and the log bridge. It is the
+        // binding case and it is the one nobody would think to check.
+        let slow_budget = bytes_per_sec_for_baud(SLOW_BAUD) as usize;
+        std::println!("  against the 115200-baud link: {per_second} B/s of {slow_budget} B/s");
+        assert!(
+            per_second < slow_budget,
+            "steady-state relay traffic {per_second} B/s exceeds the slow link's {slow_budget} B/s budget"
+        );
+
+        // No single frame may exceed the bucket's capacity, or it is refused forever
+        // however quiet the link gets -- the trap the old fixed window put `Status`
+        // in, and which capacity above `MAX_FRAME` now avoids for every legal frame.
         let text = wrapped_len(DebugPayload::Text(
             Severity::Info,
             text("0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123"),
         ));
-        assert!(
-            text <= WINDOW_BUDGET as usize,
-            "a maximum-length text frame is {text} B and cannot fit one window"
-        );
-
         for (label, size) in [
             ("counters", counters),
             ("indicators", indicators),
             ("snapshot", snapshot),
             ("largest schema frame", schema / 9),
+            ("maximum-length text", text),
         ] {
             assert!(
-                size <= WINDOW_BUDGET as usize,
-                "{label} is {size} B, which cannot fit a {WINDOW_MS} ms window of {WINDOW_BUDGET} B"
+                size <= BURST_BYTES as usize,
+                "{label} is {size} B, above the bucket's {BURST_BYTES} B capacity"
             );
         }
     }
 
-    /// Pins how much of the boot log survives the relay, because the answer is not
-    /// "all of it" and the number should not be able to drift silently.
+    /// The whole boot log must cross the relay, on **both** links.
     ///
-    /// [`TokenBucket`] is a hard fixed window with no burst capacity, by design. That
-    /// is the right shape for steady state -- which measures at a few hundred bytes a
-    /// second against a 3000 B/s budget -- but boot is not steady state: the log
-    /// bridge's own bucket admits a burst of ~21 lines within a few hundred
-    /// milliseconds (`suppress::BOOT_BURST_LINES`), and a full-width `Text` frame is
-    /// large enough that only a couple fit each 100 ms window.
+    /// This is what [`BURST_BYTES`] is sized against, and it is the test that failed
+    /// before the fixed window became a bucket: at 300 bytes per 100 ms only 12 of
+    /// the 21 lines got through on the fast link, which is information destroyed
+    /// rather than repetition collapsed. `crate::suppress` learned exactly this in
+    /// Task 16 and gave its own cap burst capacity for the same reason -- the relay
+    /// then re-throttled the very lines that capacity existed to pass.
     ///
-    /// The consequence is that a host watching over TCP sees a *thinned* boot log
-    /// where a host watching over USB sees all of it -- the USB writer has no byte
-    /// budget. It is a real loss of information rather than collapsed repetition, and
-    /// each dropped line is counted in `link_frames_dropped`, so it is at least
-    /// visible rather than silent.
+    /// Every line is measured at the maximum `TEXT_LEN` width, which is the worst
+    /// case rather than the typical one, and the slow link is included because it
+    /// refills only ~170 bytes across the whole burst -- nearly all of it has to come
+    /// out of capacity there.
     ///
-    /// Recorded, not fixed: giving the relay's bucket burst capacity is a change to
-    /// the shared `rate` module and its documented "not a leaky bucket" decision,
-    /// which is outside this task. This test exists so whoever revisits that has the
-    /// measurement in front of them.
+    /// Paired with `rate::the_sustained_bound_survives_the_burst_capacity`. Task 16's
+    /// closing lesson was that neither test suffices alone: a burst test cannot tell
+    /// a generous bucket from an unbounded one, and a sustained test cannot tell a
+    /// bucket from a fixed window.
     #[test]
-    fn the_boot_burst_is_thinned_by_the_fixed_window() {
+    fn the_boot_burst_crosses_both_links() {
         use variegated_controller_types::ApplicationProcessorToCommsProcessorMessage as Msg;
 
-        // `suppress::BOOT_BURST_LINES` worth of distinct init lines, spaced the 15 ms
-        // apart that Task 16 measured, at a realistic width.
+        // `suppress::BOOT_BURST_LINES`, spaced the 15 ms apart Task 16 measured.
         const LINES: u32 = 21;
         const SPACING_MS: u64 = 15;
 
-        let mut bucket = TokenBucket::new();
-        let mut admitted = 0;
-        for i in 0..LINES {
-            let payload = DebugPayload::Text(
-                Severity::Info,
-                text(&std::format!("initialising subsystem number {i} of the boot sequence")),
-            );
-            let encoded =
-                postcard::to_allocvec_cobs(&Msg::Debug(frame(payload))).expect("encodes");
-            if bucket.allow(i as u64 * SPACING_MS, encoded.len() as u32) {
-                admitted += 1;
-            }
-        }
+        for baud in [REFERENCE_BAUD, SLOW_BAUD] {
+            let mut bucket = TokenBucket::for_baud(baud);
+            let mut admitted = 0;
+            let mut bytes = 0usize;
 
-        std::println!(
-            "boot burst over the relay: {admitted}/{LINES} lines admitted \
-             ({SPACING_MS} ms spacing, {WINDOW_BUDGET} B per {WINDOW_MS} ms window)"
-        );
-        assert!(admitted < LINES, "if this now passes everything, the bucket gained burst capacity -- update this test and the note above it");
-        assert!(admitted >= 6, "a regression below this would mean almost no boot log crosses the link");
+            for i in 0..LINES {
+                // Maximum width: `TEXT_LEN` is 96 and `text()` truncates to it, so
+                // this is the largest `Text` frame the bridge can produce.
+                let payload = DebugPayload::Text(
+                    Severity::Info,
+                    text(&std::format!(
+                        "{i:02} initialising subsystem, padded out to the full ninety-six character text capacity!!"
+                    )),
+                );
+                let encoded =
+                    postcard::to_allocvec_cobs(&Msg::Debug(frame(payload))).expect("encodes");
+                bytes += encoded.len();
+                if bucket.allow(i as u64 * SPACING_MS, encoded.len() as u32) {
+                    admitted += 1;
+                }
+            }
+
+            std::println!(
+                "boot burst at {baud} baud: {admitted}/{LINES} lines admitted \
+                 ({bytes} B offered over {} ms, capacity {BURST_BYTES} B, \
+                 refill {} B/s)",
+                (LINES as u64 - 1) * SPACING_MS,
+                bytes_per_sec_for_baud(baud),
+            );
+            assert_eq!(
+                admitted, LINES,
+                "the boot log must cross intact at {baud} baud -- {admitted} of {LINES} got through"
+            );
+        }
     }
 }

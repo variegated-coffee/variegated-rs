@@ -117,8 +117,15 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
 async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>) {
+    // One binding for both the UART and the debug relay's byte budget, so the two
+    // cannot drift apart. It matters more on this board than on dual-boiler: this
+    // link is five times slower *and* has no hardware flow control (`Uart::new`, not
+    // `new_with_rtscts`), so there is nothing to push back if debug traffic is
+    // budgeted for the wrong link speed -- it overruns the receiver's FIFO and
+    // corrupts Status rather than merely delaying it.
+    let baudrate = 115200;
     let mut config = uart::Config::default();
-    config.baudrate = 115200;
+    config.baudrate = baudrate;
 
     let mut uart = Uart::new(
         esp_p.uart,
@@ -131,7 +138,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]

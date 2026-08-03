@@ -25,21 +25,49 @@
 //! -- is stamped by one encoder with one version, so a link still carries exactly
 //! one version and per-link keying stays correct.
 //!
-//! The exposure that *does* exist is a different one, and it is older than this
-//! relay: an application processor and a comms processor built from different
+//! **The hazard does not vanish, though: it moves, to a layer with less detection
+//! than it had before. Task 11 must not read the paragraph above as "solved".**
+//!
+//! Three consequences, and they are the reason this section is long:
+//!
+//! 1. **A version-skewed application processor now fails silently.**
+//!    `DEBUG_PROTOCOL_VERSION` lives in the same crate as `DebugFrame`, so a
+//!    processor that disagrees about the version also disagrees about the frame's
+//!    *shape*. The comms processor postcard-decodes `Debug(DebugFrame)` with its own
+//!    types, gets a deserialize error, and drops it. From the host's seat:
+//!    application frames simply stop arriving while comms frames keep coming, with no
+//!    banner and no counter — that is Task 18's scenario with the diagnostic removed
+//!    rather than relocated. Worse, this side counts those frames as *relayed*,
+//!    because they were handed to the TX queue successfully, so
+//!    `link_frames_relayed` keeps climbing and `link_frames_dropped` stays at zero.
+//!    Neither counter can be used to detect it.
+//!
+//! 2. **Re-stamping on the TCP path asserts health the encoder cannot vouch for.**
+//!    The comms processor stamps its own version on frames it did not originate and
+//!    cannot verify, so `VersionVerdict::Healthy` on a TCP link says nothing about
+//!    the application processor. That is a real regression against the USB path,
+//!    which carries the application processor's own attestation for the same frames.
+//!    Task 11 must not present relayed frames to a host as version-verified.
+//!
+//! 3. **The detector belongs on the comms side**, because that is the only party that
+//!    can tell a relayed frame from a local one. It cannot be built here, and there
+//!    is no debug bus on that processor until Task 9. Recorded as work for Task 9/10.
+//!
+//! The neighbouring exposure is older than this relay and belongs to a different
+//! protocol: an application processor and a comms processor built from different
 //! commits disagree about the shape of `ApplicationProcessorToCommsProcessorMessage`
 //! itself, and every message on the link -- Status, Configuration, this one --
 //! mis-decodes. That is the inter-processor protocol's problem
 //! (`variegated_controller_types::PROTOCOL_VERSION` and the `Hello` handshake, which
-//! today nobody sends and nobody checks), not the debug protocol's. Its symptom here
-//! is a `DebugEvent::LinkDecodeError`, not a version banner.
+//! today nobody sends and nobody checks), not the debug protocol's. Its symptom on
+//! *this* side is a `DebugEvent::LinkDecodeError`.
 //!
 //! **If this relay is ever changed to carry pre-encoded bytes** so that a frame keeps
-//! its origin processor's version end to end, the mixed-source hazard becomes real
-//! and the mismatch run must then be keyed per relay segment -- the comms processor
-//! being the only party that can attribute a frame to a link, since `source` lives
-//! inside the payload and is exactly the field a mis-versioned frame cannot be
-//! trusted about.
+//! its origin processor's version end to end, points 1 and 2 are fixed but the
+//! mixed-source hazard becomes real, and the mismatch run must then be keyed per
+//! relay segment -- the comms processor being the only party that can attribute a
+//! frame to a link, since `source` lives inside the payload and is exactly the field
+//! a mis-versioned frame cannot be trusted about.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -65,6 +93,9 @@ pub struct RelayStats {
     /// offered to a full TX queue. Filtered `Status` frames are **not** counted here
     /// -- those are a policy decision, not a loss, and there is nothing to lose since
     /// the comms processor receives `Status` by its own route.
+    ///
+    /// Every one of these is *also* counted in `bus::stats().dropped`; see
+    /// [`note_dropped`].
     pub dropped: u32,
 }
 
@@ -81,13 +112,27 @@ pub fn relay_stats() -> RelayStats {
 /// the bus's global `dropped`, because the two answer different questions: "is this
 /// link losing frames?" and "did the device fail to deliver something it wanted to
 /// send?".
+///
+/// The global is therefore per *transport attempt*, not per frame -- consistent with
+/// how the USB writer already feeds it from both its DTR and its lag paths. One frame
+/// that neither transport delivers adds two. Said out loud because
+/// `frames_dropped - link_frames_dropped` is a tempting way to isolate the USB
+/// share, and it happens to be correct only because of this overlap.
 fn note_dropped() {
     FRAMES_DROPPED.fetch_add(1, Ordering::Relaxed);
     bus::note_dropped();
 }
 
+/// `link_baud` is the UART's configured baud rate. The byte budget is a *fraction*
+/// of the link rather than an absolute, because that is what its justification has
+/// always been -- and because the two boards do not agree: `dual-boiler` runs this
+/// link at 576 kbaud with hardware flow control, `single-boiler` at 115 200 with
+/// none. A single absolute figure is 5% of one and 26% of the other, and on the
+/// board with no RTS/CTS there is nothing to push back when debug traffic
+/// oversubscribes it.
 pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
     tx_sender: Sender<'_, M, Vec<u8>, 10>,
+    link_baud: u32,
 ) {
     // Cannot happen with the bus as configured -- `BUS_SUBSCRIBERS` is 2 and there
     // are exactly two consumers -- but say so rather than dying quietly if a third
@@ -97,7 +142,7 @@ pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
         bus::emit_event(DebugEvent::SpawnFailed { task: name("debug_relay") });
         return;
     };
-    let mut bucket = TokenBucket::new();
+    let mut bucket = TokenBucket::for_baud(link_baud);
 
     loop {
         // `next_message`, not `next_message_pure`: the latter silently swallows

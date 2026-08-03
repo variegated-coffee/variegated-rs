@@ -154,12 +154,18 @@ pub fn emit_text(severity: Severity, message: DebugText) {
     publish(DebugPayload::Text(severity, message));
 }
 
-/// Serialises the tests that assert a *delta* on one of the global counters.
+/// Serialises every test that **reads or writes** one of the global counters.
 ///
-/// `DROPPED` and friends are process-wide and cargo runs tests in parallel threads,
-/// so two before/after tests overlapping would make each other fail for reasons
-/// unrelated to what either is checking. This was safe while exactly one test read
-/// `dropped`; it stopped being safe when [`crate::status`] added a second.
+/// `SEQ`, `EMITTED` and `DROPPED` are process-wide and cargo runs tests in parallel
+/// threads. Locking only the readers is not enough and was not enough: any test that
+/// calls `publish_with` bumps `SEQ` and `EMITTED`, so an unlocked writer running
+/// beside a locked reader still breaks it. That is not hypothetical -- it is how
+/// `sequence_numbers_increase_per_frame` started failing once [`crate::status`]
+/// added a second publisher to the suite.
+///
+/// The rule is therefore: **if a test touches a counter in either direction, take
+/// this lock.** That covers `publish_with`, `stamp`, `note_*`, `stats`, and anything
+/// in [`crate::status`], whose publish path goes through all three.
 #[cfg(test)]
 pub(crate) static COUNTER_DELTA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -170,6 +176,7 @@ mod tests {
 
     #[test]
     fn frames_are_stamped_with_the_compiled_in_source() {
+        let _serialised = COUNTER_DELTA_LOCK.lock();
         let mut sub = BUS.subscriber().unwrap();
         publish_with(0, DebugPayload::Event(DebugEvent::Boot));
         let frame = sub.try_next_message_pure().unwrap();
@@ -178,6 +185,7 @@ mod tests {
 
     #[test]
     fn sequence_numbers_increase_per_frame() {
+        let _serialised = COUNTER_DELTA_LOCK.lock();
         let mut sub = BUS.subscriber().unwrap();
         publish_with(10, DebugPayload::Event(DebugEvent::Boot));
         publish_with(20, DebugPayload::Event(DebugEvent::Boot));

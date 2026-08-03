@@ -30,13 +30,19 @@
 //! # Consumers
 //!
 //! Exactly one per firmware: the local transport (USB CDC on the application
-//! processor, and Task 11's TCP server on the comms processor). `Signal` holds a
-//! single waker, so a second concurrent [`wait`] would silently steal the first's
-//! wakeups -- do not add one without changing the primitive.
+//! processor, and Task 11's TCP server on the comms processor).
+//!
+//! **A second concurrent [`wait`] is worse than a lost wakeup -- it is a busy-loop.**
+//! `Signal` holds a single waker, and `poll_wait` on a waker that does not match the
+//! stored one *replaces* it and wakes the one it displaced (embassy-sync 0.8,
+//! `signal.rs:101-105`). So two consumers do not quietly stop receiving; they wake
+//! each other forever, spinning the executor on a processor that is running PID
+//! loops and a PIO pulse counter. If a second consumer is ever needed, change the
+//! primitive -- do not add another `wait`.
 //!
 //! The relay is deliberately **not** a consumer. `Status` does not cross the
-//! inter-processor link at all; see `variegated_comms::debug_relay` for the two
-//! reasons.
+//! inter-processor link at all; see `variegated_comms::debug_relay` and
+//! [`crate::relay::relayable`].
 
 use alloc::boxed::Box;
 

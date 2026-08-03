@@ -181,8 +181,12 @@ async fn esp_transceiver_task(
     dispatcher: &'static BelkaDispatcher,
     debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
 ) {
+    // One binding for both the UART and the debug relay's byte budget, so the two
+    // cannot drift apart: the budget is a fraction of the link, and a stale figure
+    // there means debug traffic sized for the wrong link speed.
+    let baudrate = 576_000;
     let mut config = uart::Config::default();
-    config.baudrate = 576_000;
+    config.baudrate = baudrate;
 
     let mut uart = Uart::new_with_rtscts(
         esp_p.uart,
@@ -197,7 +201,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender).await;
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender).await;
 }
 
 // Embassy task wrapper for ESP transceiver (dual-boiler) without Belka
@@ -212,8 +216,10 @@ async fn esp_transceiver_task(
     routine_repository: &'static RoutineRepositoryMutex,
     debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
 ) {
+    // See the belka variant above: one binding for the UART and the relay budget.
+    let baudrate = 576_000;
     let mut config = uart::Config::default();
-    config.baudrate = 576_000;
+    config.baudrate = baudrate;
 
     let mut uart = Uart::new_with_rtscts(
         esp_p.uart,
@@ -228,7 +234,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
 }
 
 

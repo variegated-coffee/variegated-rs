@@ -366,6 +366,13 @@ pub struct ApplicationState {
     /// a policy decision rather than a loss, and the comms processor receives
     /// `Status` by its own route. Both come from
     /// `variegated_comms::debug_relay::relay_stats`.
+    ///
+    /// **These are also included in [`DebugStateSnapshot::frames_dropped`].** That
+    /// counter is per *transport attempt*, not per frame: one frame refused by both
+    /// the USB writer (no host attached) and the relay (budget) adds two. So
+    /// `frames_dropped - link_frames_dropped` really is the non-relay share, but
+    /// only because every relay drop is counted in both -- do not assume the two are
+    /// disjoint sets of frames.
     pub link_frames_dropped: u32,
 }
 
