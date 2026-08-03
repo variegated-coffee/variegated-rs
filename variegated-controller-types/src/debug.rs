@@ -153,14 +153,26 @@ pub enum DebugPayload {
     /// variant would grow every frame on the bus to ~1-2 kB and blow the static RAM
     /// budget on both MCUs.
     ///
-    /// The *allocation* happens in the 1 Hz snapshot task before `publish_immediate`,
-    /// never on a control path and never inside the publish itself. Publishing still
-    /// never awaits and never back-pressures a producer, so the non-blocking contract
-    /// holds -- but it is not allocator-free: `publish_immediate` evicts the oldest
-    /// frame inside the bus's `CriticalSectionRawMutex`, and if that frame is a
-    /// `Status` the `Box` is freed there, inside a critical section. It only happens
-    /// once the ring is full of unread frames (a stalled or absent transport). Bear it
-    /// in mind before adding boxed variants that could be evicted at a higher rate.
+    /// **This variant does not travel on the shared debug bus.** It has its own
+    /// single-slot channel, `variegated_debug::status`, and the reason is a hard one:
+    /// `embassy-sync`'s pubsub hands a message to a subscriber by `clone()`ing it --
+    /// inside the bus's `CriticalSectionRawMutex` -- in every case except the last
+    /// subscriber taking the message at index 0. With one subscriber that never fires;
+    /// with two (the local transport plus the inter-processor relay) it fires on every
+    /// `Status`, which would be a ~1.7 kB first-fit `LlffHeap::alloc` plus a memcpy
+    /// with interrupts disabled on both cores, once a second, in steady state.
+    /// Filtering the variant out in the relay does not help -- the clone happens
+    /// before the relay's code runs.
+    ///
+    /// The *allocation* happens in the 1 Hz snapshot task before publication, never on
+    /// a control path and never inside the publish itself. Publishing still never
+    /// awaits and never back-pressures a producer, so the non-blocking contract holds
+    /// -- but it is not allocator-free. Superseding an undelivered `Status` frees a
+    /// `Box` through `LlffHeap::dealloc`, whose free-list insert is O(n) and takes a
+    /// critical section of its own; `status::publish_with` does that outside the
+    /// signal's own critical section, and it only happens when the transport is
+    /// stalled or absent. Bear all of this in mind before adding boxed variants, and
+    /// in particular before putting one back on the shared bus.
     ///
     /// `postcard` serializes `Box<T>` transparently, so the wire encoding is just
     /// `Status`'s own.
@@ -346,8 +358,14 @@ pub struct ApplicationState {
     /// `None` means "no routine running, or not determined" -- see the comment at the
     /// construction site.
     pub routine_running: Option<u16>,
-    /// Filled by the relay in Task 8. Zero is accurate before then: there is no relay.
+    /// Debug frames the inter-processor relay handed to the link's TX queue.
     pub link_frames_relayed: u32,
+    /// Debug frames the relay threw away: refused by its byte budget, unencodable,
+    /// offered to a full TX queue, or recycled out of the bus ring before it read
+    /// them. Filtered `DebugPayload::Status` frames are **not** counted -- those are
+    /// a policy decision rather than a loss, and the comms processor receives
+    /// `Status` by its own route. Both come from
+    /// `variegated_comms::debug_relay::relay_stats`.
     pub link_frames_dropped: u32,
 }
 

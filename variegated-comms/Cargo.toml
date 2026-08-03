@@ -27,6 +27,12 @@ defmt.workspace = true
 # Local dependencies
 variegated-controller-lib = { path = "../variegated-controller-lib" }
 variegated-controller-types = { path = "../variegated-controller-types" }
+# This crate runs on the application processor, so `source-application` is not a
+# choice its consumer could reasonably make differently -- unlike `variegated-log`,
+# which is consumed by both firmwares and therefore leaves the choice to the binary.
+# Selecting it here is what lets `cargo check -p variegated-comms` work at all:
+# `variegated-debug` is a `compile_error!` until exactly one source is chosen.
+variegated-debug = { version = "0.1.0", path = "../variegated-debug", features = ["source-application"] }
 
 [features]
 default = []

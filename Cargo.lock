@@ -2312,6 +2312,7 @@ dependencies = [
  "serde",
  "variegated-controller-lib",
  "variegated-controller-types",
+ "variegated-debug",
  "variegated-timekeeping",
 ]
 
@@ -2382,6 +2383,7 @@ dependencies = [
  "embassy-usb",
  "heapless 0.9.3",
  "portable-atomic",
+ "postcard",
  "variegated-controller-types",
  "variegated-debug-codec",
  "variegated-instrumentation",

@@ -179,6 +179,7 @@ async fn esp_transceiver_task(
     machine_definition: MachineDefinition,
     routine_repository: &'static RoutineRepositoryMutex,
     dispatcher: &'static BelkaDispatcher,
+    debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
 ) {
     let mut config = uart::Config::default();
     config.baudrate = 576_000;
@@ -196,7 +197,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher)).await;
+    esp_transceiver_main(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender).await;
 }
 
 // Embassy task wrapper for ESP transceiver (dual-boiler) without Belka
@@ -209,6 +210,7 @@ async fn esp_transceiver_task(
     command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
     machine_definition: MachineDefinition,
     routine_repository: &'static RoutineRepositoryMutex,
+    debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
 ) {
     let mut config = uart::Config::default();
     config.baudrate = 576_000;
@@ -226,7 +228,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main::<_, _, NoopDispatcher, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
 }
 
 
@@ -851,17 +853,21 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
             // and boxing it is what keeps `DebugFrame` at ~160 bytes for the 16-slot
             // static bus.
             //
-            // `publish` never awaits and never back-pressures a producer -- that much
-            // is unchanged. It is *not*, however, merely a pointer move any more:
-            // `publish_immediate` calls `queue.pop_front()` inside
-            // `inner.lock(..)`, the bus mutex is `CriticalSectionRawMutex`, and
-            // dropping an evicted `DebugPayload::Status` frees a `Box` through
-            // `LlffHeap::dealloc`, whose free-list insert is O(n) and takes a critical
-            // section of its own. That only fires once the 16-slot ring is already
-            // full, i.e. when the USB writer is stalled behind `WRITE_TIMEOUT` and
-            // frames are being evicted unread -- so it is not a live hazard today, but
-            // it is a real critical-section cost and must not be described as absent.
-            bus::publish(DebugPayload::Status(Box::new(status.clone())));
+            // Not `bus::publish`. `Status` has its own single-slot channel because a
+            // pubsub with more than one subscriber `clone()`s every message it hands
+            // out, inside the bus's `CriticalSectionRawMutex` -- so once the
+            // inter-processor relay became a second subscriber, this line would have
+            // meant a ~1.7 kB first-fit `LlffHeap::alloc` plus a memcpy with
+            // interrupts disabled on both cores, once a second, forever. See
+            // `variegated_debug::status`.
+            //
+            // `status::publish` still never awaits and never back-pressures a
+            // producer. It is not allocator-free either: superseding an undelivered
+            // frame frees a `Box` through `LlffHeap::dealloc`, whose free-list insert
+            // is O(n). That is deliberately done *outside* the signal's critical
+            // section, and it only happens at all when the transport is stalled or
+            // absent -- but it is a real cost and must not be described as absent.
+            variegated_debug::status::publish(Box::new(status.clone()));
         }
 
         Timer::after_secs(1).await;
@@ -870,6 +876,7 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
 
 fn publish_snapshot(psram_heap: bool) {
     let stats = bus::stats();
+    let relay = variegated_comms::debug_relay::relay_stats();
     bus::publish(DebugPayload::StateSnapshot(DebugStateSnapshot {
         heap_used: HEAP.used() as u32,
         heap_free: HEAP.free() as u32,
@@ -887,9 +894,8 @@ fn publish_snapshot(psram_heap: bool) {
             // from the snapshot path. `None` currently conflates "no routine" with
             // "not determined" -- acceptable while nothing consumes it.
             routine_running: None,
-            // Accurate as zero until Task 8 adds the relay that produces them.
-            link_frames_relayed: 0,
-            link_frames_dropped: 0,
+            link_frames_relayed: relay.relayed,
+            link_frames_dropped: relay.dropped,
         }),
     }));
 }
@@ -1744,11 +1750,21 @@ async fn main_task(
     let esp_configuration_receiver = configuration_channel.subscriber().expect("Failed to get ESP configuration subscriber");
     let esp_command_sender = command_channel.sender();
 
+    // The debug command channel is created here rather than beside the other debug
+    // wiring below, because the ESP transceiver needs its sender too: commands
+    // injected over TCP arrive on the inter-processor link and have to converge on
+    // the same handler as the ones injected over USB, or the two transports would
+    // apply different subsets of the same command set.
+    let debug_commands_channel: &'static Channel<CriticalSectionRawMutex, DebugCommand, 4> =
+        DEBUG_COMMANDS.init(Channel::new());
+    let debug_command_sender = debug_commands_channel.sender();
+    let debug_command_receiver = debug_commands_channel.receiver();
+
     // Spawn the ESP transceiver task
     #[cfg(feature = "belka")]
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, belka_dispatcher)));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, belka_dispatcher, debug_command_sender)));
     #[cfg(not(feature = "belka"))]
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref)));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, debug_command_sender)));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]
@@ -1761,12 +1777,8 @@ async fn main_task(
     spawner.spawn(unwrap!(configuration_debug_logger(debug_configuration_receiver)));
 
     // Wire up the structured debug bus: USB CDC transport, periodic sampler,
-    // periodic state snapshot, and injected-command handling.
-    let debug_commands_channel: &'static Channel<CriticalSectionRawMutex, DebugCommand, 4> =
-        DEBUG_COMMANDS.init(Channel::new());
-    let debug_command_sender = debug_commands_channel.sender();
-    let debug_command_receiver = debug_commands_channel.receiver();
-
+    // periodic state snapshot, and injected-command handling. The channel itself is
+    // created further up, next to the ESP transceiver that also feeds it.
     spawner.spawn(unwrap!(debug_usb_task(usb_debug_p, debug_command_sender)));
     spawner.spawn(unwrap!(debug_sampler_task()));
     // Seventh status subscriber -- see STATUS_RECEIVERS.

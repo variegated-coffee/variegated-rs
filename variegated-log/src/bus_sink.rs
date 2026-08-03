@@ -24,13 +24,16 @@
 //!
 //! Text frames are small in themselves -- a `Text` frame carries no heap
 //! allocation, so dropping *it* frees nothing. That is not the same as being
-//! free to publish. `publish_immediate` evicts the **oldest** frame in the ring
-//! to make room, and under text pressure the oldest frame is routinely a
-//! `DebugPayload::Status`, whose `Box<Status>` is then dropped inside the bus's
-//! `CriticalSectionRawMutex`. So a burst of text does aggravate exactly the
-//! allocator-under-critical-section cost documented on `DebugPayload::Status` --
-//! it just pays it by evicting someone else's frame rather than its own. That is
-//! the real reason the suppression below matters, beyond mere log noise.
+//! free to publish. `publish_immediate` evicts the **oldest** frame in the ring to
+//! make room, so a burst of text destroys other frames -- typed events, counter
+//! samples, the state snapshot -- before a host can read them. That is the real
+//! reason the suppression below matters, beyond mere log noise.
+//!
+//! It used to be worse than that: the evicted frame was routinely a
+//! `DebugPayload::Status`, whose `Box<Status>` was then freed inside the bus's
+//! `CriticalSectionRawMutex`. `Status` has since moved to its own single-slot
+//! channel (`variegated_debug::status`), so nothing on the bus owns an allocation
+//! and eviction is a plain drop.
 
 use core::fmt::Write;
 

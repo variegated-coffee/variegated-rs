@@ -50,6 +50,31 @@ pub enum CommsDebugOp {
     Ping,
 }
 
+/// Hand-written for the same reason `MachineCommand`'s is: deriving would demand
+/// `defmt::Format` on every nested type, which is the cascading-derive pattern this
+/// tree rejects. It became necessary once
+/// `CommsProcessorToApplicationProcessorMessage` -- which *does* derive `Format` --
+/// gained a `DebugCommand` variant.
+///
+/// `Machine` delegates to `MachineCommand`'s own impl, which names the variant and
+/// its arguments; the debug ops carry at most one small scalar, so `label()` plus
+/// that scalar is the whole message.
+#[cfg(feature = "defmt")]
+impl defmt::Format for DebugCommand {
+    fn format(&self, f: defmt::Formatter) {
+        match self {
+            DebugCommand::Machine(command) => defmt::write!(f, "Machine({})", command),
+            DebugCommand::App(AppDebugOp::SetSampleIntervalMs(ms)) => {
+                defmt::write!(f, "set_sample_interval({})", ms)
+            }
+            DebugCommand::Comms(CommsDebugOp::ReconnectBle(id)) => {
+                defmt::write!(f, "reconnect_ble({})", id)
+            }
+            other => defmt::write!(f, "{}", other.label()),
+        }
+    }
+}
+
 impl DebugCommand {
     pub fn label(&self) -> &'static str {
         match self {

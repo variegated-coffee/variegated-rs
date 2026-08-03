@@ -10,13 +10,18 @@
 //! accounting and the non-blocking publish contract identical on both sides of the
 //! link -- the host's gap detection depends on those matching.
 
+// `crate::status` carries a `Box<Status>`; the allocator itself comes from the
+// binary, as it does for every other crate in this tree.
+extern crate alloc;
 // The test harness needs std even though the crate itself is no_std.
 #[cfg(test)]
 extern crate std;
 
 pub mod bus;
 pub mod rate;
+pub mod relay;
 pub mod sampler;
+pub mod status;
 pub mod suppress;
 
 #[cfg(feature = "usb-cdc-rp")]

@@ -4,6 +4,10 @@
 //! `publish_immediate` is deliberate: an absent or lagging consumer loses old
 //! frames instead of backpressuring a control task. Nothing on this path may ever
 //! block on a host being attached.
+//!
+//! One payload does **not** travel here: `DebugPayload::Status` has its own
+//! single-slot channel in [`crate::status`], because a multi-subscriber pubsub
+//! clones every message it hands out and this one is ~1.7 kB. See that module.
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
@@ -14,6 +18,14 @@ use variegated_controller_types::debug::{DebugEvent, DebugFrame, DebugPayload, D
 /// of static RAM.
 pub const BUS_CAPACITY: usize = 16;
 /// USB CDC writer + inter-processor relay.
+///
+/// **Above one, every message on this bus is `clone()`d under the bus's critical
+/// section** -- `embassy-sync` only moves a message out for the last subscriber
+/// taking it at index 0. So no payload that travels here may own a heap allocation:
+/// a clone would become an `LlffHeap::alloc` with interrupts disabled on both cores,
+/// at the full frame rate. Every `DebugPayload` variant except `Status` is inline
+/// (`heapless` strings and vectors), and `Status` is why [`crate::status`] exists.
+/// Check this before adding a variant that owns anything.
 pub const BUS_SUBSCRIBERS: usize = 2;
 
 pub type DebugBus = PubSubChannel<CriticalSectionRawMutex, DebugFrame, BUS_CAPACITY, BUS_SUBSCRIBERS, 1>;
@@ -104,18 +116,30 @@ pub const SOURCE: DebugSource = DebugSource::Application;
 #[cfg(all(feature = "source-comms", not(feature = "source-application")))]
 pub const SOURCE: DebugSource = DebugSource::Comms;
 
-/// Publish with an explicit timestamp. This is the primitive so the accounting is
-/// testable on a host, where `embassy_time` has no driver installed.
-pub fn publish_with(uptime_ms: u64, payload: DebugPayload) {
+/// Stamp a payload with this build's source, the next per-source sequence number and
+/// `uptime_ms`, and count it as emitted -- without putting it anywhere.
+///
+/// Exists because not every frame travels on [`BUS`]. [`crate::status`] carries the
+/// machine's `Status` on its own single-slot channel, and the host's gap detection
+/// depends on both paths drawing from **one** sequence counter: a side channel with
+/// its own numbering, or none at all, would make every `Status` look to a host like
+/// a frame that went missing.
+pub fn stamp(uptime_ms: u64, payload: DebugPayload) -> DebugFrame {
     let frame = DebugFrame {
         source: SOURCE,
         seq: SEQ.fetch_add(1, Ordering::Relaxed),
         uptime_ms,
         payload,
     };
-    // `immediate_publisher` needs no publisher slot and never awaits.
-    BUS.immediate_publisher().publish_immediate(frame);
     EMITTED.fetch_add(1, Ordering::Relaxed);
+    frame
+}
+
+/// Publish with an explicit timestamp. This is the primitive so the accounting is
+/// testable on a host, where `embassy_time` has no driver installed.
+pub fn publish_with(uptime_ms: u64, payload: DebugPayload) {
+    // `immediate_publisher` needs no publisher slot and never awaits.
+    BUS.immediate_publisher().publish_immediate(stamp(uptime_ms, payload));
 }
 
 pub fn publish(payload: DebugPayload) {
@@ -129,6 +153,15 @@ pub fn emit_event(event: DebugEvent) {
 pub fn emit_text(severity: Severity, message: DebugText) {
     publish(DebugPayload::Text(severity, message));
 }
+
+/// Serialises the tests that assert a *delta* on one of the global counters.
+///
+/// `DROPPED` and friends are process-wide and cargo runs tests in parallel threads,
+/// so two before/after tests overlapping would make each other fail for reasons
+/// unrelated to what either is checking. This was safe while exactly one test read
+/// `dropped`; it stopped being safe when [`crate::status`] added a second.
+#[cfg(test)]
+pub(crate) static COUNTER_DELTA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -158,6 +191,7 @@ mod tests {
 
     #[test]
     fn dropped_frames_are_counted() {
+        let _serialised = COUNTER_DELTA_LOCK.lock();
         let before = stats().dropped;
         note_dropped();
         note_dropped();

@@ -62,6 +62,13 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     ExternalPeripheralSensorReading(ExternalPeripheralSensorReading),
     RequestShotLogList,
     RequestShotLogEntry(u32),
+    /// Debug command injected from a host via the comms processor.
+    ///
+    /// Appended, not inserted: postcard encodes an enum as its *declaration-order*
+    /// discriminant, so putting this anywhere but the end would renumber every
+    /// variant after it and silently mis-decode on any peer built from a different
+    /// commit. The same applies to every future variant.
+    DebugCommand(crate::debug_command::DebugCommand),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -75,4 +82,14 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     ShotLogList(ShotLogList),
     ShotLogEntry(ShotLogEntry),
     ShotLogEntryDataPoint(ShotLogEntryDataPoint),
+    /// Structured debug frames relayed to the comms processor for TCP fan-out.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// `DebugPayload::Status` never appears here: the comms processor already gets
+    /// `Status` through the `Status` variant above, and a `Status` frame cannot fit
+    /// the relay's per-window byte budget anyway. See
+    /// `variegated_debug::relay::relayable`.
+    Debug(crate::debug::DebugFrame),
 }

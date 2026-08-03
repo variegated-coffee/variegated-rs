@@ -41,6 +41,10 @@ source-comms = []
 
 [dev-dependencies]
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "std", "double_boiler", "single_group"] }
+# Dev-only: `relay`'s tests measure the *encoded* size of relayed frames, which is
+# what the byte budget is denominated in. Nothing in the library encodes -- the relay
+# in `variegated-comms` does that -- so this must not become a real dependency.
+postcard = { workspace = true, features = ["alloc"] }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation", features = ["instrumentation"] }
 # The host test binary links `embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex`,
 # which needs a `critical_section::Impl` registered at link time, and nothing

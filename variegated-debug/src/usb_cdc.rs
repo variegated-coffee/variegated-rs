@@ -21,7 +21,7 @@ use variegated_controller_types::debug::{DebugEvent, Name, DEBUG_PROTOCOL_VERSIO
 use variegated_controller_types::debug_command::DebugCommand;
 use variegated_debug_codec::{encode_frame, CommandDecoder, VersionVerdict, MAX_FRAME};
 
-use crate::bus;
+use crate::{bus, status};
 
 /// Where decoded commands are handed off. Capacity 4: injection is interactive, and
 /// dropping under flood is better than blocking the USB reader.
@@ -123,19 +123,32 @@ pub async fn run(
             };
             let mut buf = [0u8; MAX_FRAME];
             loop {
-                let frame = match subscriber.next_message().await {
+                // Two sources, because `DebugPayload::Status` travels on its own
+                // single-slot channel rather than the shared bus -- see
+                // `crate::status` for why a second bus subscriber made that
+                // necessary. Both produce a fully stamped `DebugFrame`, so
+                // everything downstream of here is unchanged.
+                //
+                // `select` polls the bus first, so a saturated bus could in
+                // principle starve the status slot. It does not matter here: the
+                // bus is not saturated in steady state, the writer awaits a USB
+                // write between iterations so both get polled, and a starved
+                // `Status` is a *level* that the next second replaces anyway --
+                // which is exactly why the slot is latest-wins.
+                let frame = match select(subscriber.next_message(), status::wait()).await {
                     // The publisher lapped us and recycled ring entries we hadn't
                     // read yet. Each lagged message is a genuinely dropped frame --
                     // count all `n` of them, not just one per lag event, so
                     // `bus::stats().dropped` stays honest about how many frames
                     // were actually lost.
-                    WaitResult::Lagged(n) => {
+                    Either::First(WaitResult::Lagged(n)) => {
                         for _ in 0..n {
                             bus::note_dropped();
                         }
                         continue;
                     }
-                    WaitResult::Message(frame) => frame,
+                    Either::First(WaitResult::Message(frame)) => frame,
+                    Either::Second(frame) => frame,
                 };
 
                 // No host has opened the port: drop rather than queue.

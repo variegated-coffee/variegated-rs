@@ -9,11 +9,16 @@
 //!
 //! # Why thinning at all
 //!
-//! `publish_immediate` evicts the **oldest** frame to make room. Under text
-//! pressure the oldest frame is routinely a `DebugPayload::Status`, so a burst of
-//! text does not merely add noise: it drops other frames before a host can read
-//! them, and frees a `Box<Status>` inside the bus's critical section while doing
-//! it.
+//! `publish_immediate` evicts the **oldest** frame to make room, so a burst of text
+//! does not merely add noise: it drops other frames -- typed events, counter
+//! samples, the state snapshot -- before a host can read them.
+//!
+//! It used to also free a `Box<Status>` inside the bus's critical section, because
+//! `DebugPayload::Status` was routinely the oldest frame. It no longer can: `Status`
+//! moved to its own single-slot channel ([`crate::status`]) when the inter-processor
+//! relay became a second bus subscriber. Nothing on the bus owns a heap allocation
+//! any more, so eviction is now a plain drop. The thinning still matters for the
+//! reason above.
 //!
 //! # Two layers
 //!

@@ -81,6 +81,7 @@ use variegated_mcp9600::Register::SensorConfiguration;
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId};
+use variegated_controller_types::debug_command::DebugCommand;
 use crate::rotary::{UIStatus};
 
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
@@ -115,7 +116,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>) {
     let mut config = uart::Config::default();
     config.baudrate = 115200;
 
@@ -130,7 +131,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    esp_transceiver_main::<_, _, NoopDispatcher, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -270,6 +271,16 @@ static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
 static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
+// Debug commands injected over the inter-processor link. `CriticalSectionRawMutex`
+// rather than this example's usual `NoopRawMutex`, because the type is fixed by
+// `variegated_debug::usb_cdc::CommandSink`, which is shared by both firmwares.
+//
+// Nothing drains it yet: this example has no debug command task until Task 14, so
+// injected commands queue and are dropped once the four slots are full. That is the
+// correct behaviour in the meantime -- `try_send` on a full channel is a drop, never
+// a stall -- and it is why the sender exists now: the alternative was leaving
+// `single_boiler` unable to compile against `esp_transceiver_main`'s new signature.
+static DEBUG_COMMANDS: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand, 4>> = StaticCell::new();
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 
 fn check_stack_usage() -> (usize, usize) {
@@ -725,7 +736,10 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition).unwrap());
+    let debug_commands_channel: &'static Channel<CriticalSectionRawMutex, DebugCommand, 4> =
+        DEBUG_COMMANDS.init(Channel::new());
+
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_commands_channel.sender()).unwrap());
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task().unwrap());
