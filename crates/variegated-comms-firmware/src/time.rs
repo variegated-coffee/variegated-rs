@@ -2,7 +2,7 @@
 
 use core::net::{IpAddr, SocketAddr};
 
-use defmt::{error, info};
+use variegated_log::{log_error, log_info};
 use embassy_net::{dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
 use embassy_time::{Duration, Timer};
 use esp_hal::rtc_cntl::Rtc;
@@ -77,7 +77,7 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    info!("Waiting for IP address for SNTP...");
+    log_info!("Waiting for IP address for SNTP...");
     loop {
         if stack.config_v4().is_some() {
             break;
@@ -86,15 +86,15 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     }
 
     // Resolve NTP server
-    info!("Resolving NTP server: {}", NTP_SERVER);
+    log_info!("Resolving NTP server: {}", NTP_SERVER);
     let ntp_addrs = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
         Ok(addrs) if !addrs.is_empty() => addrs,
         Ok(_) => {
-            error!("DNS resolution returned empty results");
+            log_error!("DNS resolution returned empty results");
             return;
         }
         Err(e) => {
-            error!("Failed to resolve NTP server: {:?}", e);
+            log_error!("Failed to resolve NTP server: {:?}", e);
             return;
         }
     };
@@ -118,7 +118,7 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     let socket = SntpSocket(socket);
 
     // Display initial RTC time
-    info!("Initial RTC time: {} us", rtc.current_time_us());
+    log_info!("Initial RTC time: {} us", rtc.current_time_us());
 
     // Sync time periodically
     loop {
@@ -143,14 +143,14 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
                 TIME_SYNCED.store(true, Ordering::Relaxed);
 
                 // Log synchronized time
-                info!(
+                log_info!(
                     "NTP sync successful | RTC time: {} us | Unix timestamp: {} s",
                     rtc.current_time_us(),
                     time.sec()
                 );
             }
             Err(_e) => {
-                error!("SNTP error occurred");
+                log_error!("SNTP error occurred");
             }
         }
 

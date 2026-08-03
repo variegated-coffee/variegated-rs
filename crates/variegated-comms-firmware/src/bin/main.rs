@@ -10,7 +10,7 @@
 use core::net::{Ipv4Addr, SocketAddr};
 
 use bt_hci::controller::ExternalController;
-use defmt::info;
+use variegated_log::log_info;
 use edge_http::io::client::Connection;
 use edge_http::Method;
 use edge_nal_embassy::{Tcp, TcpBuffers};
@@ -53,6 +53,7 @@ use variegated_comms_firmware::{
     wifi::{connection_task, net_task},
 };
 use esphome_device::ClientEvent;
+use variegated_controller_types::debug::{text, Severity};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -67,7 +68,7 @@ pub extern "Rust" fn _esp_println_timestamp() -> u64 {
 #[embassy_executor::task]
 async fn status_listener_task(status_channel: &'static ApplicationStatusChannel) {
     let mut subscriber = status_channel.subscriber().unwrap();
-    info!("Status listener task started");
+    log_info!("Status listener task started");
     loop {
         let status = subscriber.next_message_pure().await;
 //        info!("Status: {:?}", status);
@@ -84,7 +85,7 @@ async fn comms_status_signaller_task(
     use heapless::index_map::FnvIndexMap;
     use portable_atomic::Ordering;
 
-    info!("CommsStatus signaller task started");
+    log_info!("CommsStatus signaller task started");
     loop {
         // Get real WiFi connection status
         let wifi_connected = WIFI_CONNECTED.load(Ordering::Relaxed);
@@ -182,6 +183,33 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // Install the `log` -> debug-bus sink first, because the `log` facade
+    // *discards* every record emitted before a logger exists and there is no
+    // replay. Every `log_*!` in this firmware is silent until this line runs.
+    //
+    // This early is safe on both counts that could bite:
+    //   * `bus_sink` timestamps with `embassy_time::Instant::now()`, which
+    //     esp-rtos implements over the SYSTIMER (`esp-rtos-0.3.0/src/lib.rs:460`
+    //     -> `esp_hal::time::Instant::now()`). That counter is running from
+    //     `esp_hal::init` above, not from `esp_rtos::start` further down.
+    //   * it never allocates -- the record is formatted into a fixed
+    //     `heapless::String<96>` -- so it does not need the heap allocators below.
+    //
+    // esp-println is `no-op` in this build, so this sink and the USB-Serial-JTAG
+    // transport are between them the *only* way a log line leaves this chip.
+    if variegated_log::bus_sink::init().is_err() {
+        // `log` permits exactly one logger, so this means something else in the
+        // graph installed one -- a static property of the build, not a runtime
+        // condition. Reported on the bus directly rather than through `log`,
+        // which by definition is not working, because the alternative is that
+        // every log line in this firmware silently goes nowhere and the stream
+        // looks merely quiet.
+        debug::bus::emit_text(
+            Severity::Error,
+            text("log bus sink not installed: another logger won the race"),
+        );
+    }
+
     // Initialize RTC for time synchronization
     let rtc = Rtc::new(peripherals.LPWR);
 
@@ -208,7 +236,7 @@ async fn main(spawner: Spawner) -> ! {
     let usb = esp_hal::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
     let (usb_rx, usb_tx) = usb.split();
     if let Ok(t) = debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender()) { spawner.spawn(t); }
-    info!("Debug USB-Serial-JTAG transport spawned");
+    log_info!("Debug USB-Serial-JTAG transport spawned");
 
     // Initialize ESPHome channels
     let state_change_channel = STATE_CHANGE_CHANNEL.init(embassy_sync::channel::Channel::new());
@@ -233,14 +261,14 @@ async fn main(spawner: Spawner) -> ! {
     // spawn, and that is preserved here rather than switched to `unwrap`.
     if let Ok(t) = application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel) { spawner.spawn(t); }
     if let Ok(t) = status_listener_task(status_channel) { spawner.spawn(t); }
-    info!("Application processor tasks spawned");
+    log_info!("Application processor tasks spawned");
 
     // Initialize esp-rtos
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
-    info!("Initializing radio");
+    log_info!("Initializing radio");
 
     // esp-radio 0.18 removed `esp_radio::init()` and the `Controller` handle;
     // the radio is brought up implicitly by the BLE/WiFi constructors.
@@ -266,7 +294,7 @@ async fn main(spawner: Spawner) -> ! {
         (rng.random() >> 8) as u8,
     ];
     let address = Address::random(address_bytes);
-    info!("BLE: Generated random address");
+    log_info!("BLE: Generated random address");
 
     // Create BLE stack
     let stack = trouble_host::new(controller, ble_resources).set_random_address(address);
@@ -293,11 +321,11 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn BLE tasks
     if let Ok(t) = ble_runner_task(runner, printer) { spawner.spawn(t); }
     if let Ok(t) = ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender) { spawner.spawn(t); }
-    info!("BLE tasks spawned");
+    log_info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;
 
-    info!("Initializing Wifi");
+    log_info!("Initializing Wifi");
 
     // Initialize WiFi. The radio controller handle is gone in 0.18, and
     // `interfaces.sta` was renamed `interfaces.station`. Configuration stays in
@@ -308,7 +336,7 @@ async fn main(spawner: Spawner) -> ! {
 
     let wifi_interface = interfaces.station;
 
-    info!("Creating network stack");
+    log_info!("Creating network stack");
 
     // Create network stack
     let net_config = embassy_net::Config::dhcpv4(Default::default());
@@ -326,17 +354,17 @@ async fn main(spawner: Spawner) -> ! {
     let stack_static = mk_static!(embassy_net::Stack<'static>, net_stack);
     let rtc_static = mk_static!(Rtc<'static>, rtc);
 
-    info!("Spawning network tasks");
+    log_info!("Spawning network tasks");
 
     // Spawn network tasks
     if let Ok(t) = connection_task(controller) { spawner.spawn(t); }
     if let Ok(t) = net_task(runner) { spawner.spawn(t); }
     if let Ok(t) = sntp_task(rtc_static, *stack_static) { spawner.spawn(t); }
     if let Ok(t) = comms_status_signaller_task(rtc_static) { spawner.spawn(t); }
-    info!("Network and CommsStatus tasks spawned");
+    log_info!("Network and CommsStatus tasks spawned");
 
     // Wait for network
-    info!("Waiting for link...");
+    log_info!("Waiting for link...");
     loop {
         if net_stack.is_link_up() {
             break;
@@ -344,16 +372,16 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    info!("Waiting for IP address...");
+    log_info!("Waiting for IP address...");
     loop {
         if let Some(config) = net_stack.config_v4() {
-            info!("Got IP: {}", config.address);
+            log_info!("Got IP: {}", config.address);
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    info!("Network ready");
+    log_info!("Network ready");
 
     // Create TCP stack for HTTP
     let tcp_buffers = mk_static!(TcpBuffers<16, 1024, 1024>, TcpBuffers::new());
@@ -369,7 +397,7 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn HTTP server and cache update tasks
     if let Ok(t) = http_server_task(tcp_stack, command_sender) { spawner.spawn(t); }
     if let Ok(t) = cache_update_task(http_status_subscriber, http_config_subscriber) { spawner.spawn(t); }
-    info!("HTTP server and cache update tasks spawned");
+    log_info!("HTTP server and cache update tasks spawned");
 
     // Create subscribers for ESPHome server
     let esphome_status_subscriber = status_channel.subscriber().unwrap();
@@ -386,7 +414,7 @@ async fn main(spawner: Spawner) -> ! {
         client_event_channel,
         command_channel,
     ) { spawner.spawn(t); }
-    info!("ESPHome server task spawned on port 6053");
+    log_info!("ESPHome server task spawned on port 6053");
 
     // Create subscribers for WebSocket server
     let ws_status_subscriber = status_channel.subscriber().unwrap();
@@ -401,7 +429,7 @@ async fn main(spawner: Spawner) -> ! {
         ws_routine_subscriber,
         command_channel,
     ) { spawner.spawn(t); }
-    info!("WebSocket server task spawned on port 8080");
+    log_info!("WebSocket server task spawned on port 8080");
 
     // Main loop - periodic HTTP client requests
     loop {

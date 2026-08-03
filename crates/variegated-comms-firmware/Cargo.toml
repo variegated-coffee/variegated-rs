@@ -61,23 +61,49 @@ esp-backtrace = { workspace = true, features = [
 ] }
 esp-bootloader-esp-idf.workspace = true
 esp-hal = { workspace = true, features = ["defmt", "unstable"] }
-# `default-features = false` drops the `auto` output target, which probes for
-# USB-Serial-JTAG at runtime (it watches the peripheral's SOF interrupt flag and
-# switches to it the moment a host has ever been seen) and would write into the
-# same FIFO the structured debug stream now owns. `uart` pins the output to the
-# ROM console channel instead.
+# `no-op`: esp-println has **no output target at all** in this firmware. Every
+# `defmt::*!` call site still compiles and still costs a call, and the
+# `#[defmt::global_logger]` still exists (it lives behind `defmt-espflash`, not
+# behind an output target), but `Printer::write_bytes_in_cs` is empty.
 #
-# Consequence: `defmt`'s `global_logger` and `esp-backtrace`'s panic output go to
-# UART0, so `espflash monitor` over the USB-Serial-JTAG port no longer shows logs.
-# Use `variegated-debug-tui` for the structured stream, or a UART0 adapter for the
-# defmt log.
+# Two targets were rejected before this one, and both failures are instructive:
 #
-# `critical-section` is kept even though it is a default feature: it is what makes
-# each print atomic, and without it two tasks printing concurrently interleave
-# their bytes -- which for `defmt-espflash`'s rzcobs framing does not merely
-# scramble a line, it corrupts the frame. `colors` is dropped with the rest of the
-# defaults; it does nothing under `defmt-espflash`, which emits binary.
-esp-println = { workspace = true, default-features = false, features = ["uart", "critical-section", "defmt-espflash", "timestamp", "esp32c6"] }
+#   * `auto` (the default) probes for USB-Serial-JTAG at runtime -- it watches the
+#     peripheral's SOF interrupt flag and switches to it the moment a host has
+#     ever been seen -- so it would write into the same FIFO the structured debug
+#     stream owns.
+#   * `uart` does not write to a UART peripheral. On the C6 it calls ROM
+#     `tx_one_char` and flushes via `tx_flush(get_channel())`, i.e. the *ROM
+#     console channel* -- which on a chip attached over native USB is the
+#     USB-Serial-JTAG, so it contends too. Worse, `write_bytes_in_cs` flushes
+#     every 32 bytes while holding `esp_sync::RawMutex`, which at 115200 baud is
+#     ~2.8 ms of busy-wait per chunk **with interrupts disabled**, on a processor
+#     running WiFi and BLE. The `auto` path has a self-limiting `TIMED_OUT` guard;
+#     the `uart` path has none.
+#
+# Formatted log messages reach a host over the debug bus instead, via
+# `variegated-log`'s `log_*!` macros and its `bus_sink`. That removes both
+# problems outright rather than mitigating them.
+#
+# CONSEQUENCE, stated plainly: `esp-backtrace`'s panic output now has no sink. A
+# panic halts the processor silently -- no backtrace anywhere. See the Task 9
+# report; `custom-pre-backtrace` plus RTC-retained RAM is the cheap way back.
+#
+# `critical-section` is dropped along with the other defaults: it exists to make a
+# print atomic, and there is no longer a print to serialise. `timestamp` is kept
+# so `_esp_println_timestamp` in main.rs stays a live export rather than becoming
+# a dangling one.
+esp-println = { workspace = true, default-features = false, features = ["no-op", "defmt-espflash", "timestamp", "esp32c6"] }
+# The `log_*!` macros and the `log` -> debug-bus sink, the same crate and the same
+# `debug-bus` feature the application processor uses. `bus_sink` formats each
+# record into a fixed `heapless::String<96>` and runs it past
+# `variegated_debug::suppress`, so a chatty task cannot empty the 16-slot ring.
+#
+# No chip feature is named, and that is the point: `rp2040`/`rp235xa`/`rp235xb`
+# are what pull in `embassy-rp`, `embassy-usb-logger` and `defmt-rtt`, none of
+# which build for riscv32 -- and `defmt-rtt` would additionally collide with
+# `esp-println`'s `#[defmt::global_logger]`.
+variegated-log = { path = "../../variegated-rs/variegated-log", default-features = false, features = ["debug-bus"] }
 esp-rtos = { workspace = true, features = ["esp-radio", "defmt", "embassy"] }
 static_cell.workspace = true
 # 0.18 removed the `smoltcp` feature entirely -- the blocking smoltcp path is

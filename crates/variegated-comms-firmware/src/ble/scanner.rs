@@ -2,7 +2,7 @@
 
 use core::cell::RefCell;
 
-use defmt::info;
+use variegated_log::log_info;
 use heapless::Deque;
 use trouble_host::prelude::*;
 
@@ -23,20 +23,20 @@ impl EventHandler for ScanPrinter {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
         let mut seen = self.seen.borrow_mut();
         while let Some(Ok(report)) = it.next() {
-            info!("Adv report: {:?}", report);
+            log_info!("Adv report: {:?}", report);
 
             // Decode and print advertising data structures
-            info!("  Decoded advertising data:");
+            log_info!("  Decoded advertising data:");
             for structure in AdStructure::decode(report.data) {
                 match structure {
-                    Ok(ad) => info!("    {:?}", ad),
-                    Err(_) => info!("    [Decode error]"),
+                    Ok(ad) => log_info!("    {:?}", ad),
+                    Err(_) => log_info!("    [Decode error]"),
                 }
             }
 
             // Track unique devices
             if seen.iter().find(|b| b.raw() == report.addr.raw()).is_none() {
-                info!("Discovered BLE device: {:?}, RSSI: {}", report.addr, report.rssi);
+                log_info!("Discovered BLE device: {:?}, RSSI: {}", report.addr, report.rssi);
                 if seen.is_full() {
                     seen.pop_front();
                 }

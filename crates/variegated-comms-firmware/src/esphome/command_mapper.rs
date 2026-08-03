@@ -1,7 +1,7 @@
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver as ChannelReceiver, Sender as ChannelSender};
 use esphome_device::{ClientEvent, Command};
-use defmt::info;
+use variegated_log::log_info;
 use variegated_controller_types::{BoilerControlTargetValuesUpdate, MachineCommand, PidParameterTarget};
 
 use crate::channels::{CLIENT_EVENT_CAPACITY, MACHINE_COMMAND_CAPACITY, ApplicationConfigurationSubscriber};
@@ -18,10 +18,10 @@ pub async fn sensor_states_task(
 
         match command {
             ClientEvent::CommandReceived(Command::SwitchCommand(data)) => {
-                info!("Switch command received: state={}", data.state);
+                log_info!("Switch command received: state={}", data.state);
             }
             ClientEvent::CommandReceived(Command::NumberCommand(data)) => {
-                info!("Number command received: key={}, state={}", data.key, data.state);
+                log_info!("Number command received: key={}, state={}", data.key, data.state);
 
                 // Parse the key to determine entity type, device index, and property
                 let (entity_type, device_index, property) = parse_key(data.key);
@@ -38,7 +38,7 @@ pub async fn sensor_states_task(
                                 }
                             );
                             machine_command_sender.send(machine_command).await;
-                            info!("Sent SetBoilerControlTargetValues command for boiler {} with temperature: {}", device_index, data.state);
+                            log_info!("Sent SetBoilerControlTargetValues command for boiler {} with temperature: {}", device_index, data.state);
                         }
                         BOILER_TEMP_KP_CONST | BOILER_TEMP_KI_CONST | BOILER_TEMP_KD_CONST => {
                             // Get current configuration to build modified PID parameters
@@ -52,17 +52,17 @@ pub async fn sensor_states_task(
                                     BOILER_TEMP_KP_CONST => {
                                         new_pid_params.kp.positive_scale = data.state;
                                         new_pid_params.kp.negative_scale = data.state;
-                                        info!("Updated boiler {} temperature kP to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kP to {}", device_index, data.state);
                                     }
                                     BOILER_TEMP_KI_CONST => {
                                         new_pid_params.ki.positive_scale = data.state;
                                         new_pid_params.ki.negative_scale = data.state;
-                                        info!("Updated boiler {} temperature kI to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kI to {}", device_index, data.state);
                                     }
                                     BOILER_TEMP_KD_CONST => {
                                         new_pid_params.kd.positive_scale = data.state;
                                         new_pid_params.kd.negative_scale = data.state;
-                                        info!("Updated boiler {} temperature kD to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kD to {}", device_index, data.state);
                                     }
                                     _ => {}
                                 }
@@ -74,7 +74,7 @@ pub async fn sensor_states_task(
                                 );
 
                                 machine_command_sender.send(machine_command).await;
-                                info!("Sent SetPidParameters command for boiler {}", device_index);
+                                log_info!("Sent SetPidParameters command for boiler {}", device_index);
                             }
                         }
                         BOILER_TEMP_KP_UPPER_LIMIT_CONST | BOILER_TEMP_KP_LOWER_LIMIT_CONST |
@@ -90,31 +90,31 @@ pub async fn sensor_states_task(
                                 match property {
                                     BOILER_TEMP_KP_UPPER_LIMIT_CONST => {
                                         match new_pid_params.kp.limits.try_set_upper(data.state) {
-                                            Ok(_) => info!("Updated boiler {} temperature kP upper limit to {}", device_index, data.state),
-                                            Err(_e) => info!("Failed to update boiler {} temperature kP upper limit to {}", device_index, data.state),
+                                            Ok(_) => log_info!("Updated boiler {} temperature kP upper limit to {}", device_index, data.state),
+                                            Err(_e) => log_info!("Failed to update boiler {} temperature kP upper limit to {}", device_index, data.state),
                                         }
                                     }
                                     BOILER_TEMP_KP_LOWER_LIMIT_CONST => {
                                         match new_pid_params.kp.limits.try_set_lower(data.state) {
-                                            Ok(_) => info!("Updated boiler {} temperature kP lower limit to {}", device_index, data.state),
-                                            Err(_e) => info!("Failed to update boiler {} temperature kP lower limit to {}", device_index, data.state),
+                                            Ok(_) => log_info!("Updated boiler {} temperature kP lower limit to {}", device_index, data.state),
+                                            Err(_e) => log_info!("Failed to update boiler {} temperature kP lower limit to {}", device_index, data.state),
                                         }
                                     }
                                     BOILER_TEMP_KI_UPPER_LIMIT_CONST => {
                                         new_pid_params.ki.limits.try_set_upper(data.state).ok();
-                                        info!("Updated boiler {} temperature kI upper limit to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kI upper limit to {}", device_index, data.state);
                                     }
                                     BOILER_TEMP_KI_LOWER_LIMIT_CONST => {
                                         new_pid_params.ki.limits.try_set_lower(data.state).ok();
-                                        info!("Updated boiler {} temperature kI lower limit to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kI lower limit to {}", device_index, data.state);
                                     }
                                     BOILER_TEMP_KD_UPPER_LIMIT_CONST => {
                                         new_pid_params.kd.limits.try_set_upper(data.state).ok();
-                                        info!("Updated boiler {} temperature kD upper limit to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kD upper limit to {}", device_index, data.state);
                                     }
                                     BOILER_TEMP_KD_LOWER_LIMIT_CONST => {
                                         new_pid_params.kd.limits.try_set_lower(data.state).ok();
-                                        info!("Updated boiler {} temperature kD lower limit to {}", device_index, data.state);
+                                        log_info!("Updated boiler {} temperature kD lower limit to {}", device_index, data.state);
                                     }
                                     _ => {}
                                 }
@@ -126,22 +126,22 @@ pub async fn sensor_states_task(
                                 );
 
                                 machine_command_sender.send(machine_command).await;
-                                info!("Sent SetPidParameters command for boiler {} with updated limits", device_index);
+                                log_info!("Sent SetPidParameters command for boiler {} with updated limits", device_index);
                             }
                         }
                         _ => {
-                            info!("Unhandled boiler property: 0x{:04X}", property);
+                            log_info!("Unhandled boiler property: 0x{:04X}", property);
                         }
                     }
                 } else if entity_type == ENTITY_TYPE_GROUP_CONST {
                     // Handle group commands (future expansion)
-                    info!("Group command not yet implemented: device={}, property=0x{:04X}", device_index, property);
+                    log_info!("Group command not yet implemented: device={}, property=0x{:04X}", device_index, property);
                 } else {
-                    info!("Unknown entity type: {}", entity_type);
+                    log_info!("Unknown entity type: {}", entity_type);
                 }
             }
             ClientEvent::CommandReceived(Command::SelectCommand(data)) => {
-                info!("Select command received: key={}", data.key);
+                log_info!("Select command received: key={}", data.key);
 
                 // Parse the key to determine entity type, device index, and property
                 let (entity_type, device_index, property) = parse_key(data.key);
@@ -155,21 +155,21 @@ pub async fn sensor_states_task(
                             None  // Don't change target values, just mode
                         );
                         machine_command_sender.send(machine_command).await;
-                        info!("Sent SetBoilerControlTarget command for boiler {}", device_index);
+                        log_info!("Sent SetBoilerControlTarget command for boiler {}", device_index);
                     } else {
-                        info!("Invalid control mode");
+                        log_info!("Invalid control mode");
                     }
                 } else if entity_type == ENTITY_TYPE_MACHINE_CONST && property == MACHINE_MODE_CONST {
                     if let Some(mode) = string_to_machine_mode(&data.state) {
                         // Send SetMachineMode command via UART
                         let machine_command = MachineCommand::SetMachineMode(mode);
                         machine_command_sender.send(machine_command).await;
-                        info!("Sent SetMachineMode command");
+                        log_info!("Sent SetMachineMode command");
                     } else {
-                        info!("Invalid machine mode");
+                        log_info!("Invalid machine mode");
                     }
                 } else {
-                    info!("Unknown select entity: type={}, device={}, property=0x{:04X}", entity_type, device_index, property);
+                    log_info!("Unknown select entity: type={}, device={}, property=0x{:04X}", entity_type, device_index, property);
                 }
             }
             _ => {}

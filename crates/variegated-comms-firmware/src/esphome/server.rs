@@ -7,7 +7,7 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use esphome_device::{ClientEvent, EspHomeError};
 use esphome_device::embassy_net::server::{EspHomeConnection, EspHomeServer};
-use defmt::{info, warn, error};
+use variegated_log::{log_info, log_warn, log_error};
 use variegated_controller_types::MachineCommand;
 
 use crate::channels::{
@@ -31,15 +31,15 @@ pub async fn esphome_server_task(
     client_event_channel: &'static Channel<CriticalSectionRawMutex, ClientEvent, CLIENT_EVENT_CAPACITY>,
     machine_command_channel: &'static Channel<CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) {
-    info!("ESPHome server task started, waiting for configuration...");
+    log_info!("ESPHome server task started, waiting for configuration...");
 
     // Wait for initial configuration
     let mut config_sub = configuration_subscriber;
     let config = config_sub.next_message_pure().await;
-    info!("Configuration received!");
+    log_info!("Configuration received!");
 
     // Wait for machine definition
-    info!("Waiting for machine definition...");
+    log_info!("Waiting for machine definition...");
     let machine_def = wait_for_machine_definition().await;
     let machine_def = Box::leak(Box::new(machine_def));
 
@@ -49,10 +49,10 @@ pub async fn esphome_server_task(
 
     // Build dynamic device configuration
     let device_config = Box::leak(Box::new(build_device_config(machine_def, mac_address)));
-    info!("Built dynamic device config for: {}", device_config.name);
+    log_info!("Built dynamic device config for: {}", device_config.name);
 
     let entities = Box::leak(entity_builder::build_entities(&config, machine_def, None).into_boxed_slice());
-    info!("Built {} dynamic entities from configuration", entities.len());
+    log_info!("Built {} dynamic entities from configuration", entities.len());
 
     // Get channel ends for the various tasks
     let state_change_sender = state_change_channel.sender();
@@ -91,12 +91,12 @@ async fn tcp_server_loop(
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(60)));
 
-        info!("ESPHome server listening on port 6053");
+        log_info!("ESPHome server listening on port 6053");
 
         // Accept a connection
         match socket.accept(6053).await {
             Ok(()) => {
-                info!("Accepted ESPHome connection");
+                log_info!("Accepted ESPHome connection");
 
                 // Split the socket into reader and writer
                 let (mut reader, mut writer) = socket.split();
@@ -121,17 +121,17 @@ async fn tcp_server_loop(
                 let result = server.run().await;
 
                 match result {
-                    Ok(()) => info!("ESPHome connection closed normally"),
+                    Ok(()) => log_info!("ESPHome connection closed normally"),
                     Err(e) => {
                         match e {
-                            EspHomeError::ConnectionClosed => info!("ESPHome connection closed normally"),
-                            _ => error!("ESPHome server error: {:?}", defmt::Debug2Format(&e)),
+                            EspHomeError::ConnectionClosed => log_info!("ESPHome connection closed normally"),
+                            _ => log_error!("ESPHome server error: {:?}", defmt::Debug2Format(&e)),
                         }
                     },
                 }
             }
             Err(e) => {
-                error!("Failed to accept connection: {:?}", e);
+                log_error!("Failed to accept connection: {:?}", e);
                 Timer::after(Duration::from_secs(1)).await;
             }
         }
@@ -144,12 +144,12 @@ async fn wait_for_machine_definition() -> variegated_controller_types::MachineDe
         {
             let guard = MACHINE_DEFINITION.lock().await;
             if let Some(machine_def) = guard.as_ref() {
-                info!("MachineDefinition received!");
+                log_info!("MachineDefinition received!");
                 return machine_def.clone();
             }
         }
 
-        warn!("MachineDefinition not yet available, waiting...");
+        log_warn!("MachineDefinition not yet available, waiting...");
         Timer::after(Duration::from_secs(1)).await;
     }
 }

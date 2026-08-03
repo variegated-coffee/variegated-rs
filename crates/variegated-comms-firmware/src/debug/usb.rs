@@ -7,34 +7,80 @@
 //! down with it, since they share one executor.
 //!
 //! The CDC transport has two defences: it consults DTR before it writes at all, and
-//! it races each write against a timeout. **USB-Serial-JTAG has no DTR**, so only
-//! the second one exists here. `UsbSerialJtagTx`'s async write pushes 64 bytes into
-//! the endpoint FIFO and then awaits `serial_in_empty`, which a host that never
-//! attaches -- or one that attaches and stops reading -- never raises. An unguarded
-//! `write_all` on this peripheral parks the task forever. The `select` against
-//! `WRITE_TIMEOUT` below is the whole of what prevents that; do not remove it, and
-//! do not add an `await` on this path that is not similarly bounded.
+//! it races each packet against a timeout. **USB-Serial-JTAG has no DTR**, so the
+//! first one has to be reconstructed from the peripheral's own flow control, and the
+//! second is the backstop.
+//!
+//! `UsbSerialJtagTx`'s async write pushes 64 bytes into the endpoint FIFO and then
+//! awaits `serial_in_empty`, which a host that never attaches -- or one that attaches
+//! and stops reading -- never raises. An unguarded `write_all` on this peripheral
+//! parks the task forever. Two things prevent that, and both are load-bearing:
+//!
+//! 1. [`in_endpoint_has_room`] before every packet. `esp-hal`'s `write_async` pushes
+//!    into `ep1` **without checking `serial_in_ep_data_free`** -- contrast its own
+//!    `write_byte_nb`, which does. Once a stall has filled both IN buffers the
+//!    hardware silently discards what is written, and if the host resumes draining
+//!    inside the timeout window `write_all` returns `Ok(())` for bytes that never
+//!    existed. That is a frame lost with `stats().dropped` none the wiser, which is
+//!    exactly the kind of invisible failure this stream exists to eliminate.
+//! 2. A per-packet `select` against [`WRITE_TIMEOUT`].
+//!
+//! Together they also make the steady state cheap: the first frame after a host
+//! detaches costs one timeout, and every frame after that is refused by the room
+//! check in microseconds, because the buffer the first one left behind is never
+//! drained.
+//!
+//! Do not remove either, and do not add an `await` on this path that is not
+//! similarly bounded.
 
 use core::fmt::Write as _;
 
-use defmt::error;
+use variegated_log::log_error;
 use embassy_futures::join::join;
 use embassy_futures::select::{select, Either};
 use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::{Read, Write};
+use esp_hal::peripherals::USB_DEVICE;
 use esp_hal::usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx};
 use variegated_controller_types::debug::{DebugEvent, Name, DEBUG_PROTOCOL_VERSION};
 use variegated_debug_codec::{encode_frame, CommandDecoder, VersionVerdict, MAX_FRAME};
 
 use crate::debug::{bus, CommandSink};
 
-/// Longest we will wait for the host to accept a frame before dropping it.
+/// Longest we will wait for the host to accept one packet before abandoning the
+/// frame.
 ///
-/// The same 50 ms the CDC transport uses. Long enough that a briefly busy host does
-/// not cost frames, short enough that a *detached* host costs the writer 50 ms per
-/// frame rather than the rest of the uptime.
+/// The same 50 ms the CDC transport uses, and now per packet as that one is, rather
+/// than per frame. Per packet is what makes the accounting truthful: a frame is
+/// abandoned at the packet that stalled, not after an arbitrary fraction of it went
+/// out under one shared deadline.
+///
+/// Worst case for a host that *is* draining but slowly is this times the packet
+/// count -- ~1.35 s for a 1722-byte `Status` frame. That is a bound, not a park, and
+/// it is the same bound `variegated_debug::usb_cdc` has carried since Task 4. The
+/// case that matters, a host that is not draining at all, is bounded by one timeout
+/// and then by [`in_endpoint_has_room`].
 const WRITE_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// The IN endpoint FIFO packet size, and the chunk `esp-hal`'s `write_async` uses
+/// internally. Writing in the same unit is what lets each packet carry its own
+/// deadline and its own room check.
+const PACKET: usize = 64;
+
+/// Whether the USB IN endpoint has room for another packet.
+///
+/// This is the DTR substitute. It reads the same `serial_in_ep_data_free` bit that
+/// `UsbSerialJtagTx::write_byte_nb` consults and `write_async` does not, through the
+/// peripheral's static register accessor -- so it needs no borrow of the `Tx` half we
+/// are about to write through.
+fn in_endpoint_has_room() -> bool {
+    USB_DEVICE::regs()
+        .ep1_conf()
+        .read()
+        .serial_in_ep_data_free()
+        .bit_is_set()
+}
 
 /// Both versions in one `Name` (32 bytes), so the event says what to do rather than
 /// just that something went wrong. Worst case is `cmd wire v0xff, expected v0xff` at
@@ -63,9 +109,13 @@ pub async fn run(
                 // not, deliberately -- on the RP2350 the debug transport is most of
                 // what the USB peripheral is for, while here a panic would take
                 // WiFi, BLE and the ESPHome server down for the sake of a debug
-                // stream. Say so on the log that still works and leave the command
-                // reader running.
-                error!("debug bus subscriber unavailable; USB debug writer disabled");
+                // stream. Leave the command reader running instead.
+                //
+                // The report does reach someone: `subscriber()` only fails when both
+                // slots are already taken, which means two other consumers are live
+                // and will receive this text frame. (esp-println is `no-op`, so the
+                // bus is the only place it could go.)
+                log_error!("debug bus subscriber unavailable; USB debug writer disabled");
                 return;
             };
             let mut buf = [0u8; MAX_FRAME];
@@ -73,9 +123,10 @@ pub async fn run(
                 // `next_message`, not `next_message_pure`: the pure form collapses a
                 // lag into a silently newer frame, and every lagged message is a
                 // frame this device meant to send and did not. Counting all `n` of
-                // them is what keeps `bus::stats().dropped` honest -- and on this
-                // transport lag is the *expected* consequence of an unattached host,
-                // since each undrained frame costs the writer a full WRITE_TIMEOUT.
+                // them is what keeps `bus::stats().dropped` honest -- and lag is the
+                // expected consequence of an unattached host here, because every
+                // frame is then refused outright by the room check and the ring keeps
+                // filling behind a writer that publishes nothing.
                 let frame = match subscriber.next_message().await {
                     WaitResult::Lagged(n) => {
                         for _ in 0..n {
@@ -91,14 +142,27 @@ pub async fn run(
                     continue;
                 };
 
-                // The only thing standing between an unattached host and a stalled
-                // writer. See the module docs.
-                match select(tx.write_all(encoded), Timer::after(WRITE_TIMEOUT)).await {
-                    Either::First(Ok(())) => {}
-                    // Timed out or errored. Abandoning a half-written frame is fine:
-                    // COBS is zero-delimited, so the host resynchronises on the next
-                    // delimiter.
-                    _ => bus::note_dropped(),
+                // Packet at a time, each with its own room check and its own
+                // deadline. See the module docs for why neither guard is optional.
+                // Abandoning a half-written frame is fine: COBS is zero-delimited,
+                // so the host resynchronises on the next delimiter.
+                let mut sent = true;
+                for packet in encoded.chunks(PACKET) {
+                    if !in_endpoint_has_room() {
+                        // The hardware would discard these bytes and tell nobody.
+                        sent = false;
+                        break;
+                    }
+                    match select(tx.write_all(packet), Timer::after(WRITE_TIMEOUT)).await {
+                        Either::First(Ok(())) => {}
+                        _ => {
+                            sent = false;
+                            break;
+                        }
+                    }
+                }
+                if !sent {
+                    bus::note_dropped();
                 }
             }
         },

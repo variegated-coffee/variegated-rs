@@ -7,7 +7,7 @@ pub use devices::ble_devices_task;
 pub use scanner::ScanPrinter;
 
 use bt_hci::controller::ExternalController;
-use defmt::error;
+use variegated_log::log_error;
 use embassy_time::Timer;
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
@@ -25,7 +25,7 @@ pub async fn ble_runner_task(
         // This processes HCI events and delivers scan reports to the printer
         let r = runner.run_with_handler(printer).await;
         if let Err(_e) = r {
-            error!("Failed to run BLE, retrying in 10 seconds");
+            log_error!("Failed to run BLE, retrying in 10 seconds");
             Timer::after_secs(10).await;
         }
     }

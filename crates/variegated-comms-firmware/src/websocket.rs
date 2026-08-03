@@ -9,7 +9,7 @@ use embassy_sync::channel::{Channel, Sender};
 use embassy_time::{Duration, Instant, Timer};
 use edge_ws::{FrameHeader, FrameType};
 use embedded_io_async::Write;
-use defmt::{info, warn, error, debug};
+use variegated_log::{log_info, log_warn, log_error, log_debug};
 use postcard;
 use variegated_controller_types::{MachineCommand, RoutineIndex};
 
@@ -39,12 +39,12 @@ pub async fn websocket_server_task(
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(120)));
 
-        info!("WebSocket server listening on port 8080");
+        log_info!("WebSocket server listening on port 8080");
 
         // Accept a connection
         match socket.accept(8080).await {
             Ok(()) => {
-                info!("Accepted WebSocket connection");
+                log_info!("Accepted WebSocket connection");
 
                 // Handle the WebSocket connection
                 let result = handle_websocket_connection(
@@ -56,12 +56,12 @@ pub async fn websocket_server_task(
                 ).await;
 
                 match result {
-                    Ok(()) => info!("WebSocket connection closed normally"),
-                    Err(e) => warn!("WebSocket connection error: {}", e),
+                    Ok(()) => log_info!("WebSocket connection closed normally"),
+                    Err(e) => log_warn!("WebSocket connection error: {}", e),
                 }
             }
             Err(e) => {
-                error!("Failed to accept WebSocket connection: {:?}", e);
+                log_error!("Failed to accept WebSocket connection: {:?}", e);
                 Timer::after(Duration::from_secs(1)).await;
             }
         }
@@ -105,7 +105,7 @@ async fn handle_websocket_connection(
     socket.write_all(response.as_bytes()).await.map_err(|_| "Failed to send handshake response")?;
     socket.flush().await.map_err(|_| "Failed to flush handshake response")?;
 
-    info!("WebSocket handshake completed");
+    log_info!("WebSocket handshake completed");
 
     // Buffers for frame processing
     let mut frame_buf = [0u8; 2048];
@@ -114,7 +114,7 @@ async fn handle_websocket_connection(
     // Split socket into read and write halves for concurrent access
     let (mut socket_rx, mut socket_tx) = socket.split();
 
-    info!("Socket split complete, entering main loop");
+    log_info!("Socket split complete, entering main loop");
 
     // Track last status send time for throttling (5 per second)
     let mut last_status_send = Instant::now() - Duration::from_millis(200);
@@ -129,15 +129,15 @@ async fn handle_websocket_connection(
         let frame_done: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
         // Run frame receiver and update handler concurrently
-        debug!("Starting join for frame receive");
+        log_debug!("Starting join for frame receive");
         let (frame_result, _) = join(
             // Frame receiver - runs to completion, then signals done
             async {
                 let result = receive_frame_rx(&mut socket_rx, &mut frame_buf).await;
                 if let Err(e) = &result {
-                    error!("Failed to receive frame: {:?}", e);
+                    log_error!("Failed to receive frame: {:?}", e);
                 } else {
-                    debug!("Frame receiver completed successfully");
+                    log_debug!("Frame receiver completed successfully");
                 }
                 frame_done.signal(());
                 result
@@ -156,7 +156,7 @@ async fn handle_websocket_connection(
                         ),
                     ).await {
                         Either::First(()) => {
-                            debug!("Update handler: frame_done received, exiting");
+                            log_debug!("Update handler: frame_done received, exiting");
                             break;
                         }
                         Either::Second(Either::First(_status)) => {
@@ -170,13 +170,13 @@ async fn handle_websocket_connection(
                         }
                         Either::Second(Either::Second(Either::First(config))) => {
                             // Send configuration update to client
-                            info!("Sending ConfigurationUpdate to client");
+                            log_info!("Sending ConfigurationUpdate to client");
                             let msg = WsMessage::ConfigurationUpdate(config);
                             let _ = send_ws_message_tx(&mut socket_tx, &mut send_buf, &msg).await;
                         }
                         Either::Second(Either::Second(Either::Second(routine_list))) => {
                             // Convert RoutineList to RoutineStorage and send to client
-                            info!("Sending RoutinesUpdate to client");
+                            log_info!("Sending RoutinesUpdate to client");
                             let mut internal = BTreeMap::new();
                             let mut function = BTreeMap::new();
                             let mut custom = BTreeMap::new();
@@ -203,7 +203,7 @@ async fn handle_websocket_connection(
                 }
             },
         ).await;
-        debug!("Join completed");
+        log_debug!("Join completed");
 
         // Now handle the completed frame
         match frame_result {
@@ -211,7 +211,7 @@ async fn handle_websocket_connection(
                 match frame_type {
                     FrameType::Binary(_) => {
                         // Log raw bytes for debugging
-                        info!("Received binary frame, {} bytes: {:?}", payload.len(), &payload[..core::cmp::min(payload.len(), 32)]);
+                        log_info!("Received binary frame, {} bytes: {:?}", payload.len(), &payload[..core::cmp::min(payload.len(), 32)]);
 
                         // Deserialize and handle message
                         match postcard::from_bytes::<WsMessage>(payload) {
@@ -224,13 +224,13 @@ async fn handle_websocket_connection(
                                 ).await?;
                             }
                             Err(e) => {
-                                warn!("Failed to deserialize WebSocket message: {:?}", defmt::Debug2Format(&e));
+                                log_warn!("Failed to deserialize WebSocket message: {:?}", defmt::Debug2Format(&e));
                             }
                         }
                     }
                     FrameType::Text(_) => {
                         // We don't support text frames, only binary with Postcard
-                        warn!("Received text frame, ignoring (use binary)");
+                        log_warn!("Received text frame, ignoring (use binary)");
                     }
                     FrameType::Ping => {
                         // Respond with Pong
@@ -238,17 +238,17 @@ async fn handle_websocket_connection(
                     }
                     FrameType::Pong => {
                         // Ignore pong frames
-                        debug!("Received pong");
+                        log_debug!("Received pong");
                     }
                     FrameType::Close => {
-                        info!("Client sent close frame");
+                        log_info!("Client sent close frame");
                         // Send close frame back
                         send_frame_tx(&mut socket_tx, &mut send_buf, FrameType::Close, &[]).await?;
                         return Ok(());
                     }
                     FrameType::Continue(_) => {
                         // Handle continuation frames
-                        debug!("Received continuation frame");
+                        log_debug!("Received continuation frame");
                     }
                 }
             }
@@ -268,15 +268,15 @@ async fn handle_client_message<'a>(
 ) -> Result<(), &'static str> {
     match msg {
         WsMessage::RequestMachineDefinition => {
-            info!("Received RequestMachineDefinition");
+            log_info!("Received RequestMachineDefinition");
             // Get machine definition from cache
             let guard = MACHINE_DEFINITION.lock().await;
             if let Some(machine_def) = guard.as_ref() {
                 let response = WsMessage::MachineDefinition(machine_def.clone());
                 send_ws_message(socket, send_buf, &response).await?;
-                info!("Sent MachineDefinition response");
+                log_info!("Sent MachineDefinition response");
             } else {
-                warn!("Machine definition not available, sending error");
+                log_warn!("Machine definition not available, sending error");
                 let response = WsMessage::CommandAck {
                     id: 0,
                     success: false,
@@ -286,7 +286,7 @@ async fn handle_client_message<'a>(
             }
         }
         WsMessage::RequestRoutines => {
-            info!("Received RequestRoutines");
+            log_info!("Received RequestRoutines");
             // Get routines from cache
             let guard = ROUTINE_CACHE.lock().await;
             if let Some(routine_list) = guard.as_ref() {
@@ -316,9 +316,9 @@ async fn handle_client_message<'a>(
                 };
                 let response = WsMessage::RoutinesUpdate(storage);
                 send_ws_message(socket, send_buf, &response).await?;
-                info!("Sent RoutinesUpdate response");
+                log_info!("Sent RoutinesUpdate response");
             } else {
-                warn!("Routines not available, sending error");
+                log_warn!("Routines not available, sending error");
                 let response = WsMessage::CommandAck {
                     id: 0,
                     success: false,
@@ -329,14 +329,14 @@ async fn handle_client_message<'a>(
         }
         WsMessage::SendMachineCommand(cmd) => {
             // Forward command to machine command channel
-            info!("Received SendMachineCommand, forwarding");
+            log_info!("Received SendMachineCommand, forwarding");
             if command_sender.try_send(cmd).is_err() {
-                warn!("Command channel full, dropping command");
+                log_warn!("Command channel full, dropping command");
             }
         }
         // Server-to-client messages should not come from client
         _ => {
-            warn!("Received unexpected message type from client");
+            log_warn!("Received unexpected message type from client");
         }
     }
     Ok(())
@@ -595,7 +595,7 @@ async fn receive_frame_rx<'a>(
     let mut header_buf = [0u8; 14];
     let mut total_read = 0;
 
-    info!("Waiting to receive frame header");
+    log_info!("Waiting to receive frame header");
 
     // Read exactly 2 bytes for minimal header - don't over-read!
     while total_read < 2 {
@@ -646,17 +646,17 @@ async fn receive_frame_rx<'a>(
             payload_read += n;
         }
 
-        info!("Before unmask: {:?}, mask_key: {:?}", &payload_buf[..core::cmp::min(payload_len, 16)], header.mask_key);
+        log_info!("Before unmask: {:?}, mask_key: {:?}", &payload_buf[..core::cmp::min(payload_len, 16)], header.mask_key);
 
         if let Some(mask_key) = header.mask_key {
             FrameHeader::mask_with(payload_buf, Some(mask_key), 0);
         }
 
-        info!("After unmask: {:?}", &payload_buf[..core::cmp::min(payload_len, 16)]);
+        log_info!("After unmask: {:?}", &payload_buf[..core::cmp::min(payload_len, 16)]);
 
         Ok((header.frame_type, &buf[..payload_len]))
     } else {
-        info!("Received frame with no payload");
+        log_info!("Received frame with no payload");
 
         Ok((header.frame_type, &[]))
     }
@@ -704,14 +704,14 @@ async fn handle_client_message_tx<'a>(
 ) -> Result<(), &'static str> {
     match msg {
         WsMessage::RequestMachineDefinition => {
-            info!("Received RequestMachineDefinition");
+            log_info!("Received RequestMachineDefinition");
             let guard = MACHINE_DEFINITION.lock().await;
             if let Some(machine_def) = guard.as_ref() {
                 let response = WsMessage::MachineDefinition(machine_def.clone());
                 send_ws_message_tx(writer, send_buf, &response).await?;
-                info!("Sent MachineDefinition response");
+                log_info!("Sent MachineDefinition response");
             } else {
-                warn!("Machine definition not available, sending error");
+                log_warn!("Machine definition not available, sending error");
                 let response = WsMessage::CommandAck {
                     id: 0,
                     success: false,
@@ -721,7 +721,7 @@ async fn handle_client_message_tx<'a>(
             }
         }
         WsMessage::RequestRoutines => {
-            info!("Received RequestRoutines");
+            log_info!("Received RequestRoutines");
             let guard = ROUTINE_CACHE.lock().await;
             if let Some(routine_list) = guard.as_ref() {
                 let mut internal = BTreeMap::new();
@@ -749,9 +749,9 @@ async fn handle_client_message_tx<'a>(
                 };
                 let response = WsMessage::RoutinesUpdate(storage);
                 send_ws_message_tx(writer, send_buf, &response).await?;
-                info!("Sent RoutinesUpdate response");
+                log_info!("Sent RoutinesUpdate response");
             } else {
-                warn!("Routines not available, sending error");
+                log_warn!("Routines not available, sending error");
                 let response = WsMessage::CommandAck {
                     id: 0,
                     success: false,
@@ -761,13 +761,13 @@ async fn handle_client_message_tx<'a>(
             }
         }
         WsMessage::SendMachineCommand(cmd) => {
-            info!("Received SendMachineCommand, forwarding");
+            log_info!("Received SendMachineCommand, forwarding");
             if command_sender.try_send(cmd).is_err() {
-                warn!("Command channel full, dropping command");
+                log_warn!("Command channel full, dropping command");
             }
         }
         _ => {
-            warn!("Received unexpected message type from client");
+            log_warn!("Received unexpected message type from client");
         }
     }
     Ok(())

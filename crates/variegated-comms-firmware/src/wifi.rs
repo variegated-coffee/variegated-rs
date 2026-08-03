@@ -1,6 +1,6 @@
 //! WiFi connection management tasks
 
-use defmt::{error, info};
+use variegated_log::{log_error, log_info};
 use embassy_net::Runner as NetRunner;
 use embassy_time::{Duration, Timer};
 use embassy_futures::select::{select, Either};
@@ -24,7 +24,7 @@ use crate::config::{PASSWORD, SSID};
 /// `wait_for_disconnect_async()`.
 #[embassy_executor::task]
 pub async fn connection_task(mut controller: WifiController<'static>) {
-    info!("Starting WiFi connection task");
+    log_info!("Starting WiFi connection task");
 
     // 0.18 removed `start_async`/`is_started`: `set_config` configures *and*
     // starts the controller, and dropping it stops it. So this happens once,
@@ -66,14 +66,14 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             WIFI_RSSI_SIGNAL.signal(None);
         }
 
-        info!("Connecting to WiFi...");
+        log_info!("Connecting to WiFi...");
         match controller.connect_async().await {
             Ok(_) => {
                 WIFI_CONNECTED.store(true, Ordering::Relaxed);
-                info!("WiFi connected!");
+                log_info!("WiFi connected!");
             }
             Err(_e) => {
-                error!("Failed to connect to WiFi");
+                log_error!("Failed to connect to WiFi");
                 Timer::after(Duration::from_millis(5000)).await
             }
         }

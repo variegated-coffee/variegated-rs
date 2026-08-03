@@ -3717,6 +3717,7 @@ dependencies = [
  "variegated-controller-types",
  "variegated-debug",
  "variegated-debug-codec",
+ "variegated-log",
  "variegated-scale-trouble-driver",
  "variegated-trouble-connection-manager",
 ]
@@ -3771,6 +3772,18 @@ name = "variegated-instrumentation"
 version = "0.1.0"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "variegated-log"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+ "embassy-time",
+ "log",
+ "portable-atomic",
+ "variegated-controller-types",
+ "variegated-debug",
 ]
 
 [[package]]

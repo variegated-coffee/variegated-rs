@@ -4,7 +4,7 @@ use esphome_device::entity_type::sensor::SensorState;
 use esphome_device::entity_type::number::NumberState;
 use esphome_device::entity_type::switch::SwitchState;
 use esphome_device::entity_type::select::SelectState;
-use defmt::{debug, info};
+use variegated_log::{log_debug, log_info};
 use variegated_controller_types::{MachineDefinition, SensorCapability, ActuatorCapability, ControlModeCapability};
 
 use crate::channels::{
@@ -36,7 +36,7 @@ pub async fn configuration_task(
         // Wait for a configuration update
         let config = receiver.next_message_pure().await;
 
-        info!("Processing configuration update with machine definition");
+        log_info!("Processing configuration update with machine definition");
 
         // Update machine-level configuration
         update_machine_configuration(&sender, &config.machine_config);
@@ -86,7 +86,7 @@ pub async fn status_task(
 ) {
     // Build a set of valid entity keys for fast lookup
     let valid_entity_keys = build_entity_key_set(entities);
-    info!("Status task initialized with {} valid entity keys", valid_entity_keys.len());
+    log_info!("Status task initialized with {} valid entity keys", valid_entity_keys.len());
 
     // Helper macro to send state updates only for valid entities
     macro_rules! send_if_valid {
@@ -179,7 +179,7 @@ pub async fn status_task(
                     missing_state: false,
                 }));
 
-                debug!("Updated boiler {} status", boiler_index);
+                log_debug!("Updated boiler {} status", boiler_index);
             }
 
             // Update all group statuses dynamically
@@ -251,7 +251,7 @@ pub async fn status_task(
                     ));
                 }
 
-                debug!("Updated group {} status", group_index);
+                log_debug!("Updated group {} status", group_index);
             }
 
             // Update all water tap statuses dynamically
@@ -266,7 +266,7 @@ pub async fn status_task(
                     missing_state: false,
                 }));
 
-                debug!("Updated water tap {} status", water_tap_index);
+                log_debug!("Updated water tap {} status", water_tap_index);
             }
 
             // Update all steam wand statuses dynamically
@@ -288,7 +288,7 @@ pub async fn status_task(
                     SensorState::new(valve_openness_key, Some(steam_wand_status.valve_openness as f32))
                 ));
 
-                debug!("Updated steam wand {} status", steam_wand_index);
+                log_debug!("Updated steam wand {} status", steam_wand_index);
             }
 
             // Update all tank statuses dynamically
@@ -301,7 +301,7 @@ pub async fn status_task(
                     SensorState::new(water_level_key, tank_status.water_level.map(|wl| wl as f32))
                 ));
 
-                debug!("Updated tank {} status", tank_index);
+                log_debug!("Updated tank {} status", tank_index);
             }
 
             // Update machine mode status
@@ -334,7 +334,7 @@ fn update_machine_configuration(
         state: machine_config.heating_element_interlock,
     }));
 
-    info!("Updated machine configuration: heating_element_interlock={}", machine_config.heating_element_interlock);
+    log_info!("Updated machine configuration: heating_element_interlock={}", machine_config.heating_element_interlock);
 }
 
 fn update_boiler_configuration(
@@ -528,7 +528,7 @@ fn update_boiler_configuration(
         missing_state: false,
     }));
 
-    info!("Updated boiler {} configuration", boiler_index);
+    log_info!("Updated boiler {} configuration", boiler_index);
 }
 
 fn update_group_configuration(
@@ -592,7 +592,7 @@ fn update_group_configuration(
         }));
     }
 
-    info!("Updated group {} configuration", group_index);
+    log_info!("Updated group {} configuration", group_index);
 }
 
 fn update_water_tap_configuration(
@@ -640,7 +640,7 @@ fn update_water_tap_configuration(
         }));
     }
 
-    info!("Updated water tap {} configuration", water_tap_index);
+    log_info!("Updated water tap {} configuration", water_tap_index);
 }
 
 fn update_steam_wand_configuration(
@@ -711,7 +711,7 @@ fn update_steam_wand_configuration(
         state: steam_wand_config.auto_purge_enabled,
     }));
 
-    info!("Updated steam wand {} configuration", steam_wand_index);
+    log_info!("Updated steam wand {} configuration", steam_wand_index);
 }
 
 fn update_tank_configuration(
@@ -733,5 +733,5 @@ fn update_tank_configuration(
         }));
     }
 
-    info!("Updated tank {} configuration", tank_index);
+    log_info!("Updated tank {} configuration", tank_index);
 }

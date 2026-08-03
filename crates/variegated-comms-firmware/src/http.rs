@@ -10,7 +10,10 @@ use core::net::SocketAddr;
 static INDEX_HTML: &[u8] = include_bytes!("../../../frontend/dist/index.html");
 static APP_JS_GZ: &[u8] = include_bytes!("../../../frontend/dist/assets/index.js.gz");
 
-use defmt::{error, info, warn};
+// No `log_warn`: this file's only `warn!` site is the one at line ~1293 that had to
+// stay on `defmt`, because `defmt::Debug2Format` implements `Debug` but not
+// `Display` and that site formats it with `{}`.
+use variegated_log::{log_error, log_info};
 use edge_http::io::server::{Connection as ServerConnection, DefaultServer, Handler};
 use edge_http::io::Error;
 use edge_http::Method;
@@ -165,7 +168,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("GET /status");
+        log_info!("GET /status");
 
         let status = STATUS_CACHE.lock().await;
         if let Some(ref s) = *status {
@@ -175,7 +178,7 @@ impl HttpHandler {
                     Self::send_binary(conn, &binary).await
                 }
                 Err(e) => {
-                    error!("Failed to serialize status: {:?}", defmt::Debug2Format(&e));
+                    log_error!("Failed to serialize status: {:?}", defmt::Debug2Format(&e));
                     Self::send_internal_error(conn, "Failed to serialize status").await
                 }
             }
@@ -192,7 +195,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("GET /configuration");
+        log_info!("GET /configuration");
 
         let config = CONFIG_CACHE.lock().await;
         if let Some(ref c) = *config {
@@ -202,7 +205,7 @@ impl HttpHandler {
                     Self::send_binary(conn, &binary).await
                 }
                 Err(e) => {
-                    error!("Failed to serialize configuration: {:?}", defmt::Debug2Format(&e));
+                    log_error!("Failed to serialize configuration: {:?}", defmt::Debug2Format(&e));
                     Self::send_internal_error(conn, "Failed to serialize configuration").await
                 }
             }
@@ -219,7 +222,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("GET /machine-definition");
+        log_info!("GET /machine-definition");
 
         let machine_def = MACHINE_DEFINITION.lock().await;
         if let Some(ref md) = *machine_def {
@@ -229,7 +232,7 @@ impl HttpHandler {
                     Self::send_binary(conn, &binary).await
                 }
                 Err(e) => {
-                    error!("Failed to serialize machine definition: {:?}", defmt::Debug2Format(&e));
+                    log_error!("Failed to serialize machine definition: {:?}", defmt::Debug2Format(&e));
                     Self::send_internal_error(conn, "Failed to serialize machine definition").await
                 }
             }
@@ -246,7 +249,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("GET /routines");
+        log_info!("GET /routines");
 
         let routine_list = ROUTINE_CACHE.lock().await;
         if let Some(ref routines) = *routine_list {
@@ -281,7 +284,7 @@ impl HttpHandler {
                     Self::send_binary(conn, &binary).await
                 }
                 Err(e) => {
-                    error!("Failed to serialize routines: {:?}", defmt::Debug2Format(&e));
+                    log_error!("Failed to serialize routines: {:?}", defmt::Debug2Format(&e));
                     Self::send_internal_error(conn, "Failed to serialize routines").await
                 }
             }
@@ -298,14 +301,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /schedules");
+        log_info!("POST /schedules");
 
         let body = Self::read_body(conn, 8192).await?;
 
         let schedule_item: ScheduleItem = match postcard::from_bytes(&body) {
             Ok(item) => item,
             Err(e) => {
-                error!("Failed to deserialize ScheduleItem: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize ScheduleItem: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -313,11 +316,11 @@ impl HttpHandler {
         let cmd = MachineCommand::AddScheduleItem(schedule_item);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Schedule add command sent");
+                log_info!("Schedule add command sent");
                 Self::send_text(conn, 201, "Created", "Schedule added").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -332,14 +335,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("PUT /schedules/{}", index);
+        log_info!("PUT /schedules/{}", index);
 
         let body = Self::read_body(conn, 8192).await?;
 
         let schedule_item: ScheduleItem = match postcard::from_bytes(&body) {
             Ok(item) => item,
             Err(e) => {
-                error!("Failed to deserialize ScheduleItem: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize ScheduleItem: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -347,11 +350,11 @@ impl HttpHandler {
         let cmd = MachineCommand::UpdateScheduleItem(index, schedule_item);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Schedule update command sent for index {}", index);
+                log_info!("Schedule update command sent for index {}", index);
                 Self::send_text(conn, 200, "OK", "Schedule updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -366,17 +369,17 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("DELETE /schedules/{}", index);
+        log_info!("DELETE /schedules/{}", index);
 
         let cmd = MachineCommand::RemoveScheduleItem(index);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Schedule delete command sent for index {}", index);
+                log_info!("Schedule delete command sent for index {}", index);
                 conn.initiate_response(204, Some("No Content"), &[]).await?;
                 Ok(())
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -391,7 +394,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /routines/{}", path);
+        log_info!("POST /routines/{}", path);
 
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -406,7 +409,7 @@ impl HttpHandler {
         let routine: Routine = match postcard::from_bytes(&body) {
             Ok(item) => item,
             Err(e) => {
-                error!("Failed to deserialize Routine: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize Routine: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -453,11 +456,11 @@ impl HttpHandler {
 
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Routine add command sent");
+                log_info!("Routine add command sent");
                 Self::send_text(conn, 201, "Created", "Routine added").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -473,7 +476,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("PUT /routines/{}/{}", routine_type, index);
+        log_info!("PUT /routines/{}/{}", routine_type, index);
 
         let routine_index = match routine_type {
             "internal" => RoutineIndex::Internal(index),
@@ -493,7 +496,7 @@ impl HttpHandler {
         let routine: Routine = match postcard::from_bytes(&body) {
             Ok(item) => item,
             Err(e) => {
-                error!("Failed to deserialize Routine: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize Routine: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -501,11 +504,11 @@ impl HttpHandler {
         let cmd = MachineCommand::UpdateRoutine(routine_index, routine);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Routine update command sent");
+                log_info!("Routine update command sent");
                 Self::send_text(conn, 200, "OK", "Routine updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -521,7 +524,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("DELETE /routines/{}/{}", routine_type, index);
+        log_info!("DELETE /routines/{}/{}", routine_type, index);
 
         let routine_index = match routine_type {
             "internal" => RoutineIndex::Internal(index),
@@ -539,12 +542,12 @@ impl HttpHandler {
         let cmd = MachineCommand::RemoveRoutine(routine_index);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Routine delete command sent");
+                log_info!("Routine delete command sent");
                 conn.initiate_response(204, Some("No Content"), &[]).await?;
                 Ok(())
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -560,7 +563,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/run-routine/{}/{}", routine_type, index);
+        log_info!("POST /command/run-routine/{}/{}", routine_type, index);
 
         let routine_index = match routine_type {
             "internal" => RoutineIndex::Internal(index),
@@ -578,11 +581,11 @@ impl HttpHandler {
         let cmd = MachineCommand::RunRoutine(routine_index, None);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Run routine command sent");
+                log_info!("Run routine command sent");
                 Self::send_text(conn, 200, "OK", "Routine execution started").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -596,16 +599,16 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/cancel-routine");
+        log_info!("POST /command/cancel-routine");
 
         let cmd = MachineCommand::CancelRoutine;
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Cancel routine command sent");
+                log_info!("Cancel routine command sent");
                 Self::send_text(conn, 200, "OK", "Routine cancelled").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -620,16 +623,16 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/tare-group-scale/{}", index);
+        log_info!("POST /command/tare-group-scale/{}", index);
 
         let cmd = MachineCommand::TareGroupScale(index);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Tare group scale command sent");
+                log_info!("Tare group scale command sent");
                 Self::send_text(conn, 200, "OK", "Group scale tared").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -644,16 +647,16 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/zero-calibrate-group-scale/{}", index);
+        log_info!("POST /command/zero-calibrate-group-scale/{}", index);
 
         let cmd = MachineCommand::ZeroCalibrateGroupScale(index);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Zero calibrate group scale command sent");
+                log_info!("Zero calibrate group scale command sent");
                 Self::send_text(conn, 200, "OK", "Group scale zero calibrated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -668,16 +671,16 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/calibrate-group-scale-100g/{}", index);
+        log_info!("POST /command/calibrate-group-scale-100g/{}", index);
 
         let cmd = MachineCommand::CalibrateGroupScale100g(index);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Calibrate group scale 100g command sent");
+                log_info!("Calibrate group scale 100g command sent");
                 Self::send_text(conn, 200, "OK", "Group scale calibrated with 100g").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -692,7 +695,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-mode/{}", mode_str);
+        log_info!("POST /command/set-mode/{}", mode_str);
 
         let mode = match mode_str.to_lowercase().as_str() {
             "on" => MachineMode::On,
@@ -710,11 +713,11 @@ impl HttpHandler {
         let cmd = MachineCommand::SetMachineMode(mode);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Set machine mode command sent");
+                log_info!("Set machine mode command sent");
                 Self::send_text(conn, 200, "OK", "Machine mode updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -728,14 +731,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-boiler-control");
+        log_info!("POST /command/set-boiler-control");
 
         let body = Self::read_body(conn, 512).await?;
 
         let req: SetBoilerControlRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetBoilerControlRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetBoilerControlRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -755,11 +758,11 @@ impl HttpHandler {
 
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Boiler control command sent");
+                log_info!("Boiler control command sent");
                 Self::send_text(conn, 200, "OK", "Boiler control updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -773,14 +776,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-group-control");
+        log_info!("POST /command/set-group-control");
 
         let body = Self::read_body(conn, 512).await?;
 
         let req: SetGroupControlRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetGroupControlRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetGroupControlRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -815,11 +818,11 @@ impl HttpHandler {
 
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Group control command sent");
+                log_info!("Group control command sent");
                 Self::send_text(conn, 200, "OK", "Group control updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -833,14 +836,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-pid-parameters");
+        log_info!("POST /command/set-pid-parameters");
 
         let body = Self::read_body(conn, 1024).await?;
 
         let req: SetPidParametersRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetPidParametersRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetPidParametersRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -863,11 +866,11 @@ impl HttpHandler {
         let cmd = MachineCommand::SetPidParameters(target, req.pid_parameters);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("SetPidParameters command sent");
+                log_info!("SetPidParameters command sent");
                 Self::send_text(conn, 200, "OK", "PID parameters updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -881,14 +884,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-group-pump-configuration");
+        log_info!("POST /command/set-group-pump-configuration");
 
         let body = Self::read_body(conn, 512).await?;
 
         let req: SetGroupPumpConfigurationRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetGroupPumpConfigurationRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetGroupPumpConfigurationRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -896,11 +899,11 @@ impl HttpHandler {
         let cmd = MachineCommand::SetGroupPumpConfiguration(req.group_index, req.pump_configuration);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("SetGroupPumpConfiguration command sent");
+                log_info!("SetGroupPumpConfiguration command sent");
                 Self::send_text(conn, 200, "OK", "Group pump configuration updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -914,14 +917,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-water-tap-pump-configuration");
+        log_info!("POST /command/set-water-tap-pump-configuration");
 
         let body = Self::read_body(conn, 512).await?;
 
         let req: SetWaterTapPumpConfigurationRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetWaterTapPumpConfigurationRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetWaterTapPumpConfigurationRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -932,11 +935,11 @@ impl HttpHandler {
         );
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("SetWaterTapPumpConfiguration command sent");
+                log_info!("SetWaterTapPumpConfiguration command sent");
                 Self::send_text(conn, 200, "OK", "Water tap pump configuration updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -950,14 +953,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-fill-pump-configuration");
+        log_info!("POST /command/set-fill-pump-configuration");
 
         let body = Self::read_body(conn, 512).await?;
 
         let req: SetFillPumpConfigurationRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetFillPumpConfigurationRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetFillPumpConfigurationRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -966,11 +969,11 @@ impl HttpHandler {
             MachineCommand::SetFillPumpConfiguration(req.boiler_index, req.pump_configuration);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("SetFillPumpConfiguration command sent");
+                log_info!("SetFillPumpConfiguration command sent");
                 Self::send_text(conn, 200, "OK", "Fill pump configuration updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -984,14 +987,14 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/set-steam-valve-openness");
+        log_info!("POST /command/set-steam-valve-openness");
 
         let body = Self::read_body(conn, 512).await?;
 
         let req: SetSteamValveOpennessRequest = match postcard::from_bytes(&body) {
             Ok(r) => r,
             Err(e) => {
-                error!("Failed to deserialize SetSteamValveOpennessRequest: {:?}", defmt::Debug2Format(&e));
+                log_error!("Failed to deserialize SetSteamValveOpennessRequest: {:?}", defmt::Debug2Format(&e));
                 return Self::send_bad_request(conn, "Invalid postcard data").await;
             }
         };
@@ -999,11 +1002,11 @@ impl HttpHandler {
         let cmd = MachineCommand::SetSteamValveOpenness(req.steam_wand_index, req.openness);
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("SetSteamValveOpenness command sent");
+                log_info!("SetSteamValveOpenness command sent");
                 Self::send_text(conn, 200, "OK", "Steam valve openness updated").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -1017,16 +1020,16 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/optimize-routine-storage");
+        log_info!("POST /command/optimize-routine-storage");
 
         let cmd = MachineCommand::OptimizeRoutineStorage;
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Optimize routine storage command sent");
+                log_info!("Optimize routine storage command sent");
                 Self::send_text(conn, 200, "OK", "Routine storage optimization started").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -1040,16 +1043,16 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/optimize-schedule-storage");
+        log_info!("POST /command/optimize-schedule-storage");
 
         let cmd = MachineCommand::OptimizeScheduleStorage;
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Optimize schedule storage command sent");
+                log_info!("Optimize schedule storage command sent");
                 Self::send_text(conn, 200, "OK", "Schedule storage optimization started").await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -1063,17 +1066,17 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("POST /command/optimize-configuration-storage");
+        log_info!("POST /command/optimize-configuration-storage");
 
         let cmd = MachineCommand::OptimizeConfigurationStorage;
         match self.command_sender.try_send(cmd) {
             Ok(_) => {
-                info!("Optimize configuration storage command sent");
+                log_info!("Optimize configuration storage command sent");
                 Self::send_text(conn, 200, "OK", "Configuration storage optimization started")
                     .await
             }
             Err(_) => {
-                error!("Command channel full");
+                log_error!("Command channel full");
                 Self::send_unavailable(conn, "Command channel full").await
             }
         }
@@ -1098,7 +1101,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("Serving index.html");
+        log_info!("Serving index.html");
         Self::send_response(conn, 200, "OK", "text/html; charset=utf-8", INDEX_HTML).await
     }
 
@@ -1109,7 +1112,7 @@ impl HttpHandler {
     where
         T: Read + Write,
     {
-        info!("Serving app.js.gz");
+        log_info!("Serving app.js.gz");
         conn.initiate_response(
             200,
             Some("OK"),
@@ -1284,13 +1287,13 @@ impl Handler for HttpHandler {
 
             // SPA fallback - serve index.html for unknown GET paths
             (Method::Get, _) => {
-                info!("SPA fallback for: {}", path);
+                log_info!("SPA fallback for: {}", path);
                 Self::handle_index_html(conn).await
             }
 
             // 404 for non-GET methods on unknown paths
             _ => {
-                warn!("Unknown endpoint: {} {}", defmt::Debug2Format(&method), path);
+                defmt::warn!("Unknown endpoint: {} {}", defmt::Debug2Format(&method), path);
                 Self::send_not_found(conn).await
             }
         }
@@ -1303,7 +1306,7 @@ pub async fn cache_update_task(
     mut status_subscriber: ApplicationStatusSubscriber,
     mut config_subscriber: ApplicationConfigurationSubscriber,
 ) {
-    info!("Cache update task started");
+    log_info!("Cache update task started");
 
     loop {
         match select(
@@ -1330,7 +1333,7 @@ pub async fn http_server_task(
     tcp_stack: &'static Tcp<'static>,
     command_sender: &'static MachineCommandSender,
 ) {
-    info!("Starting HTTP server on port 80...");
+    log_info!("Starting HTTP server on port 80...");
 
     let mut server = DefaultServer::new();
     let handler = HttpHandler::new(command_sender);
@@ -1339,13 +1342,13 @@ pub async fn http_server_task(
 
     match tcp_stack.bind(bind_addr).await {
         Ok(acceptor) => {
-            info!("HTTP server bound to port 80");
+            log_info!("HTTP server bound to port 80");
             if let Err(e) = server.run(None, acceptor, handler).await {
-                error!("HTTP server error: {:?}", e);
+                log_error!("HTTP server error: {:?}", e);
             }
         }
         Err(e) => {
-            error!("Failed to bind HTTP server to port 80: {:?}", e);
+            log_error!("Failed to bind HTTP server to port 80: {:?}", e);
         }
     }
 }

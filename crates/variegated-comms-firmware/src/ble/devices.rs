@@ -1,7 +1,7 @@
 //! BLE device management and measurement loops
 
 use bt_hci::controller::ExternalController;
-use defmt::{error, info};
+use variegated_log::{log_error, log_info};
 use embassy_futures::join::join;
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -44,7 +44,7 @@ pub async fn ble_devices_task(
         driver.set_maintain_connection(true).await; */
     }
 
-    info!("BLE Devices: Configured Belka {:?} and ACAIA {:?}", belka_address, acaia_address);
+    log_info!("BLE Devices: Configured Belka {:?} and ACAIA {:?}", belka_address, acaia_address);
 
     // Run connection manager and both device measurement loops concurrently
     join(
@@ -79,7 +79,7 @@ async fn belka_measurement_loop(
             continue;
         }
 
-        info!("Belka Portal connected, creating GATT client...");
+        log_info!("Belka Portal connected, creating GATT client...");
 
         // Create GATT client and subscribe
         let result = {
@@ -90,21 +90,21 @@ async fn belka_measurement_loop(
 
         match result {
             Ok((_conn, gatt)) => {
-                info!("GATT client created, running task...");
+                log_info!("GATT client created, running task...");
 
                 // Signal that Belka is connected
                 BELKA_CONNECTION_STATUS.store(true, Ordering::Relaxed);
 
                 // Run GATT client task alongside operations, exit when either completes
                 let _ = select(gatt.task(), async {
-                    info!("Let's first read measurements...");
+                    log_info!("Let's first read measurements...");
                     let r = gatt.read_measurements().await;
-                    info!("Measurements: {:?}", r);
-                    info!("Then subscribe...");
+                    log_info!("Measurements: {:?}", r);
+                    log_info!("Then subscribe...");
 
                     match gatt.subscribe().await {
                         Ok(mut stream) => {
-                            info!("Successfully subscribed to Belka Portal measurements");
+                            log_info!("Successfully subscribed to Belka Portal measurements");
                             loop {
                                 // Race between getting next measurement and checking connection status
                                 match select(
@@ -119,7 +119,7 @@ async fn belka_measurement_loop(
                                     Either::First(result) => {
                                         match result {
                                             Ok(measurement) => {
-                                               /* info!(
+                                               /* log_info!(
                                                     "Portal Measurement: EC={}, Temp={} °C, Battery={}",
                                                     measurement.ec,
                                                     measurement.temperature,
@@ -151,14 +151,14 @@ async fn belka_measurement_loop(
                                                 sensor_sender.send(battery_reading).await;
                                             }
                                             Err(e) => {
-                                                error!("Failed to read measurement: {:?}", e);
+                                                log_error!("Failed to read measurement: {:?}", e);
                                                 break;
                                             }
                                         }
                                     }
                                     Either::Second(is_connected) => {
                                         if !is_connected {
-                                            info!("Connection lost during measurements, exiting");
+                                            log_info!("Connection lost during measurements, exiting");
                                             BELKA_CONNECTION_STATUS.store(false, Ordering::Relaxed);
                                             break;
                                         }
@@ -167,23 +167,23 @@ async fn belka_measurement_loop(
                             }
                         }
                         Err(e) => {
-                            error!("Failed to subscribe to measurements: {:?}", e);
+                            log_error!("Failed to subscribe to measurements: {:?}", e);
                         }
                     }
                 }).await;
-                info!("GATT join completed, connection dropped");
+                log_info!("GATT join completed, connection dropped");
 
                 // Signal disconnection
                 BELKA_CONNECTION_STATUS.store(false, Ordering::Relaxed);
             }
             Err(e) => {
-                error!("Failed to create GATT client: {:?}", e);
+                log_error!("Failed to create GATT client: {:?}", e);
                 BELKA_CONNECTION_STATUS.store(false, Ordering::Relaxed);
             }
         }
 
         // Wait before retrying
-        info!("Restarting Belka measurement loop...");
+        log_info!("Restarting Belka measurement loop...");
         Timer::after(Duration::from_secs(5)).await;
     }
 }
@@ -208,7 +208,7 @@ async fn acaia_measurement_loop(
             continue;
         }
 
-        info!("ACAIA scale connected, creating GATT client...");
+        log_info!("ACAIA scale connected, creating GATT client...");
 
         // Create GATT client
         let result = {
@@ -219,20 +219,20 @@ async fn acaia_measurement_loop(
 
         match result {
             Ok((_conn, gatt)) => {
-                info!("ACAIA GATT client created");
+                log_info!("ACAIA GATT client created");
 
                 // Run GATT client task alongside operations
                 let _ = select(gatt.task(), async {
                     // Initialize scale (subscribe + handshake in correct order)
-                    info!("Initializing ACAIA scale...");
+                    log_info!("Initializing ACAIA scale...");
                     match gatt.initialize().await {
                         Ok(mut stream) => {
-                            info!("ACAIA scale initialized successfully");
+                            log_info!("ACAIA scale initialized successfully");
 
                             // Send initial heartbeat to trigger data flow
-                            info!("Sending initial heartbeat");
+                            log_info!("Sending initial heartbeat");
                             if let Err(e) = gatt.send_heartbeat().await {
-                                error!("Failed to send initial heartbeat: {:?}", e);
+                                log_error!("Failed to send initial heartbeat: {:?}", e);
                             }
 
                             let mut last_heartbeat = Instant::now();
@@ -248,12 +248,12 @@ async fn acaia_measurement_loop(
                                             Ok(event) => {
                                                 match event {
                                                     ScaleEvent::Weight(w) => {
-                                                        info!("Scale Weight: {} g", w.weight);
+                                                        log_info!("Scale Weight: {} g", w.weight);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
-                                                error!("Failed to read ACAIA event: {:?}", e);
+                                                log_error!("Failed to read ACAIA event: {:?}", e);
                                                 break;
                                             }
                                         }
@@ -265,7 +265,7 @@ async fn acaia_measurement_loop(
                                         let is_connected = driver.is_connected().await;
 
                                         if !is_connected {
-                                            info!("ACAIA connection lost during measurements, exiting");
+                                            log_info!("ACAIA connection lost during measurements, exiting");
                                             break;
                                         }
                                     }
@@ -275,7 +275,7 @@ async fn acaia_measurement_loop(
                                 let now = Instant::now();
                                 if now.duration_since(last_heartbeat) >= Duration::from_secs(2) {
                                     if let Err(e) = gatt.send_heartbeat().await {
-                                        error!("Failed to send ACAIA heartbeat: {:?}", e);
+                                        log_error!("Failed to send ACAIA heartbeat: {:?}", e);
                                     } else {
                                         last_heartbeat = now;
                                     }
@@ -283,19 +283,19 @@ async fn acaia_measurement_loop(
                             }
                         }
                         Err(e) => {
-                            error!("Failed to initialize ACAIA scale: {:?}", e);
+                            log_error!("Failed to initialize ACAIA scale: {:?}", e);
                         }
                     }
                 }).await;
-                info!("ACAIA GATT task completed, connection dropped");
+                log_info!("ACAIA GATT task completed, connection dropped");
             }
             Err(e) => {
-                error!("Failed to create ACAIA GATT client: {:?}", e);
+                log_error!("Failed to create ACAIA GATT client: {:?}", e);
             }
         }
 
         // Wait before retrying
-        info!("Restarting ACAIA measurement loop...");
+        log_info!("Restarting ACAIA measurement loop...");
         Timer::after(Duration::from_secs(5)).await;
     }
 }

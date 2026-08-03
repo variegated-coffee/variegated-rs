@@ -5,7 +5,7 @@ use embassy_futures::select::{select4, Either4};
 use embassy_futures::join::join;
 use esp_hal::uart::{UartRx, UartTx};
 use esp_hal::Async;
-use defmt::{info, warn, error};
+use variegated_log::{log_info, log_warn, log_error};
 use postcard::accumulator::{CobsAccumulator, FeedResult};
 use portable_atomic::{AtomicBool, Ordering};
 use variegated_controller_types::{
@@ -31,7 +31,7 @@ pub async fn start(
     command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
     sensor_reading_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
-    info!("Starting UART transceiver");
+    log_info!("Starting UART transceiver");
 
     // Shared flags to track if configuration and machine definition have been received
     static CONFIG_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -49,10 +49,10 @@ pub async fn start(
         // `variegated_comms`'s reader on the other end of this UART.
         //
         // A version-skewed application processor is otherwise invisible from the
-        // host: its frames fail to decode here, produce a `warn!` into a defmt log
-        // nobody is reading (esp-println now writes to UART0), and vanish -- while
-        // the application side counts them as relayed successfully. This is what
-        // puts that failure into the stream a host actually sees.
+        // host: its frames fail to decode here, produce a warning that goes nowhere
+        // (esp-println is `no-op` in this build), and vanish -- while the application
+        // side counts them as relayed successfully. This is what puts that failure
+        // into the stream a host actually sees.
         //
         // Edge triggered, and that is load-bearing rather than tidiness:
         // `bus::emit_event` bypasses the log suppressor entirely, and a garbage
@@ -67,7 +67,7 @@ pub async fn start(
             let bytes_read = match rx.read_async(&mut buffer).await {
                 Ok(n) => n,
                 Err(e) => {
-                    error!("UART read error: {:?}", e);
+                    log_error!("UART read error: {:?}", e);
                     continue;
                 }
             };
@@ -80,7 +80,7 @@ pub async fn start(
                     FeedResult::Consumed => break, // All data consumed, wait for more
                     FeedResult::OverFull(new_wind) => {
                         // Buffer is full, reset and try again
-                        warn!("COBS accumulator buffer full, resetting");
+                        log_warn!("COBS accumulator buffer full, resetting");
                         window = new_wind;
                         accumulator = CobsAccumulator::<4096>::new();
                     }
@@ -88,11 +88,15 @@ pub async fn start(
                         // Deserialization error, reset and continue with remaining data
                         if link_healthy {
                             link_healthy = false;
-                            // The defmt line stays alongside the typed event, by
-                            // design: the probe view and the debug stream have
-                            // different audiences, and a probe user must not lose
-                            // lines because a host tool gained them.
-                            warn!("COBS deserialization error, resetting");
+                            // Note the `log_warn!` is *inside* the edge guard, so
+                            // this site now logs once per burst rather than once per
+                            // failure. That is a deliberate change from the previous
+                            // level-triggered `warn!`, not an accident of where the
+                            // brace went: the flood argument below applies to the log
+                            // as much as to the bus -- a few hundred lines a second
+                            // is not a diagnostic -- and with `log_warn!` the two are
+                            // now the same call anyway.
+                            log_warn!("COBS deserialization error, resetting");
                             bus::emit_event(DebugEvent::LinkDecodeError);
                         }
                         window = new_wind;
@@ -111,22 +115,22 @@ pub async fn start(
                             ApplicationProcessorToCommsProcessorMessage::Configuration(config) => {
                                 config_publisher.publish_immediate(config);
                                 CONFIG_RECEIVED.store(true, Ordering::Relaxed);
-                                info!("Received configuration update - stopping periodic requests");
+                                log_info!("Received configuration update - stopping periodic requests");
                             }
                             ApplicationProcessorToCommsProcessorMessage::Hello(_) => {
-                                info!("Received Hello message");
+                                log_info!("Received Hello message");
                             }
                             ApplicationProcessorToCommsProcessorMessage::MachineDefinition(machine_def) => {
-                                info!("Received MachineDefinition: {}", machine_def.name.as_str());
+                                log_info!("Received MachineDefinition: {}", machine_def.name.as_str());
                                 {
                                     let mut guard = MACHINE_DEFINITION.lock().await;
                                     *guard = Some(machine_def);
                                 }
                                 MACHINE_DEF_RECEIVED.store(true, Ordering::Relaxed);
-                                info!("Received machine definition update - stopping periodic requests");
+                                log_info!("Received machine definition update - stopping periodic requests");
                             }
                             ApplicationProcessorToCommsProcessorMessage::Routines(routine_list) => {
-                                info!("Received {} routines from application processor", routine_list.routines.len());
+                                log_info!("Received {} routines from application processor", routine_list.routines.len());
                                 // Publish to channel for WebSocket clients
                                 routine_publisher.publish_immediate(routine_list.clone());
                                 // Also cache for HTTP/request-response access
@@ -136,13 +140,13 @@ pub async fn start(
                                 }
                             }
                             ApplicationProcessorToCommsProcessorMessage::ShotLogList(_shot_log_list) => {
-                                info!("Received shot log list (not yet implemented)");
+                                log_info!("Received shot log list (not yet implemented)");
                             }
                             ApplicationProcessorToCommsProcessorMessage::ShotLogEntry(_shot_log_entry) => {
-                                info!("Received shot log entry (not yet implemented)");
+                                log_info!("Received shot log entry (not yet implemented)");
                             }
                             ApplicationProcessorToCommsProcessorMessage::ShotLogEntryDataPoint(_data_point) => {
-                                info!("Received shot log data point (not yet implemented)");
+                                log_info!("Received shot log data point (not yet implemented)");
                             }
                             ApplicationProcessorToCommsProcessorMessage::Debug(_frame) => {
                                 // Relayed application-processor debug frames. Task 11
@@ -184,7 +188,7 @@ pub async fn start(
             .expect("Failed to serialize RequestConfiguration");
         tx.write_async(&serialized_message).await
             .expect("Failed to write RequestConfiguration");
-        warn!("Sent initial RequestConfiguration command on startup");
+        log_warn!("Sent initial RequestConfiguration command on startup");
 
         // Send initial RequestMachineDefinition command on startup
         let request_machine_def_message = CommsProcessorToApplicationProcessorMessage::RequestMachineDefinition;
@@ -192,7 +196,7 @@ pub async fn start(
             .expect("Failed to serialize RequestMachineDefinition");
         tx.write_async(&serialized_message).await
             .expect("Failed to write RequestMachineDefinition");
-        warn!("Sent initial RequestMachineDefinition command on startup");
+        log_warn!("Sent initial RequestMachineDefinition command on startup");
 
         // Send initial RequestRoutines command on startup
         let request_routines_message = CommsProcessorToApplicationProcessorMessage::RequestRoutines;
@@ -200,7 +204,7 @@ pub async fn start(
             .expect("Failed to serialize RequestRoutines");
         tx.write_async(&serialized_message).await
             .expect("Failed to write RequestRoutines");
-        warn!("Sent initial RequestRoutines command on startup");
+        log_warn!("Sent initial RequestRoutines command on startup");
 
         // Track last request times for periodic operations
         let mut last_routine_request = Instant::now();
@@ -247,7 +251,7 @@ pub async fn start(
                     tx.write_async(&serialized_message).await
                         .expect("Failed to write UART");
 
-                    info!("Sent CommsStatus");
+                    log_info!("Sent CommsStatus");
                 }
                 Either4::Second(machine_command) => {
                     // Check if this command requires a delayed refresh
@@ -275,17 +279,17 @@ pub async fn start(
                     tx.write_async(&serialized_message).await
                         .expect("Failed to write UART");
 
-                    info!("Sent MachineCommand, length {} bytes", serialized_message.len());
+                    log_info!("Sent MachineCommand, length {} bytes", serialized_message.len());
 
                     // Schedule delayed request if needed
                     if let Some(request_message) = needs_delayed_request {
                         delayed_request = Some((Instant::now() + Duration::from_millis(500), request_message));
-                        info!("Scheduled delayed request for 500ms from now");
+                        log_info!("Scheduled delayed request for 500ms from now");
                     }
                 }
                 Either4::Third(sensor_reading) => {
                     // Log before moving the value
-                    /*info!("Sending ExternalPeripheralSensorReading from peripheral 0x{:04X}, endpoint {}, value {}",
+                    /*log_info!("Sending ExternalPeripheralSensorReading from peripheral 0x{:04X}, endpoint {}, value {}",
                         sensor_reading.id, sensor_reading.endpoint, sensor_reading.value);*/
 
                     let message = CommsProcessorToApplicationProcessorMessage::ExternalPeripheralSensorReading(sensor_reading);
@@ -304,7 +308,7 @@ pub async fn start(
                                 .expect("Failed to serialize delayed request");
                             tx.write_async(&serialized_message).await
                                 .expect("Failed to write delayed request");
-                            info!("Sent delayed request after schedule/routine update");
+                            log_info!("Sent delayed request after schedule/routine update");
                         } else {
                             // Not due yet, put it back
                             delayed_request = Some((when, message));
@@ -320,7 +324,7 @@ pub async fn start(
                                 .expect("Failed to serialize RequestConfiguration");
                             tx.write_async(&serialized_message).await
                                 .expect("Failed to write RequestConfiguration");
-                            warn!("Sent periodic RequestConfiguration command (still waiting for response)");
+                            log_warn!("Sent periodic RequestConfiguration command (still waiting for response)");
                         }
 
                         // Only send RequestMachineDefinition if we haven't received it yet
@@ -330,7 +334,7 @@ pub async fn start(
                                 .expect("Failed to serialize RequestMachineDefinition");
                             tx.write_async(&serialized_message).await
                                 .expect("Failed to write RequestMachineDefinition");
-                            warn!("Sent periodic RequestMachineDefinition command (still waiting for response)");
+                            log_warn!("Sent periodic RequestMachineDefinition command (still waiting for response)");
                         }
 
                         last_config_retry = Instant::now();
@@ -343,7 +347,7 @@ pub async fn start(
                             .expect("Failed to serialize RequestRoutines");
                         tx.write_async(&serialized_message).await
                             .expect("Failed to write RequestRoutines");
-                        info!("Sent periodic RequestRoutines command");
+                        log_info!("Sent periodic RequestRoutines command");
 
                         last_routine_request = Instant::now();
                     }
