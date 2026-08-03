@@ -3409,6 +3409,89 @@ failure this prevents.
 `cargo test` including the new form tests, the TUI build, and a pty run confirming the
 editor opens, accepts input, and cancels cleanly.
 
+### Task 18: Version the debug wire format
+
+Raised by the Task 16 implementer as must-not-wait, and confirmed twice in review.
+`DebugStateSnapshot` gained `frames_suppressed` in one round and `frames_rate_limited`
+in the next; `DebugPayload` gained a `Status` variant in Task 15. postcard is
+positional and has no self-description, so a device and a host built from different
+commits do not fail — they **mis-decode silently**, and the TUI renders plausible
+garbage. That is the worst possible failure for a diagnostic tool, and it lands in
+exactly the situation the tool exists for: flashing a board and connecting a host you
+built at some other time.
+
+Note `PROTOCOL_VERSION` in `variegated-controller-types/src/lib.rs` is the
+machine-definition protocol between the two processors. It is unrelated and must not
+be reused.
+
+**Files:**
+- Modify: `variegated-rs/variegated-controller-types/src/debug.rs` (the constant)
+- Modify: `variegated-rs/variegated-debug-codec/src/lib.rs` (envelope + decode)
+- Modify: `variegated-cli/src/transport.rs`, `src/model.rs`, `src/bin/variegated-debug-tui.rs`
+- Test: `variegated-debug-codec/src/lib.rs`, `variegated-cli/src/model.rs`
+
+- [x] **Step 1: Put the version in the envelope, not the payload**
+
+A version carried *inside* `DebugFrame` is useless for the failure it exists to catch:
+if the payload shape changed, the host cannot decode the frame that would have told it
+why. So the version goes in front, inside the COBS frame:
+
+```
+[ version: u8 ][ postcard-encoded DebugFrame ]
+```
+
+One byte per frame, readable without decoding anything else. Add to `debug.rs`:
+
+```rust
+/// Wire-format version for the debug protocol.
+///
+/// Bump on ANY change to the shape of `DebugFrame`, `DebugPayload`, `DebugEvent`,
+/// `DebugStateSnapshot`, `DebugCommand`, or anything they contain -- including
+/// `Status`, which travels inside `DebugPayload::Status`. postcard is positional and
+/// self-describes nothing, so a mismatched pair does not fail, it mis-decodes: the
+/// host renders plausible garbage. Adding a field to a struct or a variant anywhere
+/// but the end of an enum silently shifts everything after it.
+///
+/// Unrelated to `crate::PROTOCOL_VERSION`, which versions the machine-definition
+/// protocol between the two processors.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 1;
+```
+
+- [x] **Step 2: Write the failing tests**
+
+In `variegated-debug-codec`:
+- A frame encoded at the current version decodes normally.
+- A frame whose version byte is `DEBUG_PROTOCOL_VERSION + 1` yields a distinct
+  `CodecError::VersionMismatch { expected, found }` — NOT a deserialize error, and not
+  a silent skip.
+- The same for commands in the device-inbound direction.
+- A frame that is empty after COBS decoding (no version byte at all) is a clean error,
+  not a panic or an index out of bounds.
+
+- [x] **Step 3: Implement**
+
+`encode` prefixes the byte; the `Decoder` reads and checks it before attempting
+postcard. Count mismatches separately from `decode_errors` — they are a different
+diagnosis and the host needs to say which.
+
+- [x] **Step 4: Make the mismatch loud on the host**
+
+A transient notice is not enough; a version mismatch means everything on screen is
+suspect. In the TUI, show a persistent banner naming both versions and saying to
+rebuild, and **stop applying frames from that source** — rendering decoded garbage is
+worse than rendering nothing. Keep the connection open so the banner survives, and keep
+the notices pane working so the user can see what happened.
+
+- [x] **Step 5: Reject mismatched commands on the device**
+
+Same check in the device-inbound direction, so a stale host cannot inject a command
+that decodes into something other than what it typed. Emit `DebugEvent::CommandRejected`
+with the reason so the refusal is visible in the stream rather than silent.
+
+- [x] **Step 6: Verify and commit**
+
+Codec tests, host tests, both example builds, and the comms firmware build.
+
 ---
 
 ## Final verification

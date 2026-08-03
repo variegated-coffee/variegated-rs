@@ -16,6 +16,29 @@ use heapless::{String, Vec};
 
 use crate::Status;
 
+/// Wire-format version for the debug protocol.
+///
+/// Bump on ANY change to the shape of `DebugFrame`, `DebugPayload`, `DebugEvent`,
+/// `DebugStateSnapshot`, `DebugCommand`, or anything they contain -- including
+/// `Status`, which travels inside `DebugPayload::Status`. postcard is positional and
+/// self-describes nothing, so a mismatched pair does not fail, it mis-decodes: the
+/// host renders plausible garbage. Adding a field to a struct or a variant anywhere
+/// but the end of an enum silently shifts everything after it.
+///
+/// Appending a variant to the *end* of an enum is the one change that is
+/// backward-compatible in the decode direction, and it is still not exempt: an old
+/// host handed the new variant's discriminant fails to deserialize, which surfaces
+/// as a bare framing error rather than as "your host is out of date". Bump it too.
+///
+/// The version is carried in the codec's envelope, in front of the postcard bytes
+/// and inside the COBS frame -- never as a field of `DebugFrame`. A version inside
+/// the payload is useless for the failure it exists to catch: if the payload shape
+/// changed, the host cannot decode the frame that would have told it why.
+///
+/// Unrelated to `crate::PROTOCOL_VERSION`, which versions the machine-definition
+/// protocol between the two processors.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 1;
+
 /// Maximum number of counters or indicators carried in one sample frame.
 pub const MAX_SAMPLES: usize = 16;
 /// Capacity of the ad-hoc text escape hatch.

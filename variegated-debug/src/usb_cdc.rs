@@ -16,6 +16,8 @@ use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config};
+use core::fmt::Write as _;
+use variegated_controller_types::debug::{DebugEvent, Name, DEBUG_PROTOCOL_VERSION};
 use variegated_controller_types::debug_command::DebugCommand;
 use variegated_debug_codec::{encode_frame, CommandDecoder, MAX_FRAME};
 
@@ -74,6 +76,16 @@ fn usb_config() -> Config<'static> {
     config.max_power = 100;
     config.max_packet_size_0 = 64;
     config
+}
+
+/// Both versions in one `Name` (32 bytes), so the event says what to do rather than
+/// just that something went wrong. Worst case is `cmd wire v255, expected v255` at
+/// 29 characters, so it cannot truncate; `write!` into a `heapless::String` cannot
+/// allocate and its `Err` is only the overflow that cannot happen here.
+fn version_mismatch_reason(found: u8) -> Name {
+    let mut reason = Name::new();
+    let _ = write!(reason, "cmd wire v{found}, expected v{DEBUG_PROTOCOL_VERSION}");
+    reason
 }
 
 /// Drive the USB device, the frame writer and the command reader. Never returns.
@@ -156,12 +168,37 @@ pub async fn run(
             let mut buf = [0u8; 64];
             loop {
                 cdc_rx.wait_connection().await;
+                // Per connection: a host that reconnects gets told again, because
+                // the previous refusal has by then scrolled off whatever the
+                // operator was looking at.
+                let mut reported: Option<u8> = None;
                 loop {
                     match cdc_rx.read_packet(&mut buf).await {
-                        Ok(n) => decoder.feed(&buf[..n], |command| {
-                            // try_send, not send: never block the USB reader.
-                            let _ = sink.try_send(command);
-                        }),
+                        Ok(n) => {
+                            decoder.feed(&buf[..n], |command| {
+                                // try_send, not send: never block the USB reader.
+                                let _ = sink.try_send(command);
+                            });
+                            // A host built against a different revision of the
+                            // protocol would otherwise inject a command that decodes
+                            // into something other than what its operator typed --
+                            // on a machine that heats water and drives a pump. The
+                            // codec already refuses it; this is what makes the
+                            // refusal *visible*, since a silently ignored command
+                            // looks identical to a broken cable from the host end.
+                            //
+                            // Emitted once per distinct version rather than once per
+                            // packet: a stale host retrying would otherwise flood the
+                            // bus with the same event and evict real frames.
+                            if let Some(found) = decoder.last_version_mismatch {
+                                if reported != Some(found) {
+                                    reported = Some(found);
+                                    bus::emit_event(DebugEvent::CommandRejected {
+                                        reason: version_mismatch_reason(found),
+                                    });
+                                }
+                            }
+                        }
                         Err(_) => break,
                     }
                 }

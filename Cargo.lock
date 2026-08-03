@@ -2392,6 +2392,7 @@ name = "variegated-debug-codec"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "cobs",
  "defmt 1.1.1",
  "heapless 0.9.3",
  "postcard",

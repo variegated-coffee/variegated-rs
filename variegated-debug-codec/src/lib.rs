@@ -5,6 +5,25 @@
 //! USB-Serial-JTAG, and TCP -- so the host needs exactly one parser. COBS frames
 //! are zero-delimited, which is what lets a reader resynchronise after garbage or
 //! a partial write from a panicking device.
+//!
+//! Every frame carries a one-byte envelope in front of the postcard bytes:
+//!
+//! ```text
+//! [ 0x00-free COBS encoding of: [ version: u8 ][ postcard-encoded message ] ] 0x00
+//! ```
+//!
+//! The version is [`variegated_controller_types::debug::DEBUG_PROTOCOL_VERSION`],
+//! and it is *outside* the message rather than a field of it. That placement is the
+//! whole point: postcard is positional and self-describes nothing, so a device and a
+//! host built from different commits do not fail cleanly -- they mis-decode, and the
+//! host renders plausible garbage. A version carried inside `DebugFrame` could not
+//! catch that, because a changed payload shape is exactly the case where the host
+//! cannot decode the frame that would have told it why. One byte in front is
+//! readable before anything else is attempted.
+
+/// Re-exported so a transport can name the version it expects in a diagnostic
+/// without also depending on `variegated-controller-types` for that one constant.
+pub use variegated_controller_types::debug::DEBUG_PROTOCOL_VERSION as WIRE_VERSION;
 
 // The test harness needs std even though the crate itself is no_std.
 #[cfg(test)]
@@ -12,9 +31,8 @@ extern crate std;
 
 use core::marker::PhantomData;
 
-use postcard::accumulator::{CobsAccumulator, FeedResult};
 use serde::{Deserialize, Serialize};
-use variegated_controller_types::debug::DebugFrame;
+use variegated_controller_types::debug::{DebugFrame, DEBUG_PROTOCOL_VERSION};
 use variegated_controller_types::debug_command::DebugCommand;
 
 /// Largest COBS-encoded message we emit or accept.
@@ -22,12 +40,14 @@ use variegated_controller_types::debug_command::DebugCommand;
 /// Sized for the largest frame we emit, which is no longer a sample frame (~150
 /// bytes) but a `DebugPayload::Status`: `Status` carries five `FnvIndexMap`s of
 /// per-device status (capacities 8/4/4/4/2) plus a routine-execution block. Filled to
-/// capacity, with every varint field at its encoding-widest, it comes to 1721 bytes
+/// capacity, with every varint field at its encoding-widest, it comes to 1722 bytes
 /// COBS-encoded -- measured, not estimated, by
 /// `a_fully_populated_status_frame_fits_in_max_frame` -- so the old 512-byte bound
-/// would have silently dropped Status frames on a real machine. That leaves 327 bytes
-/// (16%) of headroom, which is not much: adding a few `Option<f32>`s to `GroupStatus`
-/// would consume it, and the test is what will tell you. Note this bounds the
+/// would have silently dropped Status frames on a real machine. That leaves 326 bytes
+/// (15.9%) of headroom, which is not much: adding a few `Option<f32>`s to
+/// `GroupStatus` would consume it, and the test is what will tell you. (1721 of those
+/// bytes are the frame; the envelope's version byte is the other one, and it does not
+/// force a second COBS overhead byte at this size.) Note this bounds the
 /// *encoded* form only: in RAM `Status` is behind a `Box`, so `DebugFrame` itself
 /// stays at 160 bytes (see `debug_frame_stays_small`).
 ///
@@ -45,13 +65,53 @@ pub enum CodecError {
     /// The value did not fit in the supplied buffer.
     TooLarge,
     Serialize,
+    /// The COBS frame decoded to zero bytes, so there is not even a version byte to
+    /// look at. A distinct variant rather than a panic on `bytes[0]`: this decoder
+    /// runs inside the firmware's USB reader, where a panic takes the machine down,
+    /// and `0x01 0x00` on the wire is a two-byte way to produce it.
+    Empty,
+    /// The bytes between two delimiters were not a valid COBS encoding. Ordinary
+    /// after a partial write from a resetting device, and the reason the framing is
+    /// COBS at all: the next delimiter resynchronises.
+    Framing,
+    /// The peer is speaking a different revision of the debug protocol.
+    ///
+    /// **Not** a deserialize error, and it must never be reported as one. postcard
+    /// is positional, so a mismatched pair usually *succeeds* at deserializing and
+    /// produces plausible garbage; that is the failure the envelope exists to
+    /// convert into this. Telling a user "framing error" here sends them looking at
+    /// cables. Telling them "device v2, host v1" tells them to rebuild.
+    VersionMismatch { expected: u8, found: u8 },
+    /// The version matched but postcard could not make the message out of what
+    /// followed. Corruption inside an otherwise well-formed frame.
+    Deserialize,
 }
 
-pub fn encode<'a, T: Serialize>(value: &T, buf: &'a mut [u8]) -> Result<&'a mut [u8], CodecError> {
-    postcard::to_slice_cobs(value, buf).map_err(|e| match e {
+/// Encode with an explicit envelope version instead of the compiled-in one.
+///
+/// Exists so tests and `variegated-cli`'s `fixture_server` can produce traffic from
+/// a *different* build of the protocol without actually being a different build --
+/// there is no other way to exercise the mismatch path, and "the codec returns an
+/// error" is not evidence that the host does anything useful with it. Emitters in
+/// firmware and on the host call [`encode`], which stamps [`WIRE_VERSION`].
+pub fn encode_with_version<'a, T: Serialize>(
+    version: u8,
+    value: &T,
+    buf: &'a mut [u8],
+) -> Result<&'a mut [u8], CodecError> {
+    // A serde tuple, which postcard encodes as the plain concatenation of its
+    // elements with no length prefix or tag of its own -- and a `u8` is one byte,
+    // not a varint. So the bytes handed to COBS are literally
+    // `[version][postcard(value)]`, and the version can be read back by indexing
+    // rather than by deserializing.
+    postcard::to_slice_cobs(&(version, value), buf).map_err(|e| match e {
         postcard::Error::SerializeBufferFull => CodecError::TooLarge,
         _ => CodecError::Serialize,
     })
+}
+
+pub fn encode<'a, T: Serialize>(value: &T, buf: &'a mut [u8]) -> Result<&'a mut [u8], CodecError> {
+    encode_with_version(DEBUG_PROTOCOL_VERSION, value, buf)
 }
 
 pub fn encode_frame<'a>(frame: &DebugFrame, buf: &'a mut [u8]) -> Result<&'a mut [u8], CodecError> {
@@ -65,12 +125,52 @@ pub fn encode_command<'a>(
     encode(command, buf)
 }
 
+/// Check the envelope on one already-de-framed message and deserialize the rest.
+///
+/// `bytes` is the COBS-*decoded* content of a single frame: version byte first, then
+/// the postcard encoding. Split out from [`Decoder`] so the version check has a
+/// return value a caller can match on, and so it can be tested without driving a
+/// byte stream.
+pub fn decode_message<T>(bytes: &[u8]) -> Result<T, CodecError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let (&found, body) = bytes.split_first().ok_or(CodecError::Empty)?;
+    if found != DEBUG_PROTOCOL_VERSION {
+        return Err(CodecError::VersionMismatch {
+            expected: DEBUG_PROTOCOL_VERSION,
+            found,
+        });
+    }
+    postcard::from_bytes(body).map_err(|_| CodecError::Deserialize)
+}
+
 /// Streaming decoder. Feed it whatever bytes arrived; it calls back once per
-/// complete message and counts framing failures so they can be surfaced rather
-/// than silently swallowed.
+/// complete message and counts failures so they can be surfaced rather than
+/// silently swallowed.
+///
+/// The accumulator is ours rather than postcard's `CobsAccumulator` because that one
+/// de-frames and deserializes in a single call and exposes no raw-bytes step, which
+/// leaves nowhere to read the version byte. Two counters, not one: a framing error
+/// and a version mismatch call for different actions from whoever is looking at
+/// them, and the host has to be able to say which it saw.
 pub struct Decoder<T, const N: usize> {
-    accumulator: CobsAccumulator<N>,
+    /// Bytes of the frame in progress, still COBS-encoded (the delimiter is not
+    /// stored). Decoded in place once the delimiter arrives.
+    buf: [u8; N],
+    len: usize,
+    /// Set when the frame in progress has already outgrown `buf`. The remainder is
+    /// discarded rather than wrapped, and the error is counted once at the
+    /// delimiter -- otherwise one oversized frame would count an error per byte.
+    overflowed: bool,
+    /// Malformed COBS, an empty frame, or a body the current version could not
+    /// deserialize.
     pub decode_errors: u32,
+    /// Frames refused because their envelope named a version we do not speak.
+    pub version_mismatches: u32,
+    /// The version byte of the most recent such frame, for reporting. `None` until
+    /// one arrives.
+    pub last_version_mismatch: Option<u8>,
     _item: PhantomData<T>,
 }
 
@@ -83,8 +183,12 @@ impl<T, const N: usize> Default for Decoder<T, N> {
 impl<T, const N: usize> Decoder<T, N> {
     pub const fn new() -> Self {
         Self {
-            accumulator: CobsAccumulator::new(),
+            buf: [0u8; N],
+            len: 0,
+            overflowed: false,
             decode_errors: 0,
+            version_mismatches: 0,
+            last_version_mismatch: None,
             _item: PhantomData,
         }
     }
@@ -95,23 +199,54 @@ where
     T: for<'de> Deserialize<'de>,
 {
     pub fn feed(&mut self, data: &[u8], mut on_item: impl FnMut(T)) {
-        let mut window = data;
-        while !window.is_empty() {
-            window = match self.accumulator.feed::<T>(window) {
-                FeedResult::Consumed => break,
-                FeedResult::OverFull(remaining) => {
-                    self.decode_errors += 1;
-                    remaining
+        for &byte in data {
+            if byte != 0 {
+                if self.len < N {
+                    self.buf[self.len] = byte;
+                    self.len += 1;
+                } else {
+                    self.overflowed = true;
                 }
-                FeedResult::DeserError(remaining) => {
-                    self.decode_errors += 1;
-                    remaining
-                }
-                FeedResult::Success { data, remaining } => {
-                    on_item(data);
-                    remaining
-                }
-            };
+                continue;
+            }
+            self.finish(&mut on_item);
+        }
+    }
+
+    /// A delimiter arrived: decode whatever has accumulated and reset for the next
+    /// frame. Every exit path clears `len` and `overflowed`, so no failure can
+    /// poison the decoder for the frames that follow -- resynchronisation is the
+    /// property COBS is here for.
+    fn finish(&mut self, on_item: &mut impl FnMut(T)) {
+        let len = core::mem::replace(&mut self.len, 0);
+        let overflowed = core::mem::replace(&mut self.overflowed, false);
+
+        if overflowed {
+            self.decode_errors += 1;
+            return;
+        }
+        // Nothing between this delimiter and the last one. Idle padding or a
+        // doubled delimiter, not a malformed frame, so it is not counted: a link
+        // that pads its output must not read as a link that is failing.
+        if len == 0 {
+            return;
+        }
+
+        let decoded_len = match cobs::decode_in_place(&mut self.buf[..len]) {
+            Ok(n) => n,
+            Err(_) => {
+                self.decode_errors += 1;
+                return;
+            }
+        };
+
+        match decode_message::<T>(&self.buf[..decoded_len]) {
+            Ok(item) => on_item(item),
+            Err(CodecError::VersionMismatch { found, .. }) => {
+                self.version_mismatches += 1;
+                self.last_version_mismatch = Some(found);
+            }
+            Err(_) => self.decode_errors += 1,
         }
     }
 }
@@ -206,6 +341,120 @@ mod tests {
 
         assert_eq!(got, vec![good]);
         assert_eq!(decoder.decode_errors, 1);
+    }
+
+    /// The envelope's whole purpose, stated as an assertion: the version is the
+    /// first byte inside the COBS frame, readable without deserialising anything
+    /// after it. Asserted on the de-framed bytes rather than on a successful
+    /// round-trip, because a round-trip alone would also pass if the version had
+    /// been put *after* the payload -- which is the placement that does not work.
+    #[test]
+    fn a_frame_at_the_current_version_round_trips_and_carries_the_version_byte() {
+        let original = frame(5, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
+
+        // De-frame by hand: what is left must start with the version byte.
+        let mut deframed = encoded.clone();
+        let len = cobs::decode_in_place(&mut deframed).unwrap();
+        assert_eq!(deframed[0], DEBUG_PROTOCOL_VERSION);
+        // And the remainder is a plain postcard `DebugFrame`, with nothing else
+        // wrapped around it.
+        let body: DebugFrame = postcard::from_bytes(&deframed[1..len]).unwrap();
+        assert_eq!(body, original);
+
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut got = Vec::new();
+        decoder.feed(&encoded, |f| got.push(f));
+        assert_eq!(got, vec![original]);
+        assert_eq!(decoder.decode_errors, 0);
+        assert_eq!(decoder.version_mismatches, 0);
+    }
+
+    /// The failure this task exists for. A frame from a device built one bump ahead
+    /// must be **refused**, not deserialised into whatever the current layout makes
+    /// of its bytes -- and refused with a diagnosis the host can act on, not folded
+    /// into the generic framing-error count where it reads as line noise.
+    #[test]
+    fn a_frame_from_a_newer_wire_version_is_refused_with_a_version_mismatch() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let original = frame(5, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_with_version(future, &original, &mut buf).unwrap().to_vec();
+
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut got = Vec::new();
+        decoder.feed(&encoded, |f| got.push(f));
+
+        assert!(got.is_empty(), "a mismatched frame must never reach the caller");
+        assert_eq!(decoder.version_mismatches, 1);
+        assert_eq!(decoder.last_version_mismatch, Some(future));
+        assert_eq!(
+            decoder.decode_errors, 0,
+            "a version mismatch is a different diagnosis from a framing error"
+        );
+
+        // The same thing at the level the host reports from.
+        let mut deframed = encoded.clone();
+        let len = cobs::decode_in_place(&mut deframed).unwrap();
+        assert_eq!(
+            decode_message::<DebugFrame>(&deframed[..len]),
+            Err(CodecError::VersionMismatch { expected: DEBUG_PROTOCOL_VERSION, found: future })
+        );
+    }
+
+    /// Device-inbound direction. Without this a stale host could inject a command
+    /// that decodes into something other than what the operator typed -- on a
+    /// machine that heats water and drives a pump.
+    #[test]
+    fn a_command_from_a_newer_wire_version_is_refused_with_a_version_mismatch() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let command = DebugCommand::Machine(MachineCommand::StartBrewing(0));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_with_version(future, &command, &mut buf).unwrap().to_vec();
+
+        let mut decoder: CommandDecoder = Decoder::new();
+        let mut got: Vec<DebugCommand> = Vec::new();
+        decoder.feed(&encoded, |c| got.push(c));
+
+        assert!(got.is_empty(), "a mismatched command must never reach the machine");
+        assert_eq!(decoder.version_mismatches, 1);
+        assert_eq!(decoder.last_version_mismatch, Some(future));
+        assert_eq!(decoder.decode_errors, 0);
+
+        // And a current-version command still gets through, so the check is not
+        // simply refusing everything.
+        let mut buf2 = [0u8; MAX_FRAME];
+        let good = encode_command(&command, &mut buf2).unwrap().to_vec();
+        decoder.feed(&good, |c| got.push(c));
+        assert_eq!(got.len(), 1);
+        assert!(matches!(&got[0], DebugCommand::Machine(MachineCommand::StartBrewing(0))));
+    }
+
+    /// `0x01 0x00` is a well-formed COBS frame whose payload is zero bytes, so there
+    /// is not even a version byte to look at. Indexing `[0]` on that slice is an
+    /// out-of-bounds panic, and this decoder runs inside the firmware's USB reader:
+    /// a panic there takes the machine down. Two bytes on the wire must not be able
+    /// to do that.
+    #[test]
+    fn an_empty_cobs_frame_is_a_clean_error_not_a_panic() {
+        assert_eq!(decode_message::<DebugFrame>(&[]), Err(CodecError::Empty));
+
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut got = Vec::new();
+        decoder.feed(&[0x01, 0x00], |f| got.push(f));
+
+        assert!(got.is_empty());
+        assert_eq!(decoder.decode_errors, 1);
+        assert_eq!(decoder.version_mismatches, 0);
+
+        // The decoder must still be usable afterwards -- an empty frame is a
+        // resynchronisation point, not a poisoned state.
+        let good = frame(1, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
+        decoder.feed(&encoded, |f| got.push(f));
+        assert_eq!(got, vec![good]);
     }
 
     #[test]

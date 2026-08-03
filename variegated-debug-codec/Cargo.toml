@@ -10,6 +10,13 @@ edition = "2024"
 # either. This crate stays alloc-free because `to_slice_cobs` and the
 # `accumulator` module are both unconditional, not because of this line.
 postcard.workspace = true
+# The envelope's version byte has to be read *before* postcard is handed anything,
+# which means de-framing and deserialising can no longer be one step. postcard's
+# `CobsAccumulator` does both at once and has no raw-bytes escape hatch, so the
+# accumulator in `Decoder` is ours and the COBS half comes from here. Not a new
+# dependency in practice: postcard already pulls in exactly this version.
+# `default-features = false` because its default is `std`.
+cobs = { version = "0.3.0", default-features = false }
 serde = { workspace = true, default-features = false }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "double_boiler", "single_group"] }
 defmt = { workspace = true, optional = true }
