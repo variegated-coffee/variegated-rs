@@ -113,6 +113,24 @@ pub async fn start(
                             ApplicationProcessorToCommsProcessorMessage::ShotLogEntryDataPoint(_data_point) => {
                                 info!("Received shot log data point (not yet implemented)");
                             }
+                            ApplicationProcessorToCommsProcessorMessage::Debug(_frame) => {
+                                // Relayed application-processor debug frames. Task 11
+                                // republishes them onto this processor's debug bus
+                                // *unchanged* -- they already carry
+                                // `DebugSource::Application` and the application
+                                // processor's own `seq` and `uptime_ms`, and rewriting
+                                // any of that would destroy the host's gap detection.
+                                //
+                                // Discarded until that bus exists. This arm is here now
+                                // only because the match is exhaustive and the variant
+                                // landed with the relay in Task 8; without it this
+                                // firmware would not compile against the current
+                                // `variegated-controller-types`.
+                                //
+                                // Deliberately silent: the application processor relays
+                                // several frames a second, so logging one per frame here
+                                // would drown this firmware's own log.
+                            }
                         }
 
                         window = remaining;
