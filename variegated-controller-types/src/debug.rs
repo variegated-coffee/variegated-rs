@@ -35,9 +35,25 @@ use crate::Status;
 /// the payload is useless for the failure it exists to catch: if the payload shape
 /// changed, the host cannot decode the frame that would have told it why.
 ///
+/// Numbering starts at `0x81` rather than `1`, and the high bit is the point.
+///
+/// The check has to reject not only a *differently* versioned peer but an
+/// *unversioned* one -- anything built before the envelope existed. Such a frame
+/// begins with the postcard encoding of `DebugFrame::source`, i.e. the `DebugSource`
+/// discriminant, and a command with `DebugCommand`'s. At `1` the check would have
+/// accepted every unversioned `DebugSource::Comms` frame and handed the host a
+/// `DebugFrame` deserialized one byte out of phase -- a fabricated event on the
+/// wrong processor, which is precisely the mis-decode this constant exists to stop.
+///
+/// postcard varint-encodes enum discriminants, so a leading byte with the high bit
+/// set means a discriminant of at least 128. No enum that can start one of these
+/// messages has anything like that many variants, so no unversioned message can
+/// begin with `0x81` -- or with `0x82`, `0x83` and the rest of the bump sequence,
+/// which inherit the property. Keep bumping inside `0x81..=0xFF`.
+///
 /// Unrelated to `crate::PROTOCOL_VERSION`, which versions the machine-definition
 /// protocol between the two processors.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 1;
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x81;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 pub const MAX_SAMPLES: usize = 16;

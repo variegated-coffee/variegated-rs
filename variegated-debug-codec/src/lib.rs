@@ -145,6 +145,102 @@ where
     postcard::from_bytes(body).map_err(|_| CodecError::Deserialize)
 }
 
+/// Consecutive mismatching frames, all naming the *same* version, before a link is
+/// declared mismatched.
+///
+/// Not 1, because a version mismatch is not the only thing that can produce one.
+/// Line noise, or a partial write from a device that reset mid-frame, occasionally
+/// COBS-decodes to a first byte that is simply not our version -- measured at
+/// roughly 0.4-0.8% of random non-zero bursts -- and the fabricated "version" is
+/// then whatever the noise happened to say. Acting on a single observation lets one
+/// such burst put an invented version number on screen and refuse a healthy link.
+///
+/// Corroboration separates the two cheaply, because they differ in exactly one
+/// respect: a genuinely stale device stamps the *same* wrong version on every frame
+/// it will ever send, while noise picks a fresh one each time. Requiring three in a
+/// row at the same version leaves a ~1e-7 chance of a false block against a ~2.3e-5
+/// chance at two, and costs a stale device 0.3 s at the 10 Hz the firmwares emit at
+/// -- which is invisible next to the time it takes a human to read the banner.
+pub const MISMATCH_CORROBORATION: u32 = 3;
+
+/// What the version watch concluded about a link. See [`Decoder::take_version_verdict`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum VersionVerdict {
+    /// Nothing has changed since the last time this was taken.
+    Quiet,
+    /// A corroborated run of frames stamped a version we do not speak. Act on it.
+    Mismatch { expected: u8, found: u8 },
+    /// The peer is speaking our version, proven by a frame that actually decoded.
+    ///
+    /// Emitted on the first good frame of a link as well as when a reported
+    /// mismatch clears -- **not** only on recovery. A consumer that keeps state
+    /// across reconnects (the TUI's banner does) cannot treat silence as evidence
+    /// of health: a peer that has been rebuilt and now works sends nothing to say
+    /// so, and a decoder created fresh for the new connection has no memory of the
+    /// mismatch to recover from. Health has to be asserted positively.
+    Healthy,
+}
+
+/// Decides when a run of version mismatches is worth acting on, and when a link has
+/// proven itself healthy.
+///
+/// Split out from the raw counters because the *decision* is where the bugs live:
+/// deciding from `last_version_mismatch` at the call site meant a stale value could
+/// re-fire a refusal against a command that had in fact just been accepted. Here it
+/// is one state machine, used identically by the host transport and the firmware's
+/// USB reader, and covered by host tests that the firmware build cannot run.
+#[derive(Copy, Clone, Debug, Default)]
+struct VersionWatch {
+    /// The version of the run of mismatches in progress, and its length. Extended
+    /// only by another mismatch at the same version; cleared by any frame that
+    /// actually decoded. A framing error neither extends nor clears it -- it says
+    /// nothing about what the peer speaks, and a stale device on a noisy line must
+    /// still be diagnosable.
+    run: Option<(u8, u32)>,
+    /// The version currently being reported, once a run corroborated.
+    reported: Option<u8>,
+    /// Whether any verdict has been produced since construction or [`Decoder::reset`].
+    /// Until one has, the first good frame produces `Healthy` -- that is what makes
+    /// a fresh decoder assert health rather than merely fail to deny it.
+    announced: bool,
+    pending: Option<VersionVerdict>,
+}
+
+impl VersionWatch {
+    const fn new() -> Self {
+        Self { run: None, reported: None, announced: false, pending: None }
+    }
+
+    fn saw_good_frame(&mut self) {
+        self.run = None;
+        if self.reported.is_some() || !self.announced {
+            self.reported = None;
+            self.announced = true;
+            self.pending = Some(VersionVerdict::Healthy);
+        }
+    }
+
+    fn saw_mismatch(&mut self, found: u8) {
+        let count = match self.run {
+            Some((version, count)) if version == found => count + 1,
+            _ => 1,
+        };
+        self.run = Some((found, count));
+        if count >= MISMATCH_CORROBORATION && self.reported != Some(found) {
+            self.reported = Some(found);
+            self.announced = true;
+            self.pending = Some(VersionVerdict::Mismatch {
+                expected: DEBUG_PROTOCOL_VERSION,
+                found,
+            });
+        }
+    }
+
+    fn take(&mut self) -> VersionVerdict {
+        self.pending.take().unwrap_or(VersionVerdict::Quiet)
+    }
+}
+
 /// Streaming decoder. Feed it whatever bytes arrived; it calls back once per
 /// complete message and counts failures so they can be surfaced rather than
 /// silently swallowed.
@@ -168,9 +264,13 @@ pub struct Decoder<T, const N: usize> {
     pub decode_errors: u32,
     /// Frames refused because their envelope named a version we do not speak.
     pub version_mismatches: u32,
-    /// The version byte of the most recent such frame, for reporting. `None` until
-    /// one arrives.
+    /// The version byte of the most recent such frame. A raw observation, not a
+    /// decision: it is never cleared by a good frame, so a consumer that acts on it
+    /// directly will re-act on a mismatch that has long since stopped happening.
+    /// Use [`Decoder::take_version_verdict`] to decide anything; this is for
+    /// diagnostics.
     pub last_version_mismatch: Option<u8>,
+    watch: VersionWatch,
     _item: PhantomData<T>,
 }
 
@@ -189,8 +289,36 @@ impl<T, const N: usize> Decoder<T, N> {
             decode_errors: 0,
             version_mismatches: 0,
             last_version_mismatch: None,
+            watch: VersionWatch::new(),
             _item: PhantomData,
         }
+    }
+
+    /// The reportable change in this link's protocol health since the last call, or
+    /// [`VersionVerdict::Quiet`] if there has not been one. Take it after each
+    /// [`Decoder::feed`].
+    ///
+    /// Taking rather than peeking is deliberate: every consumer of this needs
+    /// edge semantics -- raise a banner, emit an event -- and a peek would put the
+    /// "have I already acted on this?" bookkeeping back at each call site, which is
+    /// exactly where it was got wrong before.
+    pub fn take_version_verdict(&mut self) -> VersionVerdict {
+        self.watch.take()
+    }
+
+    /// Drop all per-connection state: the partial frame, and everything the version
+    /// watch has concluded.
+    ///
+    /// Call this when a link is re-established. The cumulative `decode_errors` and
+    /// `version_mismatches` counters survive, because they are session diagnostics
+    /// rather than per-connection state. Without this, a decoder reused across
+    /// connections carries a stale `last_version_mismatch` into the next one, and
+    /// half a frame from before the drop corrupts the first frame after it.
+    pub fn reset(&mut self) {
+        self.len = 0;
+        self.overflowed = false;
+        self.last_version_mismatch = None;
+        self.watch = VersionWatch::new();
     }
 }
 
@@ -241,11 +369,21 @@ where
         };
 
         match decode_message::<T>(&self.buf[..decoded_len]) {
-            Ok(item) => on_item(item),
+            Ok(item) => {
+                // A frame that actually decoded is the only proof a peer speaks our
+                // version, and it is what clears a mismatch run.
+                self.watch.saw_good_frame();
+                on_item(item);
+            }
             Err(CodecError::VersionMismatch { found, .. }) => {
                 self.version_mismatches += 1;
                 self.last_version_mismatch = Some(found);
+                self.watch.saw_mismatch(found);
             }
+            // Framing and deserialize failures deliberately leave the run alone.
+            // They are not evidence either way: they do not show the peer speaks
+            // our version, and treating them as a break in the run would make a
+            // stale device on a noisy line undiagnosable.
             Err(_) => self.decode_errors += 1,
         }
     }
@@ -455,6 +593,237 @@ mod tests {
         let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
         decoder.feed(&encoded, |f| got.push(f));
         assert_eq!(got, vec![good]);
+    }
+
+    /// Feed `count` frames stamped `version` into `decoder`, returning how many
+    /// reached the callback.
+    fn feed_frames(
+        decoder: &mut Decoder<DebugFrame, MAX_FRAME>,
+        version: u8,
+        count: u32,
+    ) -> usize {
+        let mut delivered = 0;
+        for seq in 0..count {
+            let f = frame(seq, DebugPayload::Event(DebugEvent::Boot));
+            let mut buf = [0u8; MAX_FRAME];
+            let encoded = encode_with_version(version, &f, &mut buf).unwrap().to_vec();
+            decoder.feed(&encoded, |_| delivered += 1);
+        }
+        delivered
+    }
+
+    /// One mismatching frame must not be enough to condemn a link.
+    ///
+    /// Roughly 0.4-0.8% of random non-zero bursts COBS-decode to a first byte that
+    /// is not our version and so classify as a mismatch rather than a framing
+    /// error. Acting on one observation lets a single noise burst -- or a partial
+    /// write from a device that reset mid-frame -- put an invented version number on
+    /// screen and refuse a link that is working.
+    #[test]
+    fn a_single_mismatching_frame_is_not_enough_to_declare_a_mismatch() {
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        // Establish health first, so the `Healthy` edge is already spent and cannot
+        // be mistaken for the `Quiet` this asserts.
+        feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Healthy);
+
+        feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION + 1, 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+        // The frame is still refused -- corroboration gates the *report*, never the
+        // refusal. A frame we cannot vouch for never reaches the caller either way.
+        assert_eq!(decoder.version_mismatches, 1);
+    }
+
+    /// Noise picks a fresh "version" each time; a stale device stamps the same one on
+    /// every frame. That difference is the whole basis for corroboration, so a run of
+    /// mismatches that never agrees must never trip the report.
+    #[test]
+    fn mismatches_at_differing_versions_never_corroborate() {
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        for offset in 1..=8u8 {
+            feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION.wrapping_add(offset), 1);
+            assert_eq!(
+                decoder.take_version_verdict(),
+                VersionVerdict::Quiet,
+                "a run of disagreeing versions is noise, not a stale device"
+            );
+        }
+        assert_eq!(decoder.version_mismatches, 8);
+    }
+
+    /// A genuinely stale device sends the same wrong version every time, so it trips
+    /// on exactly the Nth frame -- and only once, however long it keeps going.
+    #[test]
+    fn a_corroborated_run_of_the_same_version_reports_once() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+
+        for _ in 1..MISMATCH_CORROBORATION {
+            feed_frames(&mut decoder, future, 1);
+            assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+        }
+        feed_frames(&mut decoder, future, 1);
+        assert_eq!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Mismatch { expected: DEBUG_PROTOCOL_VERSION, found: future }
+        );
+
+        // Twenty more frames of the same must stay silent: a banner is a level, and
+        // re-raising it per frame would flood whatever the consumer does with it.
+        let delivered = feed_frames(&mut decoder, future, 20);
+        assert_eq!(delivered, 0);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+    }
+
+    /// A good frame is the only thing that proves a peer speaks our version, and it
+    /// must break a run in progress.
+    #[test]
+    fn a_good_frame_breaks_a_mismatch_run() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+
+        for _ in 0..MISMATCH_CORROBORATION - 1 {
+            feed_frames(&mut decoder, future, 1);
+        }
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+
+        // One good frame in the middle, then the run starts over from scratch.
+        assert_eq!(feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1), 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Healthy);
+
+        for _ in 0..MISMATCH_CORROBORATION - 1 {
+            feed_frames(&mut decoder, future, 1);
+            assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+        }
+    }
+
+    /// The defect this round exists to fix, at the codec level: after a link is
+    /// declared mismatched, a peer that starts speaking our version must say so
+    /// positively. Silence cannot clear a sticky flag, and the consumer holding that
+    /// flag is the one telling the user to go and rebuild the firmware.
+    #[test]
+    fn a_peer_that_starts_speaking_our_version_reports_healthy() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+
+        feed_frames(&mut decoder, future, MISMATCH_CORROBORATION);
+        assert_eq!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Mismatch { expected: DEBUG_PROTOCOL_VERSION, found: future }
+        );
+
+        assert_eq!(feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1), 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Healthy);
+        // And it settles: no further edges from a link that is simply working.
+        feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 5);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+    }
+
+    /// The reconnect case, which is where silence-as-evidence actually bites: the
+    /// host builds a *fresh* decoder per connection, so a decoder that only reported
+    /// `Healthy` as a recovery from its own mismatch would report nothing at all to a
+    /// consumer whose banner outlived the connection that raised it.
+    #[test]
+    fn a_fresh_decoder_asserts_health_on_its_first_good_frame() {
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+
+        assert_eq!(feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1), 1);
+        assert_eq!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Healthy,
+            "health must be asserted, not merely left un-denied"
+        );
+    }
+
+    /// `reset` is what the firmware's USB reader calls when a host reconnects. It
+    /// must drop everything the watch concluded, so the next connection is judged on
+    /// its own traffic -- otherwise a single mismatch on connection 1 re-fires a
+    /// refusal on connection 2 against a command that was in fact accepted.
+    #[test]
+    fn reset_drops_per_connection_state_but_keeps_the_counters() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+
+        feed_frames(&mut decoder, future, MISMATCH_CORROBORATION);
+        assert!(matches!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Mismatch { .. }
+        ));
+        assert_eq!(decoder.last_version_mismatch, Some(future));
+        let mismatches = decoder.version_mismatches;
+
+        decoder.reset();
+
+        assert_eq!(decoder.last_version_mismatch, None);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+        // Session diagnostics are cumulative and survive.
+        assert_eq!(decoder.version_mismatches, mismatches);
+
+        // A good frame on the new connection reports health, and nothing from the
+        // old connection leaks into the verdict.
+        assert_eq!(feed_frames(&mut decoder, DEBUG_PROTOCOL_VERSION, 1), 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Healthy);
+    }
+
+    /// Half a frame left in the buffer when a link drops must not corrupt the first
+    /// frame of the next connection.
+    #[test]
+    fn reset_discards_a_partial_frame() {
+        let good = frame(1, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
+        let (first_half, _) = encoded.split_at(encoded.len() / 2);
+
+        let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+        let mut got = Vec::new();
+        decoder.feed(first_half, |f| got.push(f));
+        assert!(got.is_empty());
+
+        decoder.reset();
+
+        decoder.feed(&encoded, |f| got.push(f));
+        assert_eq!(got, vec![good], "the leftover half must not have been prepended");
+        assert_eq!(decoder.decode_errors, 0);
+    }
+
+    /// An *unversioned* peer -- anything built before the envelope existed -- must be
+    /// refused too, and this is why `DEBUG_PROTOCOL_VERSION` has its high bit set.
+    ///
+    /// Such a frame starts with the postcard encoding of `DebugFrame::source`. With
+    /// the version at `1`, `DebugSource::Comms` (discriminant 1) would have sailed
+    /// through the check and been deserialized one byte out of phase, fabricating an
+    /// event on the wrong processor -- the exact mis-decode the envelope exists to
+    /// stop. postcard varint-encodes discriminants, so no enum small enough to start
+    /// one of these messages can produce a leading byte with the high bit set.
+    #[test]
+    fn an_unversioned_frame_from_either_source_is_refused() {
+        assert!(
+            DEBUG_PROTOCOL_VERSION & 0x80 != 0,
+            "the version must be unreachable as a postcard discriminant byte"
+        );
+
+        for source in [DebugSource::Application, DebugSource::Comms] {
+            let legacy = DebugFrame {
+                source,
+                seq: 3,
+                uptime_ms: 1234,
+                payload: DebugPayload::Text(Severity::Warn, text("pre-envelope")),
+            };
+            // Exactly what an old build put on the wire: postcard, then COBS, with
+            // no envelope in front.
+            let mut buf = [0u8; MAX_FRAME];
+            let encoded = postcard::to_slice_cobs(&legacy, &mut buf).unwrap().to_vec();
+
+            let mut decoder: Decoder<DebugFrame, MAX_FRAME> = Decoder::new();
+            let mut got = Vec::new();
+            decoder.feed(&encoded, |f| got.push(f));
+
+            assert!(
+                got.is_empty(),
+                "an unversioned {source:?} frame must never be delivered"
+            );
+        }
     }
 
     #[test]

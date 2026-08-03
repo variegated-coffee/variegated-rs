@@ -9,6 +9,13 @@ use crate::commands::MachineCommand;
 /// traits onto ~8 types across the command tree to satisfy traits nothing needs:
 /// no test compares or prints a `DebugCommand`, embassy channels don't require it,
 /// and `label()` below covers logging and the TUI palette.
+///
+/// **Travels on the debug wire, device-inbound.** postcard is positional, so adding,
+/// removing or reordering a variant here -- or in `AppDebugOp`, `CommsDebugOp` or
+/// anything in `MachineCommand` -- makes a host built against a different revision
+/// inject a command other than the one its operator typed, on a machine that heats
+/// water and drives a pump. Changing any of them requires bumping
+/// [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone)]
 pub enum DebugCommand {

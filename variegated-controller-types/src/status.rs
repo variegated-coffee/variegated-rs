@@ -43,6 +43,12 @@ impl defmt::Format for RoutineExecutionStatus {
 ///   the compiler will not stop you from claiming it.
 ///
 /// Nothing compares `Status` at runtime today; it exists for tests.
+///
+/// **Travels on the debug wire.** `Status` is carried by `DebugPayload::Status`, and
+/// postcard is positional: adding, removing or reordering a field here silently
+/// shifts every value after it for any host built against a different revision.
+/// Changing this struct, or anything reachable from it, requires bumping
+/// [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
@@ -232,6 +238,8 @@ impl defmt::Format for Status {
     }
 }
 
+/// Reachable from [`Status`], so it travels on the debug wire: changing these fields
+/// requires bumping [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -265,6 +273,8 @@ pub struct BrewStatus {
     pub output_volume: Option<OutputVolumeType>,
 }
 
+/// Reachable from [`Status`], so it travels on the debug wire: changing these fields
+/// requires bumping [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
