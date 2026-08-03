@@ -2659,6 +2659,26 @@ pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
 
 Add `variegated-debug` to `variegated-comms/Cargo.toml`.
 
+**Version-mismatch detection needs rethinking once one link carries two processors.**
+
+Task 18 made a version mismatch block a link and raise a banner, and required three
+consecutive mismatches reporting the *same* version before reporting, so line noise
+cannot fabricate one. Both decisions are keyed per link, which is correct while a link
+carries one processor. This task is what breaks that assumption.
+
+Once the TCP link carries both processors, a stale application processor interleaved
+with a healthy comms processor never produces three consecutive same-version
+mismatches — a good frame breaks the run by design. Its frames are dropped,
+`version_mismatches` climbs, and no banner ever appears. Under the pre-corroboration
+behaviour it would have been reported. `VersionWatch::pending` is a single slot with
+the same root cause: it is a level, and a level cannot represent two links.
+
+The tempting fix — key the run by `source` — does not work: `source` lives *inside* the
+postcard payload, so on a mis-versioned frame it is exactly the field you cannot trust.
+Key it per **relay segment** instead: the comms processor knows which link a frame
+arrived on, so it is the only party that can attribute one. Decide this deliberately
+when you build the relay rather than discovering it at a bench.
+
 **First: move `Status` off the shared bus before adding this task's subscriber.**
 
 Adding the relay subscriber has a cost that filtering in the relay does NOT avoid,
