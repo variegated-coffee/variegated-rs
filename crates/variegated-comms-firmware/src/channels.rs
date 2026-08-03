@@ -6,6 +6,7 @@ use embassy_sync::mutex::Mutex;
 use portable_atomic::AtomicBool;
 use static_cell::StaticCell;
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, RoutineList, Status};
+use variegated_controller_types::debug_command::DebugCommand;
 use esphome_device::{ClientEvent, StateChange};
 
 // Re-export Sender type for convenience
@@ -57,6 +58,16 @@ pub static CONFIG_CACHE: Mutex<CriticalSectionRawMutex, Option<Configuration>> =
 // Machine Command Channel - commands to send to application processor
 pub const MACHINE_COMMAND_CAPACITY: usize = 8;
 pub static MACHINE_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>> = StaticCell::new();
+
+// Debug Command Channel - commands injected over a debug transport (USB-Serial-JTAG
+// now, TCP in Task 11), handed off to whoever executes them.
+//
+// Capacity 4: injection is interactive, so a backlog deeper than this means nobody
+// is draining it. Every producer uses `try_send` and drops on full -- the debug
+// readers must never block, and a queued command an operator typed a minute ago is
+// worse than no command at all on a machine that heats water.
+pub const DEBUG_COMMAND_CAPACITY: usize = 4;
+pub static DEBUG_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>> = StaticCell::new();
 
 // Comms Status Command - internal commands to update CommsStatus
 pub enum CommsStatusCommand {

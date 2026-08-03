@@ -41,8 +41,10 @@ use variegated_comms_firmware::{
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
         MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL,
         StateChangeChannel, CLIENT_EVENT_CAPACITY, SENSOR_READING_CHANNEL,
+        DEBUG_COMMAND_CHANNEL,
     },
     config::{uart_config, acaia_address, belka_address},
+    debug,
     esphome::esphome_server_task,
     http::{http_server_task, cache_update_task},
     mk_static,
@@ -127,6 +129,18 @@ async fn comms_status_signaller_task(
     }
 }
 
+/// The structured debug stream's transport, on the peripheral `esp-println` used to
+/// share (see the `esp-println` entry in Cargo.toml -- it is now pinned to UART0
+/// precisely so this task can own USB-Serial-JTAG outright).
+#[embassy_executor::task]
+async fn debug_usb_task(
+    usb_rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>,
+    usb_tx: esp_hal::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Async>,
+    sink: debug::CommandSink,
+) {
+    debug::usb::run(usb_rx, usb_tx, sink).await;
+}
+
 #[embassy_executor::task]
 async fn application_processor_task(
     rx: esp_hal::uart::UartRx<'static, esp_hal::Async>,
@@ -180,6 +194,21 @@ async fn main(spawner: Spawner) -> ! {
     let routine_channel = ROUTINE_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
     let sensor_reading_channel = SENSOR_READING_CHANNEL.init(embassy_sync::channel::Channel::new());
+
+    // Initialize the debug command channel (commands injected over USB-Serial-JTAG
+    // now, over TCP once Task 11 lands).
+    let debug_command_channel = DEBUG_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
+
+    // Bring up the structured debug transport before anything else that might have
+    // something to say. `esp-println` no longer touches this peripheral (Cargo.toml
+    // pins it to UART0), so the stream owns it outright.
+    //
+    // `split()` returns (rx, tx) in that order -- not the (tx, rx) that most of the
+    // rest of esp-hal uses.
+    let usb = esp_hal::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+    let (usb_rx, usb_tx) = usb.split();
+    if let Ok(t) = debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender()) { spawner.spawn(t); }
+    info!("Debug USB-Serial-JTAG transport spawned");
 
     // Initialize ESPHome channels
     let state_change_channel = STATE_CHANGE_CHANNEL.init(embassy_sync::channel::Channel::new());

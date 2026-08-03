@@ -1498,7 +1498,6 @@ dependencies = [
  "esp-metadata-generated",
  "esp-sync",
  "log",
- "portable-atomic",
 ]
 
 [[package]]
@@ -3716,6 +3715,8 @@ dependencies = [
  "trouble-host",
  "variegated-belka-portal-trouble-driver",
  "variegated-controller-types",
+ "variegated-debug",
+ "variegated-debug-codec",
  "variegated-scale-trouble-driver",
  "variegated-trouble-connection-manager",
 ]
@@ -3738,6 +3739,38 @@ dependencies = [
  "heapless 0.9.3",
  "serde",
  "variegated-control-algorithm",
+]
+
+[[package]]
+name = "variegated-debug"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+ "embassy-sync 0.8.0",
+ "embassy-time",
+ "heapless 0.9.3",
+ "portable-atomic",
+ "variegated-controller-types",
+ "variegated-debug-codec",
+ "variegated-instrumentation",
+]
+
+[[package]]
+name = "variegated-debug-codec"
+version = "0.1.0"
+dependencies = [
+ "cobs",
+ "defmt 1.1.1",
+ "postcard",
+ "serde",
+ "variegated-controller-types",
+]
+
+[[package]]
+name = "variegated-instrumentation"
+version = "0.1.0"
+dependencies = [
+ "portable-atomic",
 ]
 
 [[package]]

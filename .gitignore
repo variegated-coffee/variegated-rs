@@ -1,5 +1,12 @@
-# will have compiled files and executables
-debug/
+# will have compiled files and executables.
+#
+# `/debug/` is anchored, unlike the unanchored `debug/` this used to be. Unanchored
+# it matched *any* directory named `debug` at any depth, which silently excluded
+# `crates/variegated-comms-firmware/src/debug/` -- a source module -- from every
+# commit, with no error and nothing in `git status` to notice. Cargo's own debug
+# output lives at `target/debug`, which the next line already covers; this entry is
+# only for the pre-2018 layout that put it at the root.
+/debug/
 target/
 
 # Editor configuration

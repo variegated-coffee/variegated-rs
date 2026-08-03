@@ -7,6 +7,7 @@ pub mod application_processor;
 pub mod ble;
 pub mod channels;
 pub mod config;
+pub mod debug;
 pub mod esphome;
 pub mod http;
 pub mod time;

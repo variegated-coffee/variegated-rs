@@ -12,7 +12,9 @@ use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage, CommsProcessorToApplicationProcessorMessage,
     ExternalPeripheralSensorReading, MachineCommand,
 };
+use variegated_controller_types::debug::DebugEvent;
 
+use crate::debug::bus;
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, MACHINE_DEFINITION, ROUTINE_CACHE,
@@ -43,6 +45,23 @@ pub async fn start(
         let mut buffer = [0u8; 4096];
         let mut accumulator = CobsAccumulator::<4096>::new();
 
+        // Edge trigger for `DebugEvent::LinkDecodeError`, mirroring
+        // `variegated_comms`'s reader on the other end of this UART.
+        //
+        // A version-skewed application processor is otherwise invisible from the
+        // host: its frames fail to decode here, produce a `warn!` into a defmt log
+        // nobody is reading (esp-println now writes to UART0), and vanish -- while
+        // the application side counts them as relayed successfully. This is what
+        // puts that failure into the stream a host actually sees.
+        //
+        // Edge triggered, and that is load-bearing rather than tidiness:
+        // `bus::emit_event` bypasses the log suppressor entirely, and a garbage
+        // burst on the line produces a COBS delimiter roughly every 256 random
+        // bytes, which at 576 kbaud is a few hundred `DeserError`s per second. One
+        // event per *burst* -- the first failure after a message that decoded --
+        // says the same thing without turning the 16-slot bus over on its own.
+        let mut link_healthy = true;
+
         loop {
             // Read data from UART
             let bytes_read = match rx.read_async(&mut buffer).await {
@@ -67,11 +86,23 @@ pub async fn start(
                     }
                     FeedResult::DeserError(new_wind) => {
                         // Deserialization error, reset and continue with remaining data
-                        warn!("COBS deserialization error, resetting");
+                        if link_healthy {
+                            link_healthy = false;
+                            // The defmt line stays alongside the typed event, by
+                            // design: the probe view and the debug stream have
+                            // different audiences, and a probe user must not lose
+                            // lines because a host tool gained them.
+                            warn!("COBS deserialization error, resetting");
+                            bus::emit_event(DebugEvent::LinkDecodeError);
+                        }
                         window = new_wind;
                         accumulator = CobsAccumulator::<4096>::new();
                     }
                     FeedResult::Success { data, remaining } => {
+                        // A message that decoded is what re-arms the decode-error
+                        // edge, so a link that recovers can report its next burst.
+                        link_healthy = true;
+
                         // Successfully decoded a message
                         match data {
                             ApplicationProcessorToCommsProcessorMessage::Status(status) => {
@@ -121,11 +152,14 @@ pub async fn start(
                                 // processor's own `seq` and `uptime_ms`, and rewriting
                                 // any of that would destroy the host's gap detection.
                                 //
-                                // Discarded until that bus exists. This arm is here now
-                                // only because the match is exhaustive and the variant
-                                // landed with the relay in Task 8; without it this
-                                // firmware would not compile against the current
-                                // `variegated-controller-types`.
+                                // The bus exists as of Task 9 (`crate::debug::bus`),
+                                // but republishing onto it is still Task 11's: the
+                                // frame has to be forwarded *unchanged*, and Task 11
+                                // is also what adds the TCP consumer that gives it
+                                // somewhere to go. Until then these are dropped on
+                                // the floor -- silently, and not counted, because
+                                // `bus::note_dropped` means "the transport failed"
+                                // rather than "this build does not carry these yet".
                                 //
                                 // Deliberately silent: the application processor relays
                                 // several frames a second, so logging one per frame here

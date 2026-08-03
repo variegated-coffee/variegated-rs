@@ -18,6 +18,18 @@ variegated-trouble-connection-manager = { path = "../variegated-trouble-connecti
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
 variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }
 variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
+# The *same* crate the application processor uses, not a second bus. Both
+# workspaces declare `embassy-sync = "0.8.0"` and `embassy-time = "0.5.1"`, so
+# `variegated_debug::bus`'s channel types are the same types on both processors
+# and the sequence numbering, drop accounting and non-blocking publish contract
+# cannot drift apart.
+#
+# `source-comms` stamps every frame this firmware emits with `DebugSource::Comms`;
+# enabling both source features, or neither, is a `compile_error!`. `usb-cdc-rp`
+# stays off: that transport is embassy-rp and RP2350-only, and embassy-rp cannot
+# build for riscv32 at all.
+variegated-debug = { path = "../../variegated-rs/variegated-debug", default-features = false, features = ["source-comms", "defmt"] }
+variegated-debug-codec = { path = "../../variegated-rs/variegated-debug-codec", default-features = false, features = ["defmt"] }
 bt-hci.workspace = true
 postcard = { workspace = true, features = ["alloc", "use-crc"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
@@ -49,7 +61,23 @@ esp-backtrace = { workspace = true, features = [
 ] }
 esp-bootloader-esp-idf.workspace = true
 esp-hal = { workspace = true, features = ["defmt", "unstable"] }
-esp-println = { workspace = true, features = ["defmt-espflash", "timestamp"] }
+# `default-features = false` drops the `auto` output target, which probes for
+# USB-Serial-JTAG at runtime (it watches the peripheral's SOF interrupt flag and
+# switches to it the moment a host has ever been seen) and would write into the
+# same FIFO the structured debug stream now owns. `uart` pins the output to the
+# ROM console channel instead.
+#
+# Consequence: `defmt`'s `global_logger` and `esp-backtrace`'s panic output go to
+# UART0, so `espflash monitor` over the USB-Serial-JTAG port no longer shows logs.
+# Use `variegated-debug-tui` for the structured stream, or a UART0 adapter for the
+# defmt log.
+#
+# `critical-section` is kept even though it is a default feature: it is what makes
+# each print atomic, and without it two tasks printing concurrently interleave
+# their bytes -- which for `defmt-espflash`'s rzcobs framing does not merely
+# scramble a line, it corrupts the frame. `colors` is dropped with the rest of the
+# defaults; it does nothing under `defmt-espflash`, which emits binary.
+esp-println = { workspace = true, default-features = false, features = ["uart", "critical-section", "defmt-espflash", "timestamp", "esp32c6"] }
 esp-rtos = { workspace = true, features = ["esp-radio", "defmt", "embassy"] }
 static_cell.workspace = true
 # 0.18 removed the `smoltcp` feature entirely -- the blocking smoltcp path is
