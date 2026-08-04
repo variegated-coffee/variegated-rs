@@ -3522,8 +3522,17 @@ cover for it because the executor is dead when the handler runs.
 
 **Human decision:** rather than stashing a backtrace across a reset or adding a second
 wire, make the host tolerate and display unstructured plain text on the same transport.
-Text on the wire stops being corruption and becomes content — which also picks up ROM
-boot banners and anything else that prints before the bus exists.
+Text on the wire stops being corruption and becomes content.
+
+~~which also picks up ROM boot banners and anything else that prints before the bus
+exists~~ — **that claim was wrong, and was disproved off hardware during
+implementation.** Unstructured text is legible only if the device brackets it with COBS
+delimiters. The panic handler complies; the ROM cannot, because its banner is by
+construction the run *preceding* the connection's first delimiter — which is exactly
+the run the host must refuse, since a mid-stream attach produces an indistinguishable
+frame suffix. No device-side change reaches it. The firmware still emits a leading
+delimiter, for a different and real reason: without it the banner and the first frame
+merge into one run and the frame dies too.
 
 **Files:**
 - Modify: `variegated-cli/src/transport.rs`, `src/model.rs`, `src/bin/variegated-debug-tui.rs`
