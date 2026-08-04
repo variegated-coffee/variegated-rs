@@ -23,7 +23,7 @@ use crate::config::BELKA_PERIPHERAL_ID;
 /// Set the Belka connection flag, emitting a typed event only when it actually
 /// changes.
 ///
-/// The five `BELKA_CONNECTION_STATUS.store(..)` sites this replaces are not all
+/// The four `BELKA_CONNECTION_STATUS.store(..)` sites this replaces are not all
 /// transitions. Three of them -- the GATT-client failure arm, the join-completed
 /// arm and the connection-lost arm -- sit in a five-second retry loop, and two of
 /// those can run with the flag already `false`. Storing unconditionally is

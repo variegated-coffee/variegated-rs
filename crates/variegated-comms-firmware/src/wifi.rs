@@ -14,6 +14,34 @@ use crate::channels::{NO_RSSI, WIFI_CONNECTED, WIFI_RSSI_DBM, WIFI_RSSI_SIGNAL};
 use crate::config::{PASSWORD, SSID};
 use crate::debug::bus;
 
+/// Set the Wi-Fi connection flag, emitting a typed event only when it actually
+/// changes.
+///
+/// The same shape as `ble::devices::set_belka_connected`, and for the same reason:
+/// the edge belongs in the helper rather than at the call site, so no caller -- and
+/// no future caller -- can emit a level.
+///
+/// It matters more here than it looks. Of the three sites that clear this flag,
+/// only one is unambiguously a transition (`wait_for_disconnect_async` resolving);
+/// the other two run at the top of a retry loop and can execute with the flag
+/// already `false`. And the two directions can genuinely get out of step:
+/// `connect_async` can return `Err` on an association that then completes, after
+/// which `is_connected()` is true while this flag is false, and a later disconnect
+/// would report a loss that was never announced as a gain. Gating both directions
+/// on the `swap` keeps every `WifiAssociated`/`WifiLost` a matched pair, which is
+/// what a host counts. The unpaired truth is in `CommsState::wifi_connected`, once
+/// a second, where a level belongs.
+fn set_wifi_connected(connected: bool) {
+    if WIFI_CONNECTED.swap(connected, Ordering::Relaxed) == connected {
+        return;
+    }
+    bus::emit_event(if connected {
+        DebugEvent::WifiAssociated
+    } else {
+        DebugEvent::WifiLost
+    });
+}
+
 /// WiFi connection management task
 ///
 /// Maintains WiFi connection, reconnecting when disconnected.
@@ -50,15 +78,16 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     Timer::after(Duration::from_secs(1)),
                 ).await {
                     Either::First(_) => {
-                        // Disconnected - clear RSSI and break to reconnect
-                        WIFI_CONNECTED.store(false, Ordering::Relaxed);
+                        // Disconnected - clear RSSI and break to reconnect.
+                        //
+                        // Edge triggered: `wait_for_disconnect_async()` resolving is
+                        // the link-loss transition itself -- it is a wait, not a
+                        // poll -- and this arm is only reachable from the branch
+                        // that was associated. The `swap` inside the helper is belt
+                        // and braces.
+                        set_wifi_connected(false);
                         WIFI_RSSI_SIGNAL.signal(None);
                         WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
-                        // Edge triggered: `wait_for_disconnect_async()` resolving is
-                        // the link-loss transition itself, and this arm is only
-                        // reachable from the branch that was associated. It fires
-                        // once per association lost, never on a poll.
-                        bus::emit_event(DebugEvent::WifiLost);
                         Timer::after(Duration::from_millis(5000)).await;
                         break;
                     }
@@ -74,8 +103,11 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                 }
             }
         } else {
-            // Not connected - clear RSSI
-            WIFI_CONNECTED.store(false, Ordering::Relaxed);
+            // Not connected - clear RSSI. Reached at boot and on every retry, so the
+            // helper's `swap` is doing real work here: it emits only if the flag was
+            // actually set, which covers the case where the controller drops an
+            // association before the inner loop ever gets to wait on it.
+            set_wifi_connected(false);
             WIFI_RSSI_SIGNAL.signal(None);
             WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
         }
@@ -95,13 +127,12 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
         log_info!("Connecting to WiFi...");
         match controller.connect_async().await {
             Ok(_) => {
-                WIFI_CONNECTED.store(true, Ordering::Relaxed);
-                // Edge triggered: `connect_async` returning `Ok` *is* the
-                // association. Failed attempts fall to the `Err` arm and emit
-                // nothing, so the rate here is the rate at which the link actually
-                // comes up -- in steady state, once -- and not the rate at which
-                // this loop retries.
-                bus::emit_event(DebugEvent::WifiAssociated);
+                // Edge triggered: `connect_async` waits for the association rather
+                // than polling, so failed attempts fall to the `Err` arm and emit
+                // nothing. The helper's `swap` closes the window between this
+                // returning `Ok` and the `is_connected()` check at the top of the
+                // loop.
+                set_wifi_connected(true);
             }
             Err(_e) => {
                 log_error!("Failed to connect to WiFi");

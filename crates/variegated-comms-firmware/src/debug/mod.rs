@@ -26,6 +26,8 @@ pub mod usb;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
+use embassy_sync::pubsub::Subscriber;
+use variegated_controller_types::debug::DebugFrame;
 use variegated_controller_types::debug_command::DebugCommand;
 
 use crate::channels::DEBUG_COMMAND_CAPACITY;
@@ -38,6 +40,30 @@ pub use variegated_debug::bus;
 /// Where decoded commands are handed off, shared by the USB reader and Task 11's
 /// TCP reader.
 pub type CommandSink = Sender<'static, CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>;
+
+/// A reader of the shared debug bus.
+///
+/// Nameable, rather than an `impl Trait` buried in `bus::subscriber`'s return type,
+/// because **the slot has to be claimed before the task that uses it runs**, and
+/// that means passing one of these across a task boundary.
+///
+/// `embassy_sync`'s pubsub discards a published message outright when
+/// `subscriber_count == 0` -- `try_publish` returns `Ok(())` without touching the
+/// queue (`embassy-sync-0.8.0/src/pubsub/mod.rs:332`) -- and a subscriber created
+/// later starts at `next_message_id` (`:100`), so it cannot recover what it missed.
+/// Between those two facts, nothing published before the first `subscriber()` call
+/// exists at all: not lost in the ring, not counted as dropped, simply never
+/// queued. Claiming the slot synchronously in `main`, before the first publish and
+/// with no `.await` in between, is what makes the boot frames -- `Boot`, the early
+/// `SpawnFailed`s and every `log_*!` up to the first yield -- reach a reader.
+pub type BusSubscriber = Subscriber<
+    'static,
+    CriticalSectionRawMutex,
+    DebugFrame,
+    { bus::BUS_CAPACITY },
+    { bus::BUS_SUBSCRIBERS },
+    1,
+>;
 
 /// Number of connected TCP debug clients.
 ///

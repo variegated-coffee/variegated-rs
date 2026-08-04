@@ -4,7 +4,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esphome_device::{ClientEvent, EspHomeError};
 use esphome_device::embassy_net::server::{EspHomeConnection, EspHomeServer};
 use variegated_log::{log_info, log_warn, log_error};
@@ -77,6 +77,15 @@ pub async fn esphome_server_task(
     ).await;
 }
 
+/// Minimum interval between reported ESPHome session event *pairs*.
+///
+/// Bounds the pair at two frames per five seconds -- 0.4 Hz, well under the 1 Hz
+/// snapshot and comparable to the worst case the BLE connect/disconnect pair can
+/// reach. Five seconds because it matches the retry dwell used elsewhere in this
+/// firmware and is far shorter than any real ESPHome session, so a genuine client
+/// is never collapsed.
+const ESPHOME_EVENT_MIN_INTERVAL: Duration = Duration::from_secs(5);
+
 /// TCP server loop that accepts ESPHome connections
 async fn tcp_server_loop(
     stack: &'static Stack<'static>,
@@ -88,6 +97,9 @@ async fn tcp_server_loop(
     let mut rx_buffer = [0u8; 4096];
     let mut tx_buffer = [0u8; 4096];
 
+    // When the last reported session began. See `ESPHOME_EVENT_MIN_INTERVAL`.
+    let mut last_reported: Option<Instant> = None;
+
     loop {
         // Create a new socket for each connection
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
@@ -98,11 +110,34 @@ async fn tcp_server_loop(
         // Accept a connection
         match socket.accept(6053).await {
             Ok(()) => {
-                // Edge triggered: one per accepted TCP connection. `accept` only
-                // returns when a client actually arrives -- it is a wait, not a
-                // poll -- so the rate is the client's connect rate, not this
-                // loop's.
-                bus::emit_event(DebugEvent::EsphomeClientConnected);
+                // Edge triggered -- `accept` is a wait, not a poll -- but edge
+                // triggered is not on its own sufficient here, because the edge
+                // belongs to a *remote party*. `server.run()` returning drops
+                // straight back to `accept` with no delay on this path (contrast the
+                // 1 s dwell on the error path below), so a client stuck in a
+                // reconnect loop, a monitoring probe on 6053 or a port scan sets the
+                // rate, and each attempt costs two un-suppressible frames in a
+                // 16-slot ring. As `log_info!` this was collapsed to roughly one
+                // frame per 2 s by the suppressor, so promoting it naively was a
+                // regression.
+                //
+                // The damper is on the *reporting*, not on the server: no dwell is
+                // added to the accept loop, because delaying a legitimate client's
+                // reconnect to protect a debug stream would be the wrong trade. A
+                // real ESPHome client holds the connection for minutes, so the
+                // interval never fires for one; only churn is collapsed.
+                //
+                // `note_suppressed` rather than `note_dropped`, per that function's
+                // contract: an identical frame went out moments earlier and nothing
+                // is lost that the next reported pair will not say again.
+                let report = last_reported
+                    .is_none_or(|t| Instant::now().duration_since(t) >= ESPHOME_EVENT_MIN_INTERVAL);
+                if report {
+                    last_reported = Some(Instant::now());
+                    bus::emit_event(DebugEvent::EsphomeClientConnected);
+                } else {
+                    bus::note_suppressed();
+                }
 
                 // Split the socket into reader and writer
                 let (mut reader, mut writer) = socket.split();
@@ -126,11 +161,17 @@ async fn tcp_server_loop(
                 // Run the server - handle both socket and channel loops concurrently
                 let result = server.run().await;
 
-                // Edge triggered, and strictly paired with the event above:
-                // `server.run()` returning *is* the end of the session, whichever
-                // way it ended. One accept produces exactly one of these, so the
-                // pair can never outrun the client's own connect rate.
-                bus::emit_event(DebugEvent::EsphomeClientDisconnected);
+                // Strictly paired with the event above: `server.run()` returning *is*
+                // the end of the session, whichever way it ended, and it is reported
+                // exactly when the connect was. A pair is never half-emitted, which
+                // is why `report` is captured once and reused rather than
+                // re-evaluated here -- the interval will have elapsed by now on any
+                // session worth the name.
+                if report {
+                    bus::emit_event(DebugEvent::EsphomeClientDisconnected);
+                } else {
+                    bus::note_suppressed();
+                }
 
                 // The unexpected-error case keeps its text, because it is a
                 // different fact from "the session ended" -- it says *why*, and

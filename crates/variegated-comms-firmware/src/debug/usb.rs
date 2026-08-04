@@ -48,7 +48,7 @@ use esp_hal::usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx};
 use variegated_controller_types::debug::{DebugEvent, Name, DEBUG_PROTOCOL_VERSION};
 use variegated_debug_codec::{encode_frame, CommandDecoder, VersionVerdict, MAX_FRAME};
 
-use crate::debug::{bus, CommandSink};
+use crate::debug::{bus, BusSubscriber, CommandSink};
 
 /// Longest we will wait for the host to accept one packet before abandoning the
 /// frame.
@@ -97,14 +97,24 @@ fn version_mismatch_reason(found: u8) -> Name {
 }
 
 /// Drive the frame writer and the command reader. Never returns.
+///
+/// `subscriber` is handed in rather than claimed here, and that is the whole point
+/// of the parameter. This function does not run until the executor first polls the
+/// task, which on this firmware is not until `main` reaches its first `.await` --
+/// roughly a hundred lines after the bus starts carrying frames. A subscriber
+/// claimed at that moment would miss every one of them, and not by lagging: with
+/// `subscriber_count == 0` the pubsub's `try_publish` returns `Ok(())` without
+/// queueing anything at all, so they are gone before the ring is involved. See
+/// [`crate::debug::BusSubscriber`].
 pub async fn run(
     mut rx: UsbSerialJtagRx<'static, esp_hal::Async>,
     mut tx: UsbSerialJtagTx<'static, esp_hal::Async>,
     sink: CommandSink,
+    subscriber: Option<BusSubscriber>,
 ) {
     join(
         async {
-            let Some(mut subscriber) = bus::subscriber() else {
+            let Some(mut subscriber) = subscriber else {
                 // Two slots are configured and two consumers exist on this
                 // processor, so this is a misconfiguration rather than a runtime
                 // condition. `variegated_debug::usb_cdc` panics here; this one does

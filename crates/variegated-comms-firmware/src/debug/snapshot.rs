@@ -53,9 +53,18 @@ pub fn publish_snapshot() {
     //
     // `saturating_sub` rather than `-`: the two reads are not atomic together, and
     // a sync landing between them would otherwise wrap `u64`.
+    //
+    // `try_into().unwrap_or(u32::MAX)` rather than `as u32`, for the same reason the
+    // field is a `u32` at all rather than a lie. `TIME_SYNCED` latches permanently,
+    // so on a device that synced once and then lost NTP the age keeps growing --
+    // past `u32::MAX` ms at ~49.7 days of uptime, where a truncating cast wraps to a
+    // small number and renders a clock that is seven weeks stale as freshly synced.
+    // Saturating at the ceiling is obviously wrong to a reader; wrapping is
+    // plausibly wrong, which is worse.
     let sntp_synced_ms_ago = if TIME_SYNCED.load(Ordering::Relaxed) {
         let synced_at = LAST_SNTP_SYNC_MS.load(Ordering::Relaxed);
-        Some(Instant::now().as_millis().saturating_sub(synced_at) as u32)
+        let age = Instant::now().as_millis().saturating_sub(synced_at);
+        Some(age.try_into().unwrap_or(u32::MAX))
     } else {
         None
     };
@@ -95,6 +104,15 @@ pub fn publish_snapshot() {
 /// `SourceState`s side by side without interpolating. `Timer::after_secs` rather
 /// than a `Ticker`: a snapshot that slips is not worth catching up on, and drifting
 /// slightly is better than emitting a burst after a stall.
+///
+/// Publishes *before* the first `Timer`, so the first snapshot goes out as soon as
+/// the executor reaches this task rather than a second later. That ordering was a
+/// hazard while the bus's only subscriber was claimed inside `debug_usb_task`: if
+/// this task happened to be polled first, the frame would meet
+/// `subscriber_count == 0` and be discarded outright rather than queued. It is safe
+/// now for a reason that does not depend on poll order at all -- `main` claims the
+/// subscriber synchronously before it spawns anything, so no publish anywhere in
+/// this firmware can find the bus unsubscribed. See [`crate::debug::BusSubscriber`].
 #[embassy_executor::task]
 pub async fn snapshot_task() {
     loop {

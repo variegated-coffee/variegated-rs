@@ -229,8 +229,9 @@ async fn debug_usb_task(
     usb_rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>,
     usb_tx: esp_hal::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Async>,
     sink: debug::CommandSink,
+    subscriber: Option<debug::BusSubscriber>,
 ) {
-    debug::usb::run(usb_rx, usb_tx, sink).await;
+    debug::usb::run(usb_rx, usb_tx, sink, subscriber).await;
 }
 
 #[embassy_executor::task]
@@ -274,6 +275,32 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
+    // Claim the debug bus's reader slot *here*, synchronously, before anything is
+    // published -- not inside `debug_usb_task`, where it used to be claimed.
+    //
+    // `main` is itself a task. It does not yield until its first `.await`, which is
+    // the `Timer::after_secs(5)` well over a hundred lines below, so no task spawned
+    // in between runs until then. A subscriber claimed inside one of those tasks is
+    // therefore claimed *after* every frame this function publishes.
+    //
+    // That is not a lag, it is a discard. `embassy_sync`'s pubsub short-circuits a
+    // publish when nobody is listening -- `try_publish` returns `Ok(())` without
+    // touching the queue when `subscriber_count == 0`
+    // (`embassy-sync-0.8.0/src/pubsub/mod.rs:332-336`) -- and `subscriber()` starts a
+    // new reader at the current `next_message_id` (`:100`), so it cannot recover what
+    // it did not witness. Ring capacity has nothing to do with it: the frame never
+    // reaches the ring.
+    //
+    // What that cost, before this line existed: `DebugEvent::Boot`, the `SpawnFailed`
+    // reports for the first six tasks -- including `application_processor`, whose
+    // silent absence is exactly what this feature exists to make visible -- and every
+    // `log_*!` emitted during bring-up, which is most of the boot log.
+    //
+    // Claiming it here also makes the guarantee checkable by reading rather than by
+    // reasoning about the executor: the slot is taken on this line, the first publish
+    // is nine lines down, and there is no `.await` between them.
+    let debug_subscriber = debug::bus::subscriber();
+
     // Install the `log` -> debug-bus sink first, because the `log` facade
     // *discards* every record emitted before a logger exists and there is no
     // replay. Every `log_*!` in this firmware is silent until this line runs.
@@ -306,7 +333,8 @@ async fn main(spawner: Spawner) -> ! {
     // reset that the sequence numbers restarting is a reboot and not a gap.
     //
     // Emitted here, immediately after the sink exists, so it precedes every log line
-    // this firmware produces rather than landing in the middle of them.
+    // this firmware produces rather than landing in the middle of them -- and after
+    // the `subscriber()` call above, without which it would not be emitted at all.
     debug::bus::emit_event(DebugEvent::Boot);
 
     // Initialize RTC for time synchronization
@@ -334,7 +362,7 @@ async fn main(spawner: Spawner) -> ! {
     // rest of esp-hal uses.
     let usb = esp_hal::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
     let (usb_rx, usb_tx) = usb.split();
-    spawn_or_report!(spawner, "debug_usb", debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender()));
+    spawn_or_report!(spawner, "debug_usb", debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender(), debug_subscriber));
     // The 1 Hz `CommsState` snapshot. Spawned next to the transport rather than with
     // the network tasks: it reads atomics and bus counters only, so it is useful
     // from the first second of the boot and does not depend on anything below.
