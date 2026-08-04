@@ -21,7 +21,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
-use embassy_rp::{dma, i2c, pio, pwm, spi, uart, Peri};
+use embassy_rp::{dma, i2c, pio, pwm, spi, uart, usb, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::LlffHeap as Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -75,13 +75,17 @@ use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyC
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
 use variegated_hal::scale::{gravity, ScaleController};
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
-use variegated_instrumentation::async_task_loop;
+use variegated_instrumentation::{async_task_loop, define_counters, define_indicators, PerformanceCounters, PerformanceIndicators};
 use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
 use variegated_mcp9600::Register::SensorConfiguration;
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId};
-use variegated_controller_types::debug_command::DebugCommand;
+use variegated_controller_types::debug::{ApplicationState, DebugEvent, DebugPayload, DebugStateSnapshot, SourceState};
+use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
+use variegated_debug::bus;
+use variegated_debug::sampler::{sample_interval_ms, set_sample_interval_ms, Sampler, SCHEMA_INTERVAL_MS};
+use variegated_debug::usb_cdc::{self, DebugUsbResources};
 use crate::rotary::{UIStatus};
 
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
@@ -112,11 +116,12 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH3>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>;
+    UsbIrq => usb::InterruptHandler<embassy_rp::peripherals::USB>;
 });
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Status, 1, 4, 1>, configuration_receiver: embassy_sync::pubsub::Subscriber<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::Configuration, 1, 4, 1>, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart. It matters more on this board than on dual-boiler: this
     // link is five times slower *and* has no hardware flow control (`Uart::new`, not
@@ -229,6 +234,11 @@ struct QwiicI2cBusPeripherals {
     scl_pin: Peri<'static, ()>,
 }
 
+#[variegated_board_cfg::board_cfg("usb_debug_peripherals")]
+struct UsbDebugPeripherals {
+    usb: Peri<'static, ()>,
+}
+
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
 type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
@@ -236,7 +246,11 @@ type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, S
 type GravityMutex = Mutex<NoopRawMutex, Gravity<I2cDevice<'static, NoopRawMutex, I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>>>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
 
-const STATUS_RECEIVERS: usize = 4;
+// Five consumers exist: the brew button, the rotary UI, the display, the ESP
+// transceiver, and the debug snapshot task. `subscriber()` is `.unwrap()`ed at every
+// call site, so running out is a boot panic rather than a degradation -- keep this
+// equal to the number of `status_channel.subscriber()` calls in `main_task`.
+const STATUS_RECEIVERS: usize = 5;
 type StatusChannel = PubSubChannel<NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 type StatusSubscriber = Subscriber<'static, NoopRawMutex, Status, 1, STATUS_RECEIVERS, 1>;
 
@@ -245,6 +259,25 @@ type ConfigurationChannel = PubSubChannel<NoopRawMutex, Configuration, 1, CONFIG
 type ConfigurationSubscriber = Subscriber<'static, NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 
 
+
+// Performance Counters - Track events by incrementing
+define_counters! {
+    enum CounterId {
+        BoilerTemperatureReading = 0,
+        BoilerPressureReading = 1,
+    }
+}
+
+// Performance Indicators - Track current state by setting values
+define_indicators! {
+    enum IndicatorId {
+        BoilerTemperatureReadingTimeMs = 0,
+        BoilerPressureReadingTimeMs = 1,
+    }
+}
+
+static COUNTERS: PerformanceCounters<2> = PerformanceCounters::new();
+static INDICATORS: PerformanceIndicators<2> = PerformanceIndicators::new();
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
@@ -278,16 +311,17 @@ static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
 static GRAVITY_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, gravity::GravityCommand, 3>> = StaticCell::new();
-// Debug commands injected over the inter-processor link. `CriticalSectionRawMutex`
-// rather than this example's usual `NoopRawMutex`, because the type is fixed by
-// `variegated_debug::usb_cdc::CommandSink`, which is shared by both firmwares.
+// Debug commands injected over the inter-processor link *and* over USB CDC.
+// `CriticalSectionRawMutex` rather than this example's usual `NoopRawMutex`, because
+// the type is fixed by `variegated_debug::usb_cdc::CommandSink`, which is shared by
+// both firmwares.
 //
-// Nothing drains it yet: this example has no debug command task until Task 14, so
-// injected commands queue and are dropped once the four slots are full. That is the
-// correct behaviour in the meantime -- `try_send` on a full channel is a drop, never
-// a stall -- and it is why the sender exists now: the alternative was leaving
-// `single_boiler` unable to compile against `esp_transceiver_main`'s new signature.
+// Both transports feed this one channel on purpose: a command injected over USB and
+// the same command injected over TCP have to converge on the same handler, or the two
+// paths would apply different subsets of the same command set. `debug_command_task`
+// drains it.
 static DEBUG_COMMANDS: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand, 4>> = StaticCell::new();
+static DEBUG_USB: StaticCell<DebugUsbResources> = StaticCell::new();
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 
 fn check_stack_usage() -> (usize, usize) {
@@ -321,12 +355,22 @@ fn check_stack_usage() -> (usize, usize) {
 #[embassy_executor::task]
 async fn main_task(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
+
+    // Install the `log` -> debug bus bridge before anything else logs. The `log_*!`
+    // macros in the shared libraries emit to both `defmt` (probe, unaffected) and the
+    // `log` facade; without a logger the `log` half goes nowhere, which is why this
+    // example's Events pane would otherwise carry only the handful of typed
+    // `emit_event` sites. `Err` means a logger was already installed -- nothing else
+    // installs one, so it cannot happen here, and it is not worth panicking over.
+    let _ = variegated_log::bus_sink::init();
+
     defmt::info!("Starting!");
 
     let psram_config = embassy_rp::psram::Config::aps6404l();
     defmt::info!("Initing!");
 
     let psram = embassy_rp::psram::Psram::new(QmiCs1::new(p.QMI_CS1, p.PIN_0), psram_config);
+    let psram_heap = psram.is_ok();
 
     if let Ok(psram) = psram {
         info!("PSRAM initialized successfully, using PSRAM for heap");
@@ -454,8 +498,8 @@ async fn main_task(spawner: Spawner) -> ! {
         RatiometricLowSide(Mux::AIN1, Mux::AIN2, IDACMux::AIN0, IDACMux::AIN3, ReferenceInput::Refp0Refn0, IDACMagnitude::Mag1000uA, PGAGain::Gain4, 1620.0),
         ConversionParameters::pt100().with_kalman_filter(0.001, 0.05, 1.0),
         -2.95,
-        None::<variegated_instrumentation::CounterHandle<1>>,
-        None::<variegated_instrumentation::IndicatorHandle<1>>,
+        Some(COUNTERS.handle(CounterId::BoilerTemperatureReading)),
+        Some(INDICATORS.handle(IndicatorId::BoilerTemperatureReadingTimeMs)),
     );
 
     let prs_sig: &'static Watch<_, _, 3> = PRESSURE_SIGNAL.init(Watch::new());
@@ -471,8 +515,8 @@ async fn main_task(spawner: Spawner) -> ! {
             .with_median_filter(5)
             .with_kalman_filter(0.05, 0.1, 0.5),
         0.0,
-        None::<variegated_instrumentation::CounterHandle<1>>,
-        None::<variegated_instrumentation::IndicatorHandle<1>>,
+        Some(COUNTERS.handle(CounterId::BoilerPressureReading)),
+        Some(INDICATORS.handle(IndicatorId::BoilerPressureReadingTimeMs)),
     );
 
     let mechanism_p = mechanism_peripherals!(p);
@@ -743,10 +787,28 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);
 
+    // The debug command channel is created here rather than beside the other debug
+    // wiring below, because the ESP transceiver needs its sender too: commands
+    // injected over TCP arrive on the inter-processor link and have to converge on
+    // the same handler as the ones injected over USB, or the two transports would
+    // apply different subsets of the same command set.
     let debug_commands_channel: &'static Channel<CriticalSectionRawMutex, DebugCommand, 4> =
         DEBUG_COMMANDS.init(Channel::new());
+    let debug_command_sender = debug_commands_channel.sender();
+    let debug_command_receiver = debug_commands_channel.receiver();
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_commands_channel.sender()).unwrap());
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_command_sender).unwrap());
+
+    // Wire up the structured debug bus: USB CDC transport, periodic sampler,
+    // periodic state snapshot, and injected-command handling. The channel itself is
+    // created just above, next to the ESP transceiver that also feeds it.
+    let usb_debug_p = usb_debug_peripherals!(p);
+    spawner.spawn(debug_usb_task(usb_debug_p, debug_command_sender).unwrap());
+    spawner.spawn(debug_sampler_task().unwrap());
+    // Fifth status subscriber -- see STATUS_RECEIVERS.
+    let debug_status_receiver = status_channel.subscriber().unwrap();
+    spawner.spawn(debug_snapshot_task(psram_heap, debug_status_receiver).unwrap());
+    spawner.spawn(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap).unwrap());
 
     info!("Creating heap stat tasks");
     spawner.spawn(heap_stats_task().unwrap());
@@ -779,6 +841,134 @@ async fn main_task(spawner: Spawner) -> ! {
     }
 }
 
+
+#[embassy_executor::task]
+async fn debug_usb_task(
+    usb_p: UsbDebugPeripherals,
+    sink: usb_cdc::CommandSink,
+) {
+    let driver = embassy_rp::usb::Driver::new(usb_p.usb, Irqs);
+    let resources = DEBUG_USB.init(DebugUsbResources::new());
+    usb_cdc::run(driver, resources, sink).await;
+}
+
+#[embassy_executor::task]
+async fn debug_sampler_task() {
+    let sampler = Sampler::new(
+        &COUNTERS,
+        &INDICATORS,
+        CounterId::NAMES,
+        IndicatorId::NAMES,
+        "single-boiler",
+    );
+
+    bus::emit_event(DebugEvent::Boot);
+
+    let mut since_schema_ms = SCHEMA_INTERVAL_MS;
+    loop {
+        // Re-emit the schema periodically: with always-on emission there is no
+        // handshake, so this is how a client that attaches later learns names.
+        if since_schema_ms >= SCHEMA_INTERVAL_MS {
+            for payload in sampler.schema_payloads() {
+                bus::publish(payload);
+            }
+            since_schema_ms = 0;
+        }
+
+        bus::publish(sampler.counter_payload());
+        bus::publish(sampler.indicator_payload());
+
+        let interval = sample_interval_ms();
+        Timer::after_millis(interval as u64).await;
+        since_schema_ms = since_schema_ms.saturating_add(interval);
+    }
+}
+
+#[embassy_executor::task]
+async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscriber) {
+    // The last status seen on the channel. Retained across ticks because the channel
+    // holds one message and the controller publishes on its own cadence: without
+    // this, any tick that happened to land between publishes would emit nothing and
+    // the State tab would blink empty.
+    let mut latest: Option<Status> = None;
+
+    loop {
+        publish_snapshot(psram_heap);
+
+        // Drain rather than await, so the 1 Hz cadence never depends on the
+        // controller's and this task never holds up a channel the control path
+        // publishes to.
+        while let Some(status) = status_receiver.try_next_message_pure() {
+            latest = Some(status);
+        }
+
+        if let Some(status) = latest.as_ref() {
+            // Not `bus::publish`: `Status` travels on its own single-slot channel
+            // because the bus clones every message for every subscriber, and this one
+            // is 1-2 kB. See `variegated_debug::status`. It never awaits and never
+            // back-pressures a producer.
+            variegated_debug::status::publish(Box::new(status.clone()));
+        }
+
+        Timer::after_secs(1).await;
+    }
+}
+
+fn publish_snapshot(psram_heap: bool) {
+    let stats = bus::stats();
+    let relay = variegated_comms::debug_relay::relay_stats();
+    bus::publish(DebugPayload::StateSnapshot(DebugStateSnapshot {
+        heap_used: HEAP.used() as u32,
+        heap_free: HEAP.free() as u32,
+        frames_emitted: stats.emitted,
+        frames_dropped: stats.dropped,
+        frames_suppressed: stats.suppressed,
+        frames_rate_limited: stats.rate_limited,
+        source_state: SourceState::Application(ApplicationState {
+            // This board has no watchdog wired at all, so there is nothing to
+            // report. `None` renders as "unknown" rather than a plausible-looking
+            // "fed 0 ms ago".
+            watchdog_fed_ms_ago: None,
+            psram_heap,
+            // Not determined: reading it would mean locking the routine repository
+            // from the snapshot path. `None` currently conflates "no routine" with
+            // "not determined" -- acceptable while nothing consumes it.
+            routine_running: None,
+            link_frames_relayed: relay.relayed,
+            link_frames_dropped: relay.dropped,
+        }),
+    }));
+}
+
+#[embassy_executor::task]
+async fn debug_command_task(
+    receiver: embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, DebugCommand, 4>,
+    command_sender: embassy_sync::channel::Sender<'static, NoopRawMutex, MachineCommand, 10>,
+    psram_heap: bool,
+) {
+    loop {
+        let command = receiver.receive().await;
+        bus::emit_event(DebugEvent::CommandReceived {
+            label: variegated_controller_types::debug::name(command.label()),
+        });
+        match command {
+            DebugCommand::Machine(machine) => {
+                let _ = command_sender.try_send(machine);
+            }
+            DebugCommand::App(AppDebugOp::ForceSnapshot) => publish_snapshot(psram_heap),
+            DebugCommand::App(AppDebugOp::SetSampleIntervalMs(ms)) => set_sample_interval_ms(ms),
+            DebugCommand::App(AppDebugOp::ResetCounters) => {
+                // PerformanceCounters is deliberately increment-only, so "reset"
+                // is host-side: emit the event and let the TUI rebase its
+                // baseline against the next sample.
+                bus::emit_event(DebugEvent::CountersReset);
+            }
+            DebugCommand::App(AppDebugOp::Ping) => {}
+            // Comms ops arrive only via the ESP32-C6, which handles them itself.
+            DebugCommand::Comms(_) => {}
+        }
+    }
+}
 
 #[embassy_executor::task]
 async fn heap_stats_task() {

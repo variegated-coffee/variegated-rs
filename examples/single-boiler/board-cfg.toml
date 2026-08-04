@@ -64,8 +64,12 @@ pin_flow_meter = "embassy_rp::peripherals::PIN_5"
 pin_he = "embassy_rp::peripherals::PIN_37"
 pin_solenoid = "embassy_rp::peripherals::PIN_36"
 
+[usb_debug_peripherals]
+usb = "embassy_rp::peripherals::USB"
+
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 RotaryEncoderPioIrq = "PIO0_IRQ_0"
 QwiicI2cIrq = "I2C0_IRQ"
 DmaIrq = "DMA_IRQ_0"
+UsbIrq = "USBCTRL_IRQ"
