@@ -107,7 +107,25 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             // but until then, we just use a short buffer, an accumulator, and hope for the best. Since we're
             // using HW flow control, we won't miss any bytes.
 
-            let mut cobs_buf: CobsAccumulator<1024> = CobsAccumulator::new();
+            // 4096, matching `CobsAccumulator::<4096>` on the comms side of this same
+            // link. It was 1024, which is half of `variegated_debug_codec::MAX_FRAME`
+            // and therefore *below* what the two hops in front of it accept: a
+            // `DebugCommand` passes the host codec at 2048 and the ESP's
+            // `CommandDecoder` at 2048, and then anything over ~1024 bytes died here,
+            // silently, at the third hop.
+            //
+            // 4096 rather than the obvious doubling to 2048, because 2048 is the
+            // measured worst case with **zero** bytes to spare. The largest command
+            // `encode_command` accepts comes to 2048 bytes on this link including the
+            // COBS sentinel, and `CobsAccumulator<2048>` holds exactly that and not one
+            // byte more -- and the two lengths are equal only by the coincidence that
+            // the host envelope's version byte and this message's enum tag are both a
+            // single byte, which is not a property anything guarantees: a different
+            // leading byte can move a COBS block boundary. Matching the far end takes
+            // the arithmetic out of the answer, and costs 3 kB in a 256 kB task arena.
+            // Measured by `variegated_debug::relay`'s
+            // `a_max_size_command_survives_the_inter_processor_hop`.
+            let mut cobs_buf: CobsAccumulator<4096> = CobsAccumulator::new();
 
             // Both of these exist to make typed events **edge triggered**, which is the
             // criterion `DebugEvent`'s own documentation sets for promoting a site --
@@ -137,7 +155,28 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                 'cobs: while !window.is_empty() {
                     window = match cobs_buf.feed::<CommsProcessorToApplicationProcessorMessage>(&window) {
                         FeedResult::Consumed => break 'cobs,
-                        FeedResult::OverFull(new_wind) => new_wind,
+                        // A message too large for the buffer above. Counted and
+                        // reported exactly like a `DeserError`, and sharing its edge
+                        // latch: both mean "a message arrived on this link and we could
+                        // not read it", both are produced in bursts by the same causes,
+                        // and one event per burst is what keeps the 16-slot ring from
+                        // turning over on its own. This arm used to return `new_wind`
+                        // and nothing else, so an oversized command vanished with no
+                        // counter and no event -- indistinguishable, from the host's
+                        // seat, from a command that was never sent.
+                        // `bus::note_dropped` deliberately *not* called: that counter
+                        // means "this device threw away a frame it wanted to send", and
+                        // this is an inbound message it could not read. Conflating them
+                        // would make `dev_dropped` on the host's Links row mean two
+                        // different failures at once.
+                        FeedResult::OverFull(new_wind) => {
+                            if link_healthy {
+                                link_healthy = false;
+                                error!("Message from ESP32 overflowed the COBS accumulator");
+                                bus::emit_event(DebugEvent::LinkDecodeError);
+                            }
+                            new_wind
+                        }
                         FeedResult::DeserError(new_wind) => {
                             if link_healthy {
                                 link_healthy = false;
@@ -251,9 +290,11 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         // the CommsStatus and configuration paths, so
                                         // blocking on a full debug queue would stall the
                                         // link. A dropped injected command is the correct
-                                        // trade.
+                                        // trade -- but it must not be a silent one, which
+                                        // is what `offer_command` adds over the bare
+                                        // `let _ = ` this used to be.
                                         other => {
-                                            let _ = debug_command_sender.try_send(other);
+                                            bus::offer_command(&debug_command_sender, other);
                                         }
                                     }
                                 }

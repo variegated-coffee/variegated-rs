@@ -902,12 +902,21 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
             latest = Some(status);
         }
 
-        if let Some(status) = latest.as_ref() {
-            // Not `bus::publish`: `Status` travels on its own single-slot channel
-            // because the bus clones every message for every subscriber, and this one
-            // is 1-2 kB. See `variegated_debug::status`. It never awaits and never
-            // back-pressures a producer.
-            variegated_debug::status::publish(Box::new(status.clone()));
+        // The gate is upstream of `Box::new` on purpose. The transport's own DTR check
+        // is downstream of it, so without this a machine no host has ever attached to
+        // paid a ~1.7 kB `Status::clone()` and an `LlffHeap::alloc` -- first-fit, under
+        // a critical section, interrupts off on both cores -- plus the matching
+        // `dealloc` a second later, every second, forever, on the processor running the
+        // PID loops. Do not produce for a host that is not there. See
+        // `variegated_debug::status::transport_attached`.
+        if variegated_debug::status::transport_attached() {
+            if let Some(status) = latest.as_ref() {
+                // Not `bus::publish`: `Status` travels on its own single-slot channel
+                // because the bus clones every message for every subscriber, and this
+                // one is 1-2 kB. See `variegated_debug::status`. It never awaits and
+                // never back-pressures a producer.
+                variegated_debug::status::publish(Box::new(status.clone()));
+            }
         }
 
         Timer::after_secs(1).await;

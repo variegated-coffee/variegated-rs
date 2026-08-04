@@ -854,26 +854,35 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
             latest = Some(status);
         }
 
-        if let Some(status) = latest.as_ref() {
-            // The allocation is here, on a 1 Hz task, deliberately: `Status` is 1-2 kB
-            // and boxing it is what keeps `DebugFrame` at ~160 bytes for the 16-slot
-            // static bus.
-            //
-            // Not `bus::publish`. `Status` has its own single-slot channel because a
-            // pubsub with more than one subscriber `clone()`s every message it hands
-            // out, inside the bus's `CriticalSectionRawMutex` -- so once the
-            // inter-processor relay became a second subscriber, this line would have
-            // meant a ~1.7 kB first-fit `LlffHeap::alloc` plus a memcpy with
-            // interrupts disabled on both cores, once a second, forever. See
-            // `variegated_debug::status`.
-            //
-            // `status::publish` still never awaits and never back-pressures a
-            // producer. It is not allocator-free either: superseding an undelivered
-            // frame frees a `Box` through `LlffHeap::dealloc`, whose free-list insert
-            // is O(n). That is deliberately done *outside* the signal's critical
-            // section, and it only happens at all when the transport is stalled or
-            // absent -- but it is a real cost and must not be described as absent.
-            variegated_debug::status::publish(Box::new(status.clone()));
+        // The gate is upstream of `Box::new` on purpose. The transport's own DTR check
+        // is downstream of it, so without this a machine no host has ever attached to
+        // paid the clone and the allocation described below every second, forever, for
+        // nobody. Do not produce for a host that is not there -- the comms firmware
+        // states the same rule in the same words at its own copy of this line. See
+        // `variegated_debug::status::transport_attached`.
+        if variegated_debug::status::transport_attached() {
+            if let Some(status) = latest.as_ref() {
+                // The allocation is here, on a 1 Hz task, deliberately: `Status` is
+                // 1-2 kB and boxing it is what keeps `DebugFrame` at ~160 bytes for the
+                // 16-slot static bus.
+                //
+                // Not `bus::publish`. `Status` has its own single-slot channel because
+                // a pubsub with more than one subscriber `clone()`s every message it
+                // hands out, inside the bus's `CriticalSectionRawMutex` -- so once the
+                // inter-processor relay became a second subscriber, this line would
+                // have meant a ~1.7 kB first-fit `LlffHeap::alloc` plus a memcpy with
+                // interrupts disabled on both cores, once a second, forever. See
+                // `variegated_debug::status`.
+                //
+                // `status::publish` still never awaits and never back-pressures a
+                // producer. It is not allocator-free either: superseding an undelivered
+                // frame frees a `Box` through `LlffHeap::dealloc`, whose free-list
+                // insert is O(n). That is deliberately done *outside* the signal's
+                // critical section, and with the gate above it only happens when the
+                // transport is attached but stalled -- but it is a real cost and must
+                // not be described as absent.
+                variegated_debug::status::publish(Box::new(status.clone()));
+            }
         }
 
         Timer::after_secs(1).await;

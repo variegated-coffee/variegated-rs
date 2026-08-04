@@ -84,6 +84,27 @@ use variegated_debug::relay::relayable;
 static FRAMES_RELAYED: AtomicU32 = AtomicU32::new(0);
 static FRAMES_DROPPED: AtomicU32 = AtomicU32::new(0);
 
+/// TX-queue slots the relay may never take, however much budget it has left.
+///
+/// `tx_channel` is **shared**: Status, Configuration, MachineDefinition and Routines
+/// travel on it as well as debug frames, and `try_send` alone only stops the *relay*
+/// from blocking. It does nothing to stop the relay from occupying all ten slots --
+/// from a full token bucket it may emit `BURST_BYTES` of frames back to back -- and
+/// the party that then blocks is the machine's own reader arm, which answers
+/// `RequestConfiguration`, `RequestMachineDefinition` and `RequestRoutines` with a
+/// `tx_sender.send(..).await` and forwards `MachineCommand`s while it is at it.
+///
+/// That is worse than latency on `single-boiler`. The link there is 115200 with no
+/// RTS/CTS and `embassy_rp::uart::UartRx<Async>::read` arms DMA per call, so a parked
+/// reader leaves only the 32-byte hardware FIFO -- about 2.8 ms before bytes are lost,
+/// COBS desynchronises and the link reports a decode error. A debug feature is not
+/// allowed to cause that.
+///
+/// Two slots, because the reader needs one for the response it is sending and one for
+/// the next one to have somewhere to go. Refusing here is a drop like any other and is
+/// counted like one.
+const TX_RESERVED_SLOTS: usize = 2;
+
 /// What the relay has done with the frames it was offered.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct RelayStats {
@@ -162,6 +183,16 @@ pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
 
         // Before encoding, not after: encoding is where the cost is.
         if !relayable(&frame.payload) {
+            continue;
+        }
+
+        // Also before encoding, for the same reason -- and because a frame refused
+        // here must not cost an `LlffHeap::alloc` on the processor running the PID
+        // loops. The `try_send` below stays as the backstop for the slot that goes
+        // between this check and that call; this is what stops the relay taking the
+        // last of a queue the machine is about to need. See [`TX_RESERVED_SLOTS`].
+        if tx_sender.free_capacity() <= TX_RESERVED_SLOTS {
+            note_dropped();
             continue;
         }
 

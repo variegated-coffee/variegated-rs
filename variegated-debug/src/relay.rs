@@ -300,4 +300,124 @@ mod tests {
             );
         }
     }
+
+    /// The **inbound** direction of the same link, and why its accumulator is 4096.
+    ///
+    /// A `DebugCommand` reaches the application processor over three hops: the host
+    /// codec encodes it (bounded by `MAX_FRAME`), the comms processor's
+    /// `CommandDecoder` decodes it (also `MAX_FRAME`), and then the comms processor
+    /// re-wraps it as a `CommsProcessorToApplicationProcessorMessage` and COBS-encodes
+    /// it onto the UART, where `variegated_comms::esp_transceiver_main` feeds it to a
+    /// `CobsAccumulator`. That accumulator was `<1024>` -- half of `MAX_FRAME` -- so
+    /// every command the first two hops accepted and the third could not hold was
+    /// discarded there with no counter and no event.
+    ///
+    /// It is now 4096. The obvious doubling to 2048 would have held this by exactly
+    /// zero bytes -- and only because the host envelope's version byte and this
+    /// message's enum tag happen to be one byte each, which no rule guarantees and
+    /// which a shifted COBS block boundary can break. This test measures the figure
+    /// rather than restating an arithmetic argument, because an earlier draft of that
+    /// argument was wrong by nine bytes in the other direction.
+    ///
+    /// Lives here, in the module that owns the link's decisions, for the reason at the
+    /// top of this file: `variegated_comms` links `embassy-rp` and cannot be
+    /// host-tested at all.
+    #[test]
+    fn a_max_size_command_survives_the_inter_processor_hop() {
+        use postcard::accumulator::{CobsAccumulator, FeedResult};
+        use variegated_controller_types::commands::MachineCommand;
+        use variegated_controller_types::debug_command::DebugCommand;
+        use variegated_controller_types::routines::core::{Routine, RoutineType};
+        use variegated_controller_types::CommsProcessorToApplicationProcessorMessage as Inbound;
+        use variegated_debug_codec::{encode_command, MAX_FRAME};
+
+        // `Routine::name` is an unbounded `alloc::String`, which is the cheapest way to
+        // build a command of a chosen size -- and it is not contrived: `AddRoutine` is
+        // named in the codec's own docs as the variant with no finite bound.
+        let command = |name_len: usize| {
+            DebugCommand::Machine(MachineCommand::AddRoutine(Routine {
+                routine_type: RoutineType::UserDefined,
+                name: std::iter::repeat('A').take(name_len).collect(),
+                parameters: std::vec::Vec::new(),
+                derived_parameters: std::vec::Vec::new(),
+                steps: std::vec::Vec::new(),
+                finally: std::vec::Vec::new(),
+            }))
+        };
+
+        // The largest command the two upstream hops will pass: grow it until
+        // `encode_command` refuses, then step back one.
+        let mut buf = std::vec![0u8; MAX_FRAME];
+        let mut largest = 0usize;
+        for name_len in 0..MAX_FRAME {
+            if encode_command(&command(name_len), &mut buf).is_err() {
+                break;
+            }
+            largest = name_len;
+        }
+        let host_encoded = encode_command(&command(largest), &mut buf).expect("fits").len();
+        assert!(
+            host_encoded > MAX_FRAME - 16,
+            "the fixture must actually reach the codec's ceiling, not stop short of it \
+             ({host_encoded} B of {MAX_FRAME})"
+        );
+
+        // Now the third hop, exactly as the comms processor performs it.
+        let on_the_wire =
+            postcard::to_allocvec_cobs(&Inbound::DebugCommand(command(largest))).expect("encodes");
+        std::println!(
+            "largest injectable command: {host_encoded} B at the host codec, \
+             {} B on the inter-processor link",
+            on_the_wire.len()
+        );
+
+        // The buffer this used to be. It truncated this command silently, at the last
+        // hop before the machine would have acted on it, having passed two decoders
+        // that both said yes.
+        assert!(
+            on_the_wire.len() > 1024,
+            "a 1024-byte accumulator would have held this ({} B); the fixture no longer \
+             demonstrates the defect it exists for",
+            on_the_wire.len()
+        );
+        // And the margin a doubling to 2048 would have left, which is none: 2048 is
+        // both the largest message this link can carry and the whole of that buffer.
+        // If this ever reads as comfortable headroom, the fixture has stopped reaching
+        // the ceiling.
+        assert_eq!(
+            on_the_wire.len(),
+            2048,
+            "the worst case on this link is expected to sit exactly on MAX_FRAME"
+        );
+
+        // The size the link actually uses, fed in the 8-byte reads
+        // `esp_transceiver_main` performs -- the chunking matters, because
+        // `CobsAccumulator` decides `OverFull` per feed against what it has already
+        // buffered, not against the message as a whole.
+        let mut accumulator: CobsAccumulator<4096> = CobsAccumulator::new();
+        let mut decoded = false;
+        for chunk in on_the_wire.chunks(8) {
+            let mut window = chunk;
+            while !window.is_empty() {
+                window = match accumulator.feed::<Inbound>(window) {
+                    FeedResult::Consumed => break,
+                    FeedResult::OverFull(_) => panic!(
+                        "4096 bytes must hold the largest command the codec accepts ({} B)",
+                        on_the_wire.len()
+                    ),
+                    FeedResult::DeserError(_) => {
+                        panic!("the message the comms processor sent must decode")
+                    }
+                    FeedResult::Success { data, remaining } => {
+                        // `DebugCommand` has no `Debug` and no `PartialEq` by design,
+                        // so this checks the shape rather than comparing values.
+                        assert!(matches!(data, Inbound::DebugCommand(DebugCommand::Machine(_))));
+                        decoded = true;
+                        remaining
+                    }
+                };
+            }
+        }
+        assert!(decoded, "the command must arrive whole at the application processor");
+    }
 }

@@ -17,7 +17,7 @@ use embassy_time::{Duration, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config};
 use core::fmt::Write as _;
-use variegated_controller_types::debug::{DebugEvent, Name, DEBUG_PROTOCOL_VERSION};
+use variegated_controller_types::debug::{name, DebugEvent, Name, DEBUG_PROTOCOL_VERSION};
 use variegated_controller_types::debug_command::DebugCommand;
 use variegated_debug_codec::{encode_frame, CommandDecoder, VersionVerdict, MAX_FRAME};
 
@@ -117,9 +117,28 @@ pub async fn run(
         device.run(),
         async {
             let Some(subscriber) = subscriber.as_mut() else {
-                // Two subscribers are configured; failing to get one means the bus
-                // was misconfigured, and silently doing nothing would be worse.
-                panic!("debug bus subscriber unavailable for USB CDC");
+                // Cannot happen with the bus as configured -- `BUS_SUBSCRIBERS` is 2
+                // and both examples have exactly two consumers, neither of which ever
+                // drops one -- but the margin is zero, and this is the processor that
+                // heats water and drives a pump. A `panic!` here would take the PID
+                // loops, the interlocks and the watchdog feed down for the sake of a
+                // debug stream, which inverts the entire point of the stream. Both
+                // siblings already degrade instead: `debug_relay::relay` emits
+                // `SpawnFailed` and returns, and the comms firmware's USB writer says
+                // in as many words that a panic would take WiFi, BLE and the ESPHome
+                // server with it. The argument is stronger here, not weaker.
+                //
+                // Silently doing nothing would still be wrong -- a writer that never
+                // writes looks exactly like a host that is not attached -- so the
+                // report goes on the bus. It reaches someone by construction:
+                // `subscriber()` only fails when both slots are taken, which means two
+                // other consumers are live and will receive this frame.
+                //
+                // The `join3` arms beside this one keep running: the USB device stays
+                // enumerated and the command reader stays live, so a host can still
+                // inject even with the writer down.
+                bus::emit_event(DebugEvent::SpawnFailed { task: name("debug_usb_cdc") });
+                return;
             };
             let mut buf = [0u8; MAX_FRAME];
             loop {
@@ -152,7 +171,15 @@ pub async fn run(
                 };
 
                 // No host has opened the port: drop rather than queue.
-                if !cdc_tx.dtr() {
+                //
+                // Also published upstream, because this check is the *last* thing that
+                // happens to a `Status` and the expensive part is the first: the
+                // producer clones ~1.7 kB and allocates before anything here gets a
+                // say. `status::transport_attached` is what lets it not bother. See
+                // `crate::status`.
+                let attached = cdc_tx.dtr();
+                status::note_transport_attached(attached);
+                if !attached {
                     bus::note_dropped();
                     continue;
                 }
@@ -203,8 +230,12 @@ pub async fn run(
                     match cdc_rx.read_packet(&mut buf).await {
                         Ok(n) => {
                             decoder.feed(&buf[..n], |command| {
-                                // try_send, not send: never block the USB reader.
-                                let _ = sink.try_send(command);
+                                // try_send, not send: never block the USB reader. What
+                                // `offer_command` adds over the bare `let _ = ` this
+                                // used to be is that a command lost to a full queue is
+                                // now counted and, on the edge, reported -- see
+                                // `bus::offer_command`.
+                                bus::offer_command(&sink, command);
                             });
                             // A host built against a different revision of the
                             // protocol would otherwise inject a command that decodes

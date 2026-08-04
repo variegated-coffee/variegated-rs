@@ -48,12 +48,50 @@ use alloc::boxed::Box;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
+use portable_atomic::{AtomicBool, Ordering};
 use variegated_controller_types::debug::{DebugFrame, DebugPayload};
 use variegated_controller_types::Status;
 
 use crate::bus;
 
 static STATUS: Signal<CriticalSectionRawMutex, DebugFrame> = Signal::new();
+
+/// Whether the local transport currently has a host on the other end.
+///
+/// Producers of `Status` consult this **before building one**, and that ordering is
+/// the entire reason it exists. The transport's own attachment check
+/// ([`crate::usb_cdc`]'s `dtr()`) is downstream of the caller's `Status::clone()` and
+/// `Box::new`, so on a machine no host has ever attached to, the 1 Hz publisher was
+/// paying a ~1.7 kB clone plus an `LlffHeap::alloc` -- first-fit, O(n) in the free
+/// list, under `critical_section::with`, i.e. with interrupts disabled on both cores
+/// -- and a matching `dealloc` a second later, forever, on the processor running the
+/// PID loops. That is the cost the "`Status` off the bus" redesign was built to
+/// eliminate; moving it off the pubsub removed the memcpy under the lock and left the
+/// allocation.
+///
+/// The comms firmware already applies exactly this discipline to the identical line,
+/// gating on `TCP_DEBUG_CLIENTS > 0` with the written justification *"do not produce
+/// for a host that is not there"*. This is the application processor's version of that
+/// gate. The comms firmware does not use it -- its own client count is the better
+/// signal there, and it distinguishes which transport is attached.
+static TRANSPORT_ATTACHED: AtomicBool = AtomicBool::new(false);
+
+/// Report whether a host is attached. Called by the transport, from the same place it
+/// decides whether to write.
+pub fn note_transport_attached(attached: bool) {
+    TRANSPORT_ATTACHED.store(attached, Ordering::Relaxed);
+}
+
+/// Whether it is worth building a `Status` at all. See [`TRANSPORT_ATTACHED`].
+///
+/// Deliberately a level rather than a handshake, and deliberately allowed to be stale:
+/// the transport refreshes it on every frame it considers, and the bus carries frames
+/// continuously whether or not any `Status` is produced, so a host that attaches is
+/// seen within one frame and starts receiving `Status` on the next 1 Hz tick. Nothing
+/// here waits for a host, which is the invariant the whole debug path is built on.
+pub fn transport_attached() -> bool {
+    TRANSPORT_ATTACHED.load(Ordering::Relaxed)
+}
 
 /// Offer the latest `Status` to the local transport, replacing any copy it has not
 /// yet taken.
