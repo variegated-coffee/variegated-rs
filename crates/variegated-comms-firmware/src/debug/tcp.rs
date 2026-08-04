@@ -23,10 +23,15 @@
 //! [`TCP_DEBUG_CLIENTS`] is an `AtomicU8` and therefore plural by construction, but
 //! this server can only ever store `0` or `1` into it. That is deliberate: the type
 //! does not have to change if the two limits above are ever lifted, and until then
-//! the honest value is a count that never exceeds one. A second client that
-//! connects while one is being served is not accepted -- `accept` is simply not
-//! called again until the first is gone -- so it waits in the listen backlog rather
-//! than being served a partial stream.
+//! the honest value is a count that never exceeds one.
+//!
+//! **A second client is refused, not queued.** There is one socket, and while it is
+//! serving a client nothing is in `Listen` on 9090, so `smoltcp`'s `process_tcp`
+//! answers the second SYN with an RST and the connecting host gets
+//! "connection refused" immediately. There is no listen backlog on this stack --
+//! saying there was would send an operator hunting a network fault to explain a
+//! connection that was actually working as designed. Refused beats a half stream, and
+//! refused *immediately* beats a hang.
 //!
 //! # Never block on a client
 //!
@@ -182,10 +187,10 @@ fn has_room_for(socket: &TcpSocket<'_>, len: usize) -> bool {
 /// `subscriber_count == 0` rather than queueing it. `main` claims both slots
 /// synchronously before the first publish. See [`crate::debug::BusSubscriber`].
 ///
-/// The consequence of claiming early and reading late is a large `Lagged` on the
-/// first read, which is counted honestly: those are frames this device meant to
-/// deliver and did not. It is the same accounting the USB writer produces while no
-/// host is attached, one drop per frame.
+/// Claiming early would mean reading late, and reading late would mean an unbounded
+/// `Lagged` on the first read -- so this task drains the bus from the moment it
+/// starts, connected or not. See [`accept_while_draining`], which is where that
+/// happens and why it has to.
 pub async fn run(stack: &'static Stack<'static>, subscriber: Option<BusSubscriber>) {
     let Some(mut subscriber) = subscriber else {
         // Both slots are configured and both consumers exist, so this is a
@@ -209,9 +214,21 @@ pub async fn run(stack: &'static Stack<'static>, subscriber: Option<BusSubscribe
 
         log_info!("TCP debug server listening on port {}", DEBUG_PORT);
 
-        if let Err(e) = socket.accept(DEBUG_PORT).await {
+        let accepted = accept_while_draining(&mut socket, &mut subscriber).await;
+        if let Err(e) = accepted {
             log_error!("Failed to accept TCP debug connection: {:?}", e);
             Timer::after(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        // `accept` resolves `Ok(())` for *any* state that is not `Listen`, `SynSent`
+        // or `SynReceived` (`embassy-net-0.9.1/src/tcp.rs:285-294`) -- including
+        // `Closed`. A handshake that died on the wire therefore returns success with
+        // no peer on the other end, and taking that at face value would emit a
+        // connect event, a log line and a disconnect event describing a client that
+        // never existed. Cheap to rule out, and a phantom client is exactly the kind
+        // of thing this stream is supposed to be trustworthy about.
+        if !socket.may_send() {
             continue;
         }
 
@@ -220,8 +237,21 @@ pub async fn run(stack: &'static Stack<'static>, subscriber: Option<BusSubscribe
         // {0, 1} would be describing a system that does not exist.
         TCP_DEBUG_CLIENTS.store(1, Ordering::Relaxed);
         bus::emit_event(DebugEvent::TcpDebugClientConnected);
-        // Published *before* the first frame goes out, so it is in front of the
-        // stream it qualifies rather than buried in it.
+        // Published before the first frame goes out, and it genuinely arrives first:
+        // the subscriber was drained right up to the accept, so its cursor is at the
+        // head of the ring and there is no backlog for this to queue behind. That was
+        // not true while the idle interval was allowed to accumulate lag -- the
+        // `Lagged` handler resynchronises to the *oldest* surviving ring entry, so
+        // this notice would have arrived behind up to 15 older frames while claiming
+        // to introduce them.
+        //
+        // It goes on the bus rather than straight down the socket, so the USB host
+        // sees it too. That is a little odd and is the right trade anyway: it is a
+        // true statement about the device (a TCP debug client is attached, and what
+        // its version byte covers), it is the same reach `TcpDebugClientConnected`
+        // one line above already has, and writing it to the socket directly would
+        // make it an unstructured text run -- which a host counts as the signature of
+        // a panicking device.
         bus::emit_text(Severity::Warn, text(ATTESTATION_NOTICE));
 
         serve(&mut socket, &mut subscriber, &mut frame_buf).await;
@@ -246,6 +276,59 @@ pub async fn run(stack: &'static Stack<'static>, subscriber: Option<BusSubscribe
 
         bus::emit_event(DebugEvent::TcpDebugClientDisconnected);
         log_info!("TCP debug client disconnected");
+    }
+}
+
+/// Wait for a client **while draining the bus**, so no lag accumulates while idle.
+///
+/// This is not a refinement, it is the difference between a bounded and an unbounded
+/// amount of work. An `accept` that ignored the subscriber would leave it parked at
+/// whatever message id it held when the last client left -- across the whole boot
+/// before the first connection, and across every gap between connections after that.
+/// The ring is 16 slots, so the subscriber's next read returns a single
+/// `Lagged(n)` where `n` counts every frame published in the interval: at ~5 frames a
+/// second that is ~430,000 after a day idle and millions after a week, and the
+/// handler for it is a `for` loop with no `.await` in it, on the executor that also
+/// runs WiFi and BLE. A debug transport that stalls the radios for seconds the moment
+/// someone connects to it is worse than no debug transport.
+///
+/// Draining as we go makes the same accounting arrive one frame at a time. It is the
+/// shape the USB writer has always had: `debug/usb.rs` takes every message off the
+/// bus unconditionally and counts one drop per frame in real time whether or not a
+/// host is attached, and it never accumulates lag. Claiming this server was
+/// "identical in shape" to that while it did the opposite was simply wrong.
+///
+/// Two things fall out of it for free. `frames_dropped` no longer takes a step of
+/// hundreds at first connect. And the ring stops being permanently full, which
+/// restores `embassy-sync`'s move-without-clone fast path: a message is only handed
+/// out by clone while some subscriber has yet to read it, so a bus whose readers both
+/// keep up moves each frame out to the last taker instead of copying ~150 bytes
+/// inside the bus's critical section for every frame, forever.
+///
+/// The accept future is created **once** and re-polled through `Pin::as_mut`, not
+/// re-created per iteration: `TcpSocket::accept` calls `smoltcp`'s `listen` on every
+/// call, and `listen` refuses a socket that is already open, so a loop that called
+/// `accept` again after a cancellation would fail with `InvalidState` on its second
+/// pass and never accept anything.
+async fn accept_while_draining(
+    socket: &mut TcpSocket<'_>,
+    subscriber: &mut BusSubscriber,
+) -> Result<(), embassy_net::tcp::AcceptError> {
+    let mut accept = core::pin::pin!(socket.accept(DEBUG_PORT));
+    loop {
+        match select(accept.as_mut(), subscriber.next_message()).await {
+            Either::First(result) => return result,
+            // Every frame published while nobody is connected is a frame this
+            // transport did not deliver. One drop each, counted as it happens --
+            // which is the same number the lag would eventually have reported, paid
+            // in constant time instead of in one unbounded burst.
+            Either::Second(WaitResult::Lagged(n)) => {
+                for _ in 0..n {
+                    bus::note_dropped();
+                }
+            }
+            Either::Second(WaitResult::Message(_)) => bus::note_dropped(),
+        }
     }
 }
 

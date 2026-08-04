@@ -15,6 +15,7 @@ use variegated_controller_types::{
     ExternalPeripheralSensorReading, MachineCommand,
 };
 use variegated_controller_types::debug::DebugEvent;
+use variegated_debug::relay::relayable;
 
 use crate::debug::{bus, TCP_DEBUG_CLIENTS};
 use crate::channels::{
@@ -134,22 +135,22 @@ pub async fn start(
                                 // with its own numbering would make every `Status`
                                 // look to a host like a frame that went missing.
                                 //
-                                // Gated on a client being connected, and that is the
-                                // same discipline as the USB CDC transport's DTR
-                                // check rather than an optimisation: with nobody
-                                // attached, every one of these would be a ~1.7 kB
-                                // first-fit `LlffHeap::alloc` plus a memcpy, on the
-                                // heap WiFi and BLE share, followed a moment later by
-                                // `note_dropped()` when the next one superseded it.
-                                // `frames_dropped` is the counter that says "this
-                                // device failed to deliver something", and a
-                                // permanent 1 Hz climb on an idle machine would
-                                // destroy it as a signal.
+                                // Gated on a client being connected, and the reason is
+                                // the heap, not the counters. With nobody attached,
+                                // every one of these would be a ~1.7 kB first-fit
+                                // `LlffHeap::alloc` plus a memcpy on the heap WiFi and
+                                // BLE share, superseded and freed a second later,
+                                // forever, to be delivered to nobody. That is the same
+                                // discipline as the CDC transport's DTR check: do not
+                                // produce for a host that is not there.
                                 //
-                                // Racy against a client disconnecting between the
-                                // load and the publish. The cost is one stale frame
-                                // left in the signal, which the server takes and
-                                // counts when it tears the connection down.
+                                // It is *not* justified by keeping `frames_dropped`
+                                // quiet on an idle machine. That counter already
+                                // climbs once per frame whenever no USB host is
+                                // draining the endpoint, and the TCP server does the
+                                // same while it waits for a client, so an idle machine
+                                // has a rising drop count either way and this gate
+                                // would not have changed that.
                                 if TCP_DEBUG_CLIENTS.load(Ordering::Relaxed) > 0 {
                                     variegated_debug::status::publish(Box::new(status.clone()));
                                 }
@@ -224,7 +225,26 @@ pub async fn start(
                                 // Deliberately silent: the application processor relays
                                 // several frames a second, so logging one per frame here
                                 // would drown this firmware's own log.
-                                bus::BUS.immediate_publisher().publish_immediate(frame);
+                                //
+                                // `relayable` is checked again on this side, and it is
+                                // not redundant with the identical check in the relay:
+                                // that one runs on the *other* end of a UART, in a
+                                // binary that can be older or skewed. `bus.rs` states
+                                // that no payload on this bus may own a heap
+                                // allocation, because above one subscriber every
+                                // message is `clone()`d inside the bus's critical
+                                // section -- and `Status` is the one payload that owns
+                                // a `Box`. Without this line the only thing keeping a
+                                // ~1.7 kB `LlffHeap::alloc` out of a
+                                // `CriticalSectionRawMutex`, at frame rate, on the
+                                // processor carrying WiFi and BLE, would be the good
+                                // behaviour of a peer we do not control. Dropped
+                                // silently rather than counted, for the same reason the
+                                // relay does not count its filtered frames: it is a
+                                // policy decision, not a lost frame.
+                                if relayable(&frame.payload) {
+                                    bus::BUS.immediate_publisher().publish_immediate(frame);
+                                }
                             }
                         }
 
