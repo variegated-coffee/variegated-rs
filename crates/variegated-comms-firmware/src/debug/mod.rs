@@ -21,6 +21,7 @@
 //! this processor, so this transport reads the bus only.
 
 pub mod panic_console;
+pub mod snapshot;
 pub mod usb;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

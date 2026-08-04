@@ -9,7 +9,9 @@ use esphome_device::{ClientEvent, EspHomeError};
 use esphome_device::embassy_net::server::{EspHomeConnection, EspHomeServer};
 use variegated_log::{log_info, log_warn, log_error};
 use variegated_controller_types::MachineCommand;
+use variegated_controller_types::debug::DebugEvent;
 
+use crate::debug::bus;
 use crate::channels::{
     ApplicationStatusSubscriber, ApplicationConfigurationSubscriber,
     StateChangeChannel, CLIENT_EVENT_CAPACITY, MACHINE_COMMAND_CAPACITY, MACHINE_DEFINITION,
@@ -96,7 +98,11 @@ async fn tcp_server_loop(
         // Accept a connection
         match socket.accept(6053).await {
             Ok(()) => {
-                log_info!("Accepted ESPHome connection");
+                // Edge triggered: one per accepted TCP connection. `accept` only
+                // returns when a client actually arrives -- it is a wait, not a
+                // poll -- so the rate is the client's connect rate, not this
+                // loop's.
+                bus::emit_event(DebugEvent::EsphomeClientConnected);
 
                 // Split the socket into reader and writer
                 let (mut reader, mut writer) = socket.split();
@@ -120,14 +126,21 @@ async fn tcp_server_loop(
                 // Run the server - handle both socket and channel loops concurrently
                 let result = server.run().await;
 
-                match result {
-                    Ok(()) => log_info!("ESPHome connection closed normally"),
-                    Err(e) => {
-                        match e {
-                            EspHomeError::ConnectionClosed => log_info!("ESPHome connection closed normally"),
-                            _ => log_error!("ESPHome server error: {:?}", defmt::Debug2Format(&e)),
-                        }
-                    },
+                // Edge triggered, and strictly paired with the event above:
+                // `server.run()` returning *is* the end of the session, whichever
+                // way it ended. One accept produces exactly one of these, so the
+                // pair can never outrun the client's own connect rate.
+                bus::emit_event(DebugEvent::EsphomeClientDisconnected);
+
+                // The unexpected-error case keeps its text, because it is a
+                // different fact from "the session ended" -- it says *why*, and
+                // `EsphomeClientDisconnected` has no field to carry it. The two
+                // normal-close arms are gone: they said only what the event above
+                // already says.
+                if let Err(e) = result {
+                    if !matches!(e, EspHomeError::ConnectionClosed) {
+                        log_error!("ESPHome server error: {:?}", defmt::Debug2Format(&e));
+                    }
                 }
             }
             Err(e) => {

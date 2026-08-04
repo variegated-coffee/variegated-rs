@@ -12,11 +12,40 @@ use portable_atomic::Ordering;
 use trouble_host::prelude::*;
 use variegated_belka_portal_trouble_driver::BelkaPortalDriver;
 use variegated_controller_types::ExternalPeripheralSensorReading;
+use variegated_controller_types::debug::DebugEvent;
+use crate::debug::bus;
 use variegated_scale_trouble_driver::acaia_old::{AcaiaOldDriver, ScaleEvent};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
 use crate::channels::{BELKA_CONNECTION_STATUS, SENSOR_READING_CAPACITY};
 use crate::config::BELKA_PERIPHERAL_ID;
+
+/// Set the Belka connection flag, emitting a typed event only when it actually
+/// changes.
+///
+/// The five `BELKA_CONNECTION_STATUS.store(..)` sites this replaces are not all
+/// transitions. Three of them -- the GATT-client failure arm, the join-completed
+/// arm and the connection-lost arm -- sit in a five-second retry loop, and two of
+/// those can run with the flag already `false`. Storing unconditionally is
+/// harmless; *emitting* unconditionally would not be, because `emit_event`
+/// bypasses the log suppressor: a peripheral that is powered off but advertising,
+/// or one whose GATT connect keeps failing, would put a `BlePeripheralDisconnected`
+/// into a 16-slot ring every five seconds indefinitely.
+///
+/// `swap` makes the edge the condition rather than the call site, so every caller
+/// is edge triggered by construction and no future caller can reintroduce the
+/// problem. Steady state -- connected or disconnected -- is silent, and the level
+/// is carried by `CommsState::ble_connected` in the 1 Hz snapshot.
+fn set_belka_connected(connected: bool) {
+    if BELKA_CONNECTION_STATUS.swap(connected, Ordering::Relaxed) == connected {
+        return;
+    }
+    bus::emit_event(if connected {
+        DebugEvent::BlePeripheralConnected { id: BELKA_PERIPHERAL_ID }
+    } else {
+        DebugEvent::BlePeripheralDisconnected { id: BELKA_PERIPHERAL_ID }
+    });
+}
 
 /// BLE devices management task
 ///
@@ -93,7 +122,7 @@ async fn belka_measurement_loop(
                 log_info!("GATT client created, running task...");
 
                 // Signal that Belka is connected
-                BELKA_CONNECTION_STATUS.store(true, Ordering::Relaxed);
+                set_belka_connected(true);
 
                 // Run GATT client task alongside operations, exit when either completes
                 let _ = select(gatt.task(), async {
@@ -159,7 +188,7 @@ async fn belka_measurement_loop(
                                     Either::Second(is_connected) => {
                                         if !is_connected {
                                             log_info!("Connection lost during measurements, exiting");
-                                            BELKA_CONNECTION_STATUS.store(false, Ordering::Relaxed);
+                                            set_belka_connected(false);
                                             break;
                                         }
                                     }
@@ -174,11 +203,11 @@ async fn belka_measurement_loop(
                 log_info!("GATT join completed, connection dropped");
 
                 // Signal disconnection
-                BELKA_CONNECTION_STATUS.store(false, Ordering::Relaxed);
+                set_belka_connected(false);
             }
             Err(e) => {
                 log_error!("Failed to create GATT client: {:?}", e);
-                BELKA_CONNECTION_STATUS.store(false, Ordering::Relaxed);
+                set_belka_connected(false);
             }
         }
 

@@ -8,8 +8,11 @@ use esp_radio::wifi::{Config as WifiConfig, Interface, WifiController, sta::Stat
 
 use portable_atomic::Ordering;
 
-use crate::channels::{WIFI_CONNECTED, WIFI_RSSI_SIGNAL};
+use variegated_controller_types::debug::DebugEvent;
+
+use crate::channels::{NO_RSSI, WIFI_CONNECTED, WIFI_RSSI_DBM, WIFI_RSSI_SIGNAL};
 use crate::config::{PASSWORD, SSID};
+use crate::debug::bus;
 
 /// WiFi connection management task
 ///
@@ -50,6 +53,12 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                         // Disconnected - clear RSSI and break to reconnect
                         WIFI_CONNECTED.store(false, Ordering::Relaxed);
                         WIFI_RSSI_SIGNAL.signal(None);
+                        WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+                        // Edge triggered: `wait_for_disconnect_async()` resolving is
+                        // the link-loss transition itself, and this arm is only
+                        // reachable from the branch that was associated. It fires
+                        // once per association lost, never on a poll.
+                        bus::emit_event(DebugEvent::WifiLost);
                         Timer::after(Duration::from_millis(5000)).await;
                         break;
                     }
@@ -57,6 +66,10 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                         // Timer fired - update RSSI (convert i32 to i8)
                         let rssi = controller.rssi().ok().map(|r| r as i8);
                         WIFI_RSSI_SIGNAL.signal(rssi);
+                        WIFI_RSSI_DBM.store(
+                            rssi.map(|r| r as i16).unwrap_or(NO_RSSI),
+                            Ordering::Relaxed,
+                        );
                     }
                 }
             }
@@ -64,13 +77,31 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             // Not connected - clear RSSI
             WIFI_CONNECTED.store(false, Ordering::Relaxed);
             WIFI_RSSI_SIGNAL.signal(None);
+            WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
         }
 
+        // Deliberately *not* promoted to `DebugEvent::WifiReconnectRequested`.
+        //
+        // This is the body of an unbounded retry loop: with the AP unreachable,
+        // `connect_async` fails and we are back here five seconds later, forever.
+        // A typed event bypasses the log suppressor, so promoting it would put one
+        // frame every 5 s into a 16-slot ring for as long as the network is down --
+        // evicting exactly the events someone would be looking at. As text the
+        // suppressor collapses repeats, and the condition is already carried
+        // losslessly by `CommsState::wifi_connected` in the 1 Hz snapshot.
+        //
+        // Guarding it to fire only on the first attempt after a loss would not help
+        // either: that instant is already reported by `WifiLost` above.
         log_info!("Connecting to WiFi...");
         match controller.connect_async().await {
             Ok(_) => {
                 WIFI_CONNECTED.store(true, Ordering::Relaxed);
-                log_info!("WiFi connected!");
+                // Edge triggered: `connect_async` returning `Ok` *is* the
+                // association. Failed attempts fall to the `Err` arm and emit
+                // nothing, so the rate here is the rate at which the link actually
+                // comes up -- in steady state, once -- and not the rate at which
+                // this loop retries.
+                bus::emit_event(DebugEvent::WifiAssociated);
             }
             Err(_e) => {
                 log_error!("Failed to connect to WiFi");

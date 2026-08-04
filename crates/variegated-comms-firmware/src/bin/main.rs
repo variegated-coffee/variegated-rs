@@ -54,10 +54,38 @@ use variegated_comms_firmware::{
     wifi::{connection_task, net_task},
 };
 use esphome_device::ClientEvent;
-use variegated_controller_types::debug::{text, Severity};
+use variegated_controller_types::debug::{name, text, DebugEvent, Severity};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Spawn a task, reporting a failure instead of swallowing it.
+///
+/// embassy-executor 0.10 moved fallibility from `Spawner::spawn` onto the `#[task]`
+/// function, which returns `Err` when that task's pool is exhausted. Every spawn
+/// site in `main` used to be `if let Ok(t) = f(..) { spawner.spawn(t); }`, i.e. a
+/// missing task produced no panic, no log line and no symptom other than the
+/// machine quietly not doing something (open question #5 in `JULY-UPGRADE-STATUS`).
+///
+/// A typed event is the right answer here rather than `unwrap`: this firmware
+/// carries the machine's radios, and halting the whole chip because one task could
+/// not start is worse than starting the rest and saying which one is missing. It is
+/// also better than a `log_*!`, because the suppressor can collapse text and a host
+/// filtering on `spawn_failed` cannot miss this.
+///
+/// Edge triggered by construction: `main` runs once, so each of these executes
+/// exactly once per boot and only the failing ones emit. The worst case is bounded
+/// by the number of spawn sites.
+macro_rules! spawn_or_report {
+    ($spawner:expr, $task_name:literal, $token:expr) => {
+        match $token {
+            Ok(t) => $spawner.spawn(t),
+            Err(_) => debug::bus::emit_event(DebugEvent::SpawnFailed {
+                task: name($task_name),
+            }),
+        }
+    };
+}
 
 /// Get the backtrace out, then stop.
 ///
@@ -273,6 +301,14 @@ async fn main(spawner: Spawner) -> ! {
         );
     }
 
+    // The first frame of the boot. Edge triggered in the most literal sense: this
+    // line runs once per power cycle, and it is what tells a host attached across a
+    // reset that the sequence numbers restarting is a reboot and not a gap.
+    //
+    // Emitted here, immediately after the sink exists, so it precedes every log line
+    // this firmware produces rather than landing in the middle of them.
+    debug::bus::emit_event(DebugEvent::Boot);
+
     // Initialize RTC for time synchronization
     let rtc = Rtc::new(peripherals.LPWR);
 
@@ -298,7 +334,11 @@ async fn main(spawner: Spawner) -> ! {
     // rest of esp-hal uses.
     let usb = esp_hal::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
     let (usb_rx, usb_tx) = usb.split();
-    if let Ok(t) = debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender()) { spawner.spawn(t); }
+    spawn_or_report!(spawner, "debug_usb", debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender()));
+    // The 1 Hz `CommsState` snapshot. Spawned next to the transport rather than with
+    // the network tasks: it reads atomics and bus counters only, so it is useful
+    // from the first second of the boot and does not depend on anything below.
+    spawn_or_report!(spawner, "debug_snapshot", debug::snapshot::snapshot_task());
     log_info!("Debug USB-Serial-JTAG transport spawned");
 
     // Initialize ESPHome channels
@@ -319,11 +359,11 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn application processor tasks.
     //
     // embassy-executor 0.10 moved the fallibility from `Spawner::spawn` (which
-    // now returns `()`) onto the `#[task]` function itself, so every one of
-    // these grew an inner `if let Ok`. The previous `.ok()` discarded a failed
-    // spawn, and that is preserved here rather than switched to `unwrap`.
-    if let Ok(t) = application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel) { spawner.spawn(t); }
-    if let Ok(t) = status_listener_task(status_channel) { spawner.spawn(t); }
+    // now returns `()`) onto the `#[task]` function itself. A failed spawn used to
+    // be discarded silently; `spawn_or_report!` turns it into a `SpawnFailed` event
+    // instead. See the macro's doc comment for why an event and not `unwrap`.
+    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel));
+    spawn_or_report!(spawner, "status_listener", status_listener_task(status_channel));
     log_info!("Application processor tasks spawned");
 
     // Initialize esp-rtos
@@ -382,8 +422,8 @@ async fn main(spawner: Spawner) -> ! {
     let sensor_reading_sender = sensor_reading_channel.sender();
 
     // Spawn BLE tasks
-    if let Ok(t) = ble_runner_task(runner, printer) { spawner.spawn(t); }
-    if let Ok(t) = ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender) { spawner.spawn(t); }
+    spawn_or_report!(spawner, "ble_runner", ble_runner_task(runner, printer));
+    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender));
     log_info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;
@@ -420,10 +460,10 @@ async fn main(spawner: Spawner) -> ! {
     log_info!("Spawning network tasks");
 
     // Spawn network tasks
-    if let Ok(t) = connection_task(controller) { spawner.spawn(t); }
-    if let Ok(t) = net_task(runner) { spawner.spawn(t); }
-    if let Ok(t) = sntp_task(rtc_static, *stack_static) { spawner.spawn(t); }
-    if let Ok(t) = comms_status_signaller_task(rtc_static) { spawner.spawn(t); }
+    spawn_or_report!(spawner, "wifi_connection", connection_task(controller));
+    spawn_or_report!(spawner, "net", net_task(runner));
+    spawn_or_report!(spawner, "sntp", sntp_task(rtc_static, *stack_static));
+    spawn_or_report!(spawner, "comms_status_signaller", comms_status_signaller_task(rtc_static));
     log_info!("Network and CommsStatus tasks spawned");
 
     // Wait for network
@@ -458,8 +498,8 @@ async fn main(spawner: Spawner) -> ! {
     let http_config_subscriber = config_channel.subscriber().unwrap();
 
     // Spawn HTTP server and cache update tasks
-    if let Ok(t) = http_server_task(tcp_stack, command_sender) { spawner.spawn(t); }
-    if let Ok(t) = cache_update_task(http_status_subscriber, http_config_subscriber) { spawner.spawn(t); }
+    spawn_or_report!(spawner, "http_server", http_server_task(tcp_stack, command_sender));
+    spawn_or_report!(spawner, "cache_update", cache_update_task(http_status_subscriber, http_config_subscriber));
     log_info!("HTTP server and cache update tasks spawned");
 
     // Create subscribers for ESPHome server
@@ -468,7 +508,7 @@ async fn main(spawner: Spawner) -> ! {
     let esphome_command_config_subscriber = config_channel.subscriber().unwrap();
 
     // Spawn ESPHome server task
-    if let Ok(t) = esphome_server_task(
+    spawn_or_report!(spawner, "esphome_server", esphome_server_task(
         stack_static,
         esphome_status_subscriber,
         esphome_config_subscriber,
@@ -476,7 +516,7 @@ async fn main(spawner: Spawner) -> ! {
         state_change_channel,
         client_event_channel,
         command_channel,
-    ) { spawner.spawn(t); }
+    ));
     log_info!("ESPHome server task spawned on port 6053");
 
     // Create subscribers for WebSocket server
@@ -485,13 +525,13 @@ async fn main(spawner: Spawner) -> ! {
     let ws_routine_subscriber = routine_channel.subscriber().unwrap();
 
     // Spawn WebSocket server task
-    if let Ok(t) = websocket_server_task(
+    spawn_or_report!(spawner, "websocket_server", websocket_server_task(
         stack_static,
         ws_status_subscriber,
         ws_config_subscriber,
         ws_routine_subscriber,
         command_channel,
-    ) { spawner.spawn(t); }
+    ));
     log_info!("WebSocket server task spawned on port 8080");
 
     // Main loop - periodic HTTP client requests

@@ -2,15 +2,18 @@
 
 use core::net::{IpAddr, SocketAddr};
 
-use variegated_log::{log_error, log_info};
+use variegated_log::log_info;
 use embassy_net::{dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
 use embassy_time::{Duration, Timer};
 use esp_hal::rtc_cntl::Rtc;
 use portable_atomic::Ordering;
 use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 
-use crate::channels::TIME_SYNCED;
+use variegated_controller_types::debug::DebugEvent;
+
+use crate::channels::{LAST_SNTP_SYNC_MS, TIME_SYNCED};
 use crate::config::{NTP_SERVER, USEC_IN_SEC};
+use crate::debug::bus;
 
 /// Adapter making an embassy-net `UdpSocket` usable by sntpc.
 ///
@@ -87,14 +90,23 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
 
     // Resolve NTP server
     log_info!("Resolving NTP server: {}", NTP_SERVER);
+    // Both failure arms are edge triggered in the strongest sense available: the
+    // task *returns*, so each can fire at most once per boot and SNTP is then dead
+    // for this power cycle. No loop, no polling, nothing to flood.
+    //
+    // `SntpFailed` carries no reason, so the two arms are indistinguishable on the
+    // wire once their `log_error!` is gone. That is accepted rather than worked
+    // around: giving the variant a field is a wire-format change, and what a host
+    // needs from here -- "the clock will never sync this boot" -- is fully carried
+    // by the event plus `CommsState::sntp_synced_ms_ago` staying `None`.
     let ntp_addrs = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
         Ok(addrs) if !addrs.is_empty() => addrs,
         Ok(_) => {
-            log_error!("DNS resolution returned empty results");
+            bus::emit_event(DebugEvent::SntpFailed);
             return;
         }
-        Err(e) => {
-            log_error!("Failed to resolve NTP server: {:?}", e);
+        Err(_e) => {
+            bus::emit_event(DebugEvent::SntpFailed);
             return;
         }
     };
@@ -120,7 +132,20 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     // Display initial RTC time
     log_info!("Initial RTC time: {} us", rtc.current_time_us());
 
-    // Sync time periodically
+    // Sync time periodically.
+    //
+    // `last_ok` makes the two events below edge triggered rather than level
+    // triggered. The loop body runs every 300 s regardless of outcome, so emitting
+    // on every pass would re-announce a standing condition on a heartbeat -- the
+    // exact shape the log suppressor exists to collapse and that `emit_event`
+    // bypasses. Emitting only on a change means: one `SntpSynced` when the clock
+    // first becomes valid, one `SntpFailed` when syncing starts failing, one
+    // `SntpSynced` again when it recovers, and nothing at all in steady state.
+    // Freshness in between is carried by `CommsState::sntp_synced_ms_ago`.
+    //
+    // `None` at the start so the first pass always reports, whichever way it goes.
+    let mut last_ok: Option<bool> = None;
+
     loop {
         let addr: IpAddr = ntp_addrs[0].into();
         let result = get_time(
@@ -141,16 +166,21 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
                 // The RTC now holds a real wall-clock time, so it is safe to
                 // report it to the application processor.
                 TIME_SYNCED.store(true, Ordering::Relaxed);
-
-                // Log synchronized time
-                log_info!(
-                    "NTP sync successful | RTC time: {} us | Unix timestamp: {} s",
-                    rtc.current_time_us(),
-                    time.sec()
+                LAST_SNTP_SYNC_MS.store(
+                    embassy_time::Instant::now().as_millis(),
+                    Ordering::Relaxed,
                 );
+
+                if last_ok != Some(true) {
+                    bus::emit_event(DebugEvent::SntpSynced { unix: time.sec() as u64 });
+                }
+                last_ok = Some(true);
             }
             Err(_e) => {
-                log_error!("SNTP error occurred");
+                if last_ok != Some(false) {
+                    bus::emit_event(DebugEvent::SntpFailed);
+                }
+                last_ok = Some(false);
             }
         }
 

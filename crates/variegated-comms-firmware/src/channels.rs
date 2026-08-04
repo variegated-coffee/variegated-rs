@@ -3,7 +3,7 @@ use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use embassy_sync::signal::Signal;
 use embassy_sync::channel::{Channel, Sender, Receiver};
 use embassy_sync::mutex::Mutex;
-use portable_atomic::AtomicBool;
+use portable_atomic::{AtomicBool, AtomicI16, AtomicU64};
 use static_cell::StaticCell;
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, RoutineList, Status};
 use variegated_controller_types::debug_command::DebugCommand;
@@ -33,6 +33,21 @@ pub static COMMS_STATUS_SIGNAL: Signal<CriticalSectionRawMutex, CommsStatus> = S
 
 // WiFi RSSI Signal - updated by connection_task, read by comms_status_signaller_task
 pub static WIFI_RSSI_SIGNAL: Signal<CriticalSectionRawMutex, Option<i8>> = Signal::new();
+
+// WiFi RSSI mirror, for readers that must not consume WIFI_RSSI_SIGNAL.
+//
+// `Signal::try_take` is destructive: it hands the value to exactly one caller and
+// leaves the signal empty. `comms_status_signaller_task` already takes it once a
+// second, so a second 1 Hz reader -- the debug snapshot task -- would not observe a
+// stale value, it would *steal* roughly half of them and the application processor
+// would see `wifi_rssi: None` on those cycles. Mirroring into an atomic the way
+// WIFI_CONNECTED is mirrored gives the snapshot a non-consuming read.
+//
+// `i16` rather than `i8` so there is a value outside the RSSI range to mean "not
+// known": `NO_RSSI` is returned before the first sample and whenever the link is
+// down. It renders as `Option::None`, never as a plausible `0 dBm`.
+pub const NO_RSSI: i16 = i16::MIN;
+pub static WIFI_RSSI_DBM: AtomicI16 = AtomicI16::new(NO_RSSI);
 
 // Machine Definition - set once at startup, then read-only
 // Using Mutex<Option<>> since OnceLock is std-only
@@ -104,6 +119,14 @@ pub static BELKA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
 // The RTC counts from zero at boot, so without this there is no way to tell
 // "three seconds after the epoch" from "three seconds after power-on".
 pub static TIME_SYNCED: AtomicBool = AtomicBool::new(false);
+
+// Uptime in milliseconds at the last successful SNTP sync, for the debug snapshot's
+// `sntp_synced_ms_ago`.
+//
+// Only meaningful when TIME_SYNCED is true; the snapshot gates on that rather than
+// treating `0` as a timestamp, because `0` is a legitimate uptime and would read as
+// "synced at boot" on a device whose clock never synced at all.
+pub static LAST_SNTP_SYNC_MS: AtomicU64 = AtomicU64::new(0);
 
 // WiFi Connection Status - updated by connection_task, read by comms_status_signaller_task.
 //
