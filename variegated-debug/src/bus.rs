@@ -197,6 +197,70 @@ mod tests {
         assert_eq!(second.uptime_ms, 20);
     }
 
+    /// A frame published while nobody is subscribed does not exist. Not evicted
+    /// early, not lagged -- never queued.
+    ///
+    /// `try_publish` returns `Ok(())` and touches nothing when
+    /// `subscriber_count == 0` (`embassy-sync-0.8.0/src/pubsub/mod.rs:332-336`), and
+    /// `PubSubChannel::subscriber` starts a new reader at the *current*
+    /// `next_message_id` (`:100`), so a subscriber that arrives afterwards cannot
+    /// recover it. `BUS_CAPACITY` has nothing to do with the outcome: the ring has
+    /// 16 slots and one frame was published, and it is still gone.
+    ///
+    /// This is why the comms firmware claims its subscriber slot in `main`,
+    /// synchronously, before the first publish rather than inside the task that
+    /// reads: everything published before that call -- `DebugEvent::Boot`, the early
+    /// `SpawnFailed` reports, the boot log -- was being discarded.
+    #[test]
+    fn a_frame_published_with_no_subscriber_is_unrecoverable() {
+        let _serialised = COUNTER_DELTA_LOCK.lock();
+
+        publish_with(1, DebugPayload::Event(DebugEvent::Boot));
+
+        let mut late = BUS.subscriber().unwrap();
+        assert!(
+            late.try_next_message_pure().is_none(),
+            "a subscriber created after the publish must not see the frame"
+        );
+    }
+
+    /// The other half of the same fact, and the shape the fix relies on: claim the
+    /// slot first, publish second, and the frame is delivered.
+    #[test]
+    fn a_frame_published_after_the_slot_is_claimed_is_delivered() {
+        let _serialised = COUNTER_DELTA_LOCK.lock();
+
+        let mut early = BUS.subscriber().unwrap();
+        publish_with(2, DebugPayload::Event(DebugEvent::Boot));
+
+        let frame = early
+            .try_next_message_pure()
+            .expect("a subscriber claimed before the publish must receive the frame");
+        assert_eq!(frame.payload, DebugPayload::Event(DebugEvent::Boot));
+        assert_eq!(frame.uptime_ms, 2);
+    }
+
+    /// Pins the accounting gap that makes the above invisible to the counters, so
+    /// that changing it is a deliberate act rather than an accident.
+    ///
+    /// [`stamp`] increments `EMITTED` for a frame that `try_publish` then throws
+    /// away, and nothing calls [`note_dropped`] on that path. So `frames_emitted` in
+    /// a snapshot counts frames that were never deliverable, `frames_dropped` stays
+    /// at zero, and the difference between them cannot reveal a subscriberless
+    /// publish. Whether that is worth changing is Task 9's accounting to decide;
+    /// this test only makes sure nobody changes it without noticing.
+    #[test]
+    fn a_discarded_frame_is_still_counted_as_emitted() {
+        let _serialised = COUNTER_DELTA_LOCK.lock();
+
+        let before = stats();
+        publish_with(3, DebugPayload::Event(DebugEvent::Boot));
+        let after = stats();
+
+        assert_eq!(after.emitted, before.emitted + 1);
+        assert_eq!(after.dropped, before.dropped);
+    }
+
     #[test]
     fn dropped_frames_are_counted() {
         let _serialised = COUNTER_DELTA_LOCK.lock();
