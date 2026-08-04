@@ -20,6 +20,7 @@
 //! wakeups and busy-loop. Task 11's TCP server is the intended single consumer on
 //! this processor, so this transport reads the bus only.
 
+pub mod panic_console;
 pub mod usb;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;

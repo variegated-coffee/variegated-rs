@@ -7,6 +7,7 @@
 #![no_std]
 #![no_main]
 
+use core::fmt::Write as _;
 use core::net::{Ipv4Addr, SocketAddr};
 
 use bt_hci::controller::ExternalController;
@@ -19,7 +20,7 @@ use embassy_net::StackResources;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Read;
 use esp_alloc as _;
-use esp_backtrace as _;
+use esp_backtrace::Backtrace;
 use esp_hal::{
     clock::CpuClock,
     interrupt::software::SoftwareInterruptControl,
@@ -57,6 +58,64 @@ use variegated_controller_types::debug::{text, Severity};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// Get the backtrace out, then stop.
+///
+/// This replaces `esp-backtrace`'s own handler, which was doing nothing: it formats
+/// everything through `esp_println::println!`, and `esp-println` is `no-op` in this
+/// build (see Cargo.toml for the two reasons that must not be undone). The handler
+/// looked present and produced no bytes, which is the worst of both -- a panic here
+/// halted the chip in silence.
+///
+/// The shape of the output is deliberately `esp-backtrace`'s, banner and `0x…` frames
+/// and all, so `espflash` and the existing addr2line habits keep working on it.
+///
+/// # Ordering
+///
+/// Interrupts are cleared **first**, before anything is written. "The executor is
+/// gone" is true of embassy's cooperative scheduling but not of this chip: `esp-rtos`
+/// runs preemptive threads, and a timer tick during the write could schedule another
+/// one on top of a half-emitted backtrace. Clearing `MIE` makes the claim true rather
+/// than assuming it.
+///
+/// The capture happens in this frame rather than inside `panic_console`, so the
+/// backtrace is rooted at the same depth `esp-backtrace`'s handler rooted it at and
+/// the frame list means what it used to mean.
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    // riscv32: clear `mstatus.MIE` (bit 3). Nothing may run between here and the halt
+    // loop but this function.
+    unsafe { core::arch::asm!("csrci mstatus, 8") };
+
+    let backtrace = Backtrace::capture();
+    let mut console = unsafe { debug::panic_console::PanicConsole::steal() };
+
+    // Closes whatever COBS frame was in flight, so the wreckage of it is judged
+    // separately from the text that follows. See `panic_console`'s module docs.
+    console.write_bytes(&[0x00]);
+    let _ = write!(
+        console,
+        "\r\n====================== PANIC ======================\r\n{info}\r\n\r\nBacktrace:\r\n"
+    );
+    if backtrace.frames().is_empty() {
+        // The `.cargo/config.toml` in this repo sets `force-frame-pointers`, without
+        // which the walk finds nothing. Say so rather than printing an empty list,
+        // which reads as "the panic had no caller".
+        let _ = write!(console, "no frames -- build without force-frame-pointers?\r\n");
+    }
+    for frame in backtrace.frames() {
+        let _ = write!(console, "0x{:x}\r\n", frame.program_counter());
+    }
+    let _ = write!(console, "==================== END PANIC ====================\r\n");
+    // Terminates the text run so a host renders it now. Nothing else on this wire is
+    // ever going to send another delimiter.
+    console.write_bytes(&[0x00]);
+    console.flush();
+
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "Rust" fn _esp_println_timestamp() -> u64 {
@@ -131,8 +190,10 @@ async fn comms_status_signaller_task(
 }
 
 /// The structured debug stream's transport, on the peripheral `esp-println` used to
-/// share (see the `esp-println` entry in Cargo.toml -- it is now pinned to UART0
-/// precisely so this task can own USB-Serial-JTAG outright).
+/// share. `esp-println` is now `no-op` -- it has no output target at all, on this or
+/// any other peripheral (see its entry in Cargo.toml) -- so this task owns
+/// USB-Serial-JTAG outright while the executor is running. The one other writer is
+/// the panic handler above, which takes it by force after the executor has stopped.
 #[embassy_executor::task]
 async fn debug_usb_task(
     usb_rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>,
@@ -228,8 +289,8 @@ async fn main(spawner: Spawner) -> ! {
     let debug_command_channel = DEBUG_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
 
     // Bring up the structured debug transport before anything else that might have
-    // something to say. `esp-println` no longer touches this peripheral (Cargo.toml
-    // pins it to UART0), so the stream owns it outright.
+    // something to say. `esp-println` no longer writes anywhere at all (Cargo.toml
+    // sets it to `no-op`), so the stream owns this peripheral outright.
     //
     // `split()` returns (rx, tx) in that order -- not the (tx, rx) that most of the
     // rest of esp-hal uses.

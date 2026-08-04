@@ -25,10 +25,12 @@
 //!    exactly the kind of invisible failure this stream exists to eliminate.
 //! 2. A per-packet `select` against [`WRITE_TIMEOUT`].
 //!
-//! Together they also make the steady state cheap: the first frame after a host
-//! detaches costs one timeout, and every frame after that is refused by the room
-//! check in microseconds, because the buffer the first one left behind is never
-//! drained.
+//! Together they also make the steady state cheap. The first frames after a host
+//! detaches cost a timeout apiece -- likely two rather than one, because the IN
+//! endpoint is double-buffered: the room check passes while the second buffer is
+//! still free, so a frame gets written into it and then times out waiting for a
+//! completion that never comes. Once both buffers are full every later frame is
+//! refused by the room check in microseconds, because nothing is draining them.
 //!
 //! Do not remove either, and do not add an `await` on this path that is not
 //! similarly bounded.

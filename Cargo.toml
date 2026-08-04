@@ -55,8 +55,8 @@ esp-hal = "1.1.1"
 # refuses `default-features = false` on an inherited dependency whose workspace
 # entry does not already carry it. What is being dropped is the `auto` output
 # target, which probes for USB-Serial-JTAG at runtime and would contend with the
-# structured debug stream; the member re-adds `uart` and `critical-section` and
-# explains the trade.
+# structured debug stream. The member then selects `no-op` -- no output target at
+# all -- and explains the trade; `uart` was tried in between and rejected.
 esp-println = { version = "0.17.0", default-features = false }
 esp-radio = "0.18.0"
 esp-rtos = "0.3.0"
