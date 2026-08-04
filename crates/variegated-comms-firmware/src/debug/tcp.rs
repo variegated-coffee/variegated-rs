@@ -604,8 +604,13 @@ async fn read_command(
                         state.decoder.feed(&state.buf[..n], |command| {
                             // `try_send`, not `send`: this task must never wait on
                             // whoever executes commands. A dropped injected command is
-                            // better than a debug transport that parks.
-                            let _ = sink.try_send(command);
+                            // better than a debug transport that parks -- but it is not
+                            // better than a *silent* one, so `offer_command` counts it
+                            // and reports the edge. Deliberately edge-triggered and not
+                            // per drop: this socket is unauthenticated, and a command
+                            // flood that produced one bus frame each would evict the
+                            // frames an operator needs in order to see the flood.
+                            bus::offer_command(sink, command);
                         });
                         // A host built against a different revision of the protocol
                         // injects a command that decodes into something other than

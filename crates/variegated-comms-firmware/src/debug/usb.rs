@@ -200,8 +200,10 @@ pub async fn run(
                     Ok(n) => {
                         decoder.feed(&buf[..n], |command| {
                             // try_send, not send: never block the reader on whoever
-                            // executes commands.
-                            let _ = sink.try_send(command);
+                            // executes commands -- and count and report the command
+                            // that a full queue costs, which the bare `let _ = ` this
+                            // used to be did not. See `bus::offer_command`.
+                            bus::offer_command(&sink, command);
                         });
                         // A host built against a different revision of the protocol
                         // injects a command that decodes into something other than
