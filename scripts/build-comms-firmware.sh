@@ -33,4 +33,18 @@ RC=$?
 WARNS=$(grep -cE '^warning' "$LOG")
 ERRS=$(grep -cE '^error' "$LOG")
 echo "comms-firmware: exit=$RC warnings=$WARNS errors=$ERRS log=$LOG"
-grep -E 'generated [0-9]+ warning|^error' "$LOG"
+
+# The per-crate summary lines, which are what humans have been reading. `|| true`
+# because this used to be the script's last command and therefore its exit status,
+# which made the contract exactly backwards: a build that failed with compiler errors
+# matched `^error`, so grep exited 0 and **the script exited 0**, while a clean build
+# with no warnings matched nothing, so grep exited 1 and **the script exited 1**. It
+# only ever appeared to work because the known-good build emits 8 warnings.
+grep -E 'generated [0-9]+ warning|^error' "$LOG" || true
+
+# Both conditions, for the reason `build-examples.sh` gives: cargo can fail without a
+# `^error` line, and a log with `^error` lines is a failed build whatever cargo said.
+if [ "$RC" -ne 0 ] || [ "$ERRS" -ne 0 ]; then
+    exit 1
+fi
+exit 0

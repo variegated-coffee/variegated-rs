@@ -20,8 +20,13 @@ status=0
 
 for build in dual_boiler dual_boiler_pwm_steam_valve single_boiler; do
     echo "=== $build"
+    # A comparison that cannot be made is a failed comparison, not a passed one. This
+    # used to `continue` without touching `status`, so pointing the script at an empty
+    # or mistyped directory reported "skipped" three times and exited 0 -- a green gate
+    # that had compared nothing.
     if [ ! -f "$BASE/$build.log" ] || [ ! -f "$NEW/$build.log" ]; then
-        echo "  missing log, skipped"
+        echo "  missing log, CANNOT COMPARE"
+        status=1
         continue
     fi
 
@@ -42,6 +47,11 @@ for build in dual_boiler dual_boiler_pwm_steam_valve single_boiler; do
     else
         echo "  warning texts:    differ"
         sed 's/^/    /' "$WORK/text_diff"
+        # Also a failure. The per-crate counts above can hold steady while the texts
+        # underneath them change -- one warning traded for another in the same crate is
+        # the ordinary way that happens -- so a branch that printed the diff and left
+        # `status` alone made the more sensitive of the two checks the silent one.
+        status=1
     fi
 done
 
