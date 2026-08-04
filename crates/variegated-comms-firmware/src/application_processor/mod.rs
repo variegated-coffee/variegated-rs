@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
@@ -14,7 +16,7 @@ use variegated_controller_types::{
 };
 use variegated_controller_types::debug::DebugEvent;
 
-use crate::debug::bus;
+use crate::debug::{bus, TCP_DEBUG_CLIENTS};
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, MACHINE_DEFINITION, ROUTINE_CACHE,
@@ -110,6 +112,47 @@ pub async fn start(
                         // Successfully decoded a message
                         match data {
                             ApplicationProcessorToCommsProcessorMessage::Status(status) => {
+                                // This processor's own copy of `Status`, offered to
+                                // the debug path.
+                                //
+                                // `DebugPayload::Status` deliberately does *not*
+                                // cross the inter-processor link -- the relay filters
+                                // it out, both because the rate limiter cannot pass a
+                                // ~1.7 kB frame in one window and because the message
+                                // being handled right here is the same data by a
+                                // cheaper route. So the copy a debug host sees over
+                                // TCP is this one.
+                                //
+                                // Not `status_channel`: that pubsub is `1` deep with
+                                // `APPLICATION_STATUS_RECEIVERS == 4`, and all four
+                                // slots are taken (status_listener, cache_update,
+                                // esphome, websocket). `variegated_debug::status` is
+                                // the debug stream's own single-slot, latest-wins
+                                // channel, and it stamps through `bus::stamp` so this
+                                // frame draws from the same per-source sequence
+                                // counter as everything on the bus -- a side channel
+                                // with its own numbering would make every `Status`
+                                // look to a host like a frame that went missing.
+                                //
+                                // Gated on a client being connected, and that is the
+                                // same discipline as the USB CDC transport's DTR
+                                // check rather than an optimisation: with nobody
+                                // attached, every one of these would be a ~1.7 kB
+                                // first-fit `LlffHeap::alloc` plus a memcpy, on the
+                                // heap WiFi and BLE share, followed a moment later by
+                                // `note_dropped()` when the next one superseded it.
+                                // `frames_dropped` is the counter that says "this
+                                // device failed to deliver something", and a
+                                // permanent 1 Hz climb on an idle machine would
+                                // destroy it as a signal.
+                                //
+                                // Racy against a client disconnecting between the
+                                // load and the publish. The cost is one stale frame
+                                // left in the signal, which the server takes and
+                                // counts when it tears the connection down.
+                                if TCP_DEBUG_CLIENTS.load(Ordering::Relaxed) > 0 {
+                                    variegated_debug::status::publish(Box::new(status.clone()));
+                                }
                                 status_publisher.publish_immediate(status);
                             }
                             ApplicationProcessorToCommsProcessorMessage::Configuration(config) => {
@@ -148,26 +191,40 @@ pub async fn start(
                             ApplicationProcessorToCommsProcessorMessage::ShotLogEntryDataPoint(_data_point) => {
                                 log_info!("Received shot log data point (not yet implemented)");
                             }
-                            ApplicationProcessorToCommsProcessorMessage::Debug(_frame) => {
-                                // Relayed application-processor debug frames. Task 11
-                                // republishes them onto this processor's debug bus
-                                // *unchanged* -- they already carry
-                                // `DebugSource::Application` and the application
-                                // processor's own `seq` and `uptime_ms`, and rewriting
-                                // any of that would destroy the host's gap detection.
+                            ApplicationProcessorToCommsProcessorMessage::Debug(frame) => {
+                                // A relayed application-processor debug frame, put
+                                // onto this processor's bus **exactly as it arrived**.
                                 //
-                                // The bus exists as of Task 9 (`crate::debug::bus`),
-                                // but republishing onto it is still Task 11's: the
-                                // frame has to be forwarded *unchanged*, and Task 11
-                                // is also what adds the TCP consumer that gives it
-                                // somewhere to go. Until then these are dropped on
-                                // the floor -- silently, and not counted, because
-                                // `bus::note_dropped` means "the transport failed"
-                                // rather than "this build does not carry these yet".
+                                // Not `bus::publish`, and the difference is the whole
+                                // point: `publish` calls `bus::stamp`, which would
+                                // overwrite `source` with `DebugSource::Comms`, take a
+                                // number from *this* processor's sequence counter and
+                                // replace `uptime_ms` with this processor's uptime.
+                                // The frame already carries the application
+                                // processor's own three, and the host's per-source gap
+                                // detection is built on them. Rewriting any of it
+                                // would turn two independently-numbered streams into
+                                // one, and every application frame into a phantom gap.
+                                //
+                                // `immediate_publisher` needs no publisher slot and
+                                // never awaits -- the same primitive `bus::publish`
+                                // uses underneath, and the same non-blocking contract:
+                                // if the ring is full the oldest frame is evicted
+                                // rather than this reader being back-pressured. That
+                                // matters more here than anywhere else on the bus,
+                                // because back-pressure on this task is back-pressure
+                                // on the UART carrying `Status` to the WebSocket and
+                                // ESPHome clients.
+                                //
+                                // Not counted as `emitted`: the application processor
+                                // counted it when it stamped it. Counting it again
+                                // here would double-count every relayed frame in a
+                                // number the host reads per source.
                                 //
                                 // Deliberately silent: the application processor relays
                                 // several frames a second, so logging one per frame here
                                 // would drown this firmware's own log.
+                                bus::BUS.immediate_publisher().publish_immediate(frame);
                             }
                         }
 

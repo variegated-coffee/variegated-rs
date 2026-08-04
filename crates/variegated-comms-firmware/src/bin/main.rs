@@ -234,6 +234,20 @@ async fn debug_usb_task(
     debug::usb::run(usb_rx, usb_tx, sink, subscriber).await;
 }
 
+/// The structured debug stream's network transport: one client at a time on 9090,
+/// carrying frames from both processors.
+///
+/// Spawned late, because it needs the network stack, but its bus subscriber is
+/// claimed in `main` before the first publish -- see the claim site for why the two
+/// cannot be brought together.
+#[embassy_executor::task]
+async fn debug_tcp_task(
+    stack: &'static embassy_net::Stack<'static>,
+    subscriber: Option<debug::BusSubscriber>,
+) {
+    debug::tcp::run(stack, subscriber).await;
+}
+
 #[embassy_executor::task]
 async fn application_processor_task(
     rx: esp_hal::uart::UartRx<'static, esp_hal::Async>,
@@ -300,6 +314,18 @@ async fn main(spawner: Spawner) -> ! {
     // reasoning about the executor: the slot is taken on this line, the first publish
     // is nine lines down, and there is no `.await` between them.
     let debug_subscriber = debug::bus::subscriber();
+    // The second and last slot, claimed on the same terms and for a stronger version
+    // of the same reason. The TCP server is not spawned until the network is up, tens
+    // of seconds from now; a subscriber claimed at *that* point would begin at the
+    // bus's current `next_message_id` and could never see one frame of the boot.
+    //
+    // The cost of claiming early and reading late is a single large `Lagged` on the
+    // server's first read, which it counts frame by frame -- the same accounting the
+    // USB writer produces while no host is attached. It does not cost the USB writer
+    // anything: `publish_immediate` evicts the *oldest* frame when the ring is full,
+    // and the oldest is one this subscriber has not read rather than one the writer
+    // is waiting on, so the writer's slack is still the full 16 slots.
+    let tcp_debug_subscriber = debug::bus::subscriber();
 
     // Install the `log` -> debug-bus sink first, because the `log` facade
     // *discards* every record emitted before a logger exists and there is no
@@ -513,6 +539,12 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     log_info!("Network ready");
+
+    // The debug stream's network transport, spawned first among the servers: it is
+    // the one that reports on the others, and a `SpawnFailed` for anything below is
+    // only useful to a host that can already receive it.
+    spawn_or_report!(spawner, "debug_tcp", debug_tcp_task(stack_static, tcp_debug_subscriber));
+    log_info!("TCP debug server task spawned on port 9090");
 
     // Create TCP stack for HTTP
     let tcp_buffers = mk_static!(TcpBuffers<16, 1024, 1024>, TcpBuffers::new());
