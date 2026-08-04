@@ -3222,8 +3222,25 @@ same sink. The op would be *forwarded*, not ignored.
 
 This matters because the comment is what the next person reads before touching the
 routing. Left as-is, it argues for relaxing the refusal on grounds that are wrong,
-while the real grounds — relay delivery is not guaranteed, since a dead application
-processor swallows the command at the ESP with only a `log_error!` — go unrecorded.
+while the real grounds — relay delivery is not guaranteed — go unrecorded.
+
+~~since a dead application processor swallows the command at the ESP with only a
+`log_error!`~~ **Wrong, corrected during Task 13's review.** That premise assumed
+`log_error!` is invisible to the host. It is not: `log_error!` expands to
+`log::error!` (`variegated-log/src/lib.rs:44-51`), the comms firmware installs the bus
+sink as the global `log` logger at `Info` (`comms-firmware/src/bin/main.rs:352`), and
+the sink republishes each record onto the debug bus as `DebugPayload::Text`
+(`bus_sink.rs:110-126`) — which `variegated-cli/src/model.rs:430-442` renders as a
+`text` event. A host on `--comms-uart` *would* see the failure, at Error severity, in
+the Events pane.
+
+The ruling is unaffected and the refusal still stands, but for a narrower reason than
+stated: the failure is visible in a *different pane* while the footer says `queued`, so
+the operator must correlate two views to learn that a command they confirmed did not
+land. And the far leg — the inter-processor UART write plus the application processor
+acting on it — is genuinely unacknowledged. Note that the near leg *is* acknowledged:
+`commands::dispatch` emits `CommandReceived` unconditionally before routing
+(`debug/commands.rs:74-77`), so "nothing reports back" would itself be an overclaim.
 
 Rewrite the comment to state: (1) the ESP does now forward `Machine`/`App` from either
 of its readers, so this refusal is a deliberate host-side policy rather than a
