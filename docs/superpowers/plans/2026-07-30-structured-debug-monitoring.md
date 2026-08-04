@@ -3153,7 +3153,14 @@ TUI sees the command land even if the action fails.
 
 - [ ] **Step 3: Verify both cfg paths compile**
 
-The gated code is only type-checked when the variable is set, so build both ways:
+~~The gated code is only type-checked when the variable is set, so build both ways:~~
+**Wrong — corrected during Task 12.** The gate is a `const bool` consumed by an
+ordinary `if`, so the block is type-checked in *both* configurations; elimination
+happens at codegen, not at parse. Only a `#[cfg]` gate would skip type-checking when
+unset. Build both ways anyway, but for the real reason: to prove the toggle actually
+changes the binary. Task 12 backs that with `strings -a` on an enabled-only string
+(0 occurrences unset, 1 set) plus section sizes, automated in
+`variegated-comms-rs/scripts/tcp_command_gate_check.sh`.
 
 ```bash
 env SSID=x PASSWORD=y cargo build --release
