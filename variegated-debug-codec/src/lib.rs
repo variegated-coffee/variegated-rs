@@ -145,6 +145,82 @@ where
     postcard::from_bytes(body).map_err(|_| CodecError::Deserialize)
 }
 
+/// Shortest run of printable bytes that will be surfaced as text rather than counted
+/// as corruption.
+///
+/// It buys nothing against *frames* -- those are excluded structurally, see
+/// [`is_text_run`] -- and everything against *noise*. Line noise produces short
+/// bursts, and a burst lands entirely inside the 99-value printable set with
+/// probability `(99/255)^n`: 15% at two bytes, 5.9% at three, 2.3% at four, 0.9% at
+/// five. Every run of unstructured text this system actually emits -- a panic banner,
+/// a backtrace line, a ROM boot message -- is tens to hundreds of bytes, so the
+/// threshold costs nothing real and turns the most common way for garbage to
+/// masquerade as text into a framing error, which is what it is.
+///
+/// Four rather than eight because the curve is already shallow by then and the
+/// remaining exposure is bounded and *visible*: a misclassified burst is counted in
+/// [`Decoder::text_runs`] and shown next to [`Decoder::decode_errors`], so a link
+/// producing noise reads as a link producing noise either way.
+pub const MIN_TEXT_RUN: usize = 4;
+
+/// Whether the raw bytes between two COBS delimiters are unstructured text rather
+/// than a frame or the wreckage of one.
+///
+/// **The rule:** a run is text if it is at least [`MIN_TEXT_RUN`] bytes long and
+/// *every* byte is printable ASCII (`0x20..=0x7E`) or one of tab, newline and
+/// carriage return. Nothing else. In particular this is deliberately **not** "is
+/// valid UTF-8", which is the obvious test and the wrong one -- see below.
+///
+/// # Why this rule and not a weaker one
+///
+/// The property that has to hold is one-directional and absolute: **no frame, and no
+/// prefix of a frame, may ever be classified as text.** Anything else silently
+/// swallows machine data. This rule gets that structurally rather than
+/// probabilistically:
+///
+/// * Every frame [`encode`] produces is the COBS encoding of
+///   `[DEBUG_PROTOCOL_VERSION][postcard..]`. The version byte is non-zero, so COBS
+///   never displaces it: wire byte 1 of every frame *is* the version byte.
+/// * [`DEBUG_PROTOCOL_VERSION`] has its high bit set, by construction and asserted by
+///   `an_unversioned_frame_from_either_source_is_refused`. `0x81` is not printable
+///   ASCII, so any run of two or more bytes that starts a frame fails the test.
+/// * A one-byte run is only the COBS overhead byte, and is excluded by
+///   [`MIN_TEXT_RUN`].
+///
+/// So the exclusion holds for complete frames, for frames truncated at any offset by
+/// a device that reset mid-write, and for oversized ones. It does not rest on
+/// statistics about what postcard payloads look like.
+///
+/// Valid-UTF-8 does not give that. A truncated frame is mostly small integers and
+/// ASCII string bytes, all below `0x80`, and *any* sequence of bytes below `0x80` is
+/// valid UTF-8 -- so a UTF-8 test classifies a large fraction of half-frames as text
+/// and hands postcard wreckage to the user as though it were a log line. Even
+/// full-fat UTF-8 validation does not save it: `0x81` is a continuation byte, so a
+/// frame whose COBS overhead byte happens to be `0xC2` or above begins with a
+/// perfectly valid two-byte sequence.
+///
+/// # What it costs
+///
+/// Two things, both accepted deliberately:
+///
+/// * **Non-ASCII text is classified as corruption.** A panic message containing a
+///   non-ASCII character reads as a framing error rather than as text. That is the
+///   price of the structural guarantee above, and it fails *loudly* -- the run is
+///   counted in [`Decoder::decode_errors`], not dropped on the floor.
+/// * **Escape sequences are classified as corruption.** `0x1B` is excluded along with
+///   the rest of the C0 controls, so a device cannot emit ANSI colour codes -- or
+///   anything else a terminal would act on -- through this path and have a host
+///   render it. That is a feature: everything surfaced here is inert text.
+///
+/// The other direction is not absolute and cannot be: four intentional printable
+/// bytes and four accidental ones are the same four bytes. See [`MIN_TEXT_RUN`].
+pub fn is_text_run(run: &[u8]) -> bool {
+    run.len() >= MIN_TEXT_RUN
+        && run
+            .iter()
+            .all(|&byte| matches!(byte, 0x20..=0x7E | b'\t' | b'\n' | b'\r'))
+}
+
 /// Consecutive mismatching **frames**, all naming the same version, before a link is
 /// declared mismatched.
 ///
@@ -266,6 +342,21 @@ impl VersionWatch {
     }
 }
 
+/// What the decoder made of one run of bytes between two delimiters.
+///
+/// Delivered through a single callback so the two kinds keep their order relative to
+/// each other -- see [`Decoder::feed_decoded`]. There is deliberately no variant for
+/// a failure: a run that is neither a frame nor text has nothing worth handing to a
+/// consumer, only a counter worth incrementing, and offering the bytes anyway is how
+/// corruption ends up on a screen looking like data.
+pub enum Decoded<'a, T> {
+    /// A message that de-framed, carried our wire version, and deserialized.
+    Item(T),
+    /// A run that was plain text rather than a frame, exactly as it arrived. See
+    /// [`is_text_run`] for what qualifies and why.
+    Text(&'a str),
+}
+
 /// Streaming decoder. Feed it whatever bytes arrived; it calls back once per
 /// complete message and counts failures so they can be surfaced rather than
 /// silently swallowed.
@@ -293,7 +384,21 @@ pub struct Decoder<T, const N: usize, const CORROBORATION: u32> {
     overflowed: bool,
     /// Malformed COBS, an empty frame, or a body the current version could not
     /// deserialize.
+    ///
+    /// Runs classified as text by [`is_text_run`] are **not** in here; they are in
+    /// [`Decoder::text_runs`]. The two are kept apart for the same reason
+    /// `version_mismatches` is kept apart from both: they call for different actions.
+    /// A framing error means bytes were lost or mangled between here and the device;
+    /// a text run means the device deliberately wrote something that was never a
+    /// frame. Merging them would have made a panic backtrace read as a broken cable,
+    /// and -- far worse -- a broken cable read as a panic backtrace.
     pub decode_errors: u32,
+    /// Runs of bytes between delimiters that were plain text rather than frames.
+    ///
+    /// Cumulative and per-run, not per-line: one panic backtrace is one run. A
+    /// consumer should show this next to `decode_errors` rather than instead of it,
+    /// because the whole point of separating them is that a link can be doing both.
+    pub text_runs: u32,
     /// Frames refused because their envelope named a version we do not speak.
     pub version_mismatches: u32,
     /// The version byte of the most recent such frame. A raw observation, not a
@@ -319,6 +424,7 @@ impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION> {
             len: 0,
             overflowed: false,
             decode_errors: 0,
+            text_runs: 0,
             version_mismatches: 0,
             last_version_mismatch: None,
             watch: VersionWatch::new(),
@@ -341,11 +447,12 @@ impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION> {
     /// Drop all per-connection state: the partial frame, and everything the version
     /// watch has concluded.
     ///
-    /// Call this when a link is re-established. The cumulative `decode_errors` and
-    /// `version_mismatches` counters survive, because they are session diagnostics
-    /// rather than per-connection state. Without this, a decoder reused across
-    /// connections carries a stale `last_version_mismatch` into the next one, and
-    /// half a frame from before the drop corrupts the first frame after it.
+    /// Call this when a link is re-established. The cumulative `decode_errors`,
+    /// `text_runs` and `version_mismatches` counters survive, because they are
+    /// session diagnostics rather than per-connection state. Without this, a decoder
+    /// reused across connections carries a stale `last_version_mismatch` into the
+    /// next one, and half a frame from before the drop corrupts the first frame
+    /// after it.
     pub fn reset(&mut self) {
         self.len = 0;
         self.overflowed = false;
@@ -358,7 +465,33 @@ impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION>
 where
     T: for<'de> Deserialize<'de>,
 {
+    /// Feed bytes, delivering frames only. Unstructured text runs are still
+    /// classified and counted in [`Decoder::text_runs`] -- they are simply not
+    /// handed anywhere. Use [`Decoder::feed_decoded`] to receive them.
     pub fn feed(&mut self, data: &[u8], mut on_item: impl FnMut(T)) {
+        self.feed_decoded(data, |decoded| {
+            if let Decoded::Item(item) = decoded {
+                on_item(item);
+            }
+        });
+    }
+
+    /// Feed bytes, delivering frames *and* the runs between delimiters that were
+    /// plain text rather than frames.
+    ///
+    /// One callback rather than two, and a [`Decoded`] rather than a pair of
+    /// closures, because the ordering between the two kinds is the thing worth
+    /// guaranteeing: a backtrace that follows the last frame a processor ever sent
+    /// has to be delivered after it, and two independent sinks cannot express that
+    /// without the consumer stamping and re-sorting. It also happens to be the only
+    /// shape a consumer can use to push both into one buffer, since two closures
+    /// cannot both hold it mutably.
+    ///
+    /// Text arrives exactly as it was on the wire -- newlines and all. Splitting it
+    /// into lines is the consumer's job: a backtrace is multi-line and the line
+    /// structure is the readable part of it, so this refuses to make that decision
+    /// on their behalf.
+    pub fn feed_decoded(&mut self, data: &[u8], mut on_decoded: impl FnMut(Decoded<'_, T>)) {
         for &byte in data {
             if byte != 0 {
                 if self.len < N {
@@ -369,7 +502,7 @@ where
                 }
                 continue;
             }
-            self.finish(&mut on_item);
+            self.finish(&mut on_decoded);
         }
     }
 
@@ -377,11 +510,16 @@ where
     /// frame. Every exit path clears `len` and `overflowed`, so no failure can
     /// poison the decoder for the frames that follow -- resynchronisation is the
     /// property COBS is here for.
-    fn finish(&mut self, on_item: &mut impl FnMut(T)) {
+    fn finish(&mut self, on_decoded: &mut impl FnMut(Decoded<'_, T>)) {
         let len = core::mem::replace(&mut self.len, 0);
         let overflowed = core::mem::replace(&mut self.overflowed, false);
 
         if overflowed {
+            // Deliberately *not* offered as text, however printable what fits turns
+            // out to be. Bytes were dropped on the floor by the accumulator, so
+            // anything shown would be a silently truncated quotation -- and the
+            // consumer has no way to tell that from a complete one. An oversized run
+            // is a fault whichever way it started out.
             self.decode_errors += 1;
             return;
         }
@@ -389,6 +527,28 @@ where
         // doubled delimiter, not a malformed frame, so it is not counted: a link
         // that pads its output must not read as a link that is failing.
         if len == 0 {
+            return;
+        }
+
+        // Before COBS, not after, and that ordering is load-bearing.
+        //
+        // A text line long enough to start with a byte that reads as a valid COBS
+        // pointer decodes cleanly -- a 31-character line beginning with a space is
+        // exactly such a line -- and the first byte of what falls out is then some
+        // ASCII character, which is not our version. Classifying second would file
+        // that as a *version mismatch at a fabricated version*, feed it to the
+        // corroboration watch, and let a device that logs in a consistent format
+        // corroborate its own invented mismatch three lines running and black out a
+        // link that is working perfectly. Classifying first cannot do that, and
+        // costs nothing, because no frame can pass the text test (see `is_text_run`).
+        if is_text_run(&self.buf[..len]) {
+            self.text_runs += 1;
+            // Infallible: `is_text_run` admits only ASCII. Handled rather than
+            // unwrapped anyway, because this decoder runs inside the firmware's USB
+            // reader, where a panic takes the machine down.
+            if let Ok(text) = core::str::from_utf8(&self.buf[..len]) {
+                on_decoded(Decoded::Text(text));
+            }
             return;
         }
 
@@ -405,7 +565,7 @@ where
                 // A frame that actually decoded is the only proof a peer speaks our
                 // version, and it is what clears a mismatch run.
                 self.watch.saw_good_frame();
-                on_item(item);
+                on_decoded(Decoded::Item(item));
             }
             Err(CodecError::VersionMismatch { found, .. }) => {
                 self.version_mismatches += 1;
@@ -957,6 +1117,304 @@ mod tests {
             );
             assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
         }
+    }
+
+    /// Feed a stream and return `(frames, text runs)`.
+    fn feed_both(decoder: &mut FrameDecoder, stream: &[u8]) -> (Vec<DebugFrame>, Vec<std::string::String>) {
+        let mut frames = Vec::new();
+        let mut runs: Vec<std::string::String> = Vec::new();
+        decoder.feed_decoded(stream, |decoded| match decoded {
+            Decoded::Item(frame) => frames.push(frame),
+            Decoded::Text(text) => runs.push(text.into()),
+        });
+        (frames, runs)
+    }
+
+    /// The whole point of Task 19: a panic backtrace written straight onto the wire
+    /// reaches the consumer instead of being counted as line noise and binned.
+    ///
+    /// The leading and trailing `0x00` are what the firmware's panic handler writes
+    /// around its text -- the first closes whatever frame was in flight when the
+    /// machine died, the second terminates the run so a host renders it *now* rather
+    /// than waiting for a next delimiter that a dead processor will never send.
+    #[test]
+    fn a_panic_backtrace_written_as_raw_bytes_is_surfaced_as_text() {
+        let panic_text = "\r\n====================== PANIC ======================\r\n\
+                          panicked at src/bin/main.rs:412:9:\r\nassertion failed\r\n\r\n\
+                          Backtrace:\r\n0x42000d3e\r\n0x42001a02\r\n";
+        let mut stream = vec![0x00];
+        stream.extend_from_slice(panic_text.as_bytes());
+        stream.push(0x00);
+
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (frames, runs) = feed_both(&mut decoder, &stream);
+
+        assert!(frames.is_empty());
+        assert_eq!(runs, vec![std::string::String::from(panic_text)]);
+        assert_eq!(decoder.text_runs, 1);
+        assert_eq!(
+            decoder.decode_errors, 0,
+            "text is not corruption and must not inflate the framing-error count"
+        );
+        assert_eq!(decoder.version_mismatches, 0);
+    }
+
+    /// The guarantee the whole rule is built to provide, asserted exhaustively rather
+    /// than argued: **no prefix of any frame, at any truncation offset, is text.**
+    ///
+    /// This is the direction that must never fail. A frame -- or the front half of
+    /// one from a device that reset mid-write -- classified as text would be shown to
+    /// a user as a log line assembled out of postcard bytes, which is the same class
+    /// of lie the version envelope exists to prevent. The payloads chosen are the
+    /// ones most likely to break it: `Text` and `MetricName` are almost entirely
+    /// ASCII on the wire, so if any frame could pass a printability test it is these.
+    #[test]
+    fn no_prefix_of_any_frame_is_ever_classified_as_text() {
+        let candidates = [
+            frame(1, DebugPayload::Text(Severity::Info, text("a plain ascii log line"))),
+            frame(2, DebugPayload::Text(Severity::Error, text("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))),
+            frame(3, DebugPayload::MetricName {
+                kind: MetricKind::Counter,
+                id: 0,
+                label: name("BrewTemperatureReading"),
+            }),
+            frame(4, DebugPayload::Event(DebugEvent::Boot)),
+        ];
+        for original in candidates {
+            let mut buf = [0u8; MAX_FRAME];
+            let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
+            // The trailing delimiter is not part of the run; the run is what lies
+            // *between* delimiters.
+            let body = &encoded[..encoded.len() - 1];
+            assert_eq!(
+                body[1], DEBUG_PROTOCOL_VERSION,
+                "the exclusion rests on the version byte being wire byte 1"
+            );
+            for cut in 1..=body.len() {
+                assert!(
+                    !is_text_run(&body[..cut]),
+                    "a {cut}-byte prefix of {:?} classified as text",
+                    original.payload
+                );
+            }
+        }
+    }
+
+    /// The boundary the brief singles out: a device that resets mid-frame leaves
+    /// bytes that are neither a good frame nor intended text, and then -- because the
+    /// panic handler runs next -- real text right behind them.
+    ///
+    /// The two must land in different buckets. The half-frame is a framing error, on
+    /// the nose, because that is what it is; the panic text is text. Getting this
+    /// wrong in either direction is the failure mode: a half-frame shown as text is a
+    /// fabricated log line, and a backtrace counted as a framing error is the bug
+    /// this task exists to fix.
+    #[test]
+    fn a_half_frame_followed_by_panic_text_splits_into_corruption_and_text() {
+        let good = frame(7, DebugPayload::Status(Box::new(Status::new())));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
+
+        let mut stream: Vec<u8> = Vec::new();
+        // Half a frame, cut off with no delimiter of its own...
+        stream.extend_from_slice(&encoded[..encoded.len() / 2]);
+        // ...then exactly what the panic handler writes.
+        stream.push(0x00);
+        stream.extend_from_slice(b"\r\nPANIC\r\n0x42000d3e\r\n");
+        stream.push(0x00);
+
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (frames, runs) = feed_both(&mut decoder, &stream);
+
+        assert!(frames.is_empty());
+        assert_eq!(runs, vec![std::string::String::from("\r\nPANIC\r\n0x42000d3e\r\n")]);
+        assert_eq!(decoder.text_runs, 1);
+        assert_eq!(
+            decoder.decode_errors, 1,
+            "the truncated frame is a framing error and must still be counted as one"
+        );
+    }
+
+    /// A short burst of printable bytes is far more likely to be noise than news, so
+    /// it stays a framing error. Below the threshold nothing is surfaced; at it,
+    /// everything is.
+    #[test]
+    fn printable_bursts_shorter_than_the_threshold_are_corruption() {
+        for len in 1..MIN_TEXT_RUN {
+            let burst = vec![b'A'; len];
+            assert!(!is_text_run(&burst), "{len} printable bytes must not read as text");
+
+            let mut stream = vec![0x00];
+            stream.extend_from_slice(&burst);
+            stream.push(0x00);
+            let mut decoder: FrameDecoder = Decoder::new();
+            let (_, runs) = feed_both(&mut decoder, &stream);
+            assert!(runs.is_empty());
+            assert_eq!(decoder.decode_errors, 1);
+            assert_eq!(decoder.text_runs, 0);
+        }
+        assert!(is_text_run(&vec![b'A'; MIN_TEXT_RUN]));
+    }
+
+    /// Everything the rule excludes, and why each exclusion is deliberate.
+    #[test]
+    fn only_printable_ascii_and_the_three_whitespace_bytes_are_text() {
+        assert!(is_text_run(b"heap: 21488 used\r\n"));
+        assert!(is_text_run(b"\tindented\n"));
+        assert!(is_text_run(b"    "));
+
+        // A UTF-8 multi-byte character. Valid UTF-8, deliberately still not text:
+        // admitting it would mean the exclusion of frames rested on statistics.
+        assert!(!is_text_run("kaffeteknikförfattare".as_bytes()));
+        // An ANSI colour escape. Excluded so nothing surfaced through this path can
+        // carry a sequence a terminal would act on.
+        assert!(!is_text_run(b"\x1b[31mPANIC\x1b[0m"));
+        // A lone high byte, which is what a frame looks like at offset 1.
+        assert!(!is_text_run(b"ab\x81cd"));
+        // Other C0 controls.
+        assert!(!is_text_run(b"a\x00b\x01c"));
+        assert!(!is_text_run(b"bell\x07"));
+    }
+
+    /// A text line can be a syntactically valid COBS frame by accident, and that is
+    /// why classification happens *before* de-framing.
+    ///
+    /// A 32-byte line whose first character is a space carries `0x20` in the position
+    /// COBS reads as a block length, and 0x20 is exactly right for a 32-byte run. The
+    /// frame that falls out is 31 bytes of ASCII whose first byte is not our version
+    /// -- so had this been de-framed first it would have been reported as a version
+    /// mismatch at a version nobody has ever built, and three such lines in a row
+    /// (which is what a device that logs in a fixed format produces) would have
+    /// corroborated and blacked out a healthy link.
+    #[test]
+    fn a_text_line_that_happens_to_be_valid_cobs_is_still_text() {
+        let line = " abcdefghijklmnopqrstuvwxyzABCDE";
+        assert_eq!(line.len(), 32);
+
+        // The hazard is real, not hypothetical: these bytes really do de-frame.
+        let mut deframed = line.as_bytes().to_vec();
+        let decoded_len = cobs::decode_in_place(&mut deframed)
+            .expect("this fixture must COBS-decode, or the test proves nothing");
+        assert_ne!(
+            deframed[0], DEBUG_PROTOCOL_VERSION,
+            "and what falls out would have been read as a foreign wire version"
+        );
+        assert_eq!(decoded_len, 31);
+
+        let mut stream = vec![0x00];
+        stream.extend_from_slice(line.as_bytes());
+        stream.push(0x00);
+
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (frames, runs) = feed_both(&mut decoder, &stream);
+
+        assert!(frames.is_empty());
+        assert_eq!(runs, vec![std::string::String::from(line)]);
+        assert_eq!(
+            decoder.version_mismatches, 0,
+            "a log line must never be able to invent a wire version"
+        );
+        assert_eq!(decoder.decode_errors, 0);
+    }
+
+    /// The resynchronisation property Task 18 verified, restated with text in the
+    /// middle: text between two frames must cost neither of them.
+    #[test]
+    fn text_between_two_frames_costs_neither_of_them() {
+        let a = frame(1, DebugPayload::Event(DebugEvent::Boot));
+        let b = frame(2, DebugPayload::Event(DebugEvent::WifiAssociated));
+        let mut buf = [0u8; MAX_FRAME];
+        let mut stream = encode_frame(&a, &mut buf).unwrap().to_vec();
+        stream.extend_from_slice(b"ESP-ROM:esp32c6-20220919\r\nBuild:Sep 19 2022\r\n");
+        stream.push(0x00);
+        let mut buf2 = [0u8; MAX_FRAME];
+        stream.extend_from_slice(encode_frame(&b, &mut buf2).unwrap());
+
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (frames, runs) = feed_both(&mut decoder, &stream);
+
+        assert_eq!(frames, vec![a, b]);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].starts_with("ESP-ROM:"));
+        assert_eq!(decoder.decode_errors, 0);
+        assert_eq!(decoder.text_runs, 1);
+    }
+
+    /// Text says nothing about what protocol version a peer speaks, so -- exactly like
+    /// a framing error -- it must neither extend a mismatch run nor clear one.
+    /// Otherwise a device that panics halfway through a stale-firmware diagnosis
+    /// either resets the count that was about to explain the problem, or fakes it.
+    #[test]
+    fn text_neither_extends_nor_clears_a_version_mismatch_run() {
+        let future = DEBUG_PROTOCOL_VERSION + 1;
+        let mut decoder: FrameDecoder = Decoder::new();
+
+        // Two of the three needed, then a text run, then the third.
+        feed_frames(&mut decoder, future, FRAME_CORROBORATION - 1);
+        assert_eq!(decoder.take_version_verdict(), VersionVerdict::Quiet);
+
+        let mut stream = vec![0x00];
+        stream.extend_from_slice(b"heap_free: 44047\r\n");
+        stream.push(0x00);
+        feed_both(&mut decoder, &stream);
+        assert_eq!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Quiet,
+            "text must not fabricate a verdict of its own"
+        );
+
+        feed_frames(&mut decoder, future, 1);
+        assert_eq!(
+            decoder.take_version_verdict(),
+            VersionVerdict::Mismatch { expected: DEBUG_PROTOCOL_VERSION, found: future },
+            "and it must not have broken the run that was in progress"
+        );
+    }
+
+    /// A run longer than the accumulator has already lost bytes. Showing what fits
+    /// would be a truncated quotation the consumer could not tell from a whole one,
+    /// so it stays a framing error however printable it is.
+    #[test]
+    fn an_oversized_printable_run_is_a_framing_error_not_text() {
+        let mut stream = vec![0x00];
+        stream.extend(core::iter::repeat(b'A').take(MAX_FRAME + 16));
+        stream.push(0x00);
+
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (_, runs) = feed_both(&mut decoder, &stream);
+
+        assert!(runs.is_empty());
+        assert_eq!(decoder.decode_errors, 1);
+        assert_eq!(decoder.text_runs, 0);
+
+        // And the decoder still works afterwards.
+        let good = frame(1, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
+        let (frames, _) = feed_both(&mut decoder, &encoded);
+        assert_eq!(frames, vec![good]);
+    }
+
+    /// The firmware's command reader calls plain `feed`. It has no use for the text
+    /// -- a human typing into a serial terminal is not a command -- but it must not
+    /// therefore count that typing as corruption, or the drop diagnostics stop
+    /// meaning anything the moment somebody opens the port in `screen`.
+    #[test]
+    fn plain_feed_counts_text_without_delivering_it() {
+        let mut decoder: CommandDecoder = Decoder::new();
+        let mut delivered: Vec<DebugCommand> = Vec::new();
+        decoder.feed(b"\x00hello there\r\n\x00", |c| delivered.push(c));
+
+        assert!(delivered.is_empty());
+        assert_eq!(decoder.text_runs, 1);
+        assert_eq!(decoder.decode_errors, 0);
+
+        // And a real command still gets through afterwards.
+        let command = DebugCommand::Machine(MachineCommand::StartBrewing(0));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_command(&command, &mut buf).unwrap().to_vec();
+        decoder.feed(&encoded, |c| delivered.push(c));
+        assert_eq!(delivered.len(), 1);
     }
 
     #[test]
