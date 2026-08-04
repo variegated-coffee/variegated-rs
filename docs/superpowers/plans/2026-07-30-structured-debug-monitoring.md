@@ -3512,6 +3512,61 @@ with the reason so the refusal is visible in the stream rather than silent.
 
 Codec tests, host tests, both example builds, and the comms firmware build.
 
+### Task 19: Display unstructured bytes, and restore panic output
+
+Task 9 set `esp-println` to `no-op` to get the ROM console off USB-Serial-JTAG and stop
+a `tx_flush` busy-wait that held interrupts disabled for ~2.8 ms per 32-byte chunk.
+That was right for normal operation, but it took `esp-backtrace`'s only sink: a panic
+on the comms processor now produces nothing at all, and the structured stream cannot
+cover for it because the executor is dead when the handler runs.
+
+**Human decision:** rather than stashing a backtrace across a reset or adding a second
+wire, make the host tolerate and display unstructured plain text on the same transport.
+Text on the wire stops being corruption and becomes content — which also picks up ROM
+boot banners and anything else that prints before the bus exists.
+
+**Files:**
+- Modify: `variegated-cli/src/transport.rs`, `src/model.rs`, `src/bin/variegated-debug-tui.rs`
+- Modify: `variegated-comms-rs/crates/variegated-comms-firmware/` (panic path)
+- Test: `variegated-cli/src/model.rs`, `variegated-debug-codec`
+
+- [ ] **Step 1: Let the decoder surface non-frame bytes instead of discarding them**
+
+Today anything that is not a valid COBS frame becomes a `decode_errors` increment and
+is dropped. Accumulate the bytes between delimiters that fail to decode, and when they
+are valid UTF-8 and look like text, hand them up rather than binning them. Keep the
+existing counters working — this must not mask a genuine framing fault, so text and
+corruption need to be distinguishable rather than merged.
+
+Be careful at the boundary: a partial write from a resetting device produces bytes that
+are neither a good frame nor intended text. Decide what that renders as, and make sure
+the resynchronisation property Task 18 verified still holds.
+
+- [ ] **Step 2: Render it, clearly marked as unstructured**
+
+Show it in the Events pane, tagged so it cannot be mistaken for a device-emitted
+`Text` payload — a panic backtrace and a `log_warn!` are different things and the pane
+should say which is which. Preserve line structure; a backtrace is multi-line and
+unreadable if collapsed.
+
+- [ ] **Step 3: Write the panic path as raw text**
+
+`esp-println` stays `no-op` for normal logging — the bus carries that, and the
+busy-wait must not come back. Only the panic handler writes, and there blocking is
+correct: the machine is already dead, nothing is left to perturb, and getting the
+backtrace out matters more than anything else the processor could be doing.
+
+Take the USB-Serial-JTAG peripheral by force in the handler (the executor is gone, so
+there is no owner to conflict with) and write the backtrace as plain bytes. It will
+land mid-stream between COBS frames, which is exactly what Step 1 makes legible.
+
+- [ ] **Step 4: Verify end to end**
+
+Provoke a real panic on hardware and confirm the backtrace appears in the TUI. A unit
+test that a text run round-trips through the decoder is necessary but not sufficient —
+the value of this task is entirely in whether a genuine panic is readable, and that
+needs a device.
+
 ---
 
 ## Final verification
