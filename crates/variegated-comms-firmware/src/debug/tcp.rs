@@ -89,11 +89,48 @@
 //!
 //! # Command injection
 //!
-//! Not here. Task 12 owns the inbound path and gates it behind a build-time env
-//! var so it does not exist in the binary unless set. This server therefore never
-//! reads from the socket, and the seam is marked below.
+//! Behind [`crate::config::TCP_COMMANDS_ENABLED`], which is a `const bool` derived
+//! from a build-time environment variable. With it `false` the read, the
+//! `CommandDecoder` and the dispatch below are unreachable from a branch on a
+//! literal, so none of them reaches the binary: this server is then write-only and a
+//! byte a client sends is never looked at by anything. It is not a runtime switch and
+//! must not become one -- see that constant's docs for the argument. USB injection is
+//! unconditional, because physical access already implies trust and it is the
+//! fallback for exactly the case where Wi-Fi is what is broken.
+//!
+//! ## The reader may not undo any of the guarantees above
+//!
+//! Three properties, all of them load-bearing and none of them free:
+//!
+//! 1. **A client that connects and sends nothing must not stall the writer.** The
+//!    read is one arm of the same `select3` the two frame sources are arms of, never
+//!    a standalone `await`. A socket with nothing on it is simply a pending arm.
+//! 2. **A client that floods commands must not starve the writer.** `select3` polls
+//!    its arms in declaration order and returns on the first that is ready, so the
+//!    bus and the `Status` signal are both polled *before* the socket on every pass.
+//!    A client that keeps the receive buffer permanently full therefore never wins a
+//!    poll in which a frame was waiting.
+//! 3. **The writer must not starve the reader either.** The converse holds because
+//!    the bus is finite: 16 slots, drained at least one per iteration, refilled at
+//!    ~5 frames a second. A backlog is exhausted in a bounded number of passes and
+//!    the socket is polled on the next one.
+//!
+//! The room check and the write deadline are untouched by all of this, and a command
+//! is never executed on this task: it goes onto [`CommandSink`] with `try_send` and
+//! is dropped if that queue is full. Nothing on the inbound path awaits anything but
+//! the socket read.
+//!
+//! ## Why the receive buffer is still 256 bytes
+//!
+//! Because the reader is the fix, not a bigger buffer. Draining the socket is what
+//! returns the window to the peer; a larger buffer only moves the point at which an
+//! undrained socket stops one. When commands are compiled out the buffer is undrained
+//! by construction, and that is a real (documented) way to park a client that writes
+//! more than 256 bytes to a device that was never going to read them -- but enlarging
+//! it would not fix that either, and this build has nothing to say to such a client
+//! anyway.
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::pubsub::WaitResult;
@@ -102,10 +139,12 @@ use embedded_io_async::Write;
 use portable_atomic::Ordering;
 use variegated_controller_types::debug::{text, DebugEvent, Severity};
 use variegated_debug::status;
-use variegated_debug_codec::{encode_frame, MAX_FRAME};
+use variegated_debug_codec::{encode_frame, CommandDecoder, VersionVerdict, MAX_FRAME};
 use variegated_log::{log_error, log_info, log_warn};
 
-use crate::debug::{bus, BusSubscriber, TCP_DEBUG_CLIENTS};
+use crate::config::TCP_COMMANDS_ENABLED;
+use crate::debug::commands::version_mismatch_reason;
+use crate::debug::{bus, BusSubscriber, CommandSink, TCP_DEBUG_CLIENTS};
 
 /// The debug stream's port. 8080 is the WebSocket API, 6053 ESPHome, 80 HTTP.
 pub const DEBUG_PORT: u16 = 9090;
@@ -122,19 +161,47 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 /// against a client that was reading perfectly well.
 const TX_BUFFER: usize = 4096;
 
-/// Receive buffer. Nothing reads from this socket (see the module docs on command
-/// injection), so this exists only so the peer's stack has a window to advertise
-/// against; it is deliberately small.
+/// Receive buffer.
 ///
-/// **Consequence, and Task 12's to clear**: because nothing drains it, a client that
-/// writes more than this never gets the window back, and its own `write_all` parks.
-/// `variegated-cli`'s TCP transport writes only when an operator injects a command,
-/// and injection does nothing on this side until Task 12 anyway, so today the worst
-/// case is a host that stops updating after roughly a dozen commands nobody could
-/// have executed. It is still a way for this server to hang a client, and adding the
-/// reader at the seam below is what removes it -- not enlarging this buffer, which
-/// only moves the threshold.
+/// Deliberately small, and deliberately *not* enlarged now that there is a reader.
+/// It is the window the peer advertises against, and a debug host's inbound traffic
+/// is one small COBS-framed command per keystroke-and-enter, never a stream. With the
+/// reader compiled in, [`serve`] drains this on every pass of its select, so the
+/// window is returned continuously and 256 bytes is several commands' worth of slack
+/// on top of that.
+///
+/// With commands compiled *out* nothing drains it, and a client that writes more than
+/// 256 bytes to this port will eventually park in its own `write_all`. That is not a
+/// buffer-size problem and growing the buffer would not fix it -- it is what talking
+/// to a build that does not accept commands looks like.
 const RX_BUFFER: usize = 256;
+
+/// How much of the receive buffer one read takes at a time.
+///
+/// The same 64 bytes the USB reader uses, and for the same reason: a command frame is
+/// tens of bytes, so this is a whole command per read in the ordinary case, and the
+/// decoder resynchronises on delimiters regardless of where the chunk boundaries fall.
+const RX_CHUNK: usize = 64;
+
+/// Sent once per accepted connection, and **only when commands are compiled in**.
+///
+/// It earns its place twice. For an operator it answers, at connect time, the one
+/// question the port cannot otherwise answer -- whether this build will act on
+/// anything they type -- instead of leaving them to conclude from silence that the
+/// machine is ignoring them.
+///
+/// And it is the marker that makes the gate falsifiable from outside the source: this
+/// string is emitted from inside the `if TCP_COMMANDS_ENABLED` block and appears
+/// nowhere else in the tree, so it is present in the `.rodata` of a build with the
+/// variable set and absent from one without it. `scripts/tcp_command_gate_check.sh`
+/// builds both ways and checks exactly that. **Do not reuse this text anywhere else**,
+/// or that check silently stops proving anything.
+///
+/// 72 characters, inside `TEXT_LEN` (96), so it cannot truncate into something that
+/// says less than it means -- least of all into something that drops the variable's
+/// name, which is the actionable half.
+const COMMANDS_ENABLED_NOTICE: &str =
+    "tcp: command injection compiled in (VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS)";
 
 /// How long a client may refuse *every* frame before it stops counting as a client.
 ///
@@ -191,7 +258,15 @@ fn has_room_for(socket: &TcpSocket<'_>, len: usize) -> bool {
 /// `Lagged` on the first read -- so this task drains the bus from the moment it
 /// starts, connected or not. See [`accept_while_draining`], which is where that
 /// happens and why it has to.
-pub async fn run(stack: &'static Stack<'static>, subscriber: Option<BusSubscriber>) {
+///
+/// `sink` is where a decoded inbound command goes. It is taken unconditionally even
+/// though only the gated path uses it: the parameter costs a pointer, and making it
+/// conditional would mean the caller in `main` had to know about the gate too.
+pub async fn run(
+    stack: &'static Stack<'static>,
+    subscriber: Option<BusSubscriber>,
+    sink: CommandSink,
+) {
     let Some(mut subscriber) = subscriber else {
         // Both slots are configured and both consumers exist, so this is a
         // misconfiguration rather than a runtime condition. Reported rather than
@@ -253,8 +328,17 @@ pub async fn run(stack: &'static Stack<'static>, subscriber: Option<BusSubscribe
         // make it an unstructured text run -- which a host counts as the signature of
         // a panicking device.
         bus::emit_text(Severity::Warn, text(ATTESTATION_NOTICE));
+        // Branch on a `const`: with commands compiled out this line, and the notice's
+        // bytes with it, are not in the binary at all. See [`COMMANDS_ENABLED_NOTICE`].
+        //
+        // `Warn`, like the attestation above: an unauthenticated command path on an
+        // open port is worth a raised eyebrow every time somebody connects, and a
+        // build that has it should not look identical to one that does not.
+        if TCP_COMMANDS_ENABLED {
+            bus::emit_text(Severity::Warn, text(COMMANDS_ENABLED_NOTICE));
+        }
 
-        serve(&mut socket, &mut subscriber, &mut frame_buf).await;
+        serve(&mut socket, &mut subscriber, &mut frame_buf, &sink).await;
 
         // `abort`, not `close`: `close` sends a FIN and leaves the socket draining
         // whatever a stalled client never took, which is exactly the state we are
@@ -338,10 +422,23 @@ async fn serve(
     socket: &mut TcpSocket<'_>,
     subscriber: &mut BusSubscriber,
     frame_buf: &mut [u8; MAX_FRAME],
+    sink: &CommandSink,
 ) {
     // When the current run of refused frames began, if one is in progress. See
     // [`STALL_TIMEOUT`].
     let mut stalled_since: Option<Instant> = None;
+
+    // `None` when commands are compiled out, and the `const` is what makes that a
+    // compile-time decision: `Inbound::new` -- a `CommandDecoder` and its 2 kB buffer
+    // -- is never constructed, and [`read_command`] below has no reachable body. The
+    // state is per connection because `CommandDecoder` is: a half-received frame from
+    // a client that vanished must not be joined to the first bytes of the next
+    // client's, and `synced` describes one stream.
+    let mut inbound = if TCP_COMMANDS_ENABLED {
+        Some(Inbound::new())
+    } else {
+        None
+    };
 
     loop {
         // Two sources, exactly as the USB CDC transport has since Task 4:
@@ -355,19 +452,41 @@ async fn serve(
         //
         // This is the *only* `status` consumer on this processor -- see the module
         // docs. Do not add a second one anywhere.
-        let frame = match select(subscriber.next_message(), status::wait()).await {
+        //
+        // The third arm is the inbound half, and its position is not cosmetic:
+        // `select3` polls in declaration order, so a client flooding commands cannot
+        // win a poll in which a frame was already waiting. See the module docs for the
+        // three properties this arrangement has to preserve.
+        //
+        // `TcpSocket::read` is cancel-safe -- it dequeues only when it resolves -- so
+        // losing the race to either frame source costs nothing: the bytes stay in the
+        // socket's receive buffer for the next pass.
+        let frame = match select3(
+            subscriber.next_message(),
+            status::wait(),
+            read_command(socket, &mut inbound, sink),
+        )
+        .await
+        {
             // `next_message`, not `next_message_pure`: the pure form collapses a lag
             // into a silently newer frame, and every lagged message is a frame this
             // device meant to send and did not. Counting all `n` is what keeps
             // `bus::stats().dropped` honest.
-            Either::First(WaitResult::Lagged(n)) => {
+            Either3::First(WaitResult::Lagged(n)) => {
                 for _ in 0..n {
                     bus::note_dropped();
                 }
                 continue;
             }
-            Either::First(WaitResult::Message(frame)) => frame,
-            Either::Second(frame) => frame,
+            Either3::First(WaitResult::Message(frame)) => frame,
+            Either3::Second(frame) => frame,
+            // The read half errored. That is the socket failing, not the client being
+            // slow, so the connection goes -- the same verdict the write arm reaches
+            // for a write that fails outright. A client that merely half-closes does
+            // not come through here; [`read_command`] absorbs that and stops reading.
+            Either3::Third(ReadOutcome::Failed) => return,
+            // Bytes were read and fed to the decoder. Nothing to write yet.
+            Either3::Third(ReadOutcome::Fed) => continue,
         };
 
         let Ok(encoded) = encode_frame(&frame, frame_buf) else {
@@ -408,10 +527,119 @@ async fn serve(
             }
         }
 
-        // TASK 12 SEAM: the inbound half goes here, as a `select` between this
-        // writer and a `CommandDecoder` fed from `socket.split()`'s read half,
-        // behind the build-time env var that keeps it out of the binary entirely
-        // when unset. Nothing above needs to change to accommodate it; in
-        // particular the room check and the write deadline must survive it intact.
     }
+}
+
+/// What one pass of the inbound half concluded. Only ever produced when commands are
+/// compiled in -- with the gate off [`read_command`] cannot resolve at all.
+enum ReadOutcome {
+    /// Bytes arrived and went to the decoder. Any command they completed is already
+    /// on the [`CommandSink`].
+    Fed,
+    /// The socket's read half errored. The connection is finished.
+    Failed,
+}
+
+/// Per-connection inbound state.
+///
+/// Built only inside the gate. It is ~2 kB, essentially all of it
+/// [`CommandDecoder`]'s reassembly buffer, which is sized for `MAX_FRAME` because
+/// `DebugCommand::Machine(MachineCommand::AddRoutine(..))` is a legitimate injected
+/// command and is not small.
+struct Inbound {
+    decoder: CommandDecoder,
+    buf: [u8; RX_CHUNK],
+    /// Cleared by a zero-length read, which on a TCP socket means the peer shut down
+    /// *its* write half and will never send another byte.
+    ///
+    /// Load-bearing: `read` on a half-closed socket returns `Ok(0)` immediately and
+    /// forever, so without this the third arm of the select would be permanently
+    /// ready and the serve loop would spin at full tilt on the executor that also
+    /// runs Wi-Fi and BLE -- the exact failure mode this whole module is written to
+    /// avoid, arrived at from the other direction. A half-close is not a
+    /// disconnection: the client can still be reading frames perfectly well, so the
+    /// connection stays up and only the reading stops.
+    open: bool,
+}
+
+impl Inbound {
+    fn new() -> Self {
+        Self {
+            decoder: CommandDecoder::new(),
+            buf: [0u8; RX_CHUNK],
+            open: true,
+        }
+    }
+}
+
+/// The inbound half. **Everything here is behind [`TCP_COMMANDS_ENABLED`].**
+///
+/// Resolves when bytes arrive or the read half fails; never resolves when commands
+/// are compiled out, or once the peer has half-closed. A future that never resolves
+/// is exactly what an unused arm of a `select` should be, so the disabled build's
+/// serve loop behaves as though the arm were not written -- and with the `const`
+/// false, it is not: the body below is a branch on a literal and is eliminated whole.
+///
+/// It does not await anything but the socket. In particular the command it decodes is
+/// not executed here and not handed anywhere that can block: `try_send` on a full
+/// queue drops it, which is the right trade on a debug path (see
+/// `channels::DEBUG_COMMAND_CAPACITY`).
+async fn read_command(
+    socket: &mut TcpSocket<'_>,
+    inbound: &mut Option<Inbound>,
+    sink: &CommandSink,
+) -> ReadOutcome {
+    if TCP_COMMANDS_ENABLED {
+        if let Some(state) = inbound.as_mut() {
+            if state.open {
+                // Bound to a local before the `match`, not matched on directly: the
+                // read future borrows `state.buf` and a temporary in a match scrutinee
+                // lives to the end of the match, which would make the buffer
+                // unreadable in the arm that needs to feed it to the decoder.
+                let read = socket.read(&mut state.buf).await;
+                match read {
+                    // The peer half-closed. Stop reading, keep writing.
+                    Ok(0) => state.open = false,
+                    Ok(n) => {
+                        state.decoder.feed(&state.buf[..n], |command| {
+                            // `try_send`, not `send`: this task must never wait on
+                            // whoever executes commands. A dropped injected command is
+                            // better than a debug transport that parks.
+                            let _ = sink.try_send(command);
+                        });
+                        // A host built against a different revision of the protocol
+                        // injects a command that decodes into something other than
+                        // what its operator typed. The codec refuses it; this is what
+                        // makes the refusal visible, since a silently ignored command
+                        // is indistinguishable from a broken link at the host end.
+                        //
+                        // `CommandDecoder` reports on the *first* mismatched frame,
+                        // unlike `FrameDecoder`, which waits for three to corroborate.
+                        // That asymmetry is deliberate and belongs to the codec: a
+                        // command is one-shot and interactive, so there is no second
+                        // frame coming for a threshold to wait for, and a spurious
+                        // report costs a line in an event log while a silent refusal
+                        // costs an operator standing at a machine that is ignoring
+                        // them. The decision is still the decoder's -- it fires once
+                        // per run, not once per read -- so a retrying host cannot
+                        // flood the bus and evict real frames.
+                        if let VersionVerdict::Mismatch { found, .. } =
+                            state.decoder.take_version_verdict()
+                        {
+                            bus::emit_event(DebugEvent::CommandRejected {
+                                reason: version_mismatch_reason(found),
+                            });
+                        }
+                        return ReadOutcome::Fed;
+                    }
+                    Err(_) => return ReadOutcome::Failed,
+                }
+            }
+        }
+    }
+
+    // Unreachable when enabled and reading; the only way here is a build with
+    // commands compiled out, or a peer that has half-closed. Pending forever is what
+    // makes this arm cost the select nothing in either case.
+    core::future::pending().await
 }

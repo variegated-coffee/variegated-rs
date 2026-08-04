@@ -1,5 +1,21 @@
 fn main() {
+    // `linker_be_nice` re-enters this binary as the linker's error-handling script
+    // and `exit`s from there, so nothing that is meant for *cargo* may be printed
+    // above it -- it would go to the linker's stdout instead.
     linker_be_nice();
+
+    // `config::ALLOW_TCP_COMMANDS` reads this with `option_env!`, which cargo does
+    // *not* track on its own: without this line, setting or clearing the variable
+    // leaves a previously-built rlib in place and the toggle appears to do nothing
+    // at all -- the most confusing possible failure for a switch whose whole job is
+    // to decide whether a network command path exists in the binary.
+    //
+    // An environment variable rather than argv, and one of only two places in this
+    // tree that is allowed: the standing convention is that scripts and fixtures take
+    // options on argv, but cargo offers no other channel from an invocation to a
+    // `build.rs`/`option_env!` pair. See `config::ALLOW_TCP_COMMANDS`.
+    println!("cargo::rerun-if-env-changed=VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS");
+
     println!("cargo:rustc-link-arg=-Tdefmt.x");
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");

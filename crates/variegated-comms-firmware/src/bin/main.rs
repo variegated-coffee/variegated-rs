@@ -244,8 +244,9 @@ async fn debug_usb_task(
 async fn debug_tcp_task(
     stack: &'static embassy_net::Stack<'static>,
     subscriber: Option<debug::BusSubscriber>,
+    sink: debug::CommandSink,
 ) {
-    debug::tcp::run(stack, subscriber).await;
+    debug::tcp::run(stack, subscriber, sink).await;
 }
 
 #[embassy_executor::task]
@@ -265,6 +266,12 @@ async fn application_processor_task(
         variegated_controller_types::ExternalPeripheralSensorReading,
         16,
     >,
+    debug_command_receiver: embassy_sync::channel::Receiver<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::debug_command::DebugCommand,
+        { variegated_comms_firmware::channels::DEBUG_COMMAND_CAPACITY },
+    >,
 ) {
     let status_publisher = status_channel.publisher().unwrap();
     let config_publisher = config_channel.publisher().unwrap();
@@ -280,6 +287,7 @@ async fn application_processor_task(
         routine_publisher,
         command_receiver,
         sensor_reading_receiver,
+        debug_command_receiver,
     )
     .await;
 }
@@ -376,8 +384,10 @@ async fn main(spawner: Spawner) -> ! {
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
     let sensor_reading_channel = SENSOR_READING_CHANNEL.init(embassy_sync::channel::Channel::new());
 
-    // Initialize the debug command channel (commands injected over USB-Serial-JTAG
-    // now, over TCP once Task 11 lands).
+    // Initialize the debug command channel. Filled by the USB-Serial-JTAG reader
+    // always, and by the TCP reader when `config::TCP_COMMANDS_ENABLED`; drained by
+    // the application-processor sender, which dispatches through
+    // `debug::commands::dispatch`.
     let debug_command_channel = DEBUG_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
 
     // Bring up the structured debug transport before anything else that might have
@@ -416,7 +426,7 @@ async fn main(spawner: Spawner) -> ! {
     // now returns `()`) onto the `#[task]` function itself. A failed spawn used to
     // be discarded silently; `spawn_or_report!` turns it into a `SpawnFailed` event
     // instead. See the macro's doc comment for why an event and not `unwrap`.
-    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel));
+    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver()));
     spawn_or_report!(spawner, "status_listener", status_listener_task(status_channel));
     log_info!("Application processor tasks spawned");
 
@@ -543,7 +553,7 @@ async fn main(spawner: Spawner) -> ! {
     // The debug stream's network transport, spawned first among the servers: it is
     // the one that reports on the others, and a `SpawnFailed` for anything below is
     // only useful to a host that can already receive it.
-    spawn_or_report!(spawner, "debug_tcp", debug_tcp_task(stack_static, tcp_debug_subscriber));
+    spawn_or_report!(spawner, "debug_tcp", debug_tcp_task(stack_static, tcp_debug_subscriber, debug_command_channel.sender()));
     log_info!("TCP debug server task spawned on port 9090");
 
     // Create TCP stack for HTTP

@@ -35,8 +35,6 @@
 //! Do not remove either, and do not add an `await` on this path that is not
 //! similarly bounded.
 
-use core::fmt::Write as _;
-
 use variegated_log::log_error;
 use embassy_futures::join::join;
 use embassy_futures::select::{select, Either};
@@ -45,9 +43,10 @@ use embassy_time::{Duration, Timer};
 use embedded_io_async::{Read, Write};
 use esp_hal::peripherals::USB_DEVICE;
 use esp_hal::usb_serial_jtag::{UsbSerialJtagRx, UsbSerialJtagTx};
-use variegated_controller_types::debug::{DebugEvent, Name, DEBUG_PROTOCOL_VERSION};
+use variegated_controller_types::debug::DebugEvent;
 use variegated_debug_codec::{encode_frame, CommandDecoder, VersionVerdict, MAX_FRAME};
 
+use crate::debug::commands::version_mismatch_reason;
 use crate::debug::{bus, BusSubscriber, CommandSink};
 
 /// Longest we will wait for the host to accept one packet before abandoning the
@@ -82,18 +81,6 @@ fn in_endpoint_has_room() -> bool {
         .read()
         .serial_in_ep_data_free()
         .bit_is_set()
-}
-
-/// Both versions in one `Name` (32 bytes), so the event says what to do rather than
-/// just that something went wrong. Worst case is `cmd wire v0xff, expected v0xff` at
-/// 30 characters, so it cannot truncate.
-fn version_mismatch_reason(found: u8) -> Name {
-    let mut reason = Name::new();
-    let _ = write!(
-        reason,
-        "cmd wire v{found:#04x}, expected v{DEBUG_PROTOCOL_VERSION:#04x}"
-    );
-    reason
 }
 
 /// Drive the frame writer and the command reader. Never returns.

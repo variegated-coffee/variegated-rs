@@ -17,7 +17,7 @@ use crate::debug::bus;
 use variegated_scale_trouble_driver::acaia_old::{AcaiaOldDriver, ScaleEvent};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
-use crate::channels::{BELKA_CONNECTION_STATUS, SENSOR_READING_CAPACITY};
+use crate::channels::{BELKA_CONNECTION_STATUS, BLE_RECONNECT_REQUEST, SENSOR_READING_CAPACITY};
 use crate::config::BELKA_PERIPHERAL_ID;
 
 /// Set the Belka connection flag, emitting a typed event only when it actually
@@ -75,15 +75,65 @@ pub async fn ble_devices_task(
 
     log_info!("BLE Devices: Configured Belka {:?} and ACAIA {:?}", belka_address, acaia_address);
 
-    // Run connection manager and both device measurement loops concurrently
+    // Run connection manager, the device measurement loop, and the injected-command
+    // listener concurrently.
     join(
         manager.run(),
 //        join(
-            belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
-            //acaia_measurement_loop(handle, stack, acaia_address),
+            join(
+                belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
+                //acaia_measurement_loop(handle, stack, acaia_address),
+                reconnect_request_loop(handle.clone(), belka_address),
+            ),
 //        ),
     )
     .await;
+}
+
+/// Serve `CommsDebugOp::ReconnectBle`.
+///
+/// Lives here rather than in `debug::commands` because the connection manager's
+/// handles are not `'static` -- they borrow the manager, which this task owns -- so
+/// there is nowhere else on this processor that can reach a `Connection`.
+///
+/// The reconnect is performed by *disconnecting*: the manager's maintenance loop
+/// notices a device whose connection is no longer alive, clears it, waits out its
+/// two-second cooldown and connects again. Asking it to connect directly would not
+/// work anyway, since it refuses a device it already believes is connected -- and
+/// "already connected" is precisely the state an operator reaches for this command
+/// from, when the link is nominally up and behaving badly.
+///
+/// Ids this firmware does not know are rejected by the dispatcher, before the signal,
+/// so anything arriving here is one this loop can act on. It is still matched rather
+/// than assumed: the two lists are in different modules and are allowed to drift.
+async fn reconnect_request_loop(
+    handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    belka_address: BdAddr,
+) {
+    loop {
+        let id = BLE_RECONNECT_REQUEST.wait().await;
+        if id != BELKA_PERIPHERAL_ID {
+            continue;
+        }
+
+        let device_handle = handle.register_device(belka_address);
+        // `with_connection` borrows the manager's `RefCell` for the length of the
+        // closure only, and the closure is synchronous, so this cannot overlap the
+        // manager's own `borrow_mut` across an await.
+        match device_handle.with_connection(|connection| connection.disconnect()) {
+            Ok(()) => {
+                log_info!("Reconnect requested for Belka Portal; dropping the connection");
+                // The manager sees the dead connection on its next pass and emits the
+                // `BlePeripheralDisconnected`/`BlePeripheralConnected` pair through
+                // `set_belka_connected`, so this site deliberately emits nothing: the
+                // events that follow describe what actually happened, and one here
+                // would announce an outcome that has not been reached yet.
+            }
+            // Not connected. Nothing to drop, and the manager is already retrying once
+            // a second, so the request is satisfied by what is already happening.
+            Err(()) => log_info!("Reconnect requested for Belka Portal, which is not connected"),
+        }
+    }
 }
 
 /// Belka Portal measurement loop

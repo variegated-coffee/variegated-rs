@@ -75,7 +75,9 @@ pub const MACHINE_COMMAND_CAPACITY: usize = 8;
 pub static MACHINE_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>> = StaticCell::new();
 
 // Debug Command Channel - commands injected over a debug transport (USB-Serial-JTAG
-// now, TCP in Task 11), handed off to whoever executes them.
+// always, TCP when `config::TCP_COMMANDS_ENABLED`), handed off to whoever executes
+// them. Drained by the application-processor sender, which dispatches through
+// `debug::commands::dispatch`.
 //
 // Capacity 4: injection is interactive, so a backlog deeper than this means nobody
 // is draining it. Every producer uses `try_send` and drops on full -- the debug
@@ -83,6 +85,37 @@ pub static MACHINE_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, 
 // worse than no command at all on a machine that heats water.
 pub const DEBUG_COMMAND_CAPACITY: usize = 4;
 pub static DEBUG_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>> = StaticCell::new();
+
+// The three requests `CommsDebugOp` raises against tasks that own hardware this
+// firmware cannot touch from a dispatcher.
+//
+// `Signal`, not `Channel`, and latest-wins is the right semantics for all of them:
+// an operator who asks twice for a Wi-Fi reconnect while one is in flight wants one
+// reconnect, not two queued. `signal()` never awaits and never fails, which is what
+// lets the dispatcher stay synchronous -- see `debug::commands`.
+//
+// Each has exactly one consumer, which is what `Signal` requires: `wait()` holds a
+// single waker and a second concurrent waiter would displace and re-wake the first
+// forever. See `variegated_debug::status`'s module docs for the full argument.
+
+/// Consumed by `wifi::connection_task`. Latching, so a request raised while the link
+/// is already down is satisfied by the reconnect already in progress.
+pub static WIFI_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Consumed by `time::sntp_task`, which otherwise sleeps five minutes between syncs.
+pub static SNTP_RESYNC_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Consumed by `ble::devices::ble_debug_command_loop`. Carries the peripheral id, and
+/// the dispatcher has already rejected ids this firmware does not know about, so the
+/// consumer never has to answer for one.
+pub static BLE_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::new();
+
+/// Read and cleared by `ble::scanner::ScanPrinter` on the next advertising report.
+///
+/// An atomic rather than a `Signal` because the consumer is an `EventHandler`
+/// callback invoked from the BLE runner, not an async task: it cannot await, so it
+/// needs a flag it can test and clear in place.
+pub static BLE_RESCAN_PENDING: AtomicBool = AtomicBool::new(false);
 
 // Comms Status Command - internal commands to update CommsStatus
 pub enum CommsStatusCommand {

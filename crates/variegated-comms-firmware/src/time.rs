@@ -3,6 +3,7 @@
 use core::net::{IpAddr, SocketAddr};
 
 use variegated_log::log_info;
+use embassy_futures::select::select;
 use embassy_net::{dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
 use embassy_time::{Duration, Timer};
 use esp_hal::rtc_cntl::Rtc;
@@ -11,7 +12,7 @@ use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 
 use variegated_controller_types::debug::DebugEvent;
 
-use crate::channels::{LAST_SNTP_SYNC_MS, TIME_SYNCED};
+use crate::channels::{LAST_SNTP_SYNC_MS, SNTP_RESYNC_REQUEST, TIME_SYNCED};
 use crate::config::{NTP_SERVER, USEC_IN_SEC};
 use crate::debug::bus;
 
@@ -184,7 +185,26 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
             }
         }
 
-        // Sync every 300 seconds
-        Timer::after(Duration::from_secs(300)).await;
+        // Sync every 300 seconds, or as soon as a debug host asks.
+        //
+        // Without the second arm an operator who can see the clock is wrong waits up
+        // to five minutes to find out whether it can be fixed, which on an
+        // interactive debug path is indistinguishable from the command having done
+        // nothing. The resulting `SntpSynced`/`SntpFailed` is the answer -- but only
+        // if the outcome *changed*, because `last_ok` above makes those events edge
+        // triggered; a resync that succeeds on a clock that was already synced is
+        // silent here and visible as `sntp_synced_ms_ago` dropping back to ~0 in the
+        // next snapshot.
+        //
+        // A request raised before the socket exists is not served at all: the two
+        // failure arms above `return` from this task, so a device whose DNS lookup
+        // failed at boot has no SNTP for the rest of the power cycle and this signal
+        // has no consumer. That is pre-existing behaviour, not something the request
+        // path introduced.
+        let _ = select(
+            Timer::after(Duration::from_secs(300)),
+            SNTP_RESYNC_REQUEST.wait(),
+        )
+        .await;
     }
 }

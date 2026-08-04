@@ -6,6 +6,42 @@ use trouble_host::prelude::BdAddr;
 pub const SSID: &str = env!("SSID");
 pub const PASSWORD: &str = env!("PASSWORD");
 
+/// TCP command injection is unauthenticated and unencrypted, so it is compiled in
+/// only when this is set at build time. When unset the inbound half of the TCP
+/// debug server does not exist in the binary at all -- not a runtime branch a bug
+/// could reach. USB injection is always enabled: physical access already implies
+/// trust, and it is the fallback when Wi-Fi is what is broken.
+///
+/// # An environment variable, deliberately, and one of only two exceptions
+///
+/// Everything else in this tree that takes options -- every script, every fixture --
+/// takes them on argv, because an environment variable is invisible in a shell
+/// history and silently inherited by child processes. This is one of the two places
+/// that has no choice: the value has to reach `option_env!` at *compile* time, and
+/// cargo offers no channel from an invocation to a compilation but the environment.
+/// It is paired with a `cargo::rerun-if-env-changed` line in `build.rs`, without
+/// which cargo would not even notice the variable changing.
+pub const ALLOW_TCP_COMMANDS: Option<&str> = option_env!("VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS");
+
+/// **A `const`, and that is the mechanism -- do not "simplify" it into a runtime
+/// flag, a `static`, or a function.**
+///
+/// `if TCP_COMMANDS_ENABLED { .. }` on a `const bool` is a branch on a literal, so
+/// when it is `false` the block is unreachable and the whole inbound path -- the
+/// `CommandDecoder`, the socket read, the dispatch -- is dead-code-eliminated before
+/// it reaches the binary. Turning this into anything the compiler cannot fold (a
+/// `static`, an `AtomicBool`, a config field read at boot) would leave that code
+/// present and reachable, and "present but currently disabled" is exactly the
+/// property this gate exists *not* to have: an unauthenticated command path that a
+/// stray write or a mis-parsed config could turn back on. The point is not that the
+/// branch is not taken; it is that there is nothing on the other side of it.
+///
+/// It does *not* follow that the gated code is unchecked when this is `false`: rustc
+/// still type-checks a `const`-false block. That is why the firmware has to be built
+/// **both ways** -- the second build is what proves the code still compiles, and the
+/// difference between the two binaries is what proves it is gone from the first.
+pub const TCP_COMMANDS_ENABLED: bool = ALLOW_TCP_COMMANDS.is_some();
+
 // SNTP configuration
 pub const NTP_SERVER: &str = "pool.ntp.org";
 pub const USEC_IN_SEC: u64 = 1_000_000;

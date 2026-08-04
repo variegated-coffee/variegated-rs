@@ -26,6 +26,7 @@
 //! this processor receives over the inter-processor link. Nothing else may `wait()`
 //! on it.
 
+pub mod commands;
 pub mod panic_console;
 pub mod snapshot;
 pub mod tcp;
@@ -44,8 +45,9 @@ use crate::channels::DEBUG_COMMAND_CAPACITY;
 /// other end of the UART.
 pub use variegated_debug::bus;
 
-/// Where decoded commands are handed off, shared by the USB reader and Task 11's
-/// TCP reader.
+/// Where decoded commands are handed off, shared by the USB reader and -- when
+/// `config::TCP_COMMANDS_ENABLED` -- the TCP reader. Drained by the
+/// application-processor sender, which runs them through [`commands::dispatch`].
 pub type CommandSink = Sender<'static, CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>;
 
 /// A reader of the shared debug bus.

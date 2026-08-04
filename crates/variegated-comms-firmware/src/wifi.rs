@@ -3,14 +3,14 @@
 use variegated_log::{log_error, log_info};
 use embassy_net::Runner as NetRunner;
 use embassy_time::{Duration, Timer};
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select3, Either3};
 use esp_radio::wifi::{Config as WifiConfig, Interface, WifiController, sta::StationConfig};
 
 use portable_atomic::Ordering;
 
 use variegated_controller_types::debug::DebugEvent;
 
-use crate::channels::{NO_RSSI, WIFI_CONNECTED, WIFI_RSSI_DBM, WIFI_RSSI_SIGNAL};
+use crate::channels::{NO_RSSI, WIFI_CONNECTED, WIFI_RECONNECT_REQUEST, WIFI_RSSI_DBM, WIFI_RSSI_SIGNAL};
 use crate::config::{PASSWORD, SSID};
 use crate::debug::bus;
 
@@ -73,11 +73,15 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
         if controller.is_connected() {
             // While connected, periodically update RSSI and wait for disconnect.
             loop {
-                match select(
+                // The reconnect request is the last arm, so it can never displace an
+                // actual disconnect notification or an RSSI sample that was ready at
+                // the same instant.
+                match select3(
                     controller.wait_for_disconnect_async(),
                     Timer::after(Duration::from_secs(1)),
+                    WIFI_RECONNECT_REQUEST.wait(),
                 ).await {
-                    Either::First(_) => {
+                    Either3::First(_) => {
                         // Disconnected - clear RSSI and break to reconnect.
                         //
                         // Edge triggered: `wait_for_disconnect_async()` resolving is
@@ -91,7 +95,7 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                         Timer::after(Duration::from_millis(5000)).await;
                         break;
                     }
-                    Either::Second(_) => {
+                    Either3::Second(_) => {
                         // Timer fired - update RSSI (convert i32 to i8)
                         let rssi = controller.rssi().ok().map(|r| r as i8);
                         WIFI_RSSI_SIGNAL.signal(rssi);
@@ -99,6 +103,35 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                             rssi.map(|r| r as i16).unwrap_or(NO_RSSI),
                             Ordering::Relaxed,
                         );
+                    }
+                    // A debug host asked for a reconnect. This is the *only* site that
+                    // emits `WifiReconnectRequested`, and it emits it here -- at the
+                    // point the link is actually about to be torn down and rebuilt --
+                    // rather than where the request was raised. The event then means
+                    // something a host can act on: the association it is watching is
+                    // going away on purpose. See the comment further down for why the
+                    // retry loop below deliberately does not emit it.
+                    //
+                    // Edge triggered by construction: `Signal::wait` consumes the
+                    // value, and a request raised while the link is already down is
+                    // drained in the `else` branch below by the reconnect that is
+                    // already in progress.
+                    Either3::Third(()) => {
+                        bus::emit_event(DebugEvent::WifiReconnectRequested);
+                        // Explicit rather than relying on the AP to drop us: this is
+                        // what makes the request do something on a link that is
+                        // working but wrong (associated to the wrong band, or holding
+                        // a stale DHCP lease). The error is logged rather than
+                        // propagated -- if the disconnect failed we fall through to
+                        // `connect_async` anyway, which is where a genuinely broken
+                        // controller will show up.
+                        if controller.disconnect_async().await.is_err() {
+                            log_error!("Requested WiFi disconnect failed");
+                        }
+                        set_wifi_connected(false);
+                        WIFI_RSSI_SIGNAL.signal(None);
+                        WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+                        break;
                     }
                 }
             }
@@ -110,9 +143,16 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             set_wifi_connected(false);
             WIFI_RSSI_SIGNAL.signal(None);
             WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+            // A reconnect request raised while the link was already down is satisfied
+            // by the `connect_async` a few lines below, so it is taken here rather
+            // than left to fire the instant the next association succeeds and tear it
+            // straight back down.
+            let _ = WIFI_RECONNECT_REQUEST.try_take();
         }
 
-        // Deliberately *not* promoted to `DebugEvent::WifiReconnectRequested`.
+        // Deliberately *not* promoted to `DebugEvent::WifiReconnectRequested`, which
+        // is emitted only by the injected-request arm above -- the one place where a
+        // reconnect was actually asked for rather than merely retried.
         //
         // This is the body of an unbounded retry loop: with the AP unreachable,
         // `connect_async` fails and we are back here five seconds later, forever.

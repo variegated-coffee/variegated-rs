@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_futures::join::join;
 use esp_hal::uart::{UartRx, UartTx};
 use esp_hal::Async;
@@ -15,13 +15,14 @@ use variegated_controller_types::{
     ExternalPeripheralSensorReading, MachineCommand,
 };
 use variegated_controller_types::debug::DebugEvent;
+use variegated_controller_types::debug_command::DebugCommand;
 use variegated_debug::relay::relayable;
 
-use crate::debug::{bus, TCP_DEBUG_CLIENTS};
+use crate::debug::{bus, commands, TCP_DEBUG_CLIENTS};
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
-    MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, MACHINE_DEFINITION, ROUTINE_CACHE,
-    SENSOR_READING_CAPACITY,
+    MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
+    ROUTINE_CACHE, SENSOR_READING_CAPACITY,
 };
 
 /// Start the application processor communication
@@ -33,6 +34,7 @@ pub async fn start(
     routine_publisher: ApplicationRoutinePublisher,
     command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
     sensor_reading_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
+    debug_command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>,
 ) {
     log_info!("Starting UART transceiver");
 
@@ -312,12 +314,21 @@ pub async fn start(
                 .min(time_until_config_retry)
                 .min(time_until_delayed_request);
 
-            // Select between different events
+            // Select between different events.
+            //
+            // The debug command receiver is nested *under* the timer rather than
+            // promoted to a fifth arm, and that is a priority decision as much as a
+            // consequence of `embassy-futures` stopping at `select4`. `select` and
+            // `select4` both poll in declaration order, so this arrangement polls the
+            // machine's own traffic -- status, commands, sensor readings -- before
+            // anything a debug host injected, and injected commands cannot starve the
+            // three paths this link exists for. It shares the timer's arm because the
+            // periodic work in that arm is the least urgent thing here.
             match select4(
                 COMMS_STATUS_SIGNAL.wait(),
                 command_receiver.receive(),
                 sensor_reading_receiver.receive(),
-                Timer::after(timeout),
+                select(Timer::after(timeout), debug_command_receiver.receive()),
             ).await {
                 Either4::First(comms_status) => {
                     let message = CommsProcessorToApplicationProcessorMessage::CommsStatus(comms_status.clone());
@@ -377,7 +388,34 @@ pub async fn start(
                     tx.write_async(&serialized_message).await
                         .expect("Failed to write sensor reading");
                 }
-                Either4::Fourth(_) => {
+                // A command injected over a debug transport -- USB always, TCP only
+                // when `config::TCP_COMMANDS_ENABLED`.
+                //
+                // `dispatch` is synchronous and infallible: it emits
+                // `CommandReceived`, executes the comms-side ops itself, and hands
+                // back the message for the link if there is one. This is the only
+                // place that touches the UART, which is why the dispatch lives in this
+                // loop rather than in a task of its own.
+                Either4::Fourth(Either::Second(debug_command)) => {
+                    if let Some(message) = commands::dispatch(debug_command) {
+                        // Not `.expect(..)`, unlike every other write in this loop.
+                        // Those carry the machine's own traffic and a UART that has
+                        // stopped working is a fault worth halting for; this one
+                        // carries something a debug host asked for, and panicking the
+                        // processor that owns Wi-Fi, BLE and the ESPHome server
+                        // because an injected command could not be serialized would
+                        // hand anyone on port 9090 a way to take the machine down.
+                        match postcard::to_allocvec_cobs(&message) {
+                            Ok(serialized_message) => {
+                                if tx.write_async(&serialized_message).await.is_err() {
+                                    log_error!("Failed to write injected debug command to UART");
+                                }
+                            }
+                            Err(_) => log_error!("Failed to serialize injected debug command"),
+                        }
+                    }
+                }
+                Either4::Fourth(Either::First(_)) => {
                     // Check if delayed request is due
                     if let Some((when, message)) = delayed_request.take() {
                         if Instant::now() >= when {
