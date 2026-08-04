@@ -176,7 +176,7 @@ pub const MIN_TEXT_RUN: usize = 4;
 /// The property that has to hold is one-directional and absolute: **no frame, and no
 /// prefix of a frame, may ever be classified as text.** Anything else silently
 /// swallows machine data. This rule gets that structurally rather than
-/// probabilistically:
+/// probabilistically, for the frames *this build emits*:
 ///
 /// * Every frame [`encode`] produces is the COBS encoding of
 ///   `[DEBUG_PROTOCOL_VERSION][postcard..]`. The version byte is non-zero, so COBS
@@ -190,6 +190,26 @@ pub const MIN_TEXT_RUN: usize = 4;
 /// So the exclusion holds for complete frames, for frames truncated at any offset by
 /// a device that reset mid-write, and for oversized ones. It does not rest on
 /// statistics about what postcard payloads look like.
+///
+/// The scoping matters and is not pedantry: it is a statement about *our* version
+/// byte, so a peer stamping a printable one -- a build at `DEBUG_PROTOCOL_VERSION`
+/// `0x02`, say -- is outside the argument. Such frames are still refused, but by the
+/// version check, which is an empirical guard rather than a structural one. If the
+/// version constant ever loses its high bit, this rule loses its guarantee with it,
+/// and `an_unversioned_frame_from_either_source_is_refused` is the test that will say
+/// so.
+///
+/// # What this rule does *not* cover: frame suffixes
+///
+/// A run that is the *back* half of a frame contains no version byte at all, and
+/// postcard payloads are full of ASCII, so suffixes frequently do pass this test --
+/// measurably so. Nothing about a byte run can distinguish "the tail of a frame I
+/// joined halfway through" from "a line of text", because they are the same bytes.
+///
+/// That is not this function's problem to solve and it must not try: the fix is
+/// positional, not lexical. A suffix can only be the run that *precedes the first
+/// delimiter a decoder ever saw*, so [`Decoder`] refuses to classify that run as text
+/// at all. See the `synced` field.
 ///
 /// Valid-UTF-8 does not give that. A truncated frame is mostly small integers and
 /// ASCII string bytes, all below `0x80`, and *any* sequence of bytes below `0x80` is
@@ -215,10 +235,20 @@ pub const MIN_TEXT_RUN: usize = 4;
 /// The other direction is not absolute and cannot be: four intentional printable
 /// bytes and four accidental ones are the same four bytes. See [`MIN_TEXT_RUN`].
 pub fn is_text_run(run: &[u8]) -> bool {
-    run.len() >= MIN_TEXT_RUN
-        && run
-            .iter()
-            .all(|&byte| matches!(byte, 0x20..=0x7E | b'\t' | b'\n' | b'\r'))
+    run.len() >= MIN_TEXT_RUN && run.iter().copied().all(is_text_byte)
+}
+
+/// The per-byte half of [`is_text_run`]: printable ASCII, tab, newline, carriage
+/// return.
+///
+/// Public and `const` so an *emitter* can use the same predicate the decoder judges it
+/// by. The comms firmware's panic handler does exactly that -- it substitutes `?` for
+/// anything this refuses, because `is_text_run` is all-or-nothing over a whole run and
+/// one stray byte in a panic message would otherwise discard the backtrace addresses
+/// underneath it. Sharing the function rather than restating the range means the two
+/// sides cannot drift apart and silence the panic path.
+pub const fn is_text_byte(byte: u8) -> bool {
+    matches!(byte, 0x20..=0x7E | b'\t' | b'\n' | b'\r')
 }
 
 /// Consecutive mismatching **frames**, all naming the same version, before a link is
@@ -382,6 +412,34 @@ pub struct Decoder<T, const N: usize, const CORROBORATION: u32> {
     /// discarded rather than wrapped, and the error is counted once at the
     /// delimiter -- otherwise one oversized frame would count an error per byte.
     overflowed: bool,
+    /// Whether a delimiter has been seen yet on this connection.
+    ///
+    /// Until one has, this decoder does not know where the run it is holding began,
+    /// only where it ends -- so that run may be the *back half* of a frame it joined
+    /// partway through. That is the ordinary case, not an edge one: the devices
+    /// stream continuously and a user attaches `--app-uart` or `--comms-uart`
+    /// whenever they happen to run the TUI, so the first bytes read are as likely as
+    /// not to be mid-frame.
+    ///
+    /// A suffix carries no version byte, and postcard payloads are largely ASCII, so
+    /// suffixes pass [`is_text_run`] a large fraction of the time. Without this flag
+    /// a mid-frame attach silently rendered a fabricated line of "text" cut out of a
+    /// frame's insides -- *and* did not count a framing error, so the diagnostics
+    /// said the link was clean while the screen showed wreckage. That is the same
+    /// objection that keeps an oversized run out of the text path: a truncated
+    /// quotation the consumer cannot tell from a whole one.
+    ///
+    /// So the pre-sync run is barred from the *text* path specifically. It is still
+    /// offered to the frame path, and that asymmetry is the point: de-framing is
+    /// self-validating in a way classification is not. A run only becomes a frame by
+    /// COBS-decoding consistently from its first byte, carrying our version byte, and
+    /// deserializing -- three independent checks a suffix does not pass by accident.
+    /// Barring it outright would instead throw away the first frame of every clean
+    /// connection and, on the command direction, silently swallow the first command
+    /// an operator ever sends.
+    ///
+    /// Cleared by [`Decoder::reset`], because it is per-connection by definition.
+    synced: bool,
     /// Malformed COBS, an empty frame, or a body the current version could not
     /// deserialize.
     ///
@@ -423,6 +481,7 @@ impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION> {
             buf: [0u8; N],
             len: 0,
             overflowed: false,
+            synced: false,
             decode_errors: 0,
             text_runs: 0,
             version_mismatches: 0,
@@ -447,15 +506,20 @@ impl<T, const N: usize, const CORROBORATION: u32> Decoder<T, N, CORROBORATION> {
     /// Drop all per-connection state: the partial frame, and everything the version
     /// watch has concluded.
     ///
-    /// Call this when a link is re-established. The cumulative `decode_errors`,
-    /// `text_runs` and `version_mismatches` counters survive, because they are
-    /// session diagnostics rather than per-connection state. Without this, a decoder
-    /// reused across connections carries a stale `last_version_mismatch` into the
-    /// next one, and half a frame from before the drop corrupts the first frame
-    /// after it.
+    /// Call this when a link is re-established. `decode_errors`, `text_runs` and
+    /// `version_mismatches` survive, because they are cumulative *for this decoder*
+    /// and a consumer that wants a session total across reconnects can accumulate the
+    /// deltas -- which is what `variegated-cli`'s transport does, since it builds a
+    /// fresh decoder per connection rather than calling this. Clearing them here as
+    /// well would make the two paths disagree about what the numbers mean. What is
+    /// dropped is everything that describes the *last* connection: without it a
+    /// decoder reused across connections carries a stale `last_version_mismatch` into
+    /// the next one, half a frame from before the drop corrupts the first frame after
+    /// it, and `synced` claims a delimiter was seen on a stream that has not started.
     pub fn reset(&mut self) {
         self.len = 0;
         self.overflowed = false;
+        self.synced = false;
         self.last_version_mismatch = None;
         self.watch = VersionWatch::new();
     }
@@ -513,6 +577,11 @@ where
     fn finish(&mut self, on_decoded: &mut impl FnMut(Decoded<'_, T>)) {
         let len = core::mem::replace(&mut self.len, 0);
         let overflowed = core::mem::replace(&mut self.overflowed, false);
+        // Whether a delimiter had been seen *before* this run. Taken here, alongside
+        // the other two, because the run being judged is the one ending at the
+        // delimiter that sets the flag -- reading it after would let every run
+        // declare itself synchronised.
+        let synced = core::mem::replace(&mut self.synced, true);
 
         if overflowed {
             // Deliberately *not* offered as text, however printable what fits turns
@@ -541,7 +610,14 @@ where
         // corroborate its own invented mismatch three lines running and black out a
         // link that is working perfectly. Classifying first cannot do that, and
         // costs nothing, because no frame can pass the text test (see `is_text_run`).
-        if is_text_run(&self.buf[..len]) {
+        //
+        // `synced` is the other half of the rule and covers the case `is_text_run`
+        // structurally cannot: this run may be the back half of a frame we joined
+        // partway through, and a suffix has no version byte to give it away. Only the
+        // first run on a connection can be one, so only the first run is barred. It
+        // still falls through to the frame path below, where COBS and the version
+        // envelope decide -- and where, if it really was wreckage, it is counted.
+        if synced && is_text_run(&self.buf[..len]) {
             self.text_runs += 1;
             // Infallible: `is_text_run` admits only ASCII. Handled rather than
             // unwrapped anyway, because this decoder runs inside the firmware's USB
@@ -1276,6 +1352,51 @@ mod tests {
         assert!(!is_text_run(b"bell\x07"));
     }
 
+    /// The emitter's side of the rule, checked here because the firmware that uses it
+    /// cannot run a test.
+    ///
+    /// `is_text_run` is all-or-nothing over a whole run, and the comms panic handler
+    /// writes its banner, the `PanicInfo` *and* every backtrace address as one run.
+    /// So one non-ASCII byte -- a Unicode quote in an `expect()` string, an accented
+    /// character in a path -- would discard the frame addresses along with it. The
+    /// handler therefore substitutes `?` for anything [`is_text_byte`] refuses, using
+    /// this crate's predicate rather than a copy of it.
+    #[test]
+    fn substituting_refused_bytes_is_what_keeps_a_backtrace_showable() {
+        let raw = "panicked at src/lib.rs:9:1:\r\nexpected \u{201c}sensor\u{201d}\r\n0x42000d3e\r\n";
+        assert!(
+            !is_text_run(raw.as_bytes()),
+            "one smart quote would otherwise take the addresses down with it"
+        );
+
+        // Exactly what `PanicConsole::write_bytes` does.
+        let substituted: Vec<u8> = raw
+            .bytes()
+            .map(|b| if is_text_byte(b) { b } else { b'?' })
+            .collect();
+        assert!(is_text_run(&substituted));
+
+        let mut stream = vec![0x00];
+        stream.extend_from_slice(&substituted);
+        stream.push(0x00);
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (_, runs) = feed_both(&mut decoder, &stream);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].contains("0x42000d3e"), "the addresses are the part that must survive");
+        // Per *byte*, not per character: a smart quote is three UTF-8 bytes and comes
+        // out as three `?`. Worth pinning -- the substitution happens in a firmware
+        // pushing bytes at a FIFO, where there is no character to be aware of.
+        assert!(
+            runs[0].contains("expected ???sensor???"),
+            "the mangling must be visible rather than silent: {}",
+            runs[0]
+        );
+        assert_eq!(decoder.decode_errors, 0);
+
+        // The substitution can never manufacture a delimiter, which would split a run.
+        assert!(!substituted.contains(&0x00));
+    }
+
     /// A text line can be a syntactically valid COBS frame by accident, and that is
     /// why classification happens *before* de-framing.
     ///
@@ -1393,6 +1514,227 @@ mod tests {
         let encoded = encode_frame(&good, &mut buf).unwrap().to_vec();
         let (frames, _) = feed_both(&mut decoder, &encoded);
         assert_eq!(frames, vec![good]);
+    }
+
+    /// The other half of the exclusion, and the one `is_text_run` cannot provide.
+    ///
+    /// A frame *suffix* carries no version byte -- the byte the structural argument
+    /// rests on is at the front, and a suffix is what is left when the front is gone.
+    /// Postcard payloads are largely ASCII, so suffixes pass a printability test a
+    /// large fraction of the time. This is not a corner case: the devices stream
+    /// continuously and a user attaches `--comms-uart` whenever they run the TUI, so
+    /// the first bytes a decoder sees are as likely as not to be mid-frame.
+    ///
+    /// Before the `synced` gate, attaching at 26 of the 37 interior offsets of the
+    /// frame below produced a *fabricated* text run -- a fragment cut out of a frame's
+    /// insides, shown to the user as though a device had written it -- and counted no
+    /// framing error while doing it, so the link read as clean. This asserts, at every
+    /// offset, that nothing is ever surfaced as text, and that the wreckage is
+    /// counted somewhere rather than vanishing.
+    #[test]
+    fn attaching_mid_frame_never_fabricates_text() {
+        let original = frame(
+            42,
+            DebugPayload::Text(Severity::Info, text("brew temperature 93.4C stable")),
+        );
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&original, &mut buf).unwrap().to_vec();
+
+        // What the device sends next, so each attach is followed by real traffic and
+        // the resynchronisation is checked at the same time.
+        let following = frame(43, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf2 = [0u8; MAX_FRAME];
+        let following_encoded = encode_frame(&following, &mut buf2).unwrap().to_vec();
+
+        // Offsets whose suffix would have been shown as text under the lexical rule
+        // alone, so the test reports the size of the hole it is closing rather than
+        // asserting a bare zero.
+        let mut would_have_been_text: Vec<usize> = Vec::new();
+        let mut now_framing: Vec<usize> = Vec::new();
+        let mut now_version_mismatch: Vec<usize> = Vec::new();
+
+        for offset in 1..encoded.len() - 1 {
+            // The suffix as its own run: everything from the attach point up to the
+            // frame's own trailing delimiter.
+            let suffix = &encoded[offset..encoded.len() - 1];
+            if is_text_run(suffix) {
+                would_have_been_text.push(offset);
+            }
+
+            let mut stream = encoded[offset..].to_vec();
+            stream.extend_from_slice(&following_encoded);
+
+            let mut decoder: FrameDecoder = Decoder::new();
+            let (frames, runs) = feed_both(&mut decoder, &stream);
+
+            assert!(
+                runs.is_empty(),
+                "attaching at offset {offset} fabricated text: {runs:?}"
+            );
+            // The suffix is accounted for as *something* -- a framing error or a
+            // refused version -- never silently dropped.
+            assert!(
+                decoder.decode_errors + decoder.version_mismatches >= 1,
+                "the suffix at offset {offset} vanished without being counted"
+            );
+            if decoder.decode_errors > 0 {
+                now_framing.push(offset);
+            } else {
+                now_version_mismatch.push(offset);
+            }
+            // And the stream resynchronises on the very next delimiter.
+            assert_eq!(
+                frames,
+                vec![following.clone()],
+                "the frame after the attach at offset {offset} must arrive intact"
+            );
+        }
+
+        let interior = encoded.len() - 2;
+        std::eprintln!(
+            "attach sweep over a {}-byte frame: {interior} interior offsets\n  \
+             would have been shown as text under the lexical rule alone: {} {:?}\n  \
+             now counted as framing errors: {} {:?}\n  \
+             now counted as version mismatches: {} {:?}\n  \
+             fabricated text runs: 0",
+            encoded.len(),
+            would_have_been_text.len(),
+            would_have_been_text,
+            now_framing.len(),
+            now_framing,
+            now_version_mismatch.len(),
+            now_version_mismatch,
+        );
+        assert!(
+            !would_have_been_text.is_empty(),
+            "if no suffix of this frame is printable the test proves nothing; pick another payload"
+        );
+        assert_eq!(now_framing.len() + now_version_mismatch.len(), interior);
+    }
+
+    /// The gate is positional and nothing more: the *same bytes* are text when a
+    /// delimiter precedes them and corruption when one does not. Stated as a pair so
+    /// the mechanism cannot be mistaken for something lexical.
+    #[test]
+    fn the_same_run_is_text_after_a_delimiter_and_corruption_before_one() {
+        let line = b"panicked at src/bin/main.rs:412:9";
+
+        let mut without = FrameDecoder::new();
+        let mut stream = line.to_vec();
+        stream.push(0x00);
+        let (_, runs) = feed_both(&mut without, &stream);
+        assert!(runs.is_empty(), "the first run on a link cannot be trusted as text");
+        assert_eq!(without.decode_errors, 1, "and it is counted, not dropped");
+        assert_eq!(without.text_runs, 0);
+
+        let mut with = FrameDecoder::new();
+        let mut stream = vec![0x00];
+        stream.extend_from_slice(line);
+        stream.push(0x00);
+        let (_, runs) = feed_both(&mut with, &stream);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(with.text_runs, 1);
+        assert_eq!(with.decode_errors, 0);
+    }
+
+    /// Barring the pre-sync run from the *text* path must not bar it from the frame
+    /// path. A host that connects to a device writing whole frames gets the first one
+    /// -- and, in the command direction, a device gets the first command an operator
+    /// sends. Discarding the pre-sync run outright would have cost both.
+    #[test]
+    fn the_first_frame_and_the_first_command_of_a_connection_still_arrive() {
+        let first = frame(0, DebugPayload::Event(DebugEvent::Boot));
+        let mut buf = [0u8; MAX_FRAME];
+        let encoded = encode_frame(&first, &mut buf).unwrap().to_vec();
+
+        let mut frames: FrameDecoder = Decoder::new();
+        let (got, runs) = feed_both(&mut frames, &encoded);
+        assert_eq!(got, vec![first]);
+        assert!(runs.is_empty());
+        assert_eq!(frames.decode_errors, 0);
+
+        let command = DebugCommand::Machine(MachineCommand::StartBrewing(0));
+        let mut buf2 = [0u8; MAX_FRAME];
+        let encoded = encode_command(&command, &mut buf2).unwrap().to_vec();
+
+        let mut commands: CommandDecoder = Decoder::new();
+        let mut delivered: Vec<DebugCommand> = Vec::new();
+        commands.feed(&encoded, |c| delivered.push(c));
+        assert_eq!(delivered.len(), 1, "an operator's first command must not vanish");
+        assert_eq!(commands.decode_errors, 0);
+    }
+
+    /// `reset` is per-connection state, and the sync flag is per-connection by
+    /// definition: after a reconnect the decoder is once again holding bytes whose
+    /// beginning it did not see.
+    #[test]
+    fn reset_makes_the_decoder_unsynchronised_again() {
+        let mut decoder: FrameDecoder = Decoder::new();
+        let mut stream = vec![0x00];
+        stream.extend_from_slice(b"first connection text\r\n");
+        stream.push(0x00);
+        let (_, runs) = feed_both(&mut decoder, &stream);
+        assert_eq!(runs.len(), 1);
+
+        decoder.reset();
+
+        // The same text, now the first run of a new connection, is refused again.
+        let mut stream = b"second connection text\r\n".to_vec();
+        stream.push(0x00);
+        let (_, runs) = feed_both(&mut decoder, &stream);
+        assert!(runs.is_empty());
+        assert_eq!(decoder.text_runs, 1, "still just the one from before the reset");
+        assert_eq!(decoder.decode_errors, 1);
+    }
+
+    /// What the delimiter at the top of the comms firmware's USB writer actually buys,
+    /// and what it does not.
+    ///
+    /// The brief claimed ROM boot banners would be picked up for free. They are not,
+    /// and this is the check rather than the assertion: the banner is whatever the ROM
+    /// printed before any of our code ran, so it is by construction the run *before*
+    /// the first delimiter, and the host refuses to read that as text because it
+    /// cannot tell it from a mid-frame attach. No firmware change can fix it -- a
+    /// delimiter would have to precede the ROM.
+    ///
+    /// What the delimiter does fix is worth having anyway: without it the banner and
+    /// the first frame arrive as one run and the frame is destroyed along with it.
+    #[test]
+    fn a_leading_delimiter_saves_the_first_frame_but_not_the_boot_banner() {
+        let banner = b"ESP-ROM:esp32c6-20220919\r\nBuild:Sep 19 2022\r\nrst:0x1 (POWERON),boot:0xc\r\n";
+        let first = frame(0, DebugPayload::Event(DebugEvent::Boot));
+        let second = frame(1, DebugPayload::Event(DebugEvent::WifiAssociated));
+        let mut buf = [0u8; MAX_FRAME];
+        let first_encoded = encode_frame(&first, &mut buf).unwrap().to_vec();
+        let mut buf2 = [0u8; MAX_FRAME];
+        let second_encoded = encode_frame(&second, &mut buf2).unwrap().to_vec();
+
+        // Without the delimiter: banner and first frame are one run, and it takes the
+        // frame down with it.
+        let mut stream = banner.to_vec();
+        stream.extend_from_slice(&first_encoded);
+        stream.extend_from_slice(&second_encoded);
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (frames, runs) = feed_both(&mut decoder, &stream);
+        assert_eq!(frames, vec![second.clone()], "the first frame is lost without it");
+        assert!(runs.is_empty());
+        assert!(decoder.decode_errors + decoder.version_mismatches >= 1);
+
+        // With it: the frame survives. The banner still does not -- it is the pre-sync
+        // run -- but it is counted rather than silently dropped.
+        let mut stream = banner.to_vec();
+        stream.push(0x00);
+        stream.extend_from_slice(&first_encoded);
+        stream.extend_from_slice(&second_encoded);
+        let mut decoder: FrameDecoder = Decoder::new();
+        let (frames, runs) = feed_both(&mut decoder, &stream);
+        assert_eq!(frames, vec![first, second], "both frames arrive intact");
+        assert!(
+            runs.is_empty(),
+            "a boot banner is indistinguishable from a mid-frame attach and is not shown"
+        );
+        assert_eq!(decoder.text_runs, 0);
+        assert!(decoder.decode_errors + decoder.version_mismatches >= 1);
     }
 
     /// The firmware's command reader calls plain `feed`. It has no use for the text
