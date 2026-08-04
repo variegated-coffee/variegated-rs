@@ -88,11 +88,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe { core::arch::asm!("csrci mstatus, 8") };
 
     let backtrace = Backtrace::capture();
-    let mut console = unsafe { debug::panic_console::PanicConsole::steal() };
+    let mut console = unsafe { debug::panic_console::PanicConsole::seize() };
 
     // Closes whatever COBS frame was in flight, so the wreckage of it is judged
     // separately from the text that follows. See `panic_console`'s module docs.
-    console.write_bytes(&[0x00]);
+    // `write_delimiter`, not `write_bytes`: the latter substitutes anything the host
+    // would refuse as text, and `0x00` is the one byte that has to get through raw.
+    console.write_delimiter();
     let _ = write!(
         console,
         "\r\n====================== PANIC ======================\r\n{info}\r\n\r\nBacktrace:\r\n"
@@ -109,7 +111,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let _ = write!(console, "==================== END PANIC ====================\r\n");
     // Terminates the text run so a host renders it now. Nothing else on this wire is
     // ever going to send another delimiter.
-    console.write_bytes(&[0x00]);
+    console.write_delimiter();
     console.flush();
 
     loop {

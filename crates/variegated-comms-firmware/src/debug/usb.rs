@@ -120,6 +120,29 @@ pub async fn run(
                 log_error!("debug bus subscriber unavailable; USB debug writer disabled");
                 return;
             };
+            // One delimiter before anything else this task ever writes.
+            //
+            // Whatever the ROM console printed during boot is sitting in front of our
+            // first frame with nothing between them, so without this the host reads
+            // the banner and the frame as a single run -- which contains the version
+            // byte, fails the text test, and is discarded *entire*. The first frame
+            // dies for the ROM's sake. One byte separates them and the frame survives.
+            //
+            // It does not make the banner itself legible, and the module that claims
+            // otherwise is wrong: the banner is then the run *before* the first
+            // delimiter on the connection, which the host refuses to read as text
+            // because it cannot tell it from a mid-frame attach. Nothing on this side
+            // can fix that -- a delimiter would have to precede the ROM, and the ROM
+            // runs before we do.
+            //
+            // Unbounded `write_all` is still not allowed here, so this goes through
+            // the same room check and timeout as everything else; a host that is not
+            // attached simply does not get it, which costs nothing since there is
+            // nobody to confuse.
+            if in_endpoint_has_room() {
+                let _ = select(tx.write_all(&[0x00]), Timer::after(WRITE_TIMEOUT)).await;
+            }
+
             let mut buf = [0u8; MAX_FRAME];
             loop {
                 // `next_message`, not `next_message_pure`: the pure form collapses a

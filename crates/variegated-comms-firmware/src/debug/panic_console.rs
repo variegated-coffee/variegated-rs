@@ -54,8 +54,10 @@
 //!   delimiter after a panic is one a dead processor is never going to send.
 
 use esp_hal::peripherals::USB_DEVICE;
-use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagTx};
-use esp_hal::Blocking;
+// The decoder's own per-byte predicate, imported rather than restated. These are two
+// halves of one rule living in two crates, and a copy that drifted would silence the
+// panic path at the far end with nothing here to show for it.
+use variegated_debug_codec::is_text_byte;
 
 /// How many times to re-check the IN endpoint before giving up on a byte.
 ///
@@ -70,14 +72,29 @@ const SPIN_LIMIT: u32 = 2_000_000;
 /// The IN endpoint FIFO packet size, and the unit the hardware sends in.
 const PACKET: usize = 64;
 
-/// A blocking, bounded writer on USB-Serial-JTAG, taken by force.
+/// Substituted for any byte the host's text classifier would refuse.
+const REPLACEMENT: u8 = b'?';
+
+/// A blocking, bounded writer on USB-Serial-JTAG, driven entirely through the
+/// peripheral's static register accessor.
 ///
-/// `steal()` is sound here for a reason specific to this call site and no other: the
-/// only other owner is [`crate::debug::usb`]'s writer task, and a panic handler runs
-/// after the executor has stopped scheduling. There is no concurrent user to race
-/// with because there is no concurrency left.
+/// **No `esp_hal` driver is constructed, and that is deliberate.**
+/// `UsbSerialJtag::new` goes through `PeripheralClockControl::enable`, which takes
+/// `PERIPHERAL_REF_COUNT` -- a `NonReentrantMutex` whose re-entry path is itself a
+/// panic. A panic taken inside *any* driver constructor (and this firmware builds a
+/// good many: UART, TimerGroup, BleConnector, the Wi-Fi stack) would therefore recurse
+/// through the panic handler instead of printing anything. The panic path should be
+/// the code least able to fail, so it touches no lock and allocates no driver: it
+/// reads and writes `ep1`/`ep1_conf` directly, exactly as
+/// [`crate::debug::usb::run`] already reads `serial_in_ep_data_free`.
+///
+/// The cost is one narrow window: a panic before `main` reaches
+/// `UsbSerialJtag::new(peripherals.USB_DEVICE)` finds the peripheral clock ungated and
+/// produces nothing. That window is the top of `main` -- `esp_hal::init`, the logger
+/// install, the heap allocators and the channel `init`s -- and trading it for the
+/// removal of a recursion hazard that spans every driver constructor in the firmware
+/// is clearly the right way round.
 pub struct PanicConsole {
-    tx: UsbSerialJtagTx<'static, Blocking>,
     /// Bytes written into the current packet, so it can be marked done at 64 rather
     /// than relying on a flush that would then block on an unattached host.
     in_packet: usize,
@@ -88,60 +105,88 @@ pub struct PanicConsole {
 }
 
 impl PanicConsole {
-    /// Take the USB-Serial-JTAG peripheral away from whoever had it.
+    /// Start writing on USB-Serial-JTAG regardless of who else holds it.
     ///
     /// # Safety
     ///
     /// Only sound from a panic handler, or somewhere else where it is known that no
-    /// task will ever run again. Anywhere else this aliases the transport in
-    /// [`crate::debug::usb`].
-    pub unsafe fn steal() -> Self {
-        let device = unsafe { USB_DEVICE::steal() };
-        let (_rx, tx) = UsbSerialJtag::new(device).split();
-        Self { tx, in_packet: 0, abandoned: false }
+    /// task will ever run again. Anywhere else this interleaves with the transport in
+    /// [`crate::debug::usb`], which owns the same endpoint.
+    pub unsafe fn seize() -> Self {
+        Self { in_packet: 0, abandoned: false }
+    }
+
+    /// Whether the IN endpoint has room for another byte -- the same
+    /// `serial_in_ep_data_free` bit [`crate::debug::usb::run`] consults, and the
+    /// reason neither path can use `esp-hal`'s blocking `write`, which spins on a
+    /// different and unbounded condition.
+    fn has_room() -> bool {
+        USB_DEVICE::regs()
+            .ep1_conf()
+            .read()
+            .serial_in_ep_data_free()
+            .bit_is_set()
     }
 
     /// Hand the current packet to the hardware.
-    ///
-    /// Through the peripheral's static register accessor, the same way
-    /// [`crate::debug::usb`] reads `serial_in_ep_data_free`, because `esp-hal`'s own
-    /// `flush_tx` sets this bit and then spins on an *unbounded* condition -- which is
-    /// the one thing this module must not do.
     fn mark_packet_done() {
         USB_DEVICE::regs()
             .ep1_conf()
             .modify(|_, w| w.wr_done().set_bit());
     }
 
-    pub fn write_bytes(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            if self.abandoned {
+    /// Push one byte with no filtering at all. Every caller goes through this; only
+    /// [`PanicConsole::write_delimiter`] passes it something the classifier would
+    /// refuse, and that is the point of it.
+    fn put(&mut self, byte: u8) {
+        if self.abandoned {
+            return;
+        }
+        let mut spins = 0u32;
+        while !Self::has_room() {
+            spins += 1;
+            if spins >= SPIN_LIMIT {
+                self.abandoned = true;
                 return;
             }
-            // `write_byte_nb` consults `serial_in_ep_data_free` itself and refuses
-            // rather than writing into a full FIFO -- unlike the blocking `write`,
-            // which spins, and unlike `write_async`, which pushes regardless and lets
-            // the hardware discard the bytes. Retrying it *is* the bounded wait.
-            let mut spins = 0u32;
-            loop {
-                match self.tx.write_byte_nb(byte) {
-                    Ok(()) => break,
-                    Err(_) => {
-                        spins += 1;
-                        if spins >= SPIN_LIMIT {
-                            self.abandoned = true;
-                            return;
-                        }
-                        core::hint::spin_loop();
-                    }
-                }
-            }
-            self.in_packet += 1;
-            if self.in_packet == PACKET {
-                self.in_packet = 0;
-                Self::mark_packet_done();
-            }
+            core::hint::spin_loop();
         }
+        USB_DEVICE::regs()
+            .ep1()
+            .write(|w| unsafe { w.rdwr_byte().bits(byte) });
+        self.in_packet += 1;
+        if self.in_packet == PACKET {
+            self.in_packet = 0;
+            Self::mark_packet_done();
+        }
+    }
+
+    /// Write text, substituting `?` for anything the host would refuse.
+    ///
+    /// The substitution is not cosmetic. `is_text_run` is all-or-nothing over a whole
+    /// run, and this handler writes its banner, the `PanicInfo` and every backtrace
+    /// address as *one* run between two delimiters -- so a single non-ASCII byte
+    /// anywhere in a panic message would take the addresses down with it. One
+    /// Unicode quote in an `expect()` string, or one accented character in a path,
+    /// and the output this task exists to restore is discarded in its entirety at the
+    /// far end.
+    ///
+    /// Substituting makes that impossible rather than unlikely, and it does it here
+    /// rather than by relaxing the host rule -- which would have to admit arbitrary
+    /// UTF-8 and would forfeit the structural guarantee that no frame can be read as
+    /// text. A mangled character in a panic message costs nothing; the frame
+    /// addresses under it are the part that has to survive.
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.put(if is_text_byte(byte) { byte } else { REPLACEMENT });
+        }
+    }
+
+    /// Write a COBS delimiter, bypassing the substitution above -- `0x00` is the one
+    /// byte that must reach the wire unmodified, and the one byte `write_bytes` will
+    /// never emit.
+    pub fn write_delimiter(&mut self) {
+        self.put(0x00);
     }
 
     /// Push out a part-filled packet. Called once, at the very end: calling it per
