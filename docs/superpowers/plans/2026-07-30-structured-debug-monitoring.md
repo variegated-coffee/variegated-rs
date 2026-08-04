@@ -3189,13 +3189,52 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `variegated-cli/src/bin/variegated-debug-tui.rs`
 
-- [ ] **Step 1: Extend the Commands tab**
+- [ ] ~~**Step 1: Extend the Commands tab**~~ **ALREADY DONE — superseded, see Step 1b.**
 
-Add the `CommsDebugOp` entries (`ReconnectWifi`, `ResyncSntp`, `RescanBle`,
+~~Add the `CommsDebugOp` entries (`ReconnectWifi`, `ResyncSntp`, `RescanBle`,
 `ReconnectBle(0xB1CA)`, `ReportHeap`) to the static command table, and surface
 `Sinks::send`'s error in the footer so "no transport for that command" is visible
 rather than silent — which is what you get when running `--app-uart` alone and
-selecting a comms op.
+selecting a comms op.~~
+
+Both halves landed early, in tasks written after this one:
+
+- The five `CommsDebugOp` entries plus `Ping` were added by **Task 17**
+  (`command_form.rs:304-308`, `:577-583`, `:1017-1028`), with fields, on-screen notes
+  and tests — Task 17's full-coverage palette subsumed this.
+- Surfacing the routing error was done by **Task 7's fix round 1**, which deleted the
+  cross-routing fallback outright rather than gating it and refuses with
+  `no {processor} link (pass {flag} or --tcp)`, rendered from `last_result`
+  (`variegated-debug-tui.rs:123-137`, `:1963-1969`).
+
+- [ ] **Step 1b: Correct the refusal's justification, which Task 12 falsified**
+
+**Human ruling (2026-08-04): keep refusing.** `Machine`/`App` commands still require a
+direct application link; the TUI stays deliberately stricter than the firmware.
+
+The behaviour stands, but the *reason* recorded for it no longer holds.
+`Sinks::send`'s doc comment justifies the refusal by asserting that "an `App` op sent
+down the ESP link is silently ignored while the footer reports success". Task 12 made
+that false: `application_processor/mod.rs:400` now drains `DEBUG_COMMAND_CHANNEL`
+through `commands::dispatch` and writes `CommsProcessorToApplicationProcessorMessage::
+DebugCommand` over the inter-processor UART, and both the USB and TCP readers feed that
+same sink. The op would be *forwarded*, not ignored.
+
+This matters because the comment is what the next person reads before touching the
+routing. Left as-is, it argues for relaxing the refusal on grounds that are wrong,
+while the real grounds — relay delivery is not guaranteed, since a dead application
+processor swallows the command at the ESP with only a `log_error!` — go unrecorded.
+
+Rewrite the comment to state: (1) the ESP does now forward `Machine`/`App` from either
+of its readers, so this refusal is a deliberate host-side policy rather than a
+reflection of firmware capability; (2) the reason it is kept is that the relay cannot
+confirm delivery, so reporting `queued` would assert more than the host knows — the
+same rule that widened `watchdog_fed_ms_ago` to `Option<u32>`; (3) `--tcp` accepts these
+commands over that identical relay path, and that asymmetry is intentional, because
+`--tcp` implies a working ESP whereas a lone `--comms-uart` says nothing about the
+application processor.
+
+Do not change `send`'s behaviour. This step is the comment and the ledger entry only.
 
 - [ ] **Step 2: Verify against hardware**
 
