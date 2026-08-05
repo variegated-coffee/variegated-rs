@@ -125,8 +125,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     console.write_delimiter();
     let _ = write!(
         console,
-        "\r\n====================== PANIC ======================\r\n{info}\r\n\r\nBacktrace:\r\n"
+        "\r\n====================== PANIC ======================\r\n{info}\r\n"
     );
+    write_trap_csrs(&mut console);
+    let _ = write!(console, "\r\nBacktrace:\r\n");
     if backtrace.frames().is_empty() {
         // The `.cargo/config.toml` in this repo sets `force-frame-pointers`, without
         // which the walk finds nothing. Say so rather than printing an empty list,
@@ -145,6 +147,63 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+/// Print the RISC-V trap CSRs, because for a CPU exception they are the whole diagnosis
+/// and nothing else in this handler carries it.
+///
+/// esp-hal's `ExceptionHandler` already reads `mcause`/`mepc`/`mtval` and panics with
+/// them formatted into the message -- `"Exception 'Load access fault' mepc=0x... "`, or
+/// `"Stack overflow detected at 0x..."` for `mcause == 14`. That message never arrives.
+/// esp-hal is built with defmt, so its `panic!` is `defmt::panic!`, which hands the
+/// formatted arguments to the defmt global logger and then calls
+/// `defmt::export::panic()`. Task 9 set `esp-println` to `no-op` for reasons that still
+/// hold, which left defmt with no sink -- so the arguments are discarded and
+/// `__defmt_default_panic` re-panics with the bare string `"explicit panic"`. That is
+/// what `{info}` prints, and it says nothing at all.
+///
+/// The registers themselves survive: the panic path takes no further trap, so by the
+/// time this runs they still hold what the exception handler read. Reading them here
+/// recovers the diagnosis that the defmt hop threw away, for the cost of three `csrr`s.
+///
+/// Inline asm rather than the `riscv` crate: this is the code least able to afford a
+/// dependency, and `csrr` needs no abstraction.
+///
+/// **These are only meaningful if the panic came from a trap.** An ordinary `panic!` or
+/// a failed `unwrap` leaves whatever the last trap wrote, which on this chip is usually
+/// an interrupt. Bit 31 is the discriminator -- set means interrupt, clear means
+/// exception -- so it is printed rather than interpreted away.
+fn write_trap_csrs(console: &mut debug::panic_console::PanicConsole) {
+    let (mcause, mepc, mtval): (usize, usize, usize);
+    unsafe {
+        core::arch::asm!("csrr {}, mcause", out(reg) mcause, options(nomem, nostack));
+        core::arch::asm!("csrr {}, mepc", out(reg) mepc, options(nomem, nostack));
+        core::arch::asm!("csrr {}, mtval", out(reg) mtval, options(nomem, nostack));
+    }
+
+    let is_interrupt = mcause >> 31 != 0;
+    let code = mcause & 0x7fff_ffff;
+    // The RISC-V privileged spec's machine-mode exception codes, matching the table in
+    // `esp_hal::exception_handler`. Code 14 is where esp-hal reports a stack overflow.
+    let name = match (is_interrupt, code) {
+        (true, _) => "interrupt (not an exception -- CSRs likely stale)",
+        (false, 0) => "Instruction address misaligned",
+        (false, 1) => "Instruction access fault",
+        (false, 2) => "Illegal instruction",
+        (false, 3) => "Breakpoint",
+        (false, 4) => "Load address misaligned",
+        (false, 5) => "Load access fault",
+        (false, 6) => "Store/AMO address misaligned",
+        (false, 7) => "Store/AMO access fault",
+        (false, 11) => "Environment call from M-mode",
+        (false, 14) => "STACK OVERFLOW",
+        _ => "unknown",
+    };
+
+    let _ = write!(
+        console,
+        "\r\ntrap: {name}\r\n  mcause=0x{mcause:08x} mepc=0x{mepc:08x} mtval=0x{mtval:08x}\r\n"
+    );
 }
 
 #[unsafe(no_mangle)]
