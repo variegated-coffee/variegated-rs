@@ -433,7 +433,23 @@ async fn main(spawner: Spawner) -> ! {
     // Initialize RTC for time synchronization
     let rtc = Rtc::new(peripherals.LPWR);
 
+    // The `#[ram(reclaimed)]` heap comes out of memory the ROM bootloader was using and
+    // costs the stack nothing, so it stays at 64 kB.
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
+    // Restored to its original 64 kB, paid for by the `TcpBuffers` cut further down.
+    //
+    // This was briefly squeezed to 40 kB while the stack overflow was being chased, and
+    // that broke the other way: the ESPHome server's `Vec<EntityConfig>` needs a single
+    // 12000-byte contiguous block (`esphome/server.rs:56`) and `handle_alloc_error`
+    // fired. Both bounds are measured rather than guessed -- 71704 bytes of stack
+    // overflows while `postcard::from_bytes_cobs::<..Configuration>` recurses and 87256
+    // does not, while the heap needs somewhere north of 40 kB once WiFi is up.
+    //
+    // The point of taking 24 kB out of `TcpBuffers` is that it satisfies both bounds
+    // instead of trading one against the other. `.stack` is the SRAM remainder, so a
+    // static allocation anywhere in this firmware is a subtraction from the stack that
+    // the deepest deserialization has to survive; the fix is to stop over-reserving,
+    // not to pick a better ratio between two things that are both too small.
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     // Initialize application processor channels
@@ -616,7 +632,22 @@ async fn main(spawner: Spawner) -> ! {
     log_info!("TCP debug server task spawned on port 9090");
 
     // Create TCP stack for HTTP
-    let tcp_buffers = mk_static!(TcpBuffers<16, 1024, 1024>, TcpBuffers::new());
+    // 16 -> 4 concurrent HTTP connections, i.e. 32768 -> 8192 bytes of static buffers.
+    //
+    // This was the single largest static allocation in the firmware, and larger than
+    // everything the debug feature adds put together. It mattered because `.stack` is
+    // the SRAM *remainder*: 32 kB reserved here is 32 kB the main task's stack does not
+    // have, and that stack is what `postcard::from_bytes_cobs::<..Configuration>`
+    // recurses into on every configuration update. esp-rtos caught the overflow; the
+    // symptom reaching the bench was a null-pointer load somewhere in the radio blob,
+    // at a different address every boot, because the overrun ran past the stack guard
+    // into whatever lived below it.
+    //
+    // Four is a capacity decision, taken deliberately: enough for a browser opening a
+    // few parallel requests plus a spare, on a device whose HTTP API serves one
+    // operator at a time. A fifth simultaneous connection is refused rather than
+    // queued, which is a visible failure rather than a silent one.
+    let tcp_buffers = mk_static!(TcpBuffers<4, 1024, 1024>, TcpBuffers::new());
     let tcp_stack = mk_static!(Tcp<'static>, Tcp::new(net_stack, tcp_buffers));
 
     // Get command sender for HTTP server
