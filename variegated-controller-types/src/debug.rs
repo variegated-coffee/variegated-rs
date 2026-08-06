@@ -403,9 +403,8 @@ pub struct CommsState {
     /// On the comms processor that window is currently empty, and the reason is worth
     /// stating precisely because it is easy to get backwards: the snapshot task is
     /// spawned before the address is drawn, but `main` is itself a task and does not
-    /// yield until its first `.await`, which is a `Timer::after_secs(5)` some thirty
-    /// lines *after* the address is stored. Nothing spawned in between runs until
-    /// then, so no snapshot can observe the gap.
+    /// yield until its first `.await`, which comes *after* the store. Nothing spawned
+    /// in between runs until then, so no snapshot can observe the gap.
     ///
     /// It is an `Option` anyway, and not as a hedge. That guarantee is a property of
     /// statement ordering inside one long function, held up by no test and no type --
