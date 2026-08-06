@@ -223,11 +223,20 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
     }
 }
 
+/// The 1 Hz comms-status loop.
+///
+/// It also mirrors the current DHCP lease into `WIFI_IPV4` for the debug snapshot.
+/// That lives here rather than in `debug::snapshot` because the snapshot task is
+/// spawned long before the network stack exists and takes no arguments, and rather
+/// than beside `main`'s "waiting for IP" loop because that loop runs once: a lease
+/// can change on reconnect, and a latched address goes on asserting one the device no
+/// longer holds. This task is the only 1 Hz loop that already holds the stack.
 #[embassy_executor::task]
 async fn comms_status_signaller_task(
     rtc: &'static esp_hal::rtc_cntl::Rtc<'static>,
+    stack: embassy_net::Stack<'static>,
 ) {
-    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, TIME_SYNCED, WIFI_CONNECTED, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, NO_IPV4, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_RSSI_SIGNAL};
     use variegated_comms_firmware::config::{BELKA_PERIPHERAL_ID, USEC_IN_SEC};
     use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
     use heapless::index_map::FnvIndexMap;
@@ -256,6 +265,17 @@ async fn comms_status_signaller_task(
 
         // Get Belka connection status (updated by belka_measurement_loop)
         let belka_connected = BELKA_CONNECTION_STATUS.load(Ordering::Relaxed);
+
+        // Refresh the debug snapshot's view of the DHCP lease. `config_v4` is `None`
+        // before DHCP completes and again once the lease is dropped, and `NO_IPV4`
+        // carries that through as `None` rather than as `0.0.0.0`.
+        WIFI_IPV4.store(
+            stack
+                .config_v4()
+                .map(|config| config.address.address().to_bits())
+                .unwrap_or(NO_IPV4),
+            Ordering::Relaxed,
+        );
 
         // Build peripheral connection status map
         let mut peripheral_connection_status = FnvIndexMap::new();
@@ -473,6 +493,26 @@ async fn main(spawner: Spawner) -> ! {
     // rest of esp-hal uses.
     let usb = esp_hal::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
     let (usb_rx, usb_tx) = usb.split();
+    // The station MAC, mirrored for `CommsState::wifi_mac`.
+    //
+    // Read here, before the snapshot task is spawned, so no snapshot can ever observe
+    // the "not published yet" sentinel -- eFuse is readable this early and the value
+    // is fixed for the life of the board, so there is nothing to re-read later.
+    //
+    // `interface_mac_address(Station)` rather than `base_mac_address()`: the two are
+    // the same bytes today (the station interface uses the base MAC unmodified) but
+    // the station one is what actually goes on air, and it follows
+    // `override_mac_address` if that is ever called.
+    {
+        use variegated_comms_firmware::channels::{store_address48, WIFI_MAC};
+        let mac = esp_hal::efuse::interface_mac_address(
+            esp_hal::efuse::InterfaceMacAddress::Station,
+        );
+        let mut bytes = [0u8; 6];
+        bytes.copy_from_slice(mac.as_bytes());
+        store_address48(&WIFI_MAC, bytes);
+    }
+
     spawn_or_report!(spawner, "debug_usb", debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender(), debug_subscriber));
     // The 1 Hz `CommsState` snapshot. Spawned next to the transport rather than with
     // the network tasks: it reads atomics and bus counters only, so it is useful
@@ -536,6 +576,13 @@ async fn main(spawner: Spawner) -> ! {
         (rng.random() >> 8) as u8,
     ];
     let address = Address::random(address_bytes);
+    // Mirror the *same* array the controller is about to advertise, rather than
+    // generating a second one for reporting: a second draw would put an address on
+    // screen that no scanner will ever see.
+    {
+        use variegated_comms_firmware::channels::{store_address48, BT_ADDRESS};
+        store_address48(&BT_ADDRESS, address_bytes);
+    }
     log_info!("BLE: Generated random address");
 
     // Create BLE stack
@@ -602,7 +649,7 @@ async fn main(spawner: Spawner) -> ! {
     spawn_or_report!(spawner, "wifi_connection", connection_task(controller));
     spawn_or_report!(spawner, "net", net_task(runner));
     spawn_or_report!(spawner, "sntp", sntp_task(rtc_static, *stack_static));
-    spawn_or_report!(spawner, "comms_status_signaller", comms_status_signaller_task(rtc_static));
+    spawn_or_report!(spawner, "comms_status_signaller", comms_status_signaller_task(rtc_static, *stack_static));
     log_info!("Network and CommsStatus tasks spawned");
 
     // Wait for network

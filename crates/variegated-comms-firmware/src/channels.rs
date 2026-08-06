@@ -3,7 +3,7 @@ use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use embassy_sync::signal::Signal;
 use embassy_sync::channel::{Channel, Sender, Receiver};
 use embassy_sync::mutex::Mutex;
-use portable_atomic::{AtomicBool, AtomicI16, AtomicU64};
+use portable_atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, RoutineList, Status};
 use variegated_controller_types::debug_command::DebugCommand;
@@ -167,3 +167,57 @@ pub static LAST_SNTP_SYNC_MS: AtomicU64 = AtomicU64::new(0);
 // state is only reachable through the `WifiController`, which connection_task
 // owns. Mirror it here the same way the Belka status is mirrored.
 pub static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+// Network identity mirrors, for `CommsState`'s `wifi_mac`, `bt_address` and `wifi_ip`.
+//
+// Atomics, like every other mirror above, and for the same reason: the debug snapshot
+// runs in its own task and must be able to read these without consuming anything.
+//
+// A 48-bit address packs into the low bits of a `u64` big-endian, which keeps the
+// store and the load single instructions and needs no lock. `NO_ADDRESS` is all-zeros,
+// which is unambiguous as a sentinel -- 00:00:00:00:00:00 is not assignable to an
+// interface and is not a legal BLE random address either (a random static address must
+// have at least one bit of each polarity in its top 46).
+pub const NO_ADDRESS: u64 = 0;
+
+// The station MAC from eFuse. Written once in `main`, before the snapshot task is
+// spawned, so `wifi_mac` is never reported as the sentinel in practice.
+pub static WIFI_MAC: AtomicU64 = AtomicU64::new(NO_ADDRESS);
+
+// The random BLE address `main` hands to `Address::random`. Written at BLE bring-up,
+// which is well after the snapshot task starts, so the sentinel is genuinely observable
+// for the first few seconds of a boot and renders as `unknown` rather than as zeros.
+pub static BT_ADDRESS: AtomicU64 = AtomicU64::new(NO_ADDRESS);
+
+// The DHCP-assigned IPv4 address, in host byte order (`Ipv4Addr::to_bits`).
+//
+// Refreshed once a second by `comms_status_signaller_task` rather than latched at the
+// end of the DHCP wait: a lease can change on reconnect, and a latched value would go
+// on asserting an address the device no longer holds.
+//
+// `NO_IPV4` is `0`, i.e. `0.0.0.0`, which is "this host on this network" in RFC 1122
+// and never a real interface address. It renders as `unknown`, never as `0.0.0.0`.
+pub const NO_IPV4: u32 = 0;
+pub static WIFI_IPV4: AtomicU32 = AtomicU32::new(NO_IPV4);
+
+/// Pack a 48-bit address into the low bytes of a `u64`, big-endian, and publish it.
+pub fn store_address48(slot: &AtomicU64, bytes: [u8; 6]) {
+    let mut packed = 0u64;
+    for b in bytes {
+        packed = (packed << 8) | b as u64;
+    }
+    slot.store(packed, Ordering::Relaxed);
+}
+
+/// Read a 48-bit address back, or `None` if nothing has published one yet.
+pub fn load_address48(slot: &AtomicU64) -> Option<[u8; 6]> {
+    let packed = slot.load(Ordering::Relaxed);
+    if packed == NO_ADDRESS {
+        return None;
+    }
+    let mut bytes = [0u8; 6];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = (packed >> (8 * (5 - i))) as u8;
+    }
+    Some(bytes)
+}

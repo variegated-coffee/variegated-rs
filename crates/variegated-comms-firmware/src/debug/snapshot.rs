@@ -30,8 +30,8 @@ use variegated_controller_types::debug::{
 };
 
 use crate::channels::{
-    BELKA_CONNECTION_STATUS, LAST_SNTP_SYNC_MS, NO_RSSI, TIME_SYNCED, WIFI_CONNECTED,
-    WIFI_RSSI_DBM,
+    load_address48, BELKA_CONNECTION_STATUS, BT_ADDRESS, LAST_SNTP_SYNC_MS, NO_IPV4, NO_RSSI,
+    TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_MAC, WIFI_RSSI_DBM,
 };
 use crate::config::BELKA_PERIPHERAL_ID;
 
@@ -78,6 +78,23 @@ pub fn publish_snapshot() {
         let _ = ble_connected.push(BELKA_PERIPHERAL_ID);
     }
 
+    // The station MAC is written in `main` before this task is spawned, so the
+    // sentinel is unreachable here in practice. Falling back to all-zeros rather
+    // than panicking keeps a hypothetical reordering from taking the whole snapshot
+    // down, and an all-zero MAC on screen is visibly not an address.
+    let wifi_mac = load_address48(&WIFI_MAC).unwrap_or([0; 6]);
+
+    // The BLE address, by contrast, genuinely does not exist yet for the first few
+    // seconds of a boot -- `Address::random` is built well after this task starts.
+    // `None` is the truthful answer during that window.
+    let bt_address = load_address48(&BT_ADDRESS);
+
+    // `WIFI_IPV4` is refreshed each second by `comms_status_signaller_task` from
+    // `Stack::config_v4`, and cleared back to `NO_IPV4` when the lease goes away, so
+    // this reads through to the current lease rather than to the first one.
+    let ip_bits = WIFI_IPV4.load(Ordering::Relaxed);
+    let wifi_ip = if ip_bits == NO_IPV4 { None } else { Some(ip_bits.to_be_bytes()) };
+
     bus::publish(DebugPayload::StateSnapshot(DebugStateSnapshot {
         heap_used: esp_alloc::HEAP.used() as u32,
         heap_free: esp_alloc::HEAP.free() as u32,
@@ -94,6 +111,9 @@ pub fn publish_snapshot() {
             // thing that increments this. Honest either way: it is a count, and
             // "no clients" and "no server" are both genuinely zero clients.
             tcp_debug_clients: TCP_DEBUG_CLIENTS.load(Ordering::Relaxed),
+            wifi_mac,
+            bt_address,
+            wifi_ip,
         }),
     }));
 }
