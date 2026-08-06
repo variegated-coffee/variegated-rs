@@ -87,10 +87,10 @@ pub fn publish_snapshot() {
     // The BLE address is stored later in `main` than this task's spawn, but still
     // before `main`'s first `.await`, so this task has not run yet when it lands and
     // the `None` branch is unreachable as the code stands. It is carried as an
-    // `Option` to the host anyway: the property protecting it is the absence of an
-    // `.await` in a two-hundred-line stretch of `main`, which nothing checks, and the
-    // failure mode if it is ever broken is reporting `00:00:00:00:00:00` as though it
-    // were the address on air.
+    // `Option` to the host anyway: the property protecting it is the absence of any
+    // `.await` in `main` ahead of the store, which nothing checks, and the failure
+    // mode if it is ever broken is reporting `00:00:00:00:00:00` as though it were
+    // the address on air.
     let bt_address = load_address48(&BT_ADDRESS);
 
     // `WIFI_IPV4` is refreshed each second by `comms_status_signaller_task` from
