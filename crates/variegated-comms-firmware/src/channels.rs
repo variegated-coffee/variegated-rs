@@ -185,8 +185,12 @@ pub const NO_ADDRESS: u64 = 0;
 pub static WIFI_MAC: AtomicU64 = AtomicU64::new(NO_ADDRESS);
 
 // The random BLE address `main` hands to `Address::random`. Written at BLE bring-up,
-// which is well after the snapshot task starts, so the sentinel is genuinely observable
-// for the first few seconds of a boot and renders as `unknown` rather than as zeros.
+// which is textually after the snapshot task is spawned but still before `main`'s first
+// `.await` -- so nothing spawned in between has run yet and the sentinel is not in fact
+// observable today. `CommsState::bt_address` is an `Option` regardless: that guarantee
+// rests on statement ordering in one long function and would be undone by inserting any
+// `.await` ahead of the store, with no test and no type to catch it. `None` renders as
+// `unknown`; a bare array would render zeros as though they were an address.
 pub static BT_ADDRESS: AtomicU64 = AtomicU64::new(NO_ADDRESS);
 
 // The DHCP-assigned IPv4 address, in host byte order (`Ipv4Addr::to_bits`).
