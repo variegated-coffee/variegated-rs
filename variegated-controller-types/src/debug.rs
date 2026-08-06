@@ -398,10 +398,21 @@ pub struct CommsState {
     /// The randomly-generated BLE address, which is worth knowing when correlating a
     /// scan capture against a session because it is regenerated every boot.
     ///
-    /// `None` until the BLE stack is brought up. That happens roughly fifty lines and
-    /// several seconds after the snapshot task starts publishing, so a bare `[u8; 6]`
-    /// here would report `00:00:00:00:00:00` -- a specific claim about an address that
-    /// is not on air -- for the first handful of snapshots of every boot.
+    /// `None` before the BLE stack is brought up.
+    ///
+    /// On the comms processor that window is currently empty, and the reason is worth
+    /// stating precisely because it is easy to get backwards: the snapshot task is
+    /// spawned before the address is drawn, but `main` is itself a task and does not
+    /// yield until its first `.await`, which is a `Timer::after_secs(5)` some thirty
+    /// lines *after* the address is stored. Nothing spawned in between runs until
+    /// then, so no snapshot can observe the gap.
+    ///
+    /// It is an `Option` anyway, and not as a hedge. That guarantee is a property of
+    /// statement ordering inside one long function, held up by no test and no type --
+    /// inserting any `.await` between the spawn and the store silently opens the
+    /// window. A bare `[u8; 6]` would then report `00:00:00:00:00:00`, a syntactically
+    /// valid address that no scanner will ever see, and nothing would fail to warn
+    /// about it. One byte buys immunity to that edit.
     pub bt_address: Option<[u8; 6]>,
     /// `None` until DHCP completes, and `None` again if the lease is lost.
     ///
