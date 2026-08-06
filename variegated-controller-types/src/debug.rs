@@ -53,7 +53,10 @@ use crate::Status;
 ///
 /// Unrelated to `crate::PROTOCOL_VERSION`, which versions the machine-definition
 /// protocol between the two processors.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x81;
+/// History:
+/// * `0x81` -- the envelope's first version.
+/// * `0x82` -- `CommsState` gained `wifi_mac`, `bt_address` and `wifi_ip`.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x82;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 pub const MAX_SAMPLES: usize = 16;
@@ -385,4 +388,25 @@ pub struct CommsState {
     pub sntp_synced_ms_ago: Option<u32>,
     pub ble_connected: Vec<u16, 8>,
     pub tcp_debug_clients: u8,
+    /// The station MAC, from eFuse. Fixed for the life of the board, so it is read
+    /// once at boot and mirrored rather than re-read per snapshot.
+    ///
+    /// Not an `Option`: eFuse is readable from the first instruction of `main`, and
+    /// the mirror is written before the snapshot task is spawned, so there is no
+    /// window in which this is unknown.
+    pub wifi_mac: [u8; 6],
+    /// The randomly-generated BLE address, which is worth knowing when correlating a
+    /// scan capture against a session because it is regenerated every boot.
+    ///
+    /// `None` until the BLE stack is brought up. That happens roughly fifty lines and
+    /// several seconds after the snapshot task starts publishing, so a bare `[u8; 6]`
+    /// here would report `00:00:00:00:00:00` -- a specific claim about an address that
+    /// is not on air -- for the first handful of snapshots of every boot.
+    pub bt_address: Option<[u8; 6]>,
+    /// `None` until DHCP completes, and `None` again if the lease is lost.
+    ///
+    /// Deliberately not a `[0, 0, 0, 0]` sentinel: `0.0.0.0` is a renderable, specific
+    /// and false claim about the network, and the host shows `unknown` instead. Same
+    /// discipline as `wifi_rssi` and `ApplicationState::watchdog_fed_ms_ago`.
+    pub wifi_ip: Option<[u8; 4]>,
 }
