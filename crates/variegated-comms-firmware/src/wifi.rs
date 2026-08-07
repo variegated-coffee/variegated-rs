@@ -185,7 +185,14 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
 /// Network stack runner task
 ///
 /// `WifiDevice` was renamed `Interface` in esp-radio 0.18.
+///
+/// The driver is wrapped in `net_probe::CountingDriver` -- an `#[embassy_executor::task]`
+/// cannot be generic, so the wrapper has to be named in this signature rather than
+/// abstracted over. Unwrap both this and the construction in `main` together when the
+/// probe comes out.
 #[embassy_executor::task]
-pub async fn net_task(mut runner: NetRunner<'static, Interface<'static>>) {
+pub async fn net_task(
+    mut runner: NetRunner<'static, crate::net_probe::CountingDriver<Interface<'static>>>,
+) {
     runner.run().await
 }

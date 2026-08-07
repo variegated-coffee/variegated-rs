@@ -49,6 +49,7 @@ use variegated_comms_firmware::{
     esphome::esphome_server_task,
     http::{http_server_task, cache_update_task},
     mk_static,
+    net_probe,
     time::sntp_task,
     websocket_server_task,
     wifi::{connection_task, net_task},
@@ -671,8 +672,11 @@ async fn main(spawner: Spawner) -> ! {
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
+    // Wrapped so the counters in `net_probe` see every call embassy-net makes into the
+    // driver. Temporary instrumentation -- see that module for what the numbers mean and
+    // why reading the sources was not settling it.
     let (net_stack, runner) = embassy_net::new(
-        wifi_interface,
+        net_probe::CountingDriver::new(wifi_interface),
         net_config,
         mk_static!(StackResources<16>, StackResources::<16>::new()),
         seed,
@@ -687,6 +691,7 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn network tasks
     spawn_or_report!(spawner, "wifi_connection", connection_task(controller));
     spawn_or_report!(spawner, "net", net_task(runner));
+    spawn_or_report!(spawner, "net_probe", net_probe::net_probe_task());
     spawn_or_report!(spawner, "sntp", sntp_task(rtc_static, *stack_static));
     spawn_or_report!(spawner, "comms_status_signaller", comms_status_signaller_task(rtc_static, *stack_static));
     log_info!("Network and CommsStatus tasks spawned");
