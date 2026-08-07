@@ -456,21 +456,32 @@ async fn main(spawner: Spawner) -> ! {
     // The `#[ram(reclaimed)]` heap comes out of memory the ROM bootloader was using and
     // costs the stack nothing, so it stays at 64 kB.
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    // Restored to its original 64 kB, paid for by the `TcpBuffers` cut further down.
+    // 64 -> 48 kB, buying 16 kB of stack.
     //
-    // This was briefly squeezed to 40 kB while the stack overflow was being chased, and
-    // that broke the other way: the ESPHome server's `Vec<EntityConfig>` needs a single
-    // 12000-byte contiguous block (`esphome/server.rs:56`) and `handle_alloc_error`
-    // fired. Both bounds are measured rather than guessed -- 71704 bytes of stack
-    // overflows while `postcard::from_bytes_cobs::<..Configuration>` recurses and 87256
-    // does not, while the heap needs somewhere north of 40 kB once WiFi is up.
+    // History, because both directions of this have already drawn blood. `.stack` is the
+    // SRAM *remainder*, so every static here is a subtraction from the one stack the
+    // deepest deserialization recurses into: 71704 bytes overflows and 87256 does not.
+    // But squeezing this allocator to 40 kB broke the other way -- the ESPHome server's
+    // `Vec<EntityConfig>` needs a single 12000-byte contiguous block
+    // (`esphome/server.rs:56`) and `handle_alloc_error` fired. 48 kB is deliberately on
+    // the safe side of that: 8 kB above the figure known to fail, and against a peak
+    // occupancy measured at 28216 bytes across both regions.
     //
-    // The point of taking 24 kB out of `TcpBuffers` is that it satisfies both bounds
-    // instead of trading one against the other. `.stack` is the SRAM remainder, so a
-    // static allocation anywhere in this firmware is a subtraction from the stack that
-    // the deepest deserialization has to survive; the fix is to stop over-reserving,
-    // not to pick a better ratio between two things that are both too small.
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    // What made the old 87256 insufficient is that the deepest excursion got deeper
+    // rather than the budget getting smaller. The frontend's WebSocket client only
+    // started running once it could build again, and `WsMessage` is an enum *wrapping*
+    // `Configuration`, `Status`, `MachineDefinition` and `RoutineStorage` -- so
+    // `postcard::from_bytes::<WsMessage>` on every client message, and `to_allocvec` for
+    // status pushes at up to 5 Hz, recurse strictly deeper than the
+    // `from_bytes_cobs::<..Configuration>` path those numbers were measured against.
+    //
+    // The failure this addresses did not look like a stack overflow. It arrived as a
+    // load access fault at 0xd1371488 inside
+    // `embassy_time_queue_utils::Queue::next_expiration`, because the overrun ran past
+    // the guard and corrupted a `next` pointer in embassy's intrusive timer list, which
+    // lives in task headers in `.bss`. The accompanying "explicit panic" is defmt with
+    // no sink in this build, not the real message. Same shape as the last one.
+    esp_alloc::heap_allocator!(size: 48 * 1024);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
