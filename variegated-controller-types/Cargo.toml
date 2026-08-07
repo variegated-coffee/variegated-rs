@@ -12,7 +12,13 @@ defmt = { workspace = true, optional = true }
 heapless.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"], optional = true }
-variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt"] }
+# `defmt` is inherited through this crate's own `defmt` feature rather than being
+# hardcoded here. Hardcoding it put defmt into *every* graph that touches these types,
+# including host builds -- and defmt declares `links = "defmt"` and emits `extern "Rust"`
+# references to `_defmt_acquire`/`_defmt_write`/`_defmt_timestamp` with no provider, so a
+# host binary that monomorphizes any `Format` impl fails to link. That matters now that
+# the schema exporter runs as a build script.
+variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", default-features = false }
 sequential-storage = { workspace = true, optional = true, features = ["defmt"] }
 postcard = { workspace = true, optional = true, features = ["alloc", "use-crc"] }
 crc = { workspace = true, optional = true }
@@ -34,7 +40,7 @@ std = ["serde?/std"]
 # `alloc::boxed::Box<Status>` (boxed to keep `DebugFrame` small), and defmt's
 # `impl Format for Box<T>` lives behind that feature. Without it the `defmt::Format`
 # derive on `DebugPayload` fails to resolve a bound for the boxed variant.
-defmt = ["dep:defmt", "heapless/defmt", "defmt/alloc"]
+defmt = ["dep:defmt", "heapless/defmt", "defmt/alloc", "variegated-control-algorithm/defmt"]
 double_boiler = []
 single_boiler = []
 single_group = []
