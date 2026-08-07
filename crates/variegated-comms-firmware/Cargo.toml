@@ -12,6 +12,19 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 [lib]
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
+# Generates frontend/src/schemas/schemas.ts during the build, so it cannot drift from
+# the Rust types.
+#
+# A build-dependency, not a normal one. Cargo compiles build dependencies as *host*
+# units, so this gets std and escapes the riscv default target and `-Z build-std` that
+# `.cargo/config.toml` imposes on everything else here. Resolver 2 (see the workspace
+# manifest) is what keeps the two feature universes apart: this pulls
+# variegated-controller-types with `std` + `schema`, while the normal dependency below
+# stays `no_std`. Under resolver 1 those would unify and `std` would leak into the
+# firmware.
+[build-dependencies]
+variegated-schema-export = { path = "../../tools/schema-export" }
+
 [dependencies]
 trouble-host = { workspace = true, features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
 variegated-comms-api-types = { path = "../variegated-comms-api-types" }

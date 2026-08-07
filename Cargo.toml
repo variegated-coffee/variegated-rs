@@ -16,6 +16,12 @@ exclude = [
     "variegated-rs",
     "idf-port",
     "esphome-device-rs",
+    # A std host tool that declares its own `[workspace]`. Without this exclusion cargo
+    # reports "multiple workspace roots found in the same workspace"; with it, but
+    # without the nested table, cargo would try to build it for riscv32imac, where it
+    # has no std. Both halves are needed. It reaches the firmware as a
+    # build-dependency, which cargo compiles as a host unit regardless.
+    "tools/schema-export",
 ]
 
 [workspace.package]

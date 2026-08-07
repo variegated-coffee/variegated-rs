@@ -378,9 +378,11 @@ checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "defmt 1.1.1",
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "pure-rust-locales",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -3730,6 +3732,7 @@ dependencies = [
  "variegated-debug-codec",
  "variegated-log",
  "variegated-scale-trouble-driver",
+ "variegated-schema-export",
  "variegated-trouble-connection-manager",
 ]
 
@@ -3827,6 +3830,20 @@ dependencies = [
  "heapless 0.9.3",
  "trouble-host",
  "variegated-trouble-connection-manager",
+]
+
+[[package]]
+name = "variegated-schema-export"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "heapless 0.9.3",
+ "postcard",
+ "serde",
+ "serde_json",
+ "variegated-comms-api-types",
+ "variegated-controller-types",
+ "variegated-postcard-schema",
 ]
 
 [[package]]
