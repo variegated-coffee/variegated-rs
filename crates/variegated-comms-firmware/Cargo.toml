@@ -42,8 +42,19 @@ variegated-controller-types = { path = "../../variegated-rs/variegated-controlle
 # enabling both source features, or neither, is a `compile_error!`. `usb-cdc-rp`
 # stays off: that transport is embassy-rp and RP2350-only, and embassy-rp cannot
 # build for riscv32 at all.
-variegated-debug = { path = "../../variegated-rs/variegated-debug", default-features = false, features = ["source-comms", "defmt"] }
+#
+# `instrumentation` is what makes `variegated_debug::sampler` carry real values:
+# without it `PerformanceCounters`/`PerformanceIndicators` resolve to the no-op
+# implementations and every sample publishes zero. It forwards to
+# `variegated-instrumentation/instrumentation`, and cargo unifies that with the
+# direct dependency below, so the two cannot end up disagreeing about which
+# implementation is linked.
+variegated-debug = { path = "../../variegated-rs/variegated-debug", default-features = false, features = ["source-comms", "defmt", "instrumentation"] }
 variegated-debug-codec = { path = "../../variegated-rs/variegated-debug-codec", default-features = false, features = ["defmt"] }
+# Direct, rather than leaning on the re-export path through `variegated-debug`:
+# `define_counters!`/`define_indicators!` expand to `$crate::…` paths that only
+# resolve if the crate is nameable here.
+variegated-instrumentation = { path = "../../variegated-rs/variegated-instrumentation", features = ["instrumentation"] }
 bt-hci.workspace = true
 postcard = { workspace = true, features = ["alloc", "use-crc"] }
 serde = { workspace = true, features = ["derive", "alloc"] }

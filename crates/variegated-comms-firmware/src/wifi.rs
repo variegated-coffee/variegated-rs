@@ -35,11 +35,19 @@ fn set_wifi_connected(connected: bool) {
     if WIFI_CONNECTED.swap(connected, Ordering::Relaxed) == connected {
         return;
     }
-    bus::emit_event(if connected {
-        DebugEvent::WifiAssociated
+    if connected {
+        bus::emit_event(DebugEvent::WifiAssociated);
     } else {
-        DebugEvent::WifiLost
-    });
+        // Counted here rather than at the call sites for the same reason the event is:
+        // this is the one place that knows a *transition* happened. Two of the three
+        // sites that clear the flag run at the top of a retry loop and can execute with
+        // it already false, so counting there would inflate the rate by however long the
+        // network stayed down. Incrementing beside the event also keeps the two
+        // consistent by construction -- the counter is the same fact as `WifiLost`, in
+        // the form that survives the ring turning over.
+        crate::instrumentation::note_wifi_disconnect();
+        bus::emit_event(DebugEvent::WifiLost);
+    }
 }
 
 /// WiFi connection management task
@@ -209,13 +217,12 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
 ///
 /// `WifiDevice` was renamed `Interface` in esp-radio 0.18.
 ///
-/// The driver is wrapped in `net_probe::CountingDriver` -- an `#[embassy_executor::task]`
-/// cannot be generic, so the wrapper has to be named in this signature rather than
-/// abstracted over. Unwrap both this and the construction in `main` together when the
-/// probe comes out.
+/// The driver is wrapped in `instrumentation::CountingDriver` -- an
+/// `#[embassy_executor::task]` cannot be generic, so the wrapper has to be named in this
+/// signature rather than abstracted over.
 #[embassy_executor::task]
 pub async fn net_task(
-    mut runner: NetRunner<'static, crate::net_probe::CountingDriver<Interface<'static>>>,
+    mut runner: NetRunner<'static, crate::instrumentation::CountingDriver<Interface<'static>>>,
 ) {
     runner.run().await
 }

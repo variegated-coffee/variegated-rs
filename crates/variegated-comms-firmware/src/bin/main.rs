@@ -49,7 +49,7 @@ use variegated_comms_firmware::{
     esphome::esphome_server_task,
     http::{http_server_task, cache_update_task},
     mk_static,
-    net_probe,
+    instrumentation,
     time::sntp_task,
     websocket_server_task,
     wifi::{connection_task, net_task},
@@ -530,6 +530,12 @@ async fn main(spawner: Spawner) -> ! {
     // the network tasks: it reads atomics and bus counters only, so it is useful
     // from the first second of the boot and does not depend on anything below.
     spawn_or_report!(spawner, "debug_snapshot", debug::snapshot::snapshot_task());
+    // Alongside the snapshot rather than with the network tasks, even though the network
+    // owns most of the metrics: the counter and indicator arrays are statics, so this can
+    // and should publish from the first second of the boot rather than from whenever the
+    // Wi-Fi stack finishes coming up. It also emits the schema, which a host needs before
+    // any sample means anything.
+    spawn_or_report!(spawner, "debug_sampler", instrumentation::sampler_task());
     log_info!("Debug USB-Serial-JTAG transport spawned");
 
     // Initialize ESPHome channels
@@ -672,11 +678,10 @@ async fn main(spawner: Spawner) -> ! {
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-    // Wrapped so the counters in `net_probe` see every call embassy-net makes into the
-    // driver. Temporary instrumentation -- see that module for what the numbers mean and
-    // why reading the sources was not settling it.
+    // Wrapped so the counters in `instrumentation` see every call embassy-net makes into
+    // the driver, and every frame it collects. See that module for what they mean.
     let (net_stack, runner) = embassy_net::new(
-        net_probe::CountingDriver::new(wifi_interface),
+        instrumentation::CountingDriver::new(wifi_interface),
         net_config,
         mk_static!(StackResources<16>, StackResources::<16>::new()),
         seed,
@@ -691,7 +696,6 @@ async fn main(spawner: Spawner) -> ! {
     // Spawn network tasks
     spawn_or_report!(spawner, "wifi_connection", connection_task(controller));
     spawn_or_report!(spawner, "net", net_task(runner));
-    spawn_or_report!(spawner, "net_probe", net_probe::net_probe_task());
     spawn_or_report!(spawner, "sntp", sntp_task(rtc_static, *stack_static));
     spawn_or_report!(spawner, "comms_status_signaller", comms_status_signaller_task(rtc_static, *stack_static));
     log_info!("Network and CommsStatus tasks spawned");
