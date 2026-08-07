@@ -14,6 +14,7 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 
 [dependencies]
 trouble-host = { workspace = true, features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
+variegated-comms-api-types = { path = "../variegated-comms-api-types" }
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
 variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }

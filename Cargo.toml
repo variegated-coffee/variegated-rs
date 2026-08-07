@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/variegated-comms-api-types",
     "crates/variegated-comms-firmware",
     "crates/variegated-trouble-connection-manager",
     "crates/variegated-belka-portal-trouble-driver",

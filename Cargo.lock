@@ -3679,6 +3679,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-comms-api-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "variegated-controller-types",
+]
+
+[[package]]
 name = "variegated-comms-firmware"
 version = "0.1.0"
 dependencies = [
@@ -3715,6 +3723,7 @@ dependencies = [
  "static_cell",
  "trouble-host",
  "variegated-belka-portal-trouble-driver",
+ "variegated-comms-api-types",
  "variegated-controller-types",
  "variegated-debug",
  "variegated-debug-codec",
