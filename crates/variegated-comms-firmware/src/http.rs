@@ -14,7 +14,15 @@ static APP_JS_GZ: &[u8] = include_bytes!("../../../frontend/dist/assets/index.js
 // stay on `defmt`, because `defmt::Debug2Format` implements `Debug` but not
 // `Display` and that site formats it with `{}`.
 use variegated_log::{log_error, log_info};
-use edge_http::io::server::{Connection as ServerConnection, DefaultServer, Handler};
+use edge_http::io::server::{
+    Connection as ServerConnection, DEFAULT_BUF_SIZE, Handler, Server,
+};
+use edge_http::DEFAULT_MAX_HEADERS_COUNT;
+
+/// The HTTP server, with its handler-task count pinned to the size of the socket pool
+/// in `main.rs`. See the note at its construction in `http_server_task`; these two
+/// numbers are one decision and have to move together.
+type HttpServer = Server<2, DEFAULT_BUF_SIZE, DEFAULT_MAX_HEADERS_COUNT>;
 use edge_http::io::Error;
 use edge_http::Method;
 use edge_nal::TcpBind;
@@ -1335,7 +1343,21 @@ pub async fn http_server_task(
 ) {
     log_info!("Starting HTTP server on port 80...");
 
-    let mut server = DefaultServer::new();
+    // The handler-task count MUST equal the socket count in `TcpBuffers` (see
+    // `main.rs`). Every one of these tasks sits in `accept()` simultaneously and holds a
+    // socket from that pool while it does -- edge-http works that way on purpose,
+    // because smoltcp has no accept queue and a connection can only be accepted if some
+    // task is already waiting in `accept()`.
+    //
+    // `DefaultServer` is `Server<4, ..>`, which silently matched the old
+    // `TcpBuffers<4, ..>`. When the pool was reduced to 2 the two surplus tasks had no
+    // socket to wait on, and the whole server stopped listening -- port 80 answered
+    // "connection refused" rather than answering slowly. Spelling the count out here
+    // makes the pairing visible instead of coincidental.
+    //
+    // Cheaper as well as correcter: the server's own buffers are `[[u8; 2048]; P]`, so
+    // halving P returns 4 kB.
+    let mut server = HttpServer::new();
     let handler = HttpHandler::new(command_sender);
 
     let bind_addr = SocketAddr::from(([0, 0, 0, 0], 80));

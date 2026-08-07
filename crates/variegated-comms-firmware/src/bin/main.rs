@@ -701,11 +701,42 @@ async fn main(spawner: Spawner) -> ! {
     // at a different address every boot, because the overrun ran past the stack guard
     // into whatever lived below it.
     //
-    // Four is a capacity decision, taken deliberately: enough for a browser opening a
-    // few parallel requests plus a spare, on a device whose HTTP API serves one
-    // operator at a time. A fifth simultaneous connection is refused rather than
-    // queued, which is a visible failure rather than a silent one.
-    let tcp_buffers = mk_static!(TcpBuffers<4, 1024, 1024>, TcpBuffers::new());
+    // Both buffers are 4096 rather than the 1024 default, because 1024 made serving the
+    // 48 kB JS bundle take minutes and a 1 kB response take 10-15 seconds.
+    //
+    // embassy-net enables Nagle's algorithm by default, and Nagle will not emit a
+    // segment smaller than the MSS while data is in flight. esp-radio's default MTU is
+    // 1492, so the MSS is 1452 -- and a 1024-byte buffer *can never hold a full
+    // segment*. Every write therefore waited for the previous ACK; and because only one
+    // undersized segment was ever outstanding, the peer's "ACK every second full
+    // segment" rule never fired and it fell back to its delayed-ACK timer. One sub-MSS
+    // segment per 200-500 ms is 2-5 kB/s no matter how fast the radio is. embassy-net's
+    // own docs name this interaction: Nagle costs "increased latency ... particularly
+    // when the remote peer has ACK delay enabled".
+    //
+    // 4096 is sized against 2 * MSS = 2904, not against MSS. Merely clearing 1452 would
+    // leave a sub-MSS remainder after each full segment and hit the same wall; holding
+    // *two* full segments is what makes the peer ACK immediately, removing the stall
+    // rather than halving it.
+    //
+    // Symmetric because the trap is symmetric. A 1024-byte receive window puts the
+    // browser in the same position on the way in, which is what POSTing a routine or a
+    // schedule does -- those bodies are multi-kB postcard.
+    //
+    // The socket count here MUST equal the handler-task count of the `Server` in
+    // `http.rs`. Each of those tasks waits in `accept()` simultaneously and holds a
+    // socket from this pool while it does, because smoltcp has no accept queue. Leaving
+    // `DefaultServer` (which is `Server<4, ..>`) against a pool of 2 stopped the server
+    // listening entirely: port 80 refused connections rather than serving them slowly.
+    //
+    // 4 -> 2 connections is what pays for it. At 1 kB per buffer a connection cost 2 kB
+    // and four was nearly free; at 4 kB it costs 8 kB, and `.stack` is the SRAM
+    // remainder that the deepest deserialization has to survive (see the heap allocator
+    // note above). Two still covers this workload: the SPA is `index.html` plus one
+    // bundle, and status, configuration and routines all travel over the WebSocket now,
+    // which has its own socket rather than one of these. Two 4 kB connections is both
+    // faster and 4 kB *cheaper* than the four 5 kB ones it replaces.
+    let tcp_buffers = mk_static!(TcpBuffers<2, 4096, 4096>, TcpBuffers::new());
     let tcp_stack = mk_static!(Tcp<'static>, Tcp::new(net_stack, tcp_buffers));
 
     // Get command sender for HTTP server
