@@ -4,6 +4,24 @@ runner = "espflash flash --monitor --chip esp32c6 --log-format defmt --output-fo
 [env]
 DEFMT_LOG="info"
 
+# Let smoltcp drain the whole RX queue in one poll instead of three packets at a time.
+#
+# esp-radio reports this as embassy-net's `max_burst_size` capability, and 0 is the
+# documented way to say "no limit" (wifi/mod.rs:1856 maps 0 to `None`). The default is 3.
+#
+# Three is a latch rather than a throttle here, because of how the wake works. Packets
+# reach `DATA_QUEUE_RX_STA` from `recv_cb_sta`, which fires embassy-net's receive waker
+# on *arrival*. The driver's `receive()` re-registers that waker on every call, but
+# nothing re-fires it merely because the queue is still non-empty -- so once smoltcp has
+# taken its three and returned, whatever is left waits for the next packet to arrive or
+# for smoltcp's poll timer, seconds away.
+#
+# That is why raising `rx_queue_size` off 5 only half-worked: it stopped the drops, so
+# the SYN ladder shortened and `connect` went from 6.5 s to 3.7 s, but it made the
+# backlog deeper while still draining it three at a time, and time-to-first-byte stayed
+# pinned at ten seconds. The request packet was queued behind a backlog, not lost.
+ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE = "0"
+
 [build]
 rustflags = [
 #  "-C", "link-arg=-Tlinkall.x",
