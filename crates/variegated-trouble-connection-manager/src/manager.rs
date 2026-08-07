@@ -10,6 +10,36 @@ use bt_hci::cmd::le::{LeSetScanParams, LeSetScanEnable};
 use crate::handle::ManagerHandle;
 use crate::types::ConnectionState;
 
+/// How long the controller listens for advertisements in each scan pass.
+///
+/// This is the number that matters to Wi-Fi, not the duty cycle. An ESP32-C6 has one
+/// 2.4 GHz antenna, so a scan window is a stretch of time the Wi-Fi side cannot
+/// transmit or receive in -- and a *single* blackout longer than a round trip is enough
+/// to cost a TCP retransmit and put the connection on the RTO ladder, which is measured
+/// in seconds. Shortening the window shortens the worst thing that can happen to a
+/// connection, independently of how often it happens.
+///
+/// 150 ms is chosen to stay comfortably above a connectable advertising interval, which
+/// for a scale announcing itself after power-on is typically 20-100 ms. A window at
+/// least one advertising interval long catches the device on its first pass; a shorter
+/// one turns discovery into a coin flip repeated every [`SCAN_INTERVAL`]. If a scale
+/// ever turns out to advertise more slowly than this, discovery degrades gracefully
+/// (more passes needed) and this is the number to raise.
+const SCAN_WINDOW: Duration = Duration::from_millis(150);
+
+/// How often a scan pass starts.
+///
+/// Together with [`SCAN_WINDOW`] this is a 7.5% duty cycle, down from the 20% that
+/// `400ms / 2s` gave. The machine is powered continuously while the scales are on for
+/// seconds at a time, so the absent-device case is not an edge case -- it is what this
+/// loop does essentially always, and it should be quiet.
+///
+/// The budget it is sized against is discovery within 5-10 s of a scale being switched
+/// on. Worst case here is one cooldown plus one interval, so about 4 s, with the typical
+/// case nearer 2 s. That leaves room to lengthen this further if Wi-Fi still needs the
+/// airtime.
+const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
 /// State for a single managed device
 pub(crate) struct DeviceState<'a, P: PacketPool> {
     address: BdAddr,
@@ -145,8 +175,8 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                     scan_config: ScanConfig {
                         active: false,
                         filter_accept_list: &[(AddrKind::PUBLIC, address), (AddrKind::RANDOM, address)],
-                        interval: Duration::from_secs(2),
-                        window: Duration::from_millis(400),
+                        interval: SCAN_INTERVAL,
+                        window: SCAN_WINDOW,
                         ..Default::default()
                     },
                 };
