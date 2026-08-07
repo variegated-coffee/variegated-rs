@@ -2,7 +2,7 @@ import { useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
 import {
   Configuration,
-  PidParameters_for_float,
+  PidParameters,
   PumpConfiguration,
   BoilerControlMode,
   GroupBrewControlMode,
@@ -447,7 +447,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
     type EditorData =
       | BoilerControlEditorData
       | GroupControlEditorData
-      | PidParameters_for_float
+      | PidParameters
       | PumpConfiguration
       | ControlCurve
       | KalmanParameters
@@ -518,7 +518,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           return;
         }
 
-        ws.setPidParameters(target, data as PidParameters_for_float);
+        ws.setPidParameters(target, data as PidParameters);
         alert('PID parameters updated successfully!');
         goBack();
         return;

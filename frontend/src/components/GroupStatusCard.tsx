@@ -65,7 +65,11 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
 
   // Format shot state display
   const getShotStateDisplay = () => {
-    if (!status.shot_state) return null;
+    // Shot state is a property of the brew in progress, not of the group, so it
+    // only exists while `current_brew` does. Bound to a local because optional
+    // chaining does not narrow across statements.
+    const shotState = status.current_brew?.shot_state;
+    if (!shotState) return null;
 
     const stateInfo: Record<string, { label: string; color: string; description: string }> = {
       HeadspaceFill: { label: 'Headspace Fill', color: '#ffc107', description: 'Filling headspace & wetting puck' },
@@ -73,7 +77,7 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
       PostFirstDrop: { label: 'Extracting', color: '#28a745', description: 'First drops detected, extracting' }
     };
 
-    const info = stateInfo[status.shot_state.type];
+    const info = stateInfo[shotState.type];
     return info || null;
   };
 
@@ -122,7 +126,7 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
             fontWeight: '500'
           }}
         >
-          {status.is_brewing ? `BREWING (${formatBrewTime(status.brew_time)})` : 'IDLE'}
+          {status.is_brewing ? `BREWING (${formatBrewTime(status.current_brew?.brew_time)})` : 'IDLE'}
         </span>
       </div>
 
@@ -209,10 +213,10 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
           )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.85rem' }}>
-            {status.brew_input_volume !== null && status.brew_input_volume !== undefined && (
+            {status.current_brew != null && status.current_brew.brew_input_volume != null && (
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ color: '#888' }}>Input Volume:</span>
-                <span>{status.brew_input_volume.toFixed(1)} mL</span>
+                <span>{status.current_brew.brew_input_volume.toFixed(1)} mL</span>
               </div>
             )}
           </div>

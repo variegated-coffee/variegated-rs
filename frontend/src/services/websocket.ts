@@ -12,7 +12,7 @@ import {
   GroupBrewControlMode,
   GroupBrewControlTargetValuesUpdate,
   PidParameterTarget,
-  PidParameters_for_float,
+  PidParameters,
   PumpConfiguration,
   Routine,
   RoutineIndex,
@@ -83,7 +83,11 @@ export class WebSocketService {
         this.callbacks.onError?.(new Error('WebSocket connection error'));
       };
 
-      this.ws.onmessage = (event) => {
+      // `MessageEvent.data` is `any` in the DOM lib because it depends on
+      // `binaryType`. This socket sets it to 'arraybuffer' (and the server only ever
+      // sends binary frames), so naming the type here is accurate rather than a
+      // convenient lie.
+      this.ws.onmessage = (event: MessageEvent<ArrayBuffer>) => {
         this.handleMessage(event.data);
       };
     } catch (error) {
@@ -141,16 +145,18 @@ export class WebSocketService {
     try {
       const uint8Array = new Uint8Array(data);
       const result = deserialize(WsMessageSchema, uint8Array);
-      const message = result.value as WsMessage;
+      // No cast needed: WsMessageSchema infers a discriminated union, so switching on
+      // `type` below narrows `value` on its own.
+      const message: WsMessage = result.value;
 
       // Handle different message types based on the type field
       switch (message.type) {
         case 'StatusUpdate':
-          this.callbacks.onStatusUpdate?.(message.value as Status);
+          this.callbacks.onStatusUpdate?.(message.value);
           break;
         case 'ConfigurationUpdate':
           console.log('Received ConfigurationUpdate');
-          this.callbacks.onConfigurationUpdate?.(message.value as Configuration);
+          this.callbacks.onConfigurationUpdate?.(message.value);
           break;
         case 'MachineDefinition':
           console.log('Received MachineDefinition:', message.value);
@@ -159,7 +165,7 @@ export class WebSocketService {
             clearTimeout(this.machineDefinitionRetryTimer);
             this.machineDefinitionRetryTimer = null;
           }
-          this.callbacks.onMachineDefinition?.(message.value as MachineDefinition);
+          this.callbacks.onMachineDefinition?.(message.value);
           break;
         case 'RoutinesUpdate':
           console.log('Received RoutinesUpdate:', message.value);
@@ -168,7 +174,7 @@ export class WebSocketService {
             clearTimeout(this.routinesRetryTimer);
             this.routinesRetryTimer = null;
           }
-          this.callbacks.onRoutinesUpdate?.(message.value as RoutineStorage);
+          this.callbacks.onRoutinesUpdate?.(message.value);
           break;
         case 'CommandAck': {
           const ack = message.value as { id: number; success: boolean; error: string | null };
@@ -366,7 +372,7 @@ export class WebSocketService {
   }
 
   // PID parameters
-  setPidParameters(target: PidParameterTarget, params: PidParameters_for_float): void {
+  setPidParameters(target: PidParameterTarget, params: PidParameters): void {
     this.sendMachineCommand({
       type: 'SetPidParameters',
       value: [target, params]

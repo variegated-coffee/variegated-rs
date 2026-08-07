@@ -1,10 +1,10 @@
 import { useState } from 'preact/hooks';
-import { PidParameters_for_float, Limits_for_float } from '../schemas/schemas';
+import { PidParameters, Limits } from '../schemas/schemas';
 
 interface PidParametersEditorProps {
   title: string;
-  parameters: PidParameters_for_float;
-  onSave: (params: PidParameters_for_float) => void;
+  parameters: PidParameters;
+  onSave: (params: PidParameters) => void;
   onCancel: () => void;
 }
 
@@ -15,7 +15,7 @@ type EditableLimits = {
 };
 
 // Convert schema Limits to editable form (Infinity becomes null for UI)
-const fromLimits = (limits: Limits_for_float | null | undefined): EditableLimits => {
+const fromLimits = (limits: Limits | null | undefined): EditableLimits => {
   if (!limits) {
     return { upper: null, lower: null };
   }
@@ -26,7 +26,7 @@ const fromLimits = (limits: Limits_for_float | null | undefined): EditableLimits
 };
 
 // Convert editable limits back to schema form (null becomes Infinity, with validation)
-const toLimits = (editable: EditableLimits): Limits_for_float => {
+const toLimits = (editable: EditableLimits): Limits => {
   const hasUpper = editable.upper !== null && isFinite(editable.upper);
   const hasLower = editable.lower !== null && isFinite(editable.lower);
 
@@ -55,7 +55,7 @@ type EditablePidParameters = {
 };
 
 // Convert schema parameters to editable form
-const fromParameters = (params: PidParameters_for_float): EditablePidParameters => ({
+const fromParameters = (params: PidParameters): EditablePidParameters => ({
   kp: {
     positive_scale: params.kp.positive_scale ?? 0,
     negative_scale: params.kp.negative_scale ?? 0,
@@ -74,7 +74,7 @@ const fromParameters = (params: PidParameters_for_float): EditablePidParameters 
 });
 
 // Convert editable parameters back to schema form
-const toParameters = (editable: EditablePidParameters): PidParameters_for_float => ({
+const toParameters = (editable: EditablePidParameters): PidParameters => ({
   kp: {
     positive_scale: editable.kp.positive_scale,
     negative_scale: editable.kp.negative_scale,

@@ -154,7 +154,11 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
           const groupKey = Array.from(status.group_statuses.keys())[groupIdx];
           const groupStatus = status.group_statuses.get(groupKey);
           label = exit.description || 'Input Volume';
-          currentVal = (groupStatus?.brew_input_volume ?? 0).toFixed(1);
+          // Matches what the controller actually evaluates for this condition:
+          // `current_brew.and_then(|b| b.brew_input_volume)` in routine.rs. Reading the
+          // group's live `input_volume` instead would show a number the machine is not
+          // deciding on.
+          currentVal = (groupStatus?.current_brew?.brew_input_volume ?? 0).toFixed(1);
           targetVal = value.toFixed(1);
           unit = 'mL';
         } else if (stateCondition.type === 'BoilerTemperatureAbove' || stateCondition.type === 'BoilerTemperatureBelow') {
