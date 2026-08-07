@@ -1,0 +1,6 @@
+error: explicit discriminant does not match the variant index (2).
+       serde encodes an externally tagged enum by declaration order and ignores the discriminant, so this variant would go on the wire as 2, not as written. Reorder the variants, drop the discriminant, or add `#[postcard_schema(allow_discriminants)]` if the mismatch is intended.
+  --> tests/ui/fail/mismatched_discriminant.rs:10:13
+   |
+10 |     Third = 5,
+   |             ^

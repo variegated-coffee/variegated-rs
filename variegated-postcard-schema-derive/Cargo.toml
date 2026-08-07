@@ -1,0 +1,25 @@
+[package]
+name = "variegated-postcard-schema-derive"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+bench = false
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+# A dev-dependency cycle back onto the crate this macro serves. Cargo permits this
+# (dev-dependencies are not part of the library's own build graph) and the UI tests
+# need the trait in scope to be meaningful.
+variegated-postcard-schema = { path = "../variegated-postcard-schema" }
+trybuild.workspace = true
+# The UI cases derive serde too. Without it `#[serde(...)]` is an undeclared attribute
+# and rustc's own error crowds out the one being tested -- and it would not reflect
+# reality, since the `schema` feature implies `serde` precisely so these attributes are
+# always visible to the guard.
+serde = { workspace = true, features = ["derive", "std"] }

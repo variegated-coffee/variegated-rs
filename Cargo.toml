@@ -23,6 +23,8 @@ members = [
     "variegated-rp235x-atomic-raw-mutex",
     "variegated-debug-codec",
     "variegated-debug",
+    "variegated-postcard-schema",
+    "variegated-postcard-schema-derive",
 ]
 resolver = "2"
 package = { rust-version = "1.88" }
@@ -114,6 +116,16 @@ ux = "0.1.6"
 
 # Async helpers
 async-trait = "0.1.91"
+
+# Proc-macro authoring, for variegated-postcard-schema-derive. These three move as a
+# set -- syn is built on proc-macro2's token types, so mixing majors would put two
+# incompatible `TokenStream`s in one macro.
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = "2.0"
+# UI tests for the derive's serde-attribute rejection. That rejection is the whole
+# anti-drift guarantee, so it is tested like one.
+trybuild = "1.0"
 
 [profile.dev]
 debug = true              # Enable debug info

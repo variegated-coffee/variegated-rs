@@ -1,0 +1,7 @@
+error: `#[serde(tag)]` is not modelled by PostcardSchema.
+       The generated schema would describe the type as if this attribute were absent, and because postcard encodes neither field names nor this attribute's effect, no round-trip test could detect the mismatch. Either teach the derive about it, or do not put this type on the wire.
+       (Only `borrow` is accepted -- it is a borrowing hint and does not change the encoding.)
+ --> tests/ui/fail/enum_tag.rs:6:9
+  |
+6 | #[serde(tag = "kind")]
+  |         ^^^

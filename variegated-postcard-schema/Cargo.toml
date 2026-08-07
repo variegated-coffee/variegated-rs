@@ -1,0 +1,28 @@
+[package]
+name = "variegated-postcard-schema"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+bench = false
+
+[dependencies]
+variegated-postcard-schema-derive = { version = "0.1.0", path = "../variegated-postcard-schema-derive" }
+heapless = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+
+[dev-dependencies]
+# The tests do not just assert the schema tree; where the mapping was non-obvious they
+# also serialize a value with postcard and check the bytes agree. Reasoning about what
+# serde does is how the hand-written schema went wrong in the first place.
+postcard = { workspace = true, features = ["alloc"] }
+serde = { workspace = true, features = ["derive", "alloc", "std"] }
+heapless = { workspace = true, features = ["serde"] }
+chrono = { workspace = true, features = ["serde", "alloc"] }
+
+[features]
+default = []
+# Impls for foreign types, behind features so a consumer only pays for the
+# ecosystems it actually puts on the wire.
+heapless = ["dep:heapless"]
+chrono = ["dep:chrono"]
