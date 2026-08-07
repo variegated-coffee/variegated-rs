@@ -172,6 +172,30 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
             <span style={{ fontWeight: '500' }}>{status.output_weight.toFixed(1)} g</span>
           </div>
         )}
+
+        {/* Brew-sensor readings. Output temperature and extraction rate have no
+            SensorCapability of their own to gate on, so they rely on the value
+            being present, which it only is once a BrewSensor reports. */}
+        {status.output_temperature !== null && status.output_temperature !== undefined && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
+            <span style={{ color: '#666' }}>Output Temp:</span>
+            <span style={{ fontWeight: '500' }}>{status.output_temperature.toFixed(1)}°C</span>
+          </div>
+        )}
+
+        {hasGroupSensor(index, { type: 'ElectricalConductivity' }) && status.output_electrical_conductivity !== null && status.output_electrical_conductivity !== undefined && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
+            <span style={{ color: '#666' }}>EC:</span>
+            <span style={{ fontWeight: '500' }}>{status.output_electrical_conductivity.toFixed(0)} µS/cm</span>
+          </div>
+        )}
+
+        {status.extraction_rate !== null && status.extraction_rate !== undefined && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
+            <span style={{ color: '#666' }}>Extraction:</span>
+            <span style={{ fontWeight: '500' }}>{status.extraction_rate.toFixed(1)}%</span>
+          </div>
+        )}
       </div>
 
       {/* Brew Stats (if brewing or previous brew exists) */}
@@ -217,6 +241,20 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ color: '#888' }}>Input Volume:</span>
                 <span>{status.current_brew.brew_input_volume.toFixed(1)} mL</span>
+              </div>
+            )}
+
+            {status.current_brew != null && status.current_brew.output_volume != null && (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888' }}>Output Volume:</span>
+                <span>{status.current_brew.output_volume.toFixed(1)} mL</span>
+              </div>
+            )}
+
+            {status.current_brew != null && status.current_brew.extracted_solids != null && (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: '#888' }}>Extracted Solids:</span>
+                <span>{status.current_brew.extracted_solids.toFixed(1)} g</span>
               </div>
             )}
           </div>
