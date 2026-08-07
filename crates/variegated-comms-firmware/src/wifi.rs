@@ -69,6 +69,29 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
     );
     controller.set_config(&station_config).unwrap();
 
+    // Re-apply after the station is started, because applying it before does nothing.
+    //
+    // esp-radio already sets this in `wifi::new` -- `set_power_saving(None)` with a
+    // comment that the blob default is not the best for bandwidth -- but it does so
+    // *before* its own `set_config`, and that call is what starts the station: mode goes
+    // NULL -> STA, so the `previous_mode != mode` branch runs `esp_wifi_start()`.
+    // `esp_wifi_set_ps` is driver state that the start re-applies from its own default
+    // of `WIFI_PS_MIN_MODEM`, so the setting is overwritten before it ever takes effect.
+    // Here the mode is already STA, so `set_config` above does not restart anything and
+    // this sticks.
+    //
+    // The symptom was not a power measurement, it was that unicast stopped arriving. A
+    // station in modem sleep only listens around DTIM beacons, so the AP buffers unicast
+    // for it -- and this one was not collecting, so those frames aged out. Broadcast is
+    // flooded to every station regardless and kept arriving the whole time, which is why
+    // the device looked perfectly healthy from the inside: `net_probe` showed embassy-net
+    // polling every ~10 ms and taking ~40 packets a second while a `curl` to `/` spent
+    // ten seconds retransmitting SYNs that never landed. Replies were never the problem,
+    // because transmitting does not require being awake to listen.
+    if let Err(e) = controller.set_power_saving(esp_radio::wifi::PowerSaveMode::None) {
+        log_error!("failed to disable Wi-Fi power saving: {:?}", e);
+    }
+
     loop {
         if controller.is_connected() {
             // While connected, periodically update RSSI and wait for disconnect.
