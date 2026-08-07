@@ -10,6 +10,7 @@ use variegated_controller_types::{
 
 /// Response structure for categorized routines
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct RoutineStorage {
     pub internal: BTreeMap<u32, Routine>,
     pub function: BTreeMap<u32, Routine>,
@@ -18,6 +19,7 @@ pub struct RoutineStorage {
 
 /// Request to set boiler control mode and targets
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetBoilerControlRequest {
     pub boiler_index: u8,
     pub mode: BoilerControlMode,
@@ -27,6 +29,7 @@ pub struct SetBoilerControlRequest {
 
 /// Request to set group brew control mode and targets
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetGroupControlRequest {
     pub group_index: u8,
     pub mode: GroupBrewControlMode,
@@ -42,6 +45,7 @@ pub struct SetGroupControlRequest {
 
 /// Request to set PID parameters for a controller
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetPidParametersRequest {
     pub target_type: String,
     pub index: u32,
@@ -50,6 +54,7 @@ pub struct SetPidParametersRequest {
 
 /// Request to set group pump configuration
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetGroupPumpConfigurationRequest {
     pub group_index: u8,
     pub pump_configuration: PumpConfiguration,
@@ -57,6 +62,7 @@ pub struct SetGroupPumpConfigurationRequest {
 
 /// Request to set water tap pump configuration
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetWaterTapPumpConfigurationRequest {
     pub water_tap_index: u8,
     pub pump_configuration: PumpConfiguration,
@@ -64,6 +70,7 @@ pub struct SetWaterTapPumpConfigurationRequest {
 
 /// Request to set boiler fill pump configuration
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetFillPumpConfigurationRequest {
     pub boiler_index: u8,
     pub pump_configuration: PumpConfiguration,
@@ -71,6 +78,7 @@ pub struct SetFillPumpConfigurationRequest {
 
 /// Request to set steam valve openness
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct SetSteamValveOpennessRequest {
     pub steam_wand_index: u8,
     pub openness: u8,

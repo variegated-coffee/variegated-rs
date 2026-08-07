@@ -8,6 +8,7 @@ use crate::api_types::RoutineStorage;
 
 /// WebSocket message envelope for all communication
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub enum WsMessage<'a> {
     // Server → Client (push)
     /// Real-time status update

@@ -17,3 +17,14 @@ rust-version.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive", "alloc"] }
 variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["serde"] }
+variegated-postcard-schema = { path = "../../variegated-rs/variegated-postcard-schema", optional = true }
+
+[features]
+default = []
+# Describe these types for the TypeScript schema generator. Host-only; the firmware
+# never enables it. Implies the same feature on the types these reference, since a
+# schema for `WsMessage` is nothing without one for `Status`.
+schema = [
+    "dep:variegated-postcard-schema",
+    "variegated-controller-types/schema",
+]

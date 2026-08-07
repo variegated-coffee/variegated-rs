@@ -3684,6 +3684,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "variegated-controller-types",
+ "variegated-postcard-schema",
 ]
 
 [[package]]
@@ -3739,6 +3740,7 @@ dependencies = [
  "defmt 1.1.1",
  "num-traits",
  "serde",
+ "variegated-postcard-schema",
 ]
 
 [[package]]
@@ -3750,6 +3752,7 @@ dependencies = [
  "heapless 0.9.3",
  "serde",
  "variegated-control-algorithm",
+ "variegated-postcard-schema",
 ]
 
 [[package]]
@@ -3794,6 +3797,24 @@ dependencies = [
  "portable-atomic",
  "variegated-controller-types",
  "variegated-debug",
+]
+
+[[package]]
+name = "variegated-postcard-schema"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "heapless 0.9.3",
+ "variegated-postcard-schema-derive",
+]
+
+[[package]]
+name = "variegated-postcard-schema-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
