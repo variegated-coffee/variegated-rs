@@ -1,0 +1,22 @@
+// Appended verbatim to the end of the generated schemas.ts. Hand-maintained.
+//
+// These are UI conveniences with no protocol meaning: names for the entry tuples you
+// get from iterating a Map, used by MachineContext. They are not generated because
+// deriving `BoilerEntry` from the field name `boilers` would mean putting a
+// pluralization rule inside a code generator, and the names are chosen for readability
+// rather than derived from anything.
+//
+// The generator checks that every type referenced here is one it actually emits, so a
+// rename upstream fails the build with a clear message instead of a puzzling tsc error.
+
+// Map entry type aliases for proper typing in components
+export type BoilerEntry = [number, BoilerDefinition];
+export type GroupEntry = [number, GroupDefinition];
+export type WaterTapEntry = [number, WaterTapDefinition];
+export type SteamWandEntry = [number, SteamWandDefinition];
+export type TankEntry = [number, TankDefinition];
+export type BoilerStatusEntry = [number, BoilerStatus];
+export type GroupStatusEntry = [number, GroupStatus];
+export type WaterTapStatusEntry = [number, WaterTapStatus];
+export type SteamWandStatusEntry = [number, SteamWandStatus];
+export type RoutineEntry = [number, Routine];
