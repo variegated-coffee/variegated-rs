@@ -765,6 +765,9 @@ async fn main_task(spawner: Spawner) -> ! {
         bluetooth_store,
         Some(bluetooth_scan_channel.sender()),
         Some(watchdog),
+        // shot_log_sender: this board has no SD card -- `single-boiler` does not enable
+        // `sd-card-storage`, so there is no storage task to send completed logs to.
+        None,
     );
 
     // Controller will publish configuration automatically in its task loop

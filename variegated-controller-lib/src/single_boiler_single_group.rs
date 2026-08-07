@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::ops::DerefMut;
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::Format;
-use variegated_log::{log_error, log_info, log_warn};
+use variegated_log::{log_debug, log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver, Sender};
@@ -228,6 +228,7 @@ pub struct SingleBoilerSingleGroupController<
     current_routine: Option<RoutineExecutionContext<SingleBoilerSingleGroupControllerState, SingleBoilerSingleGroupConfiguration>>,
     shot_logger: crate::shot_log::ShotLogger,
     previous_routine_step: Option<usize>,
+    shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
     previous_status: Option<Status>,
     temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
@@ -299,6 +300,7 @@ impl<
         // rather than merely refreshing the old one, so the two values have to agree --
         // and a mismatch would compile cleanly while silently changing the window.
         watchdog: Option<Watchdog>,
+        shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -321,6 +323,7 @@ impl<
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
+            shot_log_sender,
             previous_status: None,
             temperature_movavg: MovAvg::default(),
             brew_start_time: None,
@@ -1434,6 +1437,18 @@ impl<
             // Finish shot logging
             use variegated_controller_types::ShotStatus;
             self.shot_logger.finish_shot(ShotStatus::Completed);
+
+            // Send completed shot log for storage (if sender configured)
+            if let Some(ref sender) = self.shot_log_sender {
+                if let Some(shot_log) = self.shot_logger.latest_log() {
+                    if let Err(_) = sender.try_send(shot_log.clone()) {
+                        log_warn!("Failed to send shot log for storage (channel full)");
+                    } else {
+                        log_debug!("Shot log sent for storage");
+                    }
+                }
+            }
+
             self.previous_routine_step = None;
         } else {
             log_warn!("No routine to exit");

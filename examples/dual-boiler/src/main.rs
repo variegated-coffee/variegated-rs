@@ -65,7 +65,7 @@ use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType, SteamWandDefinition};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType, SteamWandDefinition, ShotLog};
 use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
@@ -78,6 +78,12 @@ use variegated_mcp23017::{Mcp23017, Mcp23017Config};
 use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
 use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
 use w25q32jv::W25q32jv;
+
+#[cfg(feature = "sd-card-storage")]
+use embedded_sdmmc::{SdCard, VolumeManager};
+#[cfg(feature = "sd-card-storage")]
+use variegated_controller_lib::{YieldingBlockDevice, BlockingSpiDevice, SdCardShotLogStorage, VariegatedTimeSource, ShotLogStorage};
+use embassy_sync::channel::Sender;
 
 mod display_state;
 mod mcp23017_hd44780;
@@ -388,6 +394,7 @@ struct MainTaskPeripherals {
     pump_p: PumpPeripherals,
     rotary_p: RotaryPumpPeripherals,
     mechanism_p: MechanismPeripherals,
+    #[cfg(not(feature = "sd-card-storage"))]
     sd_card_p: SdCardPeripherals,
     internal_i2c_p: InternalI2cBusPeripherals,
     qwiic_i2c_p: QwiicI2cBusPeripherals,
@@ -530,11 +537,36 @@ fn main() -> ! {
 
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
 
+    // Initialize shot log channel for SD card storage (must be done before core 1 spawn)
+    #[cfg(feature = "sd-card-storage")]
+    let shot_log_channel: &'static ShotLogChannel = SHOT_LOG_CHANNEL.init(Channel::new());
+
+    // Extract SD card peripherals before core 1 spawn (SD card is on display SPI bus)
+    #[cfg(feature = "sd-card-storage")]
+    let sd_card_p = sd_card_peripherals!(p);
+
     // Spawn the TFT display task if feature is enabled
     #[cfg(feature = "tft-display")]
     {
         let disp_p = eyespi_display_peripherals!(p);
         let backlight_p = backlight_peripherals!(p);
+
+        // Get shot log receiver for core 1 (if SD card storage is enabled)
+        #[cfg(feature = "sd-card-storage")]
+        let shot_log_receiver = shot_log_channel.receiver();
+
+        // Destructure display peripherals to split SPI parts from control pins
+        let DisplayPeripherals {
+            spi: disp_spi,
+            sclk_pin: disp_sclk,
+            mosi_pin: disp_mosi,
+            miso_pin: disp_miso,
+            dma_tx: disp_dma_tx,
+            dma_rx: disp_dma_rx,
+            disp_cs_pin,
+            dc_pin,
+            reset_pin,
+        } = disp_p;
 
         spawn_core1(
             p.CORE1,
@@ -542,11 +574,72 @@ fn main() -> ! {
             move || {
                 let executor1 = EXECUTOR1.init(Executor::new());
                 executor1.run(|spawner| {
+                    // Configure SPI for display (and SD card) with DMA and SPI Mode 0.
+                    // The bus is built here rather than inside the display task
+                    // because the SD card shares it.
+                    let mut spi_config = embassy_rp::spi::Config::default();
+                    spi_config.frequency = 10_000_000;
+                    spi_config.phase = spi::Phase::CaptureOnFirstTransition;
+                    spi_config.polarity = spi::Polarity::IdleLow;
+                    let spi = Spi::new(
+                        disp_spi,
+                        disp_sclk,
+                        disp_mosi,
+                        disp_miso,
+                        disp_dma_tx,
+                        disp_dma_rx,
+                        Irqs,
+                        spi_config,
+                    );
+
+                    let spi_bus: &'static DisplayBus = DISPLAY_SPI_BUS.init(Mutex::new(spi));
+
+                    // Create Output pins for display before spawning task
+                    let disp_cs = Output::new(disp_cs_pin, High);
+                    let dc = Output::new(dc_pin, Low);
+                    let reset = Output::new(reset_pin, Low);
+
                     log_info!("Spawning display task on core 1");
-                    spawner.spawn(unwrap!(graphical_display_task(disp_p, status_channel.subscriber().expect("Failed to get TFT status subscriber"))));
+                    spawner.spawn(unwrap!(graphical_display_task(
+                        spi_bus,
+                        disp_cs,
+                        dc,
+                        reset,
+                        status_channel.subscriber().expect("Failed to get TFT status subscriber")
+                    )));
 
                     log_info!("Spawning backlight task on core 1");
                     spawner.spawn(unwrap!(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
+
+                    // Spawn SD card storage task on core 1 (uses display SPI bus)
+                    #[cfg(feature = "sd-card-storage")]
+                    {
+                        log_info!("Initializing SD card storage on core 1");
+
+                        // Create SD card SPI device using display bus
+                        let sd_spi_dev = SpiDevice::new(spi_bus, Output::new(sd_card_p.pin_cs, High));
+                        let blocking_spi_dev = BlockingSpiDevice::new(sd_spi_dev);
+
+                        // Initialize SD card
+                        let sd_card = SdCard::new(blocking_spi_dev, Delay);
+                        let yielding_sd = YieldingBlockDevice::new(sd_card);
+
+                        // Create volume manager
+                        let volume_manager = VolumeManager::new(yielding_sd, VariegatedTimeSource);
+                        let mut storage = SdCardShotLogStorage::new(volume_manager);
+
+                        let res = storage.list_shots();
+                        if let Err(ref e) = res {
+                            log_error!("Failed to list shots: {:?}", e);
+                        } else {
+                            log_info!("List shots successfully");
+                        }
+
+                        drop(res);
+
+                        log_info!("Spawning shot log storage task on core 1");
+                        spawner.spawn(unwrap!(shot_log_storage_task(shot_log_receiver, storage)));
+                    }
                 });
             },
         );
@@ -559,6 +652,7 @@ fn main() -> ! {
     let pump_p = gear_pump_peripherals!(p);
     let rotary_p = rotary_pump_peripherals!(p);
     let mechanism_p = mechanism_peripherals!(p);
+    #[cfg(not(feature = "sd-card-storage"))]
     let sd_card_p = sd_card_peripherals!(p);
     let internal_i2c_p = internal_i2c_bus_peripherals!(p);
     let qwiic_i2c_p = qwiic_i2c_bus_peripherals!(p);
@@ -579,6 +673,7 @@ fn main() -> ! {
         pump_p,
         rotary_p,
         mechanism_p,
+        #[cfg(not(feature = "sd-card-storage"))]
         sd_card_p,
         internal_i2c_p,
         qwiic_i2c_p,
@@ -593,6 +688,10 @@ fn main() -> ! {
         usb_debug_p,
     };
 
+    // Get shot log sender for main_task (SD card storage channel was initialized earlier)
+    #[cfg(feature = "sd-card-storage")]
+    let shot_log_sender = shot_log_channel.sender();
+
     let executor0 = EXECUTOR0.init(Executor::new());
     executor0.run(|spawner| {
         spawner.spawn(unwrap!(main_task(
@@ -600,6 +699,8 @@ fn main() -> ! {
             peripherals,
             status_channel,
             psram_heap,
+            #[cfg(feature = "sd-card-storage")]
+            shot_log_sender,
         )))
     });
 }
@@ -706,6 +807,12 @@ static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
 
+// Shot log storage channel (for SD card storage)
+#[cfg(feature = "sd-card-storage")]
+type ShotLogChannel = Channel<SyncSendRawMutex, ShotLog, 2>;
+#[cfg(feature = "sd-card-storage")]
+static SHOT_LOG_CHANNEL: StaticCell<ShotLogChannel> = StaticCell::new();
+
 // Type aliases for cross-core storage references
 // These use CriticalSectionRawMutex which is safe for cross-core access
 type ScheduleStoreRef = &'static ScheduleStoreMutex;
@@ -725,6 +832,47 @@ async fn coordinated_heating_element_task(
     >
 ) {
     device.task().await;
+}
+
+/// Background task for storing shot logs to SD card
+/// Receives completed shot logs via channel and persists them to FAT32-formatted SD card
+/// Runs on core 1 with the display SPI bus
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+#[embassy_executor::task]
+async fn shot_log_storage_task(
+    shot_log_receiver: embassy_sync::channel::Receiver<'static, SyncSendRawMutex, ShotLog, 2>,
+    mut storage: SdCardShotLogStorage<
+        YieldingBlockDevice<SdCard<BlockingSpiDevice<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>>, Delay>>,
+        VariegatedTimeSource,
+        4,  // MAX_DIRS (VolumeManager default)
+        4,  // MAX_FILES (VolumeManager default)
+        1,  // MAX_VOLUMES (VolumeManager default)
+    >,
+) {
+    use defmt::{info, warn, debug};
+
+    info!("Shot log storage task started");
+
+    loop {
+        let shot_log = shot_log_receiver.receive().await;
+        debug!("Received shot log for storage");
+
+        // Try to store with timeout (5 seconds max)
+        match embassy_time::with_timeout(
+            Duration::from_secs(5),
+            async { storage.store_shot(&shot_log) }
+        ).await {
+            Ok(Ok(filename)) => {
+                info!("Shot log saved: {}", filename.as_str());
+            }
+            Ok(Err(e)) => {
+                warn!("Failed to save shot log: {:?}", defmt::Debug2Format(&e));
+            }
+            Err(_) => {
+                warn!("Shot log storage timed out");
+            }
+        }
+    }
 }
 
 /// Background task for handling long-running storage operations
@@ -1033,6 +1181,8 @@ async fn main_task(
     peripherals: MainTaskPeripherals,
     status_channel: &'static StatusChannel,
     psram_heap: bool,
+    #[cfg(feature = "sd-card-storage")]
+    shot_log_sender: Sender<'static, SyncSendRawMutex, ShotLog, 2>,
 ) -> ! {
     // Destructure peripherals
     let MainTaskPeripherals {
@@ -1042,6 +1192,7 @@ async fn main_task(
         pump_p,
         rotary_p,
         mechanism_p,
+        #[cfg(not(feature = "sd-card-storage"))]
         sd_card_p,
         internal_i2c_p,
         qwiic_i2c_p,
@@ -1091,7 +1242,8 @@ async fn main_task(
 
     let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
 
-    // Create SD detect pin output for toggling
+    // Create SD detect pin output for toggling (only when SD card storage is not enabled)
+    #[cfg(not(feature = "sd-card-storage"))]
     let sd_det_pin = Output::new(sd_card_p.pin_det, Low);
 
     // Create pump and solenoids for dual boiler mechanism
@@ -1912,6 +2064,13 @@ async fn main_task(
 
     log_info!("Machine definition created: {:?}", machine_definition);
 
+    // Shot log sender was passed as parameter when SD card storage is enabled
+    #[cfg(feature = "sd-card-storage")]
+    let shot_log_sender: Option<Sender<'static, SyncSendRawMutex, ShotLog, 2>> = Some(shot_log_sender);
+
+    #[cfg(not(feature = "sd-card-storage"))]
+    let shot_log_sender: Option<Sender<'static, SyncSendRawMutex, ShotLog, 2>> = None;
+
     let mut controller = DualBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
@@ -1934,6 +2093,7 @@ async fn main_task(
         Some(watchdog),
         interlock_enabled_signal,
         contention_strategy_signal,
+        shot_log_sender,
     );
 
     // Create status subscriber for LCD display and spawn the task

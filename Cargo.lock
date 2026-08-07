@@ -766,6 +766,9 @@ name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+dependencies = [
+ "defmt 0.3.100",
+]
 
 [[package]]
 name = "embedded-hal"
@@ -778,6 +781,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
 dependencies = [
+ "defmt 0.3.100",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -787,6 +791,19 @@ version = "1.0.0"
 source = "git+https://github.com/rust-embedded/embedded-hal?branch=master#41f29f6bfced1cae0cbe712ba96ee32c075b3125"
 dependencies = [
  "embedded-hal 1.0.0 (git+https://github.com/rust-embedded/embedded-hal?branch=master)",
+]
+
+[[package]]
+name = "embedded-hal-bus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d3980bf28e8577db59fe2bdb3df868a419469d2cecb363644eea2b6f7797669"
+dependencies = [
+ "critical-section",
+ "defmt 0.3.100",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "portable-atomic",
 ]
 
 [[package]]
@@ -833,6 +850,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2564b9f813c544241430e147d8bc454815ef9ac998878d30cc3055449f7fd4c0"
 dependencies = [
  "embedded-io 0.7.1",
+]
+
+[[package]]
+name = "embedded-sdmmc"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce3c7f9ea039eeafc4a49597b7bd5ae3a1c8e51b2803a381cb0f29ce90fe1ec6"
+dependencies = [
+ "byteorder",
+ "defmt 0.3.100",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-io 0.6.1",
+ "heapless 0.8.0",
 ]
 
 [[package]]
@@ -894,6 +924,8 @@ dependencies = [
  "embedded-graphics-core",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal-bus",
+ "embedded-sdmmc",
  "futures",
  "hd44780-controller",
  "heapless 0.9.3",
@@ -2436,6 +2468,7 @@ dependencies = [
  "embassy-time",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-sdmmc",
  "embedded-storage-async",
  "heapless 0.9.3",
  "log",

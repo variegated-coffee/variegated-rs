@@ -11,6 +11,18 @@ mod shot_log;
 
 pub use shot_log::{ShotLogger, ShotLoggerConfig};
 
+#[cfg(feature = "sd-card-storage")]
+pub mod sd_card;
+#[cfg(feature = "sd-card-storage")]
+pub mod shot_log_storage;
+
+#[cfg(feature = "sd-card-storage")]
+pub use sd_card::{YieldingBlockDevice, BlockingSpiDevice};
+#[cfg(feature = "sd-card-storage")]
+pub use shot_log_storage::{
+    SdCardShotLogStorage, ShotLogFileInfo, ShotLogStorage, ShotLogStorageError, VariegatedTimeSource,
+};
+
 extern crate alloc;
 
 /// Watchdog period used by the controllers.

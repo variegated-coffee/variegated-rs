@@ -165,7 +165,10 @@ pub async fn lcd_display_task(
 #[cfg(feature = "tft-display")]
 #[embassy_executor::task]
 pub async fn graphical_display_task(
-    disp_p: crate::DisplayPeripherals,
+    spi_bus: &'static crate::DisplayBus,
+    disp_cs: Output<'static>,
+    dc: Output<'static>,
+    mut reset: Output<'static>,
     mut status_receiver: StatusSubscriber
 ) {
     use crate::display::GraphicalDisplayState;
@@ -181,28 +184,9 @@ pub async fn graphical_display_task(
     info!("  Current:  0x{:x}", current_buffer.as_ptr() as usize);
     info!("  Previous: 0x{:x}", previous_buffer.as_ptr() as usize);
 
-    // Configure SPI for the display with DMA and SPI Mode 0 (as required by NV3007)
-    let mut spi_config = embassy_rp::spi::Config::default();
-    spi_config.frequency = 10_000_000;
-    spi_config.phase = Phase::CaptureOnFirstTransition;
-    spi_config.polarity = Polarity::IdleLow;
-    let spi = Spi::new(
-        disp_p.spi,
-        disp_p.sclk_pin,
-        disp_p.mosi_pin,
-        disp_p.miso_pin,
-        disp_p.dma_tx,
-        disp_p.dma_rx,
-        crate::Irqs,
-        spi_config,
-    );
-
-    let spi_bus = crate::DISPLAY_SPI_BUS.init(Mutex::new(spi));
-    let spi_dev = SpiDevice::new(spi_bus, Output::new(disp_p.disp_cs_pin, Level::High));
-
-    // Setup control pins
-    let dc = Output::new(disp_p.dc_pin, Level::Low);
-    let mut reset = Output::new(disp_p.reset_pin, Level::Low);
+    // Create SPI device for display using pre-initialized CS pin. The bus itself
+    // is built by the caller, because the SD card shares it.
+    let spi_dev = SpiDevice::new(spi_bus, disp_cs);
 
     // Create display interface
     let di = SPIInterface::new(spi_dev, dc);

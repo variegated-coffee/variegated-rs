@@ -49,9 +49,13 @@ variegated-log = { version = "0.1.0", path = "../variegated-log" }
 
 crc.workspace = true
 
+# SD card storage (optional)
+embedded-sdmmc = { version = "0.9", default-features = false, optional = true }
+
 [features]
 rp2040 = ["embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040"]
 rp235xa = ["embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb"]
 rp235x = []
 pwm-steam-valve = []
+sd-card-storage = ["dep:embedded-sdmmc"]

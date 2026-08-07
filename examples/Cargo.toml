@@ -86,12 +86,15 @@ postcard = { workspace = true, features = ["alloc"] }
 
 futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 
+embedded-sdmmc = { version = "0.9", default-features = false, optional = true, features = ["defmt-log"] }
+embedded-hal-bus = { version = "0.2", features = ["defmt-03"], optional = true }
+
 [features]
 default = ["rp235xb"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
-dual-boiler = ["tft-display", "gear-pump", "belka", "bluetooth-group-1-scale"]
+dual-boiler = ["tft-display", "gear-pump", "belka", "bluetooth-group-1-scale", "sd-card-storage"]
 single-boiler = ["dep:oled_async", "dep:display-interface-spi", "gravity"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 gravity = ["dep:variegated-gravity-driver"]
@@ -103,6 +106,7 @@ belka = []
 bluetooth-group-1-scale = []
 gear-pump = []
 pwm-steam-valve = ["variegated-controller-lib/pwm-steam-valve"]
+sd-card-storage = ["variegated-controller-lib/sd-card-storage", "dep:embedded-sdmmc", "dep:embedded-hal-bus"]
 
 [profile.dev]
 debug = true              # Enable debug info
