@@ -631,8 +631,36 @@ async fn main(spawner: Spawner) -> ! {
     // `interfaces.sta` was renamed `interfaces.station`. Configuration stays in
     // `connection_task`, which now calls `set_config` -- that both configures
     // and starts the controller, since `start_async` was removed.
+    //
+    // The queue sizes are raised off esp-radio's defaults of 5 and 3, which its own
+    // docs describe as "quite conservative". On this firmware the RX default was not
+    // merely conservative, it was a latch.
+    //
+    // `recv_cb_sta` (esp-radio wifi/mod.rs:1004) pushes each received frame onto
+    // `DATA_QUEUE_RX_STA` and then wakes embassy-net's receive waker -- but only on the
+    // success path. When the queue is already at `rx_queue_size` the frame is dropped
+    // and *the waker is not fired*. That is self-sustaining: a full queue stops the
+    // wake, no wake means embassy-net never polls, never polling means the queue is
+    // never drained, and it stays full. The only thing that breaks the cycle is
+    // smoltcp's own poll timer, seconds later.
+    //
+    // Five slots is nothing on a real network -- ARP and mDNS broadcast alone will fill
+    // it -- so the stack spent most of its time latched. The symptom was not lost
+    // throughput but latency measured in seconds: a `curl` to `/` spent 6.5 s in
+    // connect (the SYN ladder, retransmitting into a stack that was not looking) and
+    // another 3.7 s to first byte, then transferred the whole body in 0.3 ms. ICMP
+    // never got answered at all, because a ping's timeout is shorter than the gap
+    // between polls.
+    //
+    // 32 and 16 cost almost nothing: the queue holds `PacketBuffer` handles, and the
+    // buffers they refer to are already accounted for by `dynamic_rx_buf_num`, which
+    // defaults to 32 and is left alone. Sized under that deliberately, so the queue can
+    // never own more buffers than the driver has.
+    let radio_config = esp_radio::wifi::ControllerConfig::default()
+        .with_rx_queue_size(32)
+        .with_tx_queue_size(16);
     let (controller, interfaces) =
-        esp_radio::wifi::new(peripherals.WIFI, Default::default()).unwrap();
+        esp_radio::wifi::new(peripherals.WIFI, radio_config).unwrap();
 
     let wifi_interface = interfaces.station;
 
