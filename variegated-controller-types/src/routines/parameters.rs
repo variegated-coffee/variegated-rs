@@ -11,9 +11,9 @@ pub type RoutineParameters = FnvIndexMap<u8, f32, 8>;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RoutineIndex {
-    Internal(usize),
-    Function(usize),
-    Custom(usize)
+    Internal(u32),
+    Function(u32),
+    Custom(u32)
 }
 
 impl RoutineIndex {
@@ -40,7 +40,7 @@ impl RoutineIndex {
     /// Convert a bit-packed u16 storage index to RoutineIndex
     pub fn from_storage_index(storage_index: u16) -> Option<Self> {
         let type_bits = (storage_index >> 14) & 0x03;
-        let index = (storage_index & 0x3FFF) as usize;
+        let index = (storage_index & 0x3FFF) as u32;
 
         match type_bits {
             0b00 => Some(RoutineIndex::Internal(index)),
@@ -51,7 +51,7 @@ impl RoutineIndex {
     }
 
     /// Get the inner index value
-    pub fn inner(&self) -> usize {
+    pub fn inner(&self) -> u32 {
         match self {
             RoutineIndex::Internal(n) | RoutineIndex::Function(n) | RoutineIndex::Custom(n) => *n,
         }

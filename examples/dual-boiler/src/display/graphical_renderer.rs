@@ -1039,7 +1039,7 @@ impl GraphicalDisplayState {
         if let Some(routine_execution) = &self.shared_state.status.routine_execution {
             if let Some(current_step_idx) = routine_execution.current_step {
                 if let Some(routine) = &self.current_routine {
-                    if let Some(step) = routine.steps.get(current_step_idx) {
+                    if let Some(step) = routine.steps.get(current_step_idx as usize) {
                         let mut y_offset = EFFECTIVE_Y + 35;
 
                         // Display exit conditions with progress

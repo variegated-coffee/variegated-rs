@@ -7,7 +7,7 @@ use heapless::index_map::FnvIndexMap;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
-    pub current_step: Option<usize>,
+    pub current_step: Option<u32>,
     pub step_elapsed_time: Option<Duration>,
     pub total_elapsed_time: Option<Duration>,
     pub resolved_parameters: FnvIndexMap<u8, f32, 8>, // resolved parameter values for display

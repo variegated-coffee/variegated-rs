@@ -541,7 +541,9 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 self.transition_to(self.current_step.unwrap() + 1, status)
             }
             RoutineStepExitType::JumpToStep(step) => {
-                self.transition_to(step, status)
+                // `JumpToStep` is a wire type and carries u32; step indices are
+                // `Vec` offsets internally.
+                self.transition_to(step as usize, status)
             }
             RoutineStepExitType::Finished => {
                 self.currently_executing = false;
@@ -762,7 +764,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         self.load_from_flash().await.ok().unwrap();
 
         // Find first available Custom index
-        let mut inner_index = 0usize;
+        let mut inner_index = 0u32;
         loop {
             let test_index = RoutineIndex::Custom(inner_index);
             let storage_index = test_index.to_storage_index();
@@ -932,7 +934,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
 
     async fn add_routine(&mut self, routine: Routine) {
         // Find first available Custom index
-        let mut inner_index = 0usize;
+        let mut inner_index = 0u32;
         loop {
             let test_index = RoutineIndex::Custom(inner_index);
             let storage_index = test_index.to_storage_index();

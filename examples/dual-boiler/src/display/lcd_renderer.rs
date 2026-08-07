@@ -311,7 +311,7 @@ impl LcdDisplayState {
                     let step_num = current_step_idx + 1;
 
                     // Get step description if available
-                    if let Some(step) = routine.steps().get(current_step_idx) {
+                    if let Some(step) = routine.steps().get(current_step_idx as usize) {
                         if let Some(description) = step.description() {
                             // Format: "X/Y Description"
                             let prefix = format!("{}/{} ", step_num, total_steps);
@@ -359,7 +359,7 @@ impl LcdDisplayState {
             // Use cached routine if available
             if let Some(routine) = &self.current_routine {
                 if let Some(current_step_idx) = routine_execution.current_step {
-                    if let Some(step) = routine.steps().get(current_step_idx) {
+                    if let Some(step) = routine.steps().get(current_step_idx as usize) {
                         // Get first exit condition
                         if let Some(exit) = step.exits().first() {
                             return self.format_exit_condition_with_value(&exit.condition, &routine_execution);
@@ -371,7 +371,7 @@ impl LcdDisplayState {
                 let mut routine_repo = self.routine_repository.lock().await;
                 if let Some(routine) = routine_repo.get_routine(routine_execution.routine_index).await {
                     if let Some(current_step_idx) = routine_execution.current_step {
-                        if let Some(step) = routine.steps().get(current_step_idx) {
+                        if let Some(step) = routine.steps().get(current_step_idx as usize) {
                             // Get first exit condition
                             if let Some(exit) = step.exits().first() {
                                 return self.format_exit_condition_with_value(&exit.condition, &routine_execution);

@@ -1222,7 +1222,7 @@ impl<
             });
             RoutineExecutionStatus {
                 routine_index: rxc.routine_index,
-                current_step: rxc.current_step,
+                current_step: rxc.current_step.map(|s| s as u32),
                 step_elapsed_time,
                 total_elapsed_time,
                 resolved_parameters: rxc.parameters.clone(),
@@ -1665,7 +1665,7 @@ impl<
                 log_info!("Removing schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
                     Ok(mut store) => {
-                        let res = store.remove_schedule(idx).await;
+                        let res = store.remove_schedule(idx as usize).await;
                         if res.is_none() {
                             log_warn!("Failed to remove schedule at index {}: index out of bounds", idx);
                         }
@@ -1684,7 +1684,7 @@ impl<
                 log_info!("Updating schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
                     Ok(mut store) => {
-                        let res = store.update_schedule(idx, item).await;
+                        let res = store.update_schedule(idx as usize, item).await;
                         if res.is_err() {
                             log_warn!("Failed to update schedule at index {}: index out of bounds", idx);
                         }

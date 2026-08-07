@@ -220,7 +220,7 @@ pub struct GroupConfiguration {
 pub struct MachineConfiguration {
     pub heating_element_interlock: bool,
     /// Maximum number of shot logs to keep in history
-    pub max_shot_logs: usize,
+    pub max_shot_logs: u32,
     /// Sample every Nth control loop tick (1 = every tick, 2 = every other tick, etc.)
     pub log_sample_decimation: u8,
     /// Prevent starting water-consuming operations (brewing, water dispensing, steaming, routines)

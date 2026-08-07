@@ -19,7 +19,7 @@ pub enum RoutineExitCondition {
 #[derive(Clone, Copy, Debug)]
 pub enum RoutineStepExitType {
     NextStep,
-    JumpToStep(usize),
+    JumpToStep(u32),
     Finished,
 }
 

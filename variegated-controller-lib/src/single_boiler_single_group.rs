@@ -649,7 +649,7 @@ impl<
             });
             RoutineExecutionStatus {
                 routine_index: rxc.routine_index,
-                current_step: rxc.current_step,
+                current_step: rxc.current_step.map(|s| s as u32),
                 step_elapsed_time,
                 total_elapsed_time,
                 resolved_parameters: rxc.parameters.clone(),

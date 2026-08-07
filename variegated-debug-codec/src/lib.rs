@@ -1975,8 +1975,8 @@ mod tests {
             resolved_parameters.insert(i, i as f32).unwrap();
         }
         status.routine_execution = Some(RoutineExecutionStatus {
-            routine_index: RoutineIndex::Custom(usize::MAX),
-            current_step: Some(usize::MAX),
+            routine_index: RoutineIndex::Custom(u32::MAX),
+            current_step: Some(u32::MAX),
             step_elapsed_time: Some(MAX_DURATION),
             total_elapsed_time: Some(MAX_DURATION),
             resolved_parameters,

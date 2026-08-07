@@ -431,7 +431,7 @@ impl ButtonEventHandler {
                         MachineCommand::CancelRoutine
                     } else {
                         defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
-                        MachineCommand::RunRoutine(RoutineIndex::Function(button_idx), None)
+                        MachineCommand::RunRoutine(RoutineIndex::Function(button_idx as u32), None)
                     };
                     return vec![command];
                 }
