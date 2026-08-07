@@ -1,0 +1,525 @@
+//! Sample values, serialized both as postcard bytes and as JSON, for the TypeScript
+//! round-trip harness to check itself against.
+//!
+//! # What this is actually testing
+//!
+//! Not "did we transcribe the schema correctly" -- that is no longer possible to get
+//! wrong, since the schema is generated from the same declarations that produce the
+//! bytes. What remains untested by construction is whether
+//! `@variegated-coffee/serde-postcard-ts` and Rust's postcard agree about *composite*
+//! structures: nested maps of structs, options inside options, enum payloads. That is a
+//! third-party implementation, and this is what checks it.
+//!
+//! # Why two encodings
+//!
+//! The byte comparison catches wrong node kinds, wrong nesting, wrong field counts and
+//! wrong variant order. It is blind to field *names* and to two same-typed fields being
+//! swapped, because postcard encodes neither. Only the JSON comparison catches those,
+//! and that is the exact bug class the hand-written file suffered from. Both are needed;
+//! neither subsumes the other.
+//!
+//! # Rules for the values below
+//!
+//! - **Exhaustive struct literals, never `..Default::default()`.** This is the load
+//!   bearing part: a new field on a wire type becomes a compile error *here*, in the
+//!   same commit that adds it. No runtime check can do that. Several of these types
+//!   have hand-written `Default` impls that would silently swallow a new field.
+//! - **No `Limits::default()`.** It is `{lower: -inf, upper: +inf}`, and serde_json
+//!   writes infinity as `null` -- an irreversible, deeply confusing comparison failure.
+//!   Every float here is finite and exactly f32-representable, so the two decoders
+//!   cannot disagree about rounding.
+//! - **Every `u64` stays below 2^53**, because `JSON.parse` silently loses precision
+//!   above that.
+//! - **Timestamps have no subsecond component**, since chrono's `DateTime` serializes
+//!   with `SecondsFormat::AutoSi` and the fraction length varies with the value.
+//! - **Maps hold at least two entries.** A one-entry map hides length-prefix bugs.
+//! - **Enum-typed fields prefer a non-first variant**, so a variant-index off-by-one
+//!   shows up instead of encoding as zero either way.
+
+use std::path::Path;
+
+use heapless::index_map::FnvIndexMap;
+use serde::Serialize;
+use variegated_comms_api_types::ws_types::WsMessage;
+use variegated_control_algorithm::pid::{Limits, PidOut};
+use variegated_controller_types::*;
+
+/// One fixture: a name, the postcard bytes, and the same value as JSON.
+pub struct Fixture {
+    pub name: &'static str,
+    /// The generated schema to decode it with, e.g. `StatusSchema`.
+    pub schema: &'static str,
+    pub bytes: Vec<u8>,
+    pub json: String,
+}
+
+fn fixture<T: Serialize>(name: &'static str, schema: &'static str, value: &T) -> Fixture {
+    Fixture {
+        name,
+        schema,
+        bytes: postcard::to_allocvec(value).expect("fixture must serialize"),
+        json: serde_json::to_string_pretty(value).expect("fixture must serialize as JSON"),
+    }
+}
+
+fn limits(lower: f32, upper: f32) -> PidLimits {
+    // The public constructor, because the fields are private. Deliberately not
+    // `Limits::default()` -- see the module note about infinity.
+    Limits::new_with_limits(lower, upper).expect("valid limits")
+}
+
+fn pid_term(positive: f32, negative: f32) -> PidTerm {
+    PidTerm { positive_scale: positive, negative_scale: negative, limits: limits(-100.0, 100.0) }
+}
+
+fn pid_parameters() -> PidParameters {
+    PidParameters {
+        kp: pid_term(2.0, 1.5),
+        ki: pid_term(0.5, 0.25),
+        kd: pid_term(0.125, 0.0625),
+    }
+}
+
+fn control_curve() -> ControlCurve {
+    ControlCurve { a: 0.5, b: 1.5, c: 2.0, min: 0.0, max: 9.0 }
+}
+
+fn boiler_control_state() -> BoilerControlState {
+    BoilerControlState {
+        // Not the first variant: an index error would otherwise encode as 0 regardless.
+        mode: BoilerControlMode::Pressure,
+        values: BoilerControlTargetValues { target_temperature: 93.0, target_pressure: 9.0 },
+    }
+}
+
+fn group_control_state() -> GroupBrewControlState {
+    GroupBrewControlState {
+        mode: GroupBrewControlMode::PressureCurve,
+        values: GroupBrewControlTargetValues {
+            flow_rate: 2.5,
+            flow_rate_curve: control_curve(),
+            pressure: 9.0,
+            pressure_curve: control_curve(),
+            output_flow_rate: 1.5,
+            output_flow_rate_curve: control_curve(),
+            duty_cycle: 75,
+            duty_cycle_curve: control_curve(),
+        },
+    }
+}
+
+fn pump_configuration() -> PumpConfiguration {
+    PumpConfiguration {
+        tacho_pulses_per_liter: Some(1000.0),
+        max_duty_cycle: Some(100),
+        min_duty_cycle: Some(10),
+        ramp_up_time_ms: Some(500),
+        ramp_down_time_ms: Some(250),
+    }
+}
+
+/// A `Status` with every `Option` populated and every map holding two entries.
+///
+/// The point of a maximal value is that `Status::default()` is a legal fixture that
+/// serializes to a handful of zero bytes and proves nothing about the 90% of the tree
+/// hidden behind `Option`s -- including `comms_status`, which is where the drift that
+/// motivated all of this was hiding.
+fn status_maximal() -> Status {
+    let mut boiler_statuses = FnvIndexMap::new();
+    for i in 0..2u8 {
+        boiler_statuses
+            .insert(
+                i,
+                BoilerStatus {
+                    temperature: Some(93.0),
+                    pressure: Some(9.0),
+                    water_level: Some(80),
+                    // Exercises a newtype variant carrying a struct.
+                    output: Output::PidOutput(PidOut::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0)),
+                    control_state: boiler_control_state(),
+                },
+            )
+            .expect("fits");
+    }
+
+    let mut group_statuses = FnvIndexMap::new();
+    for i in 0..2u8 {
+        group_statuses
+            .insert(
+                i,
+                GroupStatus {
+                    is_brewing: true,
+                    three_way_valve_open: Some(true),
+                    current_brew: Some(BrewStatus {
+                        brew_time: core::time::Duration::new(25, 500_000_000),
+                        brew_input_volume: Some(36.0),
+                        shot_state: Some(ShotState::PostFirstDrop),
+                        extracted_solids: Some(2.5),
+                        output_volume: Some(30.0),
+                    }),
+                    input_flow_rate: Some(2.5),
+                    input_volume: Some(40.0),
+                    output_flow_rate: Some(1.5),
+                    output_weight: Some(36.0),
+                    pressure: Some(9.0),
+                    temperature: Some(93.0),
+                    output_temperature: Some(88.0),
+                    output_electrical_conductivity: Some(0.5),
+                    extraction_rate: Some(1.25),
+                    pump_output: Output::FixedDutyCycle(80),
+                    control_state: group_control_state(),
+                    previous_brew: Some(PreviousBrewInfo {
+                        brew_time: core::time::Duration::new(27, 0),
+                        brew_input_volume: Some(38.0),
+                        output_weight: Some(36.5),
+                        started_at_millis: 1_000_000,
+                        stopped_at_millis: 1_027_000,
+                    }),
+                },
+            )
+            .expect("fits");
+    }
+
+    let mut water_tap_statuses = FnvIndexMap::new();
+    let mut steam_wand_statuses = FnvIndexMap::new();
+    let mut tank_statuses = FnvIndexMap::new();
+    for i in 0..2u8 {
+        water_tap_statuses.insert(i, WaterTapStatus { is_dispensing: true }).expect("fits");
+        steam_wand_statuses
+            .insert(i, SteamWandStatus { is_steaming: true, valve_openness: 100 })
+            .expect("fits");
+        tank_statuses.insert(i, TankStatus { water_level: Some(75) }).expect("fits");
+    }
+
+    let mut resolved_parameters = FnvIndexMap::new();
+    resolved_parameters.insert(0u8, 93.0f32).expect("fits");
+    resolved_parameters.insert(1u8, 36.0f32).expect("fits");
+
+    let mut peripheral_connection_status = FnvIndexMap::new();
+    for i in 0..2u16 {
+        peripheral_connection_status
+            .insert(0xF000 + i, WirelessConnectionStatus { connected: true, rssi: Some(-70) })
+            .expect("fits");
+    }
+
+    let mut peripherals = FnvIndexMap::new();
+    for i in 0..2u16 {
+        peripherals
+            .insert(
+                0xE000 + i,
+                PeripheralInfo {
+                    peripheral_type: PeripheralType::BrewSensor,
+                    is_available: true,
+                },
+            )
+            .expect("fits");
+    }
+
+    Status {
+        boiler_statuses,
+        group_statuses,
+        water_tap_statuses,
+        steam_wand_statuses,
+        tank_statuses,
+        mode: MachineMode::PowerSaveStandby,
+        routine_execution: Some(RoutineExecutionStatus {
+            routine_index: RoutineIndex::Custom(3),
+            current_step: Some(2),
+            step_elapsed_time: Some(core::time::Duration::new(5, 0)),
+            total_elapsed_time: Some(core::time::Duration::new(42, 0)),
+            resolved_parameters,
+        }),
+        // The field that was missing from the hand-written schema, which is why any
+        // Status carrying comms state mis-decoded everything after it.
+        comms_status: Some(CommsStatus {
+            timestamp: Some(1_700_000_000),
+            wifi_connected: true,
+            wifi_rssi: Some(-55),
+            peripheral_connection_status,
+        }),
+        peripheral_status: PeripheralStatus { peripherals },
+        // No subsecond component: chrono's formatting is value-dependent.
+        current_local_time: Some(
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 7)
+                .expect("valid date")
+                .and_hms_opt(9, 30, 0)
+                .expect("valid time"),
+        ),
+    }
+}
+
+/// The other extreme: everything absent, every map empty.
+///
+/// Checks that the decoder agrees about *absence* -- an option discriminant read one
+/// byte off looks like a populated value full of garbage.
+fn status_minimal() -> Status {
+    Status {
+        boiler_statuses: FnvIndexMap::new(),
+        group_statuses: FnvIndexMap::new(),
+        water_tap_statuses: FnvIndexMap::new(),
+        steam_wand_statuses: FnvIndexMap::new(),
+        tank_statuses: FnvIndexMap::new(),
+        mode: MachineMode::On,
+        routine_execution: None,
+        comms_status: None,
+        peripheral_status: PeripheralStatus { peripherals: FnvIndexMap::new() },
+        current_local_time: None,
+    }
+}
+
+fn routine() -> Routine {
+    Routine {
+        routine_type: RoutineType::Cleaning,
+        name: "Fixture".into(),
+        parameters: vec![RoutineParameter {
+            index: 0,
+            name: "Dose".into(),
+            default: 18.0,
+            unit: Some(ParameterUnit::Grams),
+        }],
+        derived_parameters: vec![DerivedParameter {
+            index: 1,
+            name: "Yield".into(),
+            unit: Some(ParameterUnit::Grams),
+            formula: DerivedFormula::Linear { base_param: 0, multiplier: 2.0, offset: 0.0 },
+        }],
+        steps: vec![RoutineStep {
+            entry_command: vec![RoutineCommand::StartBrewing(0)],
+            exits: vec![RoutineExit {
+                condition: RoutineExitCondition::StateConditionMet(
+                    StateCondition::GroupPressureAbove(0, ParameterValue::Static(9.0)),
+                ),
+                then: RoutineStepExitType::JumpToStep(2),
+                description: Some("Reached pressure".into()),
+            }],
+            description: Some("Brew".into()),
+        }],
+        finally: vec![RoutineCommand::StopBrewing(0)],
+    }
+}
+
+fn schedule_item() -> ScheduleItem {
+    let mut on_days = heapless::index_set::FnvIndexSet::new();
+    on_days.insert(chrono::Weekday::Mon).expect("fits");
+    on_days.insert(chrono::Weekday::Wed).expect("fits");
+
+    ScheduleItem {
+        trigger_at: ScheduleTrigger {
+            on_minute: 30,
+            on_hour: 6,
+            on_days: Some(on_days),
+            on_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 8, 7).expect("valid date")),
+            enabled: true,
+            once: false,
+        },
+        commands: vec![ScheduleAction::SetMachineMode(MachineMode::On)],
+    }
+}
+
+/// Every `MachineCommand` variant, in declaration order.
+///
+/// Serialized as one sequence, so the harness decodes it with `seq(MachineCommandSchema)`
+/// and checks all of them at once. The exhaustive `match` below is what makes a newly
+/// added variant a compile error rather than a silently untested one -- the runtime
+/// coverage check in the harness catches the complementary mistake of updating the match
+/// but forgetting the list.
+fn machine_commands() -> Vec<MachineCommand> {
+    use MachineCommand::*;
+
+    #[allow(dead_code)]
+    fn exhaustive(c: &MachineCommand) {
+        // No `_` arm, deliberately. Adding a variant must break this.
+        match c {
+            StartBrewing(_) => {}
+            StopBrewing(_) => {}
+            StartPumpingToWaterTap(_) => {}
+            StopPumpingToWaterTap(_) => {}
+            StartSteaming(_) => {}
+            StopSteaming(_) => {}
+            SetSteamValveOpenness(..) => {}
+            SetBoilerControlTarget(..) => {}
+            SetBoilerControlTargetValues(..) => {}
+            SetGroupBrewControlTarget(..) => {}
+            SetGroupBrewControlTargetValues(..) => {}
+            SetPidParameters(..) => {}
+            RunRoutine(..) => {}
+            CancelRoutine => {}
+            EnableBoiler(_) => {}
+            DisableBoiler(_) => {}
+            TareGroupScale(_) => {}
+            ZeroCalibrateGroupScale(_) => {}
+            CalibrateGroupScale100g(_) => {}
+            UpdateCommsStatus(_) => {}
+            AddScheduleItem(_) => {}
+            RemoveScheduleItem(_) => {}
+            UpdateScheduleItem(..) => {}
+            AddRoutine(_) => {}
+            RemoveRoutine(_) => {}
+            UpdateRoutine(..) => {}
+            SetMachineMode(_) => {}
+            OptimizeConfigurationStorage => {}
+            OptimizeRoutineStorage => {}
+            OptimizeScheduleStorage => {}
+            SetGroupPumpConfiguration(..) => {}
+            SetWaterTapPumpConfiguration(..) => {}
+            SetFillPumpConfiguration(..) => {}
+            InferGroupPressureIntegral(..) => {}
+            InferGroupFlowRateIntegral(..) => {}
+            InferGroupOutputFlowRateIntegral(..) => {}
+            SetHeatingElementInterlock(_) => {}
+            SetHeatingElementContentionStrategy(_) => {}
+            SetWaterDispersalPumpStrategy(..) => {}
+        }
+    }
+
+    let mut resolved = FnvIndexMap::new();
+    resolved.insert(0u8, 18.0f32).expect("fits");
+    resolved.insert(1u8, 36.0f32).expect("fits");
+
+    let mut comms_peripherals = FnvIndexMap::new();
+    comms_peripherals
+        .insert(0xF001u16, WirelessConnectionStatus { connected: false, rssi: None })
+        .expect("fits");
+    comms_peripherals
+        .insert(0xF002u16, WirelessConnectionStatus { connected: true, rssi: Some(-61) })
+        .expect("fits");
+
+    vec![
+        StartBrewing(0),
+        StopBrewing(1),
+        StartPumpingToWaterTap(0),
+        StopPumpingToWaterTap(1),
+        StartSteaming(0),
+        StopSteaming(1),
+        SetSteamValveOpenness(0, 50),
+        SetBoilerControlTarget(
+            0,
+            BoilerControlMode::Temperature,
+            Some(BoilerControlTargetValuesUpdate {
+                temperature: Some(93.0),
+                pressure: Some(9.0),
+            }),
+        ),
+        SetBoilerControlTargetValues(
+            1,
+            BoilerControlTargetValuesUpdate { temperature: None, pressure: Some(1.5) },
+        ),
+        SetGroupBrewControlTarget(
+            0,
+            GroupBrewControlMode::FixedDutyCycle,
+            Some(GroupBrewControlTargetValuesUpdate {
+                flow_rate: Some(2.5),
+                flow_rate_curve: Some(control_curve()),
+                pressure: Some(9.0),
+                pressure_curve: Some(control_curve()),
+                output_flow_rate: Some(1.5),
+                output_flow_rate_curve: Some(control_curve()),
+                duty_cycle: Some(60),
+                duty_cycle_curve: Some(control_curve()),
+            }),
+        ),
+        SetGroupBrewControlTargetValues(
+            1,
+            GroupBrewControlTargetValuesUpdate {
+                flow_rate: None,
+                flow_rate_curve: None,
+                pressure: Some(6.0),
+                pressure_curve: None,
+                output_flow_rate: None,
+                output_flow_rate_curve: None,
+                duty_cycle: None,
+                duty_cycle_curve: None,
+            },
+        ),
+        SetPidParameters(PidParameterTarget::GroupPressure(0), pid_parameters()),
+        RunRoutine(RoutineIndex::Function(2), Some(resolved)),
+        CancelRoutine,
+        EnableBoiler(0),
+        DisableBoiler(1),
+        TareGroupScale(0),
+        ZeroCalibrateGroupScale(0),
+        CalibrateGroupScale100g(0),
+        UpdateCommsStatus(CommsStatus {
+            timestamp: Some(1_700_000_001),
+            wifi_connected: true,
+            wifi_rssi: Some(-60),
+            peripheral_connection_status: comms_peripherals,
+        }),
+        AddScheduleItem(schedule_item()),
+        RemoveScheduleItem(3),
+        UpdateScheduleItem(4, schedule_item()),
+        AddRoutine(routine()),
+        RemoveRoutine(RoutineIndex::Custom(1)),
+        UpdateRoutine(RoutineIndex::Internal(0), routine()),
+        SetMachineMode(MachineMode::PowerSaveStandby),
+        OptimizeConfigurationStorage,
+        OptimizeRoutineStorage,
+        OptimizeScheduleStorage,
+        SetGroupPumpConfiguration(0, pump_configuration()),
+        SetWaterTapPumpConfiguration(0, pump_configuration()),
+        SetFillPumpConfiguration(0, pump_configuration()),
+        InferGroupPressureIntegral(0, 9.0),
+        InferGroupFlowRateIntegral(0, 2.5),
+        InferGroupOutputFlowRateIntegral(0, 1.5),
+        SetHeatingElementInterlock(true),
+        SetHeatingElementContentionStrategy(HeatingElementContentionStrategy::Proportional),
+        SetWaterDispersalPumpStrategy(0, WaterDispersalPumpStrategy::NoPump),
+    ]
+}
+
+pub fn all() -> Vec<Fixture> {
+    vec![
+        fixture("status_maximal", "StatusSchema", &status_maximal()),
+        fixture("status_minimal", "StatusSchema", &status_minimal()),
+        fixture("machine_commands", "seq:MachineCommandSchema", &machine_commands()),
+        // The envelope itself, including the struct variant with the borrowed field --
+        // the one place in the tree with a `#[serde(borrow)]`.
+        fixture(
+            "ws_command_ack",
+            "WsMessageSchema",
+            &WsMessage::CommandAck { id: 7, success: false, error: Some("boiler offline") },
+        ),
+        fixture(
+            "ws_status_update",
+            "WsMessageSchema",
+            &WsMessage::StatusUpdate(status_maximal()),
+        ),
+        fixture::<WsMessage>(
+            "ws_request_routines",
+            "WsMessageSchema",
+            &WsMessage::RequestRoutines,
+        ),
+    ]
+}
+
+/// Write every fixture to `dir` as a `.bin`/`.json` pair, plus an index the harness
+/// reads so it does not need its own hardcoded list.
+pub fn write_all(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+
+    let fixtures = all();
+    let mut index = String::from("[\n");
+    for (i, f) in fixtures.iter().enumerate() {
+        write_if_changed(&dir.join(format!("{}.bin", f.name)), &f.bytes)?;
+        write_if_changed(&dir.join(format!("{}.json", f.name)), f.json.as_bytes())?;
+        let comma = if i + 1 == fixtures.len() { "" } else { "," };
+        index.push_str(&format!(
+            "  {{ \"name\": \"{}\", \"schema\": \"{}\" }}{}\n",
+            f.name, f.schema, comma
+        ));
+    }
+    index.push_str("]\n");
+    write_if_changed(&dir.join("index.json"), index.as_bytes())?;
+    Ok(())
+}
+
+/// Same read-compare-write discipline as the schema itself: this runs from a build
+/// script, and rust-analyzer checks continuously in the background.
+fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    if let Ok(current) = std::fs::read(path) {
+        if current == contents {
+            return Ok(());
+        }
+    }
+    std::fs::write(path, contents)
+}

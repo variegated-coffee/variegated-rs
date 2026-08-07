@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "check:schemas": "tsx scripts/check-schema-order.ts",
+    "check:schemas": "tsx scripts/check-schema-order.ts && tsx scripts/check-schemas.ts",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix"
   },

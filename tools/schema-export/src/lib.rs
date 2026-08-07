@@ -8,11 +8,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub mod emit;
+pub mod fixtures;
 pub mod roots;
 
 /// Where the generated file and its inputs live, relative to the repository root.
 pub const SCHEMAS_PATH: &str = "frontend/src/schemas/schemas.ts";
 pub const EPILOGUE_PATH: &str = "frontend/src/schemas/epilogue.ts.in";
+pub const FIXTURES_DIR: &str = "frontend/fixtures";
 
 pub fn render(repo_root: &Path) -> io::Result<String> {
     let epilogue = match std::fs::read_to_string(repo_root.join(EPILOGUE_PATH)) {
@@ -38,6 +40,13 @@ pub enum Outcome {
 pub fn write_if_changed(repo_root: &Path) -> io::Result<Outcome> {
     let path = repo_root.join(SCHEMAS_PATH);
     let next = render(repo_root)?;
+
+    // Fixtures are refreshed independently of the schema. A fixture value can change
+    // without the *shape* changing -- a new enum variant added to the corpus, say --
+    // and gating them behind a schema diff would leave the harness checking against
+    // stale bytes while reporting success. They use the same read-compare-write
+    // discipline, so this still does not touch anything unnecessarily.
+    fixtures::write_all(&repo_root.join(FIXTURES_DIR))?;
 
     if let Ok(current) = std::fs::read_to_string(&path) {
         if current == next {

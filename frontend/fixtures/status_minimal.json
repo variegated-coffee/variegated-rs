@@ -1,0 +1,14 @@
+{
+  "boiler_statuses": {},
+  "group_statuses": {},
+  "water_tap_statuses": {},
+  "steam_wand_statuses": {},
+  "tank_statuses": {},
+  "mode": "On",
+  "routine_execution": null,
+  "comms_status": null,
+  "peripheral_status": {
+    "peripherals": {}
+  },
+  "current_local_time": null
+}

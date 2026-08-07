@@ -1,0 +1,7 @@
+{
+  "CommandAck": {
+    "id": 7,
+    "success": false,
+    "error": "boiler offline"
+  }
+}

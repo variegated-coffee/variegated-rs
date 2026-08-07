@@ -3842,6 +3842,7 @@ dependencies = [
  "serde",
  "serde_json",
  "variegated-comms-api-types",
+ "variegated-control-algorithm",
  "variegated-controller-types",
  "variegated-postcard-schema",
 ]

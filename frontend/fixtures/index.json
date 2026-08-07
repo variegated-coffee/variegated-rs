@@ -1,0 +1,8 @@
+[
+  { "name": "status_maximal", "schema": "StatusSchema" },
+  { "name": "status_minimal", "schema": "StatusSchema" },
+  { "name": "machine_commands", "schema": "seq:MachineCommandSchema" },
+  { "name": "ws_command_ack", "schema": "WsMessageSchema" },
+  { "name": "ws_status_update", "schema": "WsMessageSchema" },
+  { "name": "ws_request_routines", "schema": "WsMessageSchema" }
+]
