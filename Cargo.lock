@@ -2417,6 +2417,7 @@ dependencies = [
  "defmt 1.1.1",
  "num-traits",
  "serde",
+ "variegated-postcard-schema",
 ]
 
 [[package]]
@@ -2462,6 +2463,7 @@ dependencies = [
  "sequential-storage",
  "serde",
  "variegated-control-algorithm",
+ "variegated-postcard-schema",
 ]
 
 [[package]]

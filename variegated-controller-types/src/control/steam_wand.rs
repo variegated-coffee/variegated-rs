@@ -3,6 +3,7 @@ use crate::ValveOpenType;
 /// Steam wand control state - stores the current control parameters
 /// This is stored in ephemeral configuration (persists during runtime, resets on power cycle)
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SteamWandControlState {

@@ -4,6 +4,7 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use heapless::index_set::FnvIndexSet;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleTrigger {
     pub on_minute: u8,
@@ -53,6 +54,7 @@ impl defmt::Format for ScheduleTrigger {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Default)]
 pub struct ScheduleItem {
     pub trigger_at: ScheduleTrigger,

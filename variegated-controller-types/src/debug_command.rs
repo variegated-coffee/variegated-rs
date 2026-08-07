@@ -17,6 +17,7 @@ use crate::commands::MachineCommand;
 /// water and drives a pump. Changing any of them requires bumping
 /// [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub enum DebugCommand {
     /// Forwarded to the application processor's command channel, exactly as the
@@ -27,6 +28,7 @@ pub enum DebugCommand {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AppDebugOp {
@@ -39,6 +41,7 @@ pub enum AppDebugOp {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum CommsDebugOp {

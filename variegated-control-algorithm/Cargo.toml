@@ -14,9 +14,23 @@ bench = false
 [dependencies]
 serde = { workspace = true, optional = true, features = ["derive"] }
 defmt = { workspace = true, optional = true }
+variegated-postcard-schema = { version = "0.1.0", path = "../variegated-postcard-schema", optional = true }
 num-traits.workspace = true # add features = ["libm"] if you wish to use `Float` and `Real` without `std`
 
 [features]
 serde = ["dep:serde"]
 std = []
 defmt = ["dep:defmt"]
+# Describe the PID types for the TypeScript schema generator.
+#
+# The derive has to live here rather than being hand-written in
+# variegated-postcard-schema, for two reasons. `Limits` has private fields, so an
+# external impl could not name them from the type system -- only from a string
+# literal that nothing checks. And postcard does not encode field names, so such an
+# impl could name them wrongly and still round-trip byte-identically forever. A derive
+# expands in the defining module and reads the real fields.
+#
+# Implies `serde`: `cfg_attr(feature = "serde", serde(...))` attributes are stripped
+# before derives run, so with serde off the schema derive's attribute guard would have
+# nothing to see and would silently pass a type it should have rejected.
+schema = ["serde", "dep:variegated-postcard-schema"]

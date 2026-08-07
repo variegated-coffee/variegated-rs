@@ -5,6 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub enum RoutineType {
@@ -15,6 +16,7 @@ pub enum RoutineType {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub struct Routine {
     pub routine_type: RoutineType,
@@ -76,6 +78,7 @@ impl Routine {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub struct RoutineList {
     pub routines: BTreeMap<RoutineIndex, Routine>,

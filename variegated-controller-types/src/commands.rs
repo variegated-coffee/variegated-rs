@@ -12,6 +12,7 @@ pub enum StorageCommand {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub enum MachineCommand {
     StartBrewing(GroupIndex),
@@ -142,6 +143,7 @@ impl defmt::Format for MachineCommand {
 /// This is a subset of MachineCommand that excludes meta-commands like
 /// adding/removing schedules or routines, which don't make sense in a schedule.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub enum ScheduleAction {
     /// Run a routine with optional parameters

@@ -4,6 +4,7 @@ use core::time::Duration;
 use heapless::index_map::FnvIndexMap;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoutineExecutionStatus {
     pub routine_index: RoutineIndex,
@@ -50,6 +51,7 @@ impl defmt::Format for RoutineExecutionStatus {
 /// Changing this struct, or anything reachable from it, requires bumping
 /// [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub boiler_statuses: FnvIndexMap<BoilerIndex, BoilerStatus, MAX_BOILERS>,
@@ -241,6 +243,7 @@ impl defmt::Format for Status {
 /// Reachable from [`Status`], so it travels on the debug wire: changing these fields
 /// requires bumping [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoilerStatus {
@@ -254,6 +257,7 @@ pub struct BoilerStatus {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 pub struct PreviousBrewInfo {
     pub brew_time: Duration,
     pub brew_input_volume: Option<InputVolumeType>,
@@ -263,6 +267,7 @@ pub struct PreviousBrewInfo {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrewStatus {
@@ -276,6 +281,7 @@ pub struct BrewStatus {
 /// Reachable from [`Status`], so it travels on the debug wire: changing these fields
 /// requires bumping [`crate::debug::DEBUG_PROTOCOL_VERSION`].
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupStatus {
@@ -297,6 +303,7 @@ pub struct GroupStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WaterTapStatus {
@@ -304,6 +311,7 @@ pub struct WaterTapStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SteamWandStatus {
@@ -312,6 +320,7 @@ pub struct SteamWandStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TankStatus {

@@ -12,6 +12,7 @@ defmt = { workspace = true, optional = true }
 heapless.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"], optional = true }
+variegated-postcard-schema = { version = "0.1.0", path = "../variegated-postcard-schema", optional = true }
 # `defmt` is inherited through this crate's own `defmt` feature rather than being
 # hardcoded here. Hardcoding it put defmt into *every* graph that touches these types,
 # including host builds -- and defmt declares `links = "defmt"` and emits `extern "Rust"`
@@ -41,6 +42,23 @@ std = ["serde?/std"]
 # `impl Format for Box<T>` lives behind that feature. Without it the `defmt::Format`
 # derive on `DebugPayload` fails to resolve a bound for the boxed variant.
 defmt = ["dep:defmt", "heapless/defmt", "defmt/alloc", "variegated-control-algorithm/defmt"]
+# Describe these types for the TypeScript schema generator in variegated-comms-rs.
+#
+# Off by default and never enabled for firmware: it exists for host builds of the
+# exporter. `variegated-postcard-schema`'s heapless and chrono impls are both required
+# here -- `FnvIndexMap` appears on nearly every type in this crate, and
+# `Status::current_local_time` is a `NaiveDateTime`.
+#
+# Implies `serde` deliberately. `cfg_attr(feature = "serde", serde(...))` attributes
+# are stripped before derives run, so with serde off the schema derive's guard against
+# unmodelled serde attributes would see nothing and pass a type it should reject.
+schema = [
+    "serde",
+    "dep:variegated-postcard-schema",
+    "variegated-postcard-schema/heapless",
+    "variegated-postcard-schema/chrono",
+    "variegated-control-algorithm/schema",
+]
 double_boiler = []
 single_boiler = []
 single_group = []

@@ -1,6 +1,7 @@
 use crate::*;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug)]
 pub enum PidParameterTarget {
@@ -13,6 +14,7 @@ pub enum PidParameterTarget {
 
 /// The control mode for a boiler - what type of control is active
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BoilerControlMode {
@@ -25,6 +27,7 @@ pub enum BoilerControlMode {
 /// All stored target values for boiler control
 /// These values persist regardless of current mode
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoilerControlTargetValues {
@@ -44,6 +47,7 @@ impl Default for BoilerControlTargetValues {
 /// Update structure for changing boiler target values
 /// Only specified fields will be updated
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoilerControlTargetValuesUpdate {
@@ -53,6 +57,7 @@ pub struct BoilerControlTargetValuesUpdate {
 
 /// Complete boiler control state
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoilerControlState {
@@ -70,6 +75,7 @@ impl Default for BoilerControlState {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaterDispersalPumpStrategy {
@@ -86,6 +92,7 @@ impl Default for WaterDispersalPumpStrategy {
 /// Strategy for resolving heating element contention when multiple boilers
 /// request more combined duty cycle than available (>100% total)
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeatingElementContentionStrategy {

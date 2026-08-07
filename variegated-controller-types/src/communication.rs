@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use defmt::Debug2Format;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone,  Debug)]
 pub struct ExternalPeripheralSensorReading {
@@ -16,6 +17,7 @@ pub struct ExternalPeripheralSensorReading {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 // `PartialEq` is needed because `Status` reaches this type and `Status` now travels
 // inside `DebugPayload`, whose `PartialEq` derive is what the codec round-trip tests
 // assert on.
@@ -42,6 +44,7 @@ impl defmt::Format for CommsStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone,  Debug, Copy, PartialEq)]
 pub struct WirelessConnectionStatus {
@@ -50,6 +53,7 @@ pub struct WirelessConnectionStatus {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone)]
 pub enum CommsProcessorToApplicationProcessorMessage {
@@ -72,6 +76,7 @@ pub enum CommsProcessorToApplicationProcessorMessage {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub enum ApplicationProcessorToCommsProcessorMessage {
     Hello(ProtocolConfig),

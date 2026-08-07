@@ -10,12 +10,14 @@ use heapless::index_map::FnvIndexMap;
 // ============================================================================
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub struct ShotLogList {
     pub list_entries: Vec<ShotLogListEntry>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub struct ShotLogListEntry {
     pub id: u32,
@@ -23,6 +25,7 @@ pub struct ShotLogListEntry {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub struct ShotLogEntry {
     pub id: u32,
@@ -35,6 +38,7 @@ pub struct ShotLogEntry {
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone)]
 pub struct ShotLogEntryDataPoint {
     pub shot_log_entry_id: u32,
@@ -53,6 +57,7 @@ pub struct ShotLogEntryDataPoint {
 
 /// Complete runtime log for a single shot execution (routine or manual)
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug)]
 pub struct ShotLog {
     pub metadata: ShotLogMetadata,
@@ -62,6 +67,7 @@ pub struct ShotLog {
 
 /// Metadata about a shot execution
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug)]
 pub struct ShotLogMetadata {
     /// Type of shot (routine or manual)
@@ -80,6 +86,7 @@ pub struct ShotLogMetadata {
 
 /// Type of shot execution
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShotType {
     /// Shot executed as part of a routine
@@ -90,6 +97,7 @@ pub enum ShotType {
 
 /// Final outcome of a shot execution
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShotStatus {
     /// Currently executing
@@ -102,6 +110,7 @@ pub enum ShotStatus {
 
 /// Metadata specific to routine executions
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug)]
 pub struct RoutineExecutionMetadata {
     /// Index of the routine being executed
@@ -116,6 +125,7 @@ pub struct RoutineExecutionMetadata {
 
 /// A timestamped snapshot of all sensor readings and control outputs
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug)]
 pub struct ShotLogSample {
     /// Time since shot start (milliseconds)
@@ -130,6 +140,7 @@ pub struct ShotLogSample {
 
 /// Boiler sensor readings at a point in time
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Copy, Debug)]
 pub struct BoilerSample {
     pub temperature: Option<TemperatureType>,
@@ -140,6 +151,7 @@ pub struct BoilerSample {
 
 /// Group sensor readings at a point in time
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Copy, Debug)]
 pub struct GroupSample {
     pub is_brewing: bool,
@@ -159,6 +171,7 @@ pub struct GroupSample {
 
 /// Water tap sensor readings at a point in time
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Copy, Debug)]
 pub struct WaterTapSample {
     pub is_dispensing: bool,
@@ -166,6 +179,7 @@ pub struct WaterTapSample {
 
 /// Event recording a routine step transition
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug)]
 pub struct RoutineEvent {
     /// Time since shot start (milliseconds)
