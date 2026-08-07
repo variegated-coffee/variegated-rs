@@ -330,7 +330,7 @@ impl HttpHandler {
     async fn handle_put_schedule<T, const N: usize>(
         &self,
         conn: &mut ServerConnection<'_, T, N>,
-        index: usize,
+        index: u32,
     ) -> Result<(), Error<T::Error>>
     where
         T: Read + Write,
@@ -364,7 +364,7 @@ impl HttpHandler {
     async fn handle_delete_schedule<T, const N: usize>(
         &self,
         conn: &mut ServerConnection<'_, T, N>,
-        index: usize,
+        index: u32,
     ) -> Result<(), Error<T::Error>>
     where
         T: Read + Write,
@@ -433,7 +433,7 @@ impl HttpHandler {
                     )
                     .await;
                 }
-                let index: usize = match parts[1].parse() {
+                let index: u32 = match parts[1].parse() {
                     Ok(idx) => idx,
                     Err(_) => {
                         return Self::send_bad_request(conn, "Invalid index").await;
@@ -471,7 +471,7 @@ impl HttpHandler {
         &self,
         conn: &mut ServerConnection<'_, T, N>,
         routine_type: &str,
-        index: usize,
+        index: u32,
     ) -> Result<(), Error<T::Error>>
     where
         T: Read + Write,
@@ -519,7 +519,7 @@ impl HttpHandler {
         &self,
         conn: &mut ServerConnection<'_, T, N>,
         routine_type: &str,
-        index: usize,
+        index: u32,
     ) -> Result<(), Error<T::Error>>
     where
         T: Read + Write,
@@ -558,7 +558,7 @@ impl HttpHandler {
         &self,
         conn: &mut ServerConnection<'_, T, N>,
         routine_type: &str,
-        index: usize,
+        index: u32,
     ) -> Result<(), Error<T::Error>>
     where
         T: Read + Write,
@@ -1083,7 +1083,7 @@ impl HttpHandler {
     }
 
     // Parse path parameters from a path like /schedules/123
-    fn parse_path_index(path: &str, prefix: &str) -> Option<usize> {
+    fn parse_path_index(path: &str, prefix: &str) -> Option<u32> {
         let index_str = path.strip_prefix(prefix)?;
         index_str.parse().ok()
     }
@@ -1179,7 +1179,7 @@ impl Handler for HttpHandler {
                 let remainder = p.strip_prefix("/routines/").unwrap_or("");
                 let parts: Vec<&str> = remainder.split('/').collect();
                 if parts.len() == 2 {
-                    if let Ok(index) = parts[1].parse::<usize>() {
+                    if let Ok(index) = parts[1].parse::<u32>() {
                         self.handle_put_routine(conn, parts[0], index).await
                     } else {
                         Self::send_bad_request(conn, "Invalid routine index").await
@@ -1192,7 +1192,7 @@ impl Handler for HttpHandler {
                 let remainder = p.strip_prefix("/routines/").unwrap_or("");
                 let parts: Vec<&str> = remainder.split('/').collect();
                 if parts.len() == 2 {
-                    if let Ok(index) = parts[1].parse::<usize>() {
+                    if let Ok(index) = parts[1].parse::<u32>() {
                         self.handle_delete_routine(conn, parts[0], index).await
                     } else {
                         Self::send_bad_request(conn, "Invalid routine index").await
@@ -1207,7 +1207,7 @@ impl Handler for HttpHandler {
                 let remainder = p.strip_prefix("/command/run-routine/").unwrap_or("");
                 let parts: Vec<&str> = remainder.split('/').collect();
                 if parts.len() == 2 {
-                    if let Ok(index) = parts[1].parse::<usize>() {
+                    if let Ok(index) = parts[1].parse::<u32>() {
                         self.handle_run_routine(conn, parts[0], index).await
                     } else {
                         Self::send_bad_request(conn, "Invalid routine index").await
