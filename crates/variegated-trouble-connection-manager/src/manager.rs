@@ -169,13 +169,27 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                                 state.connection = Some(connection);
                                 state.state = ConnectionState::Connected;
                             }
+                            // A failed attempt starts the cooldown too, not just a
+                            // dropped connection. Without this, `last_disconnect` stays
+                            // `None` for a device that has never connected, the cooldown
+                            // check reads that as "ready", and the loop retries with no
+                            // gap at all -- so a scale that is simply switched off keeps
+                            // this radio scanning essentially without pause.
+                            //
+                            // That is not free on an ESP32-C6: Wi-Fi and BLE share one
+                            // 2.4 GHz antenna, and every scan window is time the Wi-Fi
+                            // side cannot transmit or receive in. Retrying instantly is
+                            // also the case where retrying is *least* likely to help,
+                            // since nothing has changed since the last attempt.
                             Ok(Err(_e)) => {
                                 defmt::warn!("Failed to connect to device {}", address);
                                 state.state = ConnectionState::Disconnected;
+                                state.last_disconnect = Some(embassy_time::Instant::now());
                             }
                             Err(_) => {
                                 defmt::warn!("Connection timeout for device {}", address);
                                 state.state = ConnectionState::Disconnected;
+                                state.last_disconnect = Some(embassy_time::Instant::now());
                             }
                         }
                     }
