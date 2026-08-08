@@ -362,32 +362,35 @@ pub async fn ble_slot_task(
             continue;
         };
 
-        // Inline, in `.bss`, and **not** on the heap. This was boxed once; it panicked
-        // the machine, and the reason is worth stating so nobody boxes it again.
+        // Boxed, and the history matters because the obvious reading of it is wrong.
         //
         // This future is about 10 kB -- the ACAIA arm dominates, carrying a
-        // `FlowEstimator` with a sample deque, a median window and a Kalman filter. On
-        // the heap that would be ~10 kB per *connected* peripheral rather than
-        // `MAX_BLUETOOTH_PERIPHERALS` times in `.bss`, which is genuinely cheaper on a
-        // machine with one scale, and it bought 41688 bytes of `.stack`.
+        // `FlowEstimator` with a sample deque, a median window and a Kalman filter. Left
+        // inline it is part of the task future, which `pool_size` allocates
+        // `MAX_BLUETOOTH_PERIPHERALS` times in `.bss` whether or not anything is
+        // associated; boxed, it costs one allocation per *connected* peripheral and hands
+        // 41 kB back to `.stack`, which is the SRAM remainder.
         //
-        // What it cost was **contiguity**, which is the property that actually matters
-        // here. `esp_alloc` gives each region its own `linked_list_allocator::Heap` and
-        // tries them in registration order, so an allocation must fit contiguously
-        // *within a single region*. The ESPHome server needs one 12000-byte block for its
-        // entity table (`esphome/server.rs`), which it leaks and holds forever. A 10 kB
-        // block dropped into a region, alongside the constant small churn of
-        // `to_allocvec_cobs` on the UART path, can leave that region with ample free space
-        // and no 12000-byte run left in it -- and then the request fails outright and
-        // `handle_alloc_error` takes the machine down. Observed exactly that, at 52 s
-        // uptime, with `memory allocation of 12000 bytes failed`.
+        // Boxing it the first time panicked the machine with
+        // `memory allocation of 12000 bytes failed`. That was not a shortage of heap --
+        // it was **contiguity**. `esp_alloc` gives each region its own
+        // `linked_list_allocator::Heap` and an allocation must fit contiguously inside
+        // one region, and the ESPHome entity table was asking for a single 12000-byte
+        // run. A 10 kB block landing in the same region, alongside the constant churn of
+        // `to_allocvec_cobs` on the UART path, could leave that region with ample free
+        // space and nowhere to put it.
         //
-        // Growing the heap does not fix that: more total space is not more contiguous
-        // space, and the two large permanent consumers are almost the same size, so they
-        // fragment each other whichever order they arrive in.
+        // The entity table is now built in `.bss` (`esphome/entity_builder.rs`), so the
+        // heap no longer has a large contiguous consumer to be fragmented away from. What
+        // is left here is a handful of ~10 kB blocks against 112 kB across two regions,
+        // with a measured peak occupancy of 28 kB before any of this.
         //
-        // `.bss` cannot fail. That is the whole argument for paying for it up front.
-        let driver = async {
+        // One allocation per *assignment*, not per reconnect: the retry loops live inside
+        // the measurement loops, and the `select` below only completes when this slot's
+        // assignment changes. So this runs when a user associates or removes a
+        // peripheral -- long-lived, few and large, which is the least fragmenting shape
+        // for this allocator.
+        let driver = alloc::boxed::Box::pin(async {
             match assignment.driver {
                 BluetoothDriverKind::BelkaPortal => {
                     belka_measurement_loop(
@@ -413,7 +416,7 @@ pub async fn ble_slot_task(
                     .await
                 }
             }
-        };
+        });
 
         // `changed_and` marks a value as seen only when the predicate holds, so a change
         // that reassigns a *different* slot re-parks this one instead of cancelling a

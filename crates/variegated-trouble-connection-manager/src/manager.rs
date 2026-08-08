@@ -36,7 +36,13 @@ pub struct ScanRequest {
 /// device seen incidentally while connecting".
 pub trait ScanSink {
     fn begin(&self);
-    fn end(&self);
+    /// `started` distinguishes a scan that ran and saw nothing from one the controller
+    /// refused to start.
+    ///
+    /// Without it the two are indistinguishable from outside -- both end with an empty
+    /// list -- and they call for opposite responses: one means the device is not
+    /// advertising, the other means the radio never looked.
+    fn end(&self, started: bool);
 }
 
 /// How long the controller listens for advertisements in each scan pass.
@@ -454,17 +460,31 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
         };
 
         sink.begin();
-        match scanner.scan(&config).await {
+        let started = match scanner.scan(&config).await {
             Ok(session) => {
                 defmt::info!("[ble] discovery scan started");
                 Timer::after(request.duration).await;
                 // Dropping the session cancels the scan, which the control runner turns
                 // into `LeSetScanEnable(false)`.
                 drop(session);
+                true
             }
-            Err(_e) => defmt::warn!("[ble] discovery scan failed to start"),
-        }
-        sink.end();
+            // Matched rather than formatted whole: `BleHostError`'s `Controller` arm
+            // carries the controller's own error type, which has no `defmt::Format`
+            // bound here and would force one on every caller. The host arm is the
+            // informative one anyway -- it is where an HCI status such as
+            // `CommandDisallowed` surfaces, and that is the code that distinguishes "a
+            // connection attempt is still outstanding" from "these parameters are wrong".
+            Err(BleHostError::BleHost(e)) => {
+                defmt::warn!("[ble] discovery scan failed to start: {:?}", e);
+                false
+            }
+            Err(_) => {
+                defmt::warn!("[ble] discovery scan failed to start: controller error");
+                false
+            }
+        };
+        sink.end(started);
 
         // Borrow-checked ordering: `scan` takes `&mut scanner` and the session borrows
         // it, so the session is necessarily dropped before this line.

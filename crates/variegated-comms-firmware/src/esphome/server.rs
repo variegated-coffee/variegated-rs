@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use static_cell::StaticCell;
 use embassy_futures::join::join4;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
@@ -53,7 +54,17 @@ pub async fn esphome_server_task(
     let device_config = Box::leak(Box::new(build_device_config(machine_def, mac_address)));
     log_info!("Built dynamic device config for: {}", device_config.name);
 
-    let entities = Box::leak(entity_builder::build_entities(&config, machine_def, None).into_boxed_slice());
+    // `.bss`, not the heap. This used to be `Box::leak(..into_boxed_slice())`, i.e. one
+    // contiguous 12000-byte allocation -- the largest and most fragile request this
+    // firmware made, and one that took the processor down with `handle_alloc_error` when
+    // it could not find an unbroken run. See `entity_builder::build_entities`.
+    //
+    // A `StaticCell` has exactly the lifetime the leaked box had, so nothing downstream
+    // changes; it simply cannot fail.
+    static ENTITY_TABLE: StaticCell<entity_builder::EntityList> = StaticCell::new();
+    let entity_table = ENTITY_TABLE.init(entity_builder::EntityList::new());
+    entity_builder::build_entities(&config, machine_def, None, entity_table);
+    let entities: &'static [esphome_device::EntityConfig<'static>] = entity_table.as_slice();
     log_info!("Built {} dynamic entities from configuration", entities.len());
 
     // Get channel ends for the various tasks

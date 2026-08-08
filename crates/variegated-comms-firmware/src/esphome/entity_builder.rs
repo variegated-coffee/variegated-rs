@@ -1,6 +1,7 @@
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::ToString;
+use variegated_log::log_warn;
 use alloc::vec;
 use alloc::vec::Vec;
 use esphome_device::{BinarySensorConfig, EntityConfig};
@@ -257,42 +258,92 @@ pub fn string_to_machine_mode(s: &str) -> Option<variegated_controller_types::Ma
     }
 }
 
+/// Ceiling on the entity table.
+///
+/// A dual-boiler machine builds about 100. 128 leaves headroom for another component
+/// without being so generous that the reservation hurts: at
+/// `size_of::<EntityConfig>() == 120` this is 15360 bytes of `.bss`, and `.bss` comes out
+/// of the stack.
+///
+/// Overflow truncates and logs rather than panicking. A machine missing three sensors
+/// from Home Assistant is a much better outcome than one that will not boot.
+pub const MAX_ENTITIES: usize = 128;
+
+/// The entity table, sized once and held for the life of the process.
+pub type EntityList = heapless::Vec<EntityConfig<'static>, MAX_ENTITIES>;
+
+/// Build the ESPHome entity table into caller-provided storage.
+///
+/// # Why this does not return a `Vec`
+///
+/// It used to, and the caller `Box::leak`ed it -- which meant asking the allocator for
+/// one contiguous 12000-byte block. `esp_alloc` gives each heap region its own
+/// `linked_list_allocator::Heap` and an allocation must fit contiguously inside a single
+/// region, so that request was the largest and most fragile on the machine: it competed
+/// with every other long-lived allocation for an unbroken run, and when it lost,
+/// `handle_alloc_error` took the whole processor down. That happened.
+///
+/// Writing into storage the caller owns -- in practice a `StaticCell`, i.e. `.bss` --
+/// removes the failure entirely rather than making it less likely. The table is leaked
+/// either way, so a static has exactly the lifetime the heap version had.
+///
+/// The per-component helpers below still return `Vec`, and deliberately: each is a
+/// couple of kilobytes, allocated and dropped immediately, which is the shape a
+/// first-fit allocator handles without complaint.
 pub fn build_entities(
     config: &Configuration,
     machine_def: &MachineDefinition,
-    status: Option<&Status>
-) -> Vec<EntityConfig<'static>> {
-    let mut entities = Vec::new();
+    status: Option<&Status>,
+    entities: &mut EntityList,
+) {
+    let mut dropped = 0usize;
+
+    // `heapless::Vec` implements `Extend` by silently discarding what does not fit, which
+    // would make a truncated table indistinguishable from a complete one. Counting is the
+    // whole reason this is not `entities.extend(..)`.
+    let mut append = |entities: &mut EntityList, built: Vec<EntityConfig<'static>>| {
+        for entity in built {
+            if entities.push(entity).is_err() {
+                dropped += 1;
+            }
+        }
+    };
 
     // Build machine-level configuration entities
-    entities.extend(build_machine_entities(&config.machine_config, machine_def));
+    append(entities, build_machine_entities(&config.machine_config, machine_def));
 
     // Build boiler entities
     for (&boiler_index, boiler_config) in config.iter_boilers() {
-        entities.extend(build_boiler_entities(boiler_index, boiler_config, machine_def, status));
+        append(entities, build_boiler_entities(boiler_index, boiler_config, machine_def, status));
     }
 
     // Build group entities
     for (&group_index, group_config) in config.iter_groups() {
-        entities.extend(build_group_entities(group_index, group_config, machine_def, status));
+        append(entities, build_group_entities(group_index, group_config, machine_def, status));
     }
 
     // Build water tap entities
     for (&water_tap_index, water_tap_config) in config.iter_water_taps() {
-        entities.extend(build_water_tap_entities(water_tap_index, water_tap_config, machine_def, status));
+        append(entities, build_water_tap_entities(water_tap_index, water_tap_config, machine_def, status));
     }
 
     // Build steam wand entities
     for (&steam_wand_index, steam_wand_config) in config.iter_steam_wands() {
-        entities.extend(build_steam_wand_entities(steam_wand_index, steam_wand_config, machine_def, status));
+        append(entities, build_steam_wand_entities(steam_wand_index, steam_wand_config, machine_def, status));
     }
 
     // Build tank entities
     for (&tank_index, tank_config) in config.iter_tanks() {
-        entities.extend(build_tank_entities(tank_index, tank_config, machine_def, status));
+        append(entities, build_tank_entities(tank_index, tank_config, machine_def, status));
     }
 
-    entities
+    if dropped > 0 {
+        log_warn!(
+            "Entity table full at {}: {} entities dropped and will not appear in Home Assistant",
+            MAX_ENTITIES,
+            dropped
+        );
+    }
 }
 
 fn build_machine_entities(

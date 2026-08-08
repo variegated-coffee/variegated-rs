@@ -2,7 +2,7 @@
 
 use core::cell::RefCell;
 
-use variegated_log::log_info;
+use variegated_log::{log_info, log_warn};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Receiver};
 use heapless::Deque;
@@ -87,8 +87,16 @@ impl ScanSink for ScanPrinter {
         self.active.store(true, Ordering::Relaxed);
     }
 
-    fn end(&self) {
+    fn end(&self, started: bool) {
         self.active.store(false, Ordering::Relaxed);
+
+        // Logged here rather than in the manager because the manager logs with raw
+        // `defmt`, which does not reach this firmware's debug transports -- so a scan
+        // that never started looked exactly like one that found nothing.
+        if !started {
+            log_warn!("Bluetooth scan did not start: the controller refused it");
+        }
+
         let reports_dropped = self.dropped.load(Ordering::Relaxed);
         // If this does not fit, the application processor's own scan deadline ends the
         // scan a few seconds later. Losing it costs the dropped-report count, not the
