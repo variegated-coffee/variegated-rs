@@ -112,11 +112,25 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
         }
     };
 
-    // Create UDP socket for NTP
-    let mut rx_meta = [PacketMetadata::EMPTY; 16];
-    let mut rx_buffer = [0; 4096];
-    let mut tx_meta = [PacketMetadata::EMPTY; 16];
-    let mut tx_buffer = [0; 4096];
+    // Create UDP socket for NTP.
+    //
+    // Sized to the protocol rather than to a round number. An SNTP packet is 48 bytes
+    // (RFC 4330 §4); the only thing that makes one longer is an authenticator, which
+    // `sntpc` neither sends nor parses. 512 bytes is ten times the largest datagram
+    // this socket can meaningfully see.
+    //
+    // These are locals of an `#[embassy_executor::task]`, so they are not transient
+    // stack -- they live in the task's future in `.bss` for the whole life of the
+    // firmware. `.stack` is the SRAM remainder (see the heap note in `main.rs`), so
+    // 8 kB here was 8 kB taken off the one stack the deepest postcard recursion runs
+    // in, permanently, to hold 48-byte packets once every 300 s.
+    //
+    // Four metadata slots for the same reason: `get_time` has exactly one datagram in
+    // flight at a time.
+    let mut rx_meta = [PacketMetadata::EMPTY; 4];
+    let mut rx_buffer = [0; 512];
+    let mut tx_meta = [PacketMetadata::EMPTY; 4];
+    let mut tx_buffer = [0; 512];
 
     let mut socket = UdpSocket::new(
         stack,

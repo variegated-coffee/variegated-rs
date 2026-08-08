@@ -36,6 +36,23 @@ impl<'a> ScaleNotificationStream<'a> {
     /// This method buffers incoming data to handle fragmented BLE notifications.
     pub async fn next(&mut self) -> Result<ScaleEvent, Error> {
         loop {
+            // Drain what is already buffered *before* awaiting.
+            //
+            // `try_parse_buffer` returns on the first complete frame and leaves the
+            // remainder in place, so one notification carrying two frames leaves the
+            // second one sitting here. Awaiting first meant that second event was not
+            // returned until *another* notification arrived -- a full connection
+            // interval, 80 ms on this link, later.
+            //
+            // For weight alone that is invisible: the value is still correct, just late.
+            // It stops being invisible once something differentiates the stream, because
+            // the late event is timestamped on arrival: one sample is stamped ~80 ms after
+            // it was really taken, and the sample after it gets a correspondingly short
+            // interval. A rate computed across either is wrong in opposite directions.
+            if let Some(event) = self.try_parse_buffer()? {
+                return Ok(event);
+            }
+
             // Wait for next notification
             let notification = self.listener.next().await;
             let data: &[u8] = notification.as_ref();
@@ -49,12 +66,6 @@ impl<'a> ScaleNotificationStream<'a> {
 
             defmt::debug!("Buffered {} bytes, total buffer size: {}", data.len(), self.buffer.len());
             debug!("Data: {:?}", self.buffer);
-
-            // Try to parse a complete frame from the buffer
-            if let Some(event) = self.try_parse_buffer()? {
-                return Ok(event);
-            }
-            // No complete packet yet, loop back to wait for more data
         }
     }
 

@@ -71,6 +71,17 @@ pub const BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID: u16 = 0xB5C0;
 pub const BLUETOOTH_GROUP_2_SCALE_PERIPHERAL_ID: u16 = 0xB5C1;
 pub const BLUETOOTH_DOSE_SCALE_1_PERIPHERAL_ID: u16 = 0xB5D0;
 
+/// Endpoints a scale reports on, within `ExternalPeripheralSensorReading`.
+///
+/// The peripheral id says *which* scale; the endpoint says *what about it*. Nothing in
+/// this firmware interprets an endpoint -- the meaning is assigned on the application
+/// processor, in `variegated_hal::scale::bluetooth` -- so these are one half of a wire
+/// contract whose other half is a matching pair of constants over there, and the
+/// numbers must agree. They are named here rather than written as literals at the send
+/// sites so the contract is at least stated on the side that produces it.
+pub const BLUETOOTH_SCALE_ENDPOINT_WEIGHT: u8 = 0;
+pub const BLUETOOTH_SCALE_ENDPOINT_FLOW: u8 = 1;
+
 pub fn acaia_address() -> BdAddr {
     BdAddr::new([0x2f, 0xa0, 0x1a, 0x97, 0x1c, 0x00])
 }

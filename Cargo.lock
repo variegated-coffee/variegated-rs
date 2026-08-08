@@ -2492,6 +2492,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "micromath"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
+
+[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3671,6 +3677,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
+name = "variegated-adc-tools"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
+ "micromath",
+]
+
+[[package]]
 name = "variegated-belka-portal-trouble-driver"
 version = "0.1.0"
 dependencies = [
@@ -3726,6 +3740,7 @@ dependencies = [
  "sntpc",
  "static_cell",
  "trouble-host",
+ "variegated-adc-tools",
  "variegated-belka-portal-trouble-driver",
  "variegated-comms-api-types",
  "variegated-controller-types",

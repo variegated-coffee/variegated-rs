@@ -595,9 +595,33 @@ async fn main(spawner: Spawner) -> ! {
     let connector = BleConnector::new(peripherals.BT, Default::default()).unwrap();
     let controller: ExternalController<_, 20> = ExternalController::new(connector);
 
-    // Create BLE host resources
+    // Create BLE host resources.
+    //
+    // `<CONNS, CHANNELS, ADV_SETS>`, sized to what this firmware is rather than to
+    // trouble-host's example defaults it was carrying (`4, 12, 16`). This is not free
+    // real estate: `HostResources` is a `mk_static!` static, `.stack` is the SRAM
+    // remainder, so every unused slot here is stack the deepest postcard recursion
+    // does not get. The three were worth 2752 bytes together.
+    //
+    // - `CONNS = 3`. This is a central and connects to exactly two peripherals, the
+    //   Belka portal and the scale. The third is margin for a reconnect that overlaps
+    //   a not-yet-reaped stale connection, which the manager's maintenance pass can
+    //   briefly produce.
+    // - `CHANNELS = 2`. `ChannelStorage` is *dynamic L2CAP connection-oriented*
+    //   channels only -- GATT does not use it, it rides the fixed ATT CID through
+    //   `ConnectionStorage::gatt_client`. Nothing here opens a CoC channel: both
+    //   drivers are plain GATT clients. This could be 0; 2 is left as headroom
+    //   because each slot embeds a `PacketChannel<_, L2CAP_RX_QUEUE_SIZE>` and
+    //   discovering the need for one at runtime is worse than paying for two.
+    // - `ADV_SETS = 1`. This firmware never advertises -- there is no `Peripheral`,
+    //   no `advertise()` call, in the firmware or in either driver. `AdvHandleState`
+    //   is small, so 16 -> 1 is the least of the three; it is corrected because a
+    //   count of 16 advertising sets actively misdescribes what this radio does.
+    //
+    // If any of those three claims stops being true, this line is the thing that
+    // fails, and it fails at connect/advertise time rather than at compile time.
     let ble_resources = mk_static!(
-        HostResources<DefaultPacketPool, 4, 12, 16>,
+        HostResources<DefaultPacketPool, 3, 2, 1>,
         HostResources::new()
     );
 

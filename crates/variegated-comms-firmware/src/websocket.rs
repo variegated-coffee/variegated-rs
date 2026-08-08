@@ -29,7 +29,22 @@ pub async fn websocket_server_task(
     mut routine_subscriber: ApplicationRoutineSubscriber,
     machine_command_channel: &'static Channel<CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) {
-    let mut rx_buffer = [0u8; 4096];
+    // smoltcp's socket buffers, and the two are deliberately asymmetric.
+    //
+    // These are locals of an `#[embassy_executor::task]`, so they are not transient
+    // stack: they live in the task's future in `.bss` for the life of the firmware,
+    // and `.stack` is the SRAM remainder (see the heap note in `main.rs`). Every byte
+    // here is a byte the deepest postcard recursion does not get.
+    //
+    // `rx` is the receive window for a direction that only ever carries
+    // `RequestMachineDefinition`, `RequestRoutines` and `SendMachineCommand` -- and
+    // `MachineCommand` is 128 bytes. 1 kB is already eight times the largest thing a
+    // client can say.
+    //
+    // `tx` stays at 4 kB and should not be cut. It is the window for the *server's*
+    // pushes, and a `MachineDefinition` serialises into the low thousands; shrinking
+    // it would make the 5 Hz status push wait on ACKs mid-frame.
+    let mut rx_buffer = [0u8; 1024];
     let mut tx_buffer = [0u8; 4096];
 
     let command_sender = machine_command_channel.sender();
@@ -76,8 +91,14 @@ async fn handle_websocket_connection(
     routine_subscriber: &mut ApplicationRoutineSubscriber,
     command_sender: Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) -> Result<(), &'static str> {
-    // Perform WebSocket handshake
-    let mut handshake_buf = [0u8; 1024];
+    // Perform WebSocket handshake.
+    //
+    // One `read`, not a loop, so this only ever holds whatever arrived in the first
+    // segment -- a request split across segments fails here regardless of the size,
+    // and making the buffer bigger does not change that. 512 bytes covers a browser
+    // upgrade request (the parse needs `Sec-WebSocket-Key`, which browsers put in the
+    // first few hundred bytes) without paying for a size that would not help anyway.
+    let mut handshake_buf = [0u8; 512];
     let n = embedded_io_async::Read::read(&mut socket, &mut handshake_buf).await.map_err(|_| "Failed to read handshake")?;
 
     if n == 0 {
@@ -107,9 +128,26 @@ async fn handle_websocket_connection(
 
     log_info!("WebSocket handshake completed");
 
-    // Buffers for frame processing
-    let mut frame_buf = [0u8; 2048];
-    let mut send_buf = [0u8; 2048];
+    // Buffers for frame processing.
+    //
+    // `frame_buf` bounds the largest payload a client may send: `receive_frame_rx`
+    // rejects anything longer outright. The client half of `WsMessage` is
+    // `RequestMachineDefinition`, `RequestRoutines` and `SendMachineCommand`, and
+    // `MachineCommand` is 128 bytes, so 256 is double the largest legal frame. It was
+    // 2048, which bought nothing: a frame between 256 and 2048 bytes is not a message
+    // this server has a variant for, so accepting it only moves the failure from
+    // "payload too large" to a postcard error.
+    //
+    // `header_buf` is *not* a send buffer, whatever its old name suggested. The
+    // payload never passes through it -- `send_frame_tx` writes the serialised
+    // `FrameHeader` here and then writes the payload straight from its own slice in a
+    // second `write_all`. An unmasked header is at most 10 bytes (2 + 8 for a 64-bit
+    // extended length; the 4 mask bytes are client-to-server only, and this side
+    // always sends `mask_key: None`). `serialize` bounds-checks against
+    // `serialized_len`, so 16 is margin over a hard maximum, not a guess. This was
+    // 2048 bytes to hold 10.
+    let mut frame_buf = [0u8; 256];
+    let mut header_buf = [0u8; 16];
 
     // Split socket into read and write halves for concurrent access
     let (mut socket_rx, mut socket_tx) = socket.split();
@@ -145,7 +183,22 @@ async fn handle_websocket_connection(
             // Update handler - sends updates until frame is received
             async {
                 loop {
-                    match select(
+                    // Encode inside the match, send outside it.
+                    //
+                    // The scrutinee here is `Either<(), Either<Status,
+                    // Either<Configuration, RoutineList>>>`, and a match keeps its
+                    // scrutinee alive for the whole match expression -- so awaiting the
+                    // socket inside an arm parks that entire `Either` (`Configuration`
+                    // alone is 3464 bytes) *plus* the 3664-byte `WsMessage` built from
+                    // it in this task's future, which lives in `.bss` for the life of
+                    // the firmware rather than on a stack that unwinds.
+                    //
+                    // Hoisting the await out means the match contains no suspension
+                    // point at all, so none of it has to be stored: the only thing that
+                    // crosses the await below is a `Vec` handle. This is the same
+                    // reasoning as the buffer sizes above, applied to the values rather
+                    // than the buffers, and it is worth several times more.
+                    let encoded: Option<Result<Vec<u8>, &'static str>> = match select(
                         frame_done.wait(),
                         select(
                             status_subscriber.next_message_pure(),
@@ -159,20 +212,20 @@ async fn handle_websocket_connection(
                             log_debug!("Update handler: frame_done received, exiting");
                             break;
                         }
-                        Either::Second(Either::First(_status)) => {
+                        Either::Second(Either::First(status)) => {
                             // Throttle status updates to 5 per second
                             let now = Instant::now();
                             if now.duration_since(last_status_send) >= Duration::from_millis(200) {
                                 last_status_send = now;
-                                let msg = WsMessage::StatusUpdate(_status);
-                                let _ = send_ws_message_tx(&mut socket_tx, &mut send_buf, &msg).await;
+                                Some(encode_ws_message(&WsMessage::StatusUpdate(status)))
+                            } else {
+                                None
                             }
                         }
                         Either::Second(Either::Second(Either::First(config))) => {
                             // Send configuration update to client
                             log_info!("Sending ConfigurationUpdate to client");
-                            let msg = WsMessage::ConfigurationUpdate(config);
-                            let _ = send_ws_message_tx(&mut socket_tx, &mut send_buf, &msg).await;
+                            Some(encode_ws_message(&WsMessage::ConfigurationUpdate(config)))
                         }
                         Either::Second(Either::Second(Either::Second(routine_list))) => {
                             // Convert RoutineList to RoutineStorage and send to client
@@ -196,9 +249,28 @@ async fn handle_websocket_connection(
                             }
 
                             let routine_storage = RoutineStorage { internal, function, custom };
-                            let msg = WsMessage::RoutinesUpdate(routine_storage);
-                            let _ = send_ws_message_tx(&mut socket_tx, &mut send_buf, &msg).await;
+                            Some(encode_ws_message(&WsMessage::RoutinesUpdate(routine_storage)))
                         }
+                    };
+
+                    // These three sites used to discard the send with `let _ = ..`, so a
+                    // client that had gone away and a message that would not serialise
+                    // both failed in complete silence. Neither is recoverable here --
+                    // the frame receiver in the other half of the `join` is what notices
+                    // a dead socket and ends the connection -- but they are worth saying.
+                    match encoded {
+                        Some(Ok(bytes)) => {
+                            if let Err(e) = send_frame_tx(
+                                &mut socket_tx,
+                                &mut header_buf,
+                                FrameType::Binary(false),
+                                &bytes,
+                            ).await {
+                                log_warn!("Failed to send update frame: {}", e);
+                            }
+                        }
+                        Some(Err(e)) => log_warn!("Failed to encode update: {}", e),
+                        None => {}
                     }
                 }
             },
@@ -213,19 +285,27 @@ async fn handle_websocket_connection(
                         // Log raw bytes for debugging
                         log_info!("Received binary frame, {} bytes: {:?}", payload.len(), &payload[..core::cmp::min(payload.len(), 32)]);
 
-                        // Deserialize and handle message
-                        match postcard::from_bytes::<WsMessage>(payload) {
-                            Ok(msg) => {
-                                handle_client_message_tx(
-                                    msg,
-                                    &mut socket_tx,
-                                    &mut send_buf,
-                                    &command_sender,
-                                ).await?;
-                            }
+                        // Deserialize, then narrow to `ClientRequest` in the same
+                        // statement, before anything suspends. `handle_client_request_tx`
+                        // is `async`, so whatever is passed into it by value lives in
+                        // this task's future for the life of the firmware -- and the
+                        // decoded `WsMessage` is 3664 bytes against `ClientRequest`'s
+                        // ~132. See the type's doc comment.
+                        let request = match postcard::from_bytes::<WsMessage>(payload) {
+                            Ok(msg) => ClientRequest::from_ws(msg),
                             Err(e) => {
                                 log_warn!("Failed to deserialize WebSocket message: {:?}", defmt::Debug2Format(&e));
+                                None
                             }
+                        };
+
+                        if let Some(request) = request {
+                            handle_client_request_tx(
+                                request,
+                                &mut socket_tx,
+                                &mut header_buf,
+                                &command_sender,
+                            ).await?;
                         }
                     }
                     FrameType::Text(_) => {
@@ -234,7 +314,7 @@ async fn handle_websocket_connection(
                     }
                     FrameType::Ping => {
                         // Respond with Pong
-                        send_frame_tx(&mut socket_tx, &mut send_buf, FrameType::Pong, payload).await?;
+                        send_frame_tx(&mut socket_tx, &mut header_buf, FrameType::Pong, payload).await?;
                     }
                     FrameType::Pong => {
                         // Ignore pong frames
@@ -243,7 +323,7 @@ async fn handle_websocket_connection(
                     FrameType::Close => {
                         log_info!("Client sent close frame");
                         // Send close frame back
-                        send_frame_tx(&mut socket_tx, &mut send_buf, FrameType::Close, &[]).await?;
+                        send_frame_tx(&mut socket_tx, &mut header_buf, FrameType::Close, &[]).await?;
                         return Ok(());
                     }
                     FrameType::Continue(_) => {
@@ -685,89 +765,152 @@ async fn send_frame_tx(
     Ok(())
 }
 
-/// Send a WsMessage as a binary frame using TcpWriter
-async fn send_ws_message_tx(
-    writer: &mut TcpWriter<'_>,
-    buf: &mut [u8],
-    msg: &WsMessage<'_>,
-) -> Result<(), &'static str> {
-    let serialized = postcard::to_allocvec(msg).map_err(|_| "Failed to serialize message")?;
-    send_frame_tx(writer, buf, FrameType::Binary(false), &serialized).await
+/// Serialise a `WsMessage` into a heap buffer.
+///
+/// Synchronous, and that is the whole reason it exists apart from the send. A
+/// `WsMessage` is 3664 bytes -- it carries `Status` (2408), `Configuration` (3464)
+/// and `MachineDefinition` (3660) inline, by value -- so any message still alive
+/// across a socket write is 3664 bytes resident in the enclosing task's future, in
+/// `.bss`, forever, at every send site the compiler cannot prove disjoint from the
+/// others. On this chip `.stack` is the SRAM remainder, so that is stack taken from
+/// the deepest postcard recursion (see the heap note in `main.rs`).
+///
+/// Because this returns the bytes instead of taking the writer, every caller can
+/// build, encode and drop a message inside a single statement containing no `.await`.
+/// Only the returned `Vec` handle then crosses the suspension point.
+///
+/// Callers must not hold the message past this call. Taking `&WsMessage` rather than
+/// consuming it is deliberate: the natural call is
+/// `encode_ws_message(&WsMessage::Foo(..))`, where the argument is a temporary that
+/// dies at the end of the statement.
+fn encode_ws_message(msg: &WsMessage<'_>) -> Result<Vec<u8>, &'static str> {
+    postcard::to_allocvec(msg).map_err(|_| "Failed to serialize message")
 }
 
-/// Handle a message from the client using TcpWriter
-async fn handle_client_message_tx<'a>(
-    msg: WsMessage<'a>,
+/// What a client actually asked for.
+///
+/// `WsMessage` is the wire envelope for *both* directions, which is why it is 3664
+/// bytes: it has to be able to hold a `MachineDefinition`. Only three of its variants
+/// can ever arrive *from* a client, and the largest thing among them is a 128-byte
+/// `MachineCommand`, so this is around 132 bytes.
+///
+/// Narrowing to it immediately after `from_bytes`, in a statement with no `.await`,
+/// is what keeps the envelope out of the task's future: the handler below is `async`,
+/// so anything handed to it by value is stored for the life of the firmware.
+enum ClientRequest {
+    MachineDefinition,
+    Routines,
+    Command(MachineCommand),
+}
+
+impl ClientRequest {
+    /// `None` for anything this server has no action for -- including the
+    /// server-to-client variants, which a client has no business sending.
+    fn from_ws(msg: WsMessage<'_>) -> Option<Self> {
+        match msg {
+            WsMessage::RequestMachineDefinition => Some(Self::MachineDefinition),
+            WsMessage::RequestRoutines => Some(Self::Routines),
+            WsMessage::SendMachineCommand(cmd) => Some(Self::Command(cmd)),
+            _ => {
+                log_warn!("Received unexpected message type from client");
+                None
+            }
+        }
+    }
+}
+
+/// Serve a [`ClientRequest`] on the write half of a split socket.
+///
+/// Every arm that answers does so in two steps: an `encoded` block that takes the
+/// lock, clones, wraps and serialises, and then a single `send_frame_tx` outside it.
+/// That shape is load-bearing twice over.
+///
+/// The memory half: the block ends before the write begins, so the guard, the clone
+/// and the 3664-byte `WsMessage` are all dropped before this function suspends, and
+/// none of them is stored in the future. Written the obvious way -- build the
+/// response, then `send(..).await` while it is still in scope -- each arm contributes
+/// its own copy to `.bss`.
+///
+/// The correctness half: `MACHINE_DEFINITION` and `ROUTINE_CACHE` are also written by
+/// the application-processor path, and the previous version held those mutexes across
+/// the socket write. A client that stopped reading could therefore block the
+/// application processor's cache updates for as long as its TCP window stayed shut.
+async fn handle_client_request_tx(
+    request: ClientRequest,
     writer: &mut TcpWriter<'_>,
-    send_buf: &mut [u8],
+    header_buf: &mut [u8],
     command_sender: &Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) -> Result<(), &'static str> {
-    match msg {
-        WsMessage::RequestMachineDefinition => {
+    match request {
+        ClientRequest::MachineDefinition => {
             log_info!("Received RequestMachineDefinition");
-            let guard = MACHINE_DEFINITION.lock().await;
-            if let Some(machine_def) = guard.as_ref() {
-                let response = WsMessage::MachineDefinition(machine_def.clone());
-                send_ws_message_tx(writer, send_buf, &response).await?;
-                log_info!("Sent MachineDefinition response");
-            } else {
-                log_warn!("Machine definition not available, sending error");
-                let response = WsMessage::CommandAck {
-                    id: 0,
-                    success: false,
-                    error: Some("Machine definition not available yet"),
-                };
-                send_ws_message_tx(writer, send_buf, &response).await?;
-            }
-        }
-        WsMessage::RequestRoutines => {
-            log_info!("Received RequestRoutines");
-            let guard = ROUTINE_CACHE.lock().await;
-            if let Some(routine_list) = guard.as_ref() {
-                let mut internal = BTreeMap::new();
-                let mut function = BTreeMap::new();
-                let mut custom = BTreeMap::new();
-
-                for (idx, routine) in routine_list.routines.iter() {
-                    match idx {
-                        RoutineIndex::Internal(n) => {
-                            internal.insert(*n as u32, routine.clone());
-                        }
-                        RoutineIndex::Function(n) => {
-                            function.insert(*n as u32, routine.clone());
-                        }
-                        RoutineIndex::Custom(n) => {
-                            custom.insert(*n as u32, routine.clone());
-                        }
+            let encoded = {
+                let guard = MACHINE_DEFINITION.lock().await;
+                match guard.as_ref() {
+                    Some(machine_def) => {
+                        encode_ws_message(&WsMessage::MachineDefinition(machine_def.clone()))?
+                    }
+                    None => {
+                        log_warn!("Machine definition not available, sending error");
+                        encode_ws_message(&WsMessage::CommandAck {
+                            id: 0,
+                            success: false,
+                            error: Some("Machine definition not available yet"),
+                        })?
                     }
                 }
-
-                let storage = RoutineStorage {
-                    internal,
-                    function,
-                    custom,
-                };
-                let response = WsMessage::RoutinesUpdate(storage);
-                send_ws_message_tx(writer, send_buf, &response).await?;
-                log_info!("Sent RoutinesUpdate response");
-            } else {
-                log_warn!("Routines not available, sending error");
-                let response = WsMessage::CommandAck {
-                    id: 0,
-                    success: false,
-                    error: Some("Routines not available yet"),
-                };
-                send_ws_message_tx(writer, send_buf, &response).await?;
-            }
+            };
+            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+            log_info!("Sent MachineDefinition response");
         }
-        WsMessage::SendMachineCommand(cmd) => {
+        ClientRequest::Routines => {
+            log_info!("Received RequestRoutines");
+            let encoded = {
+                let guard = ROUTINE_CACHE.lock().await;
+                match guard.as_ref() {
+                    Some(routine_list) => {
+                        let mut internal = BTreeMap::new();
+                        let mut function = BTreeMap::new();
+                        let mut custom = BTreeMap::new();
+
+                        for (idx, routine) in routine_list.routines.iter() {
+                            match idx {
+                                RoutineIndex::Internal(n) => {
+                                    internal.insert(*n as u32, routine.clone());
+                                }
+                                RoutineIndex::Function(n) => {
+                                    function.insert(*n as u32, routine.clone());
+                                }
+                                RoutineIndex::Custom(n) => {
+                                    custom.insert(*n as u32, routine.clone());
+                                }
+                            }
+                        }
+
+                        encode_ws_message(&WsMessage::RoutinesUpdate(RoutineStorage {
+                            internal,
+                            function,
+                            custom,
+                        }))?
+                    }
+                    None => {
+                        log_warn!("Routines not available, sending error");
+                        encode_ws_message(&WsMessage::CommandAck {
+                            id: 0,
+                            success: false,
+                            error: Some("Routines not available yet"),
+                        })?
+                    }
+                }
+            };
+            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+            log_info!("Sent RoutinesUpdate response");
+        }
+        ClientRequest::Command(cmd) => {
             log_info!("Received SendMachineCommand, forwarding");
             if command_sender.try_send(cmd).is_err() {
                 log_warn!("Command channel full, dropping command");
             }
-        }
-        _ => {
-            log_warn!("Received unexpected message type from client");
         }
     }
     Ok(())

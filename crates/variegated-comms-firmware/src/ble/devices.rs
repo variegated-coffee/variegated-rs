@@ -21,7 +21,11 @@ use crate::channels::{
     BELKA_CONNECTION_STATUS, BLE_RECONNECT_REQUEST, SCALE_CONNECTION_STATUS, SCALE_TARE_REQUEST,
     SENSOR_READING_CAPACITY,
 };
-use crate::config::{BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID};
+use crate::config::{
+    BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID, BLUETOOTH_SCALE_ENDPOINT_FLOW,
+    BLUETOOTH_SCALE_ENDPOINT_WEIGHT,
+};
+use variegated_adc_tools::{ConversionParameters, KalmanFilterParameters};
 
 /// Set the Belka connection flag, emitting a typed event only when it actually
 /// changes.
@@ -75,11 +79,150 @@ fn set_scale_connected(connected: bool) {
     });
 }
 
+/// Number of weight samples the flow estimator differences across.
+///
+/// The baseline is `FLOW_WINDOW_SAMPLES - 1` intervals, so six samples on the scale's
+/// 80 ms grid is a 400 ms baseline. That number is chosen against quantisation, which is
+/// the dominant error here and not load-cell noise: weight arrives quantised to 0.1 g
+/// (`acaia_old::types`), so at a realistic 2 g/s the true step is 0.16 g per sample and a
+/// difference between *adjacent* samples can only ever come out as 1.25 or 2.5 g/s, with
+/// nothing in between. The quantum is fixed in the numerator, so stretching the baseline
+/// five-fold divides its contribution five-fold. The cost is one window of lag, which a
+/// 25-30 s shot absorbs easily.
+const FLOW_WINDOW_SAMPLES: usize = 6;
+
+/// Median window, for outlier rejection ahead of the Kalman.
+///
+/// Note what this does and does not do. A median *selects* an existing sample, so it
+/// cannot average the quantisation staircase away -- that is the Kalman's job, and the
+/// baseline above is what makes the staircase fine enough to be worth averaging. What the
+/// median is for is the genuine outlier: a sample delivered a whole connection interval
+/// late because one BLE notification carried two frames, which the driver surfaces one at
+/// a time.
+const FLOW_MEDIAN_WINDOW: usize = 5;
+
+/// Below this, flow reports exactly zero.
+///
+/// An idle scale still produces a small non-zero slope out of quantisation noise, and a
+/// display or a PID reading +-0.08 g/s from a scale with nothing on it is reporting
+/// something that is not happening.
+///
+/// The tradeoff is real and worth stating: this equally suppresses *genuine* slow flow at
+/// the tail of a shot, which is exactly where brew-by-weight is deciding when to stop. It
+/// is set low enough that it should sit under the noise floor rather than inside the
+/// signal, but it is the first constant to revisit if the last gram of a shot reads wrong.
+const FLOW_DEADBAND_G_PER_S: f32 = 0.1;
+
+/// Shortest baseline that yields a usable rate, in microseconds.
+///
+/// Guards the division. `embassy_time` ticks at 1 MHz here, so this is not about clock
+/// resolution -- it is that two samples reassembled into the same instant would divide a
+/// non-zero weight delta by nearly nothing and produce an enormous rate.
+const FLOW_MIN_BASELINE_US: u64 = 1_000;
+
+/// Derives gravimetric flow rate from a stream of weight samples.
+///
+/// Lives on this processor rather than the application processor for two reasons. The UART
+/// hop and the application processor's scheduling both add latency *between* samples, and
+/// differentiation is precisely the operation that turns jitter in sample timing into
+/// error in the result. And other Bluetooth scales report flow computed in the scale
+/// itself, so the application processor should receive flow as a measurement whoever
+/// produced it, rather than knowing that one particular scale needs it synthesised.
+///
+/// The output is mass flow, g/s. The application processor's `FlowRateType` is nominally
+/// ml/s; under the 1 g/ml assumption the rest of the codebase already makes for coffee
+/// (see `dual_boiler_single_group`'s output-volume derivation) they are interchangeable,
+/// and no conversion is applied.
+struct FlowEstimator {
+    samples: heapless::Deque<(Instant, f32), FLOW_WINDOW_SAMPLES>,
+    filter: ConversionParameters,
+}
+
+impl FlowEstimator {
+    fn new() -> Self {
+        Self {
+            samples: heapless::Deque::new(),
+            filter: Self::filter(),
+        }
+    }
+
+    /// `linear_conversion(1.0, 0.0)` is the identity -- the value is already g/s and needs
+    /// no conversion. It is present because `convert()` applies the median *before* the
+    /// conversion step and the Kalman *after* it, which is the order this wants, and an
+    /// explicit identity is clearer than relying on the no-conversion-configured path.
+    fn filter() -> ConversionParameters {
+        ConversionParameters::linear_conversion(1.0, 0.0)
+            .with_median_filter(FLOW_MEDIAN_WINDOW)
+            .with_kalman_preset(KalmanFilterParameters::balanced())
+    }
+
+    /// Discard all history, including the filters'.
+    ///
+    /// The filters are rebuilt rather than reset. `ConversionParameters::reset_kalman_filter`
+    /// does not restore the error covariance to its initial value -- the initial value is
+    /// not stored on the filter at all, despite a comment in that crate saying it will be --
+    /// so a reset filter would carry its old confidence into a fresh signal. Rebuilding is
+    /// two allocations of nothing and is exactly right.
+    fn reset(&mut self) {
+        self.samples.clear();
+        self.filter = Self::filter();
+    }
+
+    /// Feed a weight sample; returns a flow rate once there is enough history for one.
+    ///
+    /// `None` rather than `0.0` while warming up. Zero is a *measurement* here -- it means
+    /// "not flowing" -- so reporting it before the estimator can tell would be a lie of
+    /// exactly the kind the debug snapshot's "absent, never zero" rule exists to prevent.
+    fn push(&mut self, now: Instant, weight: f32) -> Option<f32> {
+        // A reading of exactly zero is the observable end state of a tare, and the tare is
+        // the one discontinuity that would otherwise wreck this. Keying on the value rather
+        // than on the tare *command* matters: the scale runs several of its own measuring
+        // cycles before the reading settles, so a reset when the command is written would
+        // discard samples that are still pre-tare and leave the transition in the buffer.
+        //
+        // It also catches what no command can. A tare from the scale's own button is
+        // invisible here -- the driver surfaces only `ScaleEvent::Weight` -- as is a
+        // power-on, and the cup being lifted off. All three land on zero.
+        //
+        // Comparing a float with `==` is safe on this value specifically: it is decoded as
+        // `raw_u16 / 10^scale_index` with a separate sign bit, so a zero raw reading is
+        // exactly `0.0` or `-0.0` (which compare equal), never an accumulated near-zero.
+        if weight == 0.0 {
+            self.reset();
+            return None;
+        }
+
+        if self.samples.is_full() {
+            self.samples.pop_front();
+        }
+        let _ = self.samples.push_back((now, weight));
+
+        if !self.samples.is_full() {
+            return None;
+        }
+
+        let (t_old, w_old) = *self.samples.front()?;
+        let (t_new, w_new) = *self.samples.back()?;
+
+        let dt_us = t_new.duration_since(t_old).as_micros();
+        if dt_us < FLOW_MIN_BASELINE_US {
+            return None;
+        }
+
+        let raw = (w_new - w_old) / (dt_us as f32 / 1_000_000.0);
+        let smoothed = self.filter.convert(raw);
+
+        Some(if smoothed.abs() < FLOW_DEADBAND_G_PER_S {
+            0.0
+        } else {
+            smoothed
+        })
+    }
+}
+
 /// BLE devices management task
 ///
 /// Manages connections to Belka Portal and ACAIA scale, running their measurement loops.
-///
-/// Belka is currently commented out while the ACAIA scale driver is being brought up.
 #[embassy_executor::task]
 pub async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
@@ -92,10 +235,10 @@ pub async fn ble_devices_task(
 
     // Register both devices and enable auto-connection
     {
-/*        // Register Belka Portal
+        // Register Belka Portal
         let device_handle = handle.register_device(belka_address);
         let driver = BelkaPortalDriver::new(device_handle, stack);
-        driver.set_maintain_connection(true).await; */
+        driver.set_maintain_connection(true).await;
 
         // Register ACAIA scale
         let device_handle = handle.register_device(acaia_address);
@@ -109,13 +252,13 @@ pub async fn ble_devices_task(
     // listener concurrently.
     join(
         manager.run(),
-//        join(
+        join(
             join(
-                //belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
+                belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
                 acaia_measurement_loop(handle.clone(), stack, acaia_address, sensor_sender),
-                reconnect_request_loop(handle.clone(), belka_address),
             ),
-//        ),
+            reconnect_request_loop(handle.clone(), belka_address),
+        ),
     )
     .await;
 }
@@ -167,7 +310,6 @@ async fn reconnect_request_loop(
 }
 
 /// Belka Portal measurement loop
-#[allow(dead_code)] // Temporarily unwired; see `ble_devices_task`.
 async fn belka_measurement_loop(
     handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
@@ -366,8 +508,12 @@ async fn acaia_measurement_loop(
                             let mut last_heartbeat = Instant::now();
                             // Edge-triggers the "channel full" log below. A persistently
                             // full channel would otherwise log at the notification rate,
-                            // which is the same 10-20 Hz flood the drop exists to avoid.
+                            // which is the same ~12.5 Hz flood the drop exists to avoid.
                             let mut dropping_weights = false;
+                            // Declared inside the connected scope, so a reconnect starts
+                            // with no history rather than differencing the first new
+                            // sample against a weight from before the link dropped.
+                            let mut flow = FlowEstimator::new();
 
                             loop {
                                 // Race between: next event, periodic timer, and a tare.
@@ -415,12 +561,12 @@ async fn acaia_measurement_loop(
                                                         // disconnect and a five-second reconnect cycle.
                                                         //
                                                         // Dropping is the right failure: the next weight
-                                                        // arrives in 50-100 ms and supersedes this one, so a
+                                                        // arrives ~80 ms later and supersedes this one, so a
                                                         // full channel costs one sample rather than the
                                                         // connection.
                                                         let weight_reading = ExternalPeripheralSensorReading {
                                                             id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
-                                                            endpoint: 0,
+                                                            endpoint: BLUETOOTH_SCALE_ENDPOINT_WEIGHT,
                                                             value: w.weight,
                                                         };
                                                         match sensor_sender.try_send(weight_reading) {
@@ -436,6 +582,29 @@ async fn acaia_measurement_loop(
                                                                     log_error!("Sensor channel full, dropping scale weights");
                                                                 }
                                                             }
+                                                        }
+
+                                                        // Flow is derived from the same sample, timestamped
+                                                        // here rather than in the driver because this is as
+                                                        // close to arrival as the value gets.
+                                                        //
+                                                        // `None` while the estimator warms up or straddles a
+                                                        // tare, and in that case nothing is sent at all --
+                                                        // the application processor's watch keeps its last
+                                                        // value, which `BluetoothScale` zeroes on disconnect.
+                                                        //
+                                                        // Shares the weight's drop-rather-than-block
+                                                        // discipline, but deliberately not its logging: two
+                                                        // edge-triggered flags for one channel would both
+                                                        // fire on the same congestion and say the same thing
+                                                        // twice. The weight flag already reports it.
+                                                        if let Some(flow_rate) = flow.push(Instant::now(), w.weight) {
+                                                            let flow_reading = ExternalPeripheralSensorReading {
+                                                                id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+                                                                endpoint: BLUETOOTH_SCALE_ENDPOINT_FLOW,
+                                                                value: flow_rate,
+                                                            };
+                                                            let _ = sensor_sender.try_send(flow_reading);
                                                         }
                                                     }
                                                 }

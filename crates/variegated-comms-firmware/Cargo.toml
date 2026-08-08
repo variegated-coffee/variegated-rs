@@ -55,6 +55,13 @@ variegated-debug-codec = { path = "../../variegated-rs/variegated-debug-codec", 
 # `define_counters!`/`define_indicators!` expand to `$crate::…` paths that only
 # resolve if the crate is nameable here.
 variegated-instrumentation = { path = "../../variegated-rs/variegated-instrumentation", features = ["instrumentation"] }
+# For `ConversionParameters`' median and Kalman filters, which smooth the gravimetric
+# flow rate derived in `ble::devices`. Nothing here converts an ADC count -- the crate
+# is named for its main use on the application processor, but the filters are the
+# portable part of it: `#![no_std]`, `micromath` + `heapless` only, no embassy and
+# nothing RP2350-specific. Both workspaces pin `heapless 0.9.3`, so it unifies; this is
+# what pulls `micromath` into this graph for the first time.
+variegated-adc-tools = { path = "../../variegated-rs/variegated-adc-tools" }
 bt-hci.workspace = true
 postcard = { workspace = true, features = ["alloc", "use-crc"] }
 serde = { workspace = true, features = ["derive", "alloc"] }

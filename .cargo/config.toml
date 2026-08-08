@@ -3,6 +3,7 @@ runner = "espflash flash --monitor --chip esp32c6 --log-format defmt --output-fo
 
 [env]
 DEFMT_LOG="info"
+VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS = "1"
 
 # Let smoltcp drain the whole RX queue in one poll instead of three packets at a time.
 #
