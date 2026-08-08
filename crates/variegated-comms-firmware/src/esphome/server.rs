@@ -105,8 +105,20 @@ async fn tcp_server_loop(
     state_change_channel: &'static StateChangeChannel,
     client_event_channel: &'static Channel<CriticalSectionRawMutex, ClientEvent, CLIENT_EVENT_CAPACITY>,
 ) {
-    let mut rx_buffer = [0u8; 4096];
-    let mut tx_buffer = [0u8; 4096];
+    // 4096 -> 2048 each, i.e. 4 kB of `.bss` back to the stack.
+    //
+    // These live in the task future, not on the heap, and `pool_size` means the whole
+    // 8 kB was reserved for the life of the process. They are socket buffers for the
+    // ESPHome protocol, whose messages are protobuf frames describing one entity or one
+    // state change -- hundreds of bytes, not kilobytes. The one bulk moment is the
+    // ListEntities response, and that is streamed message by message rather than sent as
+    // one blob, so it is bounded by the largest single entity rather than by their total.
+    //
+    // 2048 is still comfortably above that. If ESPHome ever starts stalling on a client
+    // that reads slowly, this is where to look first -- a too-small TX buffer shows up as
+    // throughput collapse rather than as an error.
+    let mut rx_buffer = [0u8; 2048];
+    let mut tx_buffer = [0u8; 2048];
 
     // When the last reported session began. See `ESPHOME_EVENT_MIN_INTERVAL`.
     let mut last_reported: Option<Instant> = None;

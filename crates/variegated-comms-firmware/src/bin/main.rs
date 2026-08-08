@@ -725,9 +725,30 @@ async fn main(spawner: Spawner) -> ! {
     // buffers they refer to are already accounted for by `dynamic_rx_buf_num`, which
     // defaults to 32 and is left alone. Sized under that deliberately, so the queue can
     // never own more buffers than the driver has.
+    // `static_rx_buf_num` 10 -> 6, which is ~6.4 kB of heap back.
+    //
+    // These are the only Wi-Fi buffers that are *permanent*: esp-radio's own docs put
+    // them at approximately 1.6 kB each, allocated inside `esp_wifi_init` and not freed
+    // until deinit -- and they come out of the same `esp_alloc::HEAP` as everything else,
+    // because the blob's `malloc` is esp-alloc's. On a firmware that ran out of heap
+    // with 105 kB in use and no BLE peripheral connected, sixteen kilobytes of
+    // permanently-held receive buffers is the largest single thing worth questioning.
+    //
+    // Six is the documented floor while AMPDU RX is on: the field's docs recommend
+    // keeping it at or above `rx_ba_win`, which defaults to 6, and esp-radio's own
+    // validation rejects `rx_ba_win >= 2 * static_rx_buf_num`. Going lower means turning
+    // `ampdu_rx_enable` off as well, which trades throughput this machine does not need
+    // -- it serves a 50 kB gzipped page and ESPHome telemetry -- and is the next lever
+    // if the heap is still tight.
+    //
+    // Deliberately *not* touched: `dynamic_rx_buf_num`/`dynamic_tx_buf_num`, which are
+    // caps on transient buffers rather than steady cost, and which the queue sizes above
+    // are sized against. Lowering those without lowering the queues would break the
+    // invariant this comment block was written to protect.
     let radio_config = esp_radio::wifi::ControllerConfig::default()
         .with_rx_queue_size(32)
-        .with_tx_queue_size(16);
+        .with_tx_queue_size(16)
+        .with_static_rx_buf_num(6);
     let (controller, interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, radio_config).unwrap();
 

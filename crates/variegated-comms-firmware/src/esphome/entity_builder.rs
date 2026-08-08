@@ -354,10 +354,10 @@ fn build_machine_entities(
 
     // Heating element interlock switch
     entities.push(EntityConfig::Switch(SwitchConfig {
-        object_id: Box::leak("machine_heating_element_interlock".to_string().into_boxed_str()),
+        object_id: "machine_heating_element_interlock",
         key: generate_key(ENTITY_TYPE_MACHINE, 0, MACHINE_HEATING_ELEMENT_INTERLOCK),
-        name: Box::leak("Heating Element Interlock".to_string().into_boxed_str()),
-        unique_id: Box::leak("machine_heating_element_interlock".to_string().into_boxed_str()),
+        name: "Heating Element Interlock",
+        unique_id: "machine_heating_element_interlock",
         icon: "mdi:power-socket",
         disabled_by_default: false,
         entity_category: EntityCategory::Config,
@@ -367,10 +367,10 @@ fn build_machine_entities(
 
     // Machine mode select
     entities.push(EntityConfig::Select(SelectConfig {
-        object_id: Box::leak("machine_mode".to_string().into_boxed_str()),
+        object_id: "machine_mode",
         key: generate_key(ENTITY_TYPE_MACHINE, 0, MACHINE_MODE),
-        name: Box::leak("Machine Mode".to_string().into_boxed_str()),
-        unique_id: Box::leak("machine_mode".to_string().into_boxed_str()),
+        name: "Machine Mode",
+        unique_id: "machine_mode",
         icon: "mdi:power",
         options: Box::leak(vec!["On", "Off", "PowerSaveStandby"].into_boxed_slice()),
         disabled_by_default: false,
