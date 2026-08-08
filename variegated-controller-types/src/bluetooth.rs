@@ -202,6 +202,27 @@ impl defmt::Format for BluetoothScanStatus {
     }
 }
 
+/// Progress of a discovery scan, as it arrives from the comms processor.
+///
+/// Carried by [`crate::MachineCommand::UpdateBluetoothScan`], which is not a user
+/// command despite living in that enum -- it is the same shape as
+/// [`crate::MachineCommand::UpdateCommsStatus`], and for the same reason: the comms
+/// processor's only route into the controller is the command channel, and this state has
+/// to reach the controller because the controller is what assembles `Status`.
+///
+/// **Append, never insert.**
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BluetoothScanUpdate {
+    /// One device, reported as it is seen rather than batched at the end of the scan.
+    Discovered(DiscoveredBluetoothPeripheral),
+    /// The scan is over. `reports_dropped` counts what the comms processor saw but could
+    /// not forward.
+    Finished { reports_dropped: u16 },
+}
+
 /// The association list as it is stored in flash.
 ///
 /// A newtype rather than a bare [`BluetoothPeripheralList`] purely so it can carry a

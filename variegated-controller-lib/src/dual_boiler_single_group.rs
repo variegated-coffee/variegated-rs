@@ -33,6 +33,10 @@ use variegated_hal::scale::ScaleConfiguration;
 use variegated_timekeeping::TimeKeeper;
 use crate::schedule::{InMemoryScheduleStore, ScheduleStore};
 use crate::settings::SettingsStorage;
+use crate::{BLUETOOTH_SCAN_DURATION_MS, BLUETOOTH_SCAN_SLACK_MS};
+use variegated_controller_types::bluetooth::{
+    BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
+};
 
 /// Persistent configuration for dual-boiler single-group machine
 /// Uses nested leaf types from variegated-controller-types for clean structure
@@ -417,6 +421,7 @@ pub struct DualBoilerSingleGroupController<
     SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration> + 'static,
     RoutineRepoT: RoutineRepository + 'static,
     ScheduleStoreT: ScheduleStore + 'static,
+    BluetoothStoreT: SettingsStorage<BluetoothAssociations> + 'static,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
@@ -473,6 +478,27 @@ pub struct DualBoilerSingleGroupController<
     // Schedule store
     schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
 
+    // Bluetooth peripheral associations.
+    //
+    // Its own store, at its own flash range, rather than a field on the persistent
+    // configuration. These blobs are postcard with a CRC and no version, so appending a
+    // field to the configuration would make every previously stored copy fail to
+    // deserialize and silently fall back to `Default` -- a factory reset of every boiler
+    // and PID setting on the first boot after the upgrade.
+    bluetooth_store: &'static Mutex<StorageM, BluetoothStoreT>,
+    // Kept in RAM because it is read on every configuration assembly and written only
+    // when the user changes something. The store's own cache would serve, but taking its
+    // lock on the publish path would make a configuration publish contend with a flash
+    // write.
+    bluetooth_associations: BluetoothAssociations,
+    bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
+    bluetooth_status: BluetoothScanStatus,
+    bluetooth_publish_pending: bool,
+    // When the current scan should be considered over even if the comms processor never
+    // says so. Without it a comms reset mid-scan would leave `scanning` latched true and
+    // the UI's scan button disabled until the next reboot.
+    bluetooth_scan_deadline: Option<Instant>,
+
     // Status tracking
     previous_status: Option<Status>,
     brew_temperature_movavg: MovAvg<f32, f32, 10>,
@@ -513,11 +539,12 @@ impl<
     SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration>,
     RoutineRepoT: RoutineRepository,
     ScheduleStoreT: ScheduleStore,
+    BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
 /*    fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -541,6 +568,11 @@ impl<
         settings_store: &'static Mutex<StorageM, SettingsStoreT>,
         routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
         schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
+        bluetooth_store: &'static Mutex<StorageM, BluetoothStoreT>,
+        // Where an accepted `ScanForBluetoothPeripherals` goes, carrying the duration in
+        // milliseconds. `None` on a machine whose comms processor is not wired for it, in
+        // which case scan requests are refused rather than silently dropped.
+        bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
@@ -600,6 +632,12 @@ impl<
             water_tap_dispensing: false,
             routine_repository,
             schedule_store,
+            bluetooth_store,
+            bluetooth_associations: BluetoothAssociations::default(),
+            bluetooth_scan_sender,
+            bluetooth_status: BluetoothScanStatus::default(),
+            bluetooth_publish_pending: false,
+            bluetooth_scan_deadline: None,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
@@ -657,7 +695,34 @@ impl<
             }
         };
 
+        // From the RAM copy, not the store: this runs on the publish path, and taking the
+        // store's lock here would put a configuration publish behind a flash write.
+        configuration.bluetooth_peripherals = self.bluetooth_associations.0.clone();
+
         configuration
+    }
+
+    /// Persist the association list, and tell the comms processor it changed.
+    ///
+    /// The push is not a nicety. The comms processor holds no configuration of its own,
+    /// so until it is told, an association the user just created does not exist as far as
+    /// the radio is concerned. It rides on the `Configuration` publish rather than a
+    /// message of its own -- see the transceiver, which compares the list it last sent.
+    async fn save_bluetooth_associations(&mut self) {
+        match with_timeout(Duration::from_millis(100), self.bluetooth_store.lock()).await {
+            Ok(mut store) => {
+                if store.save_settings(&self.bluetooth_associations).await.is_err() {
+                    log_warn!("Failed to save Bluetooth associations");
+                }
+            }
+            Err(_) => log_warn!("Failed to acquire bluetooth_store lock for save (timeout)"),
+        }
+        // `publish_configuration_if_changed` compares the *machine* configuration, which
+        // these associations are deliberately not part of -- they have their own store.
+        // So a change here is invisible to that comparison and needs to say so itself,
+        // or an association would not reach the comms processor until something else
+        // happened to dirty the configuration.
+        self.bluetooth_publish_pending = true;
     }
 
     pub async fn task(&mut self) {
@@ -665,7 +730,35 @@ impl<
         let mut last_published_configuration = self.configuration.clone();
         let mut last_configuration_publish = Instant::now();
 
+        // Once, before the loop. Unlike the machine configuration, which is re-read every
+        // tick because it is cheap and the store owns the cache, this is the only reader
+        // and writer of the association list -- so loading it repeatedly would be work
+        // that could only ever return what is already in hand.
+        self.bluetooth_associations = match self.bluetooth_store.lock().await.load_settings().await {
+            Ok(associations) => associations,
+            Err(_) => {
+                log_warn!("Failed to load Bluetooth associations; starting with none");
+                BluetoothAssociations::default()
+            }
+        };
+        log_info!("Loaded {} Bluetooth associations", self.bluetooth_associations.0.len());
+        // The comms processor asks for these itself at boot, but it has no way to know
+        // whether this processor was simply slow to answer, so publish once regardless.
+        self.bluetooth_publish_pending = true;
+
         loop {
+            // A scan the comms processor never reported the end of -- because it reset,
+            // or the link dropped mid-scan. Latching `scanning` true would disable the
+            // UI's scan button until the next reboot, so time it out here rather than
+            // trusting a message that may not arrive.
+            if let Some(deadline) = self.bluetooth_scan_deadline {
+                if Instant::now() >= deadline {
+                    log_warn!("Bluetooth scan timed out without a result from the comms processor");
+                    self.bluetooth_scan_deadline = None;
+                    self.bluetooth_status.scanning = false;
+                }
+            }
+
             // Try to load settings with timeout to avoid blocking if optimization is running
             self.configuration.persistent = match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
                 Ok(mut store) => store.load_settings().await.unwrap_or_default(),
@@ -770,7 +863,8 @@ impl<
     }
 
     async fn publish_configuration_if_changed(&mut self, previous_configuration: DualBoilerSingleGroupConfiguration) -> DualBoilerSingleGroupConfiguration {
-        if self.configuration != previous_configuration {
+        if self.configuration != previous_configuration || self.bluetooth_publish_pending {
+            self.bluetooth_publish_pending = false;
             self.publish_general_configuration().await;
 
             return self.configuration.clone();
@@ -1262,7 +1356,7 @@ impl<
             comms_status,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
-            bluetooth: Default::default(),
+            bluetooth: self.bluetooth_status.clone(),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());
@@ -1885,22 +1979,114 @@ impl<
                     Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
             }
-            // Bluetooth association commands. Accepted and logged, not yet acted on:
-            // the store they mutate and the link that carries the result arrive in the
-            // commits that follow. Enumerated rather than folded into a catch-all so
-            // that the next command added here still has to be handled deliberately.
             MachineCommand::AssociateBluetoothPeripheral(association) => {
-                log_info!("AssociateBluetoothPeripheral 0x{:04X} (not yet implemented)", association.id);
+                let id = association.id;
+                if self.bluetooth_associations.upsert(association) {
+                    log_info!("Associated Bluetooth peripheral 0x{:04X}", id);
+                    self.save_bluetooth_associations().await;
+                } else {
+                    // Only reachable when the list is full *and* the id is new, since an
+                    // existing id replaces in place.
+                    log_warn!("Cannot associate 0x{:04X}: no free Bluetooth peripheral slots", id);
+                }
             }
             MachineCommand::RemoveBluetoothPeripheral(id) => {
-                log_info!("RemoveBluetoothPeripheral 0x{:04X} (not yet implemented)", id);
+                if self.bluetooth_associations.remove(id) {
+                    log_info!("Removed Bluetooth association 0x{:04X}", id);
+                    self.save_bluetooth_associations().await;
+                } else {
+                    log_warn!("No Bluetooth association for 0x{:04X} to remove", id);
+                }
             }
             MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => {
-                log_info!("SetBluetoothPeripheralEnabled 0x{:04X}={} (not yet implemented)", id, enabled);
+                if self.bluetooth_associations.set_enabled(id, enabled) {
+                    log_info!("Bluetooth association 0x{:04X} enabled={}", id, enabled);
+                    self.save_bluetooth_associations().await;
+                } else {
+                    log_warn!("No Bluetooth association for 0x{:04X} to enable/disable", id);
+                }
             }
             MachineCommand::ScanForBluetoothPeripherals => {
-                log_info!("ScanForBluetoothPeripherals (not yet implemented)");
+                // A discovery scan monopolises a radio that is shared with Wi-Fi and with
+                // the live links to the peripherals themselves. The ACAIA driver has to
+                // heartbeat every couple of seconds or the scale drops the connection, so
+                // a scan started mid-shot can cost brew-by-weight the shot it is
+                // weighing. The comms processor cannot see any of that -- this is the
+                // only processor that knows coffee is being made.
+                let busy = self.group_brewing
+                    || self.water_tap_dispensing
+                    || self.current_routine.is_some();
+                #[cfg(feature = "pwm-steam-valve")]
+                let busy = busy || self.steam_wand.is_steaming();
+
+                if busy {
+                    log_warn!("Refusing Bluetooth scan: machine is busy");
+                    self.bluetooth_status.blocked = true;
+                } else if let Some(sender) = self.bluetooth_scan_sender {
+                    match sender.try_send(BLUETOOTH_SCAN_DURATION_MS) {
+                        Ok(()) => {
+                            log_info!("Starting Bluetooth scan");
+                            self.bluetooth_status.blocked = false;
+                            self.bluetooth_status.scanning = true;
+                            self.bluetooth_status.reports_dropped = 0;
+                            // Cleared on *start*, not on finish. The user is about to
+                            // pick from this list, and leaving the previous scan's
+                            // results visible underneath the new ones would offer them
+                            // devices that may no longer be there.
+                            self.bluetooth_status.discovered.clear();
+                            self.bluetooth_scan_deadline = Some(
+                                Instant::now()
+                                    + Duration::from_millis(
+                                        BLUETOOTH_SCAN_DURATION_MS as u64 + BLUETOOTH_SCAN_SLACK_MS,
+                                    ),
+                            );
+                        }
+                        Err(_) => log_warn!("Failed to start Bluetooth scan: channel full"),
+                    }
+                } else {
+                    log_warn!("Refusing Bluetooth scan: no comms processor wired for it");
+                    self.bluetooth_status.blocked = true;
+                }
             }
+            MachineCommand::UpdateBluetoothScan(update) => match update {
+                BluetoothScanUpdate::Discovered(device) => {
+                    // Replace rather than append when the address is already listed. The
+                    // comms processor sends a device twice on purpose -- once from its
+                    // advertisement and again from its scan response, which is where most
+                    // scales put their name -- so the second report is an improvement on
+                    // the first, not a duplicate.
+                    match self
+                        .bluetooth_status
+                        .discovered
+                        .iter_mut()
+                        .find(|d| d.address == device.address)
+                    {
+                        Some(existing) => *existing = device,
+                        None => {
+                            if self.bluetooth_status.discovered.push(device).is_err() {
+                                // Counted where the UI already looks for "results were
+                                // lost", rather than in a log nobody reads mid-scan.
+                                self.bluetooth_status.reports_dropped =
+                                    self.bluetooth_status.reports_dropped.saturating_add(1);
+                            }
+                        }
+                    }
+                }
+                BluetoothScanUpdate::Finished { reports_dropped } => {
+                    log_info!(
+                        "Bluetooth scan finished: {} found, {} dropped by the comms processor",
+                        self.bluetooth_status.discovered.len(),
+                        reports_dropped
+                    );
+                    self.bluetooth_scan_deadline = None;
+                    self.bluetooth_status.scanning = false;
+                    // Added to, not overwritten: this processor drops reports of its own
+                    // when the list is full, and both losses are the same fact to a user
+                    // wondering where their scale went.
+                    self.bluetooth_status.reports_dropped =
+                        self.bluetooth_status.reports_dropped.saturating_add(reports_dropped);
+                }
+            },
             #[cfg(not(feature = "pwm-steam-valve"))]
             MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
                 log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");

@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use core::cell::RefCell;
 use chrono::{DateTime, Utc};
 use defmt::{error, info};
-use embassy_futures::join::{join, join5};
+use embassy_futures::join::{join, join3, join5};
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::blocking_mutex::Mutex;
@@ -80,6 +80,10 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // wraps rather than translates -- and it is `(PeripheralId, ScaleOp)` rather than a
     // bare op because one machine can carry several scales.
     scale_command_receiver: Option<ChannelReceiver<'static, SM, (PeripheralId, ScaleOp), 4>>,
+    // Accepted Bluetooth scan requests, carrying the duration in milliseconds. `None` on
+    // a machine whose controller was not given the matching sender, in which case the
+    // controller refuses scan requests rather than this arm dropping them.
+    bluetooth_scan_receiver: Option<ChannelReceiver<'static, SM, u16, 2>>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -367,6 +371,74 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         dispatcher.dispatch_reading(&reading);
                                     }
                                 }
+                                CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals => {
+                                    info!("Bluetooth peripherals requested by ESP32");
+
+                                    // Answered out of the cached configuration rather
+                                    // than from a store of its own. The association list
+                                    // travels inside `Configuration` for the browser's
+                                    // benefit anyway, so this arm has the current list to
+                                    // hand and a second source would only be a second
+                                    // thing to keep in step.
+                                    //
+                                    // An empty list is a real answer, and the distinction
+                                    // that matters is between "no associations" and "no
+                                    // configuration published yet" -- the comms processor
+                                    // stops asking on receipt, so answering before the
+                                    // controller has published would tell it there are no
+                                    // peripherals and never correct that.
+                                    let output = last_sent_config.lock(|cell| {
+                                        cell.borrow().as_ref().map(|boxed_config| {
+                                            let response = ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals(
+                                                boxed_config.bluetooth_peripherals.clone(),
+                                            );
+                                            to_allocvec_cobs(&response).ok()
+                                        })
+                                    });
+
+                                    match output {
+                                        Some(Some(output)) => {
+                                            let _ = tx_sender.send(output).await;
+                                            info!("Sent Bluetooth peripherals to ESP32");
+                                        }
+                                        Some(None) => info!("Failed to serialize Bluetooth peripherals"),
+                                        None => info!("No configuration published yet; not answering"),
+                                    }
+                                }
+                                // Scan results reach the controller as commands, the same
+                                // route `CommsStatus` takes: this is the only channel from
+                                // this task into the controller, and the controller is
+                                // what assembles `Status`.
+                                //
+                                // `try_send`, never `send().await`. This runs in the UART
+                                // reader, and back-pressure here stalls `Status` and every
+                                // debug frame behind it. A scan result is the most
+                                // droppable thing on this link -- the device is still
+                                // advertising and will be reported again.
+                                CommsProcessorToApplicationProcessorMessage::BluetoothPeripheralDiscovered(device) => {
+                                    if command_sender
+                                        .try_send(MachineCommand::UpdateBluetoothScan(
+                                            variegated_controller_types::bluetooth::BluetoothScanUpdate::Discovered(device),
+                                        ))
+                                        .is_err()
+                                    {
+                                        info!("Dropped a Bluetooth scan result: command channel full");
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::BluetoothScanFinished { reports_dropped } => {
+                                    info!("ESP32 reports the Bluetooth scan finished");
+                                    if command_sender
+                                        .try_send(MachineCommand::UpdateBluetoothScan(
+                                            variegated_controller_types::bluetooth::BluetoothScanUpdate::Finished { reports_dropped },
+                                        ))
+                                        .is_err()
+                                    {
+                                        // Not fatal: the controller times the scan out on
+                                        // its own deadline precisely because this message
+                                        // is not guaranteed to arrive.
+                                        info!("Dropped the Bluetooth scan-finished message: command channel full");
+                                    }
+                                }
                                 _ => {
                                     info!("Received unknown message type");
                                 }
@@ -392,6 +464,25 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             loop {
                 let config = configuration_receiver.next_message_pure().await;
 
+                // Whether the association list changed, decided *before* the cached
+                // configuration is replaced below.
+                //
+                // The comms processor is told about associations twice over, and this is
+                // the deliberate half: it holds no configuration of its own, so an
+                // association the user just created does not exist to the radio until a
+                // message says so. Riding on this publish rather than a channel of its
+                // own means there is one place that decides the list changed, and it is
+                // the same place that already decided the configuration did.
+                //
+                // `None` -- nothing published yet -- counts as changed, so the first
+                // configuration of a boot also delivers the list.
+                let bluetooth_changed = last_sent_config.lock(|cell| {
+                    cell.borrow()
+                        .as_ref()
+                        .map(|previous| previous.bluetooth_peripherals != config.bluetooth_peripherals)
+                        .unwrap_or(true)
+                });
+
                 // Serialize and box in tight scope to minimize stack usage
                 let response = ApplicationProcessorToCommsProcessorMessage::Configuration(config.clone());
                 let output = to_allocvec_cobs(&response);
@@ -399,6 +490,19 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                 if let Ok(output) = output {
                     let _ = tx_sender.send(output).await;
                     info!("Sent updated configuration to ESP32");
+
+                    if bluetooth_changed {
+                        let response = ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals(
+                            config.bluetooth_peripherals.clone(),
+                        );
+                        if let Ok(output) = to_allocvec_cobs(&response) {
+                            let _ = tx_sender.send(output).await;
+                            info!("Sent updated Bluetooth peripherals to ESP32");
+                        } else {
+                            info!("Failed to serialize Bluetooth peripherals");
+                        }
+                    }
+
                     // Box after successful send
                     last_sent_config.lock(|cell| {
                         cell.replace(Some(Box::new(config)));
@@ -415,7 +519,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
         //
         // `tx_sender` is `Copy`, so the four futures above are unaffected by these
         // two taking handles of their own.
-        join(
+        join3(
             debug_relay::relay(tx_sender, link_baud),
             async {
                 // Scale commands bound for a scale the comms processor owns.
@@ -448,6 +552,33 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         info!("Sent scale command to ESP32 for peripheral {}", peripheral_id);
                     } else {
                         info!("Failed to serialize scale command");
+                    }
+                }
+            },
+            async {
+                // Bluetooth scan requests the controller has already accepted.
+                //
+                // The controller is what decides whether a scan may run -- it is the only
+                // processor that knows a shot is in progress -- so anything arriving here
+                // has been vetted and is simply put on the wire.
+                let Some(receiver) = bluetooth_scan_receiver else {
+                    core::future::pending::<()>().await;
+                    return;
+                };
+
+                loop {
+                    let duration_ms = receiver.receive().await;
+
+                    // `send().await` for the same reason the scale command above uses it:
+                    // this is machine traffic, arriving at most a few times a session, and
+                    // belongs on the same footing as `Status` rather than behind the debug
+                    // relay's reserved-capacity dance.
+                    let response = ApplicationProcessorToCommsProcessorMessage::StartBluetoothScan { duration_ms };
+                    if let Ok(output) = to_allocvec_cobs(&response) {
+                        let _ = tx_sender.send(output).await;
+                        info!("Sent Bluetooth scan request to ESP32 ({} ms)", duration_ms);
+                    } else {
+                        info!("Failed to serialize Bluetooth scan request");
                     }
                 }
             },

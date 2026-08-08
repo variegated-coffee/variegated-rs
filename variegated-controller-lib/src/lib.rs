@@ -25,6 +25,25 @@ extern crate alloc;
 /// Note the RP2350 ceiling is 0xFFFFFF microseconds (~16.7 s).
 pub const WATCHDOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(15);
 
+/// How long a Bluetooth discovery scan runs.
+///
+/// A radio-coexistence figure, not a user preference, which is why the command that
+/// starts a scan carries no duration. The comms processor has one 2.4 GHz antenna shared
+/// between Wi-Fi, the live links to the peripherals, and the scan -- and the ACAIA
+/// protocol needs a heartbeat every couple of seconds or the scale drops the connection.
+/// Eight seconds is long enough to catch a device advertising at the usual 100 ms and
+/// short enough that a link surviving on heartbeats can ride it out.
+pub const BLUETOOTH_SCAN_DURATION_MS: u16 = 8_000;
+
+/// Extra time allowed before a scan is assumed to have died.
+///
+/// The comms processor reports the end of a scan, and this is what covers the case where
+/// it does not: a reset or a dropped link mid-scan would otherwise leave the scan latched
+/// as running, and with it the UI's scan button disabled, until the next reboot. Sized to
+/// cover the inter-processor round trip and the comms processor's own one-second
+/// maintenance tick with room to spare, not to be tight.
+pub const BLUETOOTH_SCAN_SLACK_MS: u64 = 5_000;
+
 use core::time::Duration;
 use embassy_time::Instant;
 use variegated_control_algorithm::pid::PidCtrl;

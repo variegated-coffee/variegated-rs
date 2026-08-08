@@ -66,6 +66,7 @@ use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType, SteamWandDefinition};
+use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -223,6 +224,7 @@ async fn esp_transceiver_task(
     dispatcher: &'static ExternalDeviceDispatcher,
     debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
     scale_command_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::ScaleOp), 4>>,
+    bluetooth_scan_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u16, 2>>,
 ) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart: the budget is a fraction of the link, and a stale figure
@@ -244,7 +246,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver).await;
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver).await;
 }
 
 
@@ -437,10 +439,15 @@ type SettingsFlashType = W25q32jv<SpiDevice<'static, SyncSendRawMutex, Spi<'stat
 type RoutineRepositoryType = SequentialStorageRoutineRepository<'static, SyncSendRawMutex, SettingsFlashType>;
 type ScheduleStoreType = SequentialStorageScheduleStore<'static, SyncSendRawMutex, SettingsFlashType>;
 type SettingsStorageType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration>;
+/// The Bluetooth association list is the same shape as the settings blob -- a whole
+/// value, written at once, compared before writing -- so it reuses that store rather
+/// than getting one of its own. Only the payload type and the flash range differ.
+type BluetoothStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, BluetoothAssociations>;
 
 type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
 type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
 type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
+type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
 type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
 const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
@@ -685,6 +692,15 @@ static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCe
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
 static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
 static SETTINGS_STORAGE: StaticCell<SettingsStorageMutex> = StaticCell::new();
+static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
+/// Accepted scan requests, carrying the duration in milliseconds. The controller sends
+/// and `esp_transceiver_main` drains, so this crosses cores the same way
+/// `BLUETOOTH_SCALE_COMMAND_CHANNEL` does -- hence `SyncSendRawMutex`.
+///
+/// Depth 2 rather than 1: a user who presses the scan button twice should get the second
+/// press queued rather than dropped, and depth beyond that would only let stale requests
+/// pile up behind a scan already running.
+static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u16, 2>> = StaticCell::new();
 static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -1376,6 +1392,20 @@ async fn main_task(
     // Make schedule store reference available globally for display task (cross-core safe via CriticalSectionRawMutex)
     *SCHEDULE_STORE_REF.lock().await = Some(schedule_store_ref);
 
+    // Bluetooth associations, in the gap between the routine and schedule ranges.
+    //
+    // A range of its own rather than a field on the settings blob above, and that is the
+    // point of it: these blobs are postcard with a CRC and no version, so appending a
+    // field to the persistent configuration would make every previously stored copy fail
+    // to deserialize and fall back to `Default` -- resetting every boiler and PID setting
+    // on the first boot after the upgrade.
+    let bluetooth_store: BluetoothStoreType = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new(
+        flash,
+        0x0010_0000..0x0012_0000
+    );
+    let bluetooth_store_ref = BLUETOOTH_STORE.init(Mutex::new(bluetooth_store));
+    let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
+
     log_info!("Configuration loaded");
 
     // Create storage command channel for async storage operations
@@ -1898,6 +1928,8 @@ async fn main_task(
         settings_storage_ref,
         routine_repository_ref,
         schedule_store_ref,
+        bluetooth_store_ref,
+        Some(bluetooth_scan_channel.sender()),
         peripheral_registry,
         Some(watchdog),
         interlock_enabled_signal,
@@ -1944,7 +1976,7 @@ async fn main_task(
     #[cfg(not(feature = "bluetooth-group-1-scale"))]
     let scale_command_receiver = None;
 
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver)));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()))));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]

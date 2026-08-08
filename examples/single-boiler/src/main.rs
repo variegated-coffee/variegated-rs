@@ -81,6 +81,7 @@ use variegated_mcp9600::Register::SensorConfiguration;
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId};
+use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_controller_types::debug::{ApplicationState, DebugEvent, DebugPayload, DebugStateSnapshot, SourceState};
 use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
 use variegated_debug::bus;
@@ -121,7 +122,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart. It matters more on this board than on dual-boiler: this
     // link is five times slower *and* has no hardware flow control (`Uart::new`, not
@@ -143,11 +144,12 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    // No Bluetooth scale on this machine -- its scale is the I2C Gravity, driven
-    // locally -- so there is no scale-command channel to drain. `NoopRawMutex` is an
-    // arbitrary choice for the unused `SM`: `None` carries no receiver, so nothing is
-    // ever locked with it.
-    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None).await;
+    // No Bluetooth *scale* on this machine -- its scale is the I2C Gravity, driven
+    // locally -- so there is no scale-command channel to drain. The Bluetooth scan
+    // channel is a different matter: this machine has a comms processor like any other,
+    // so it can carry a Belka Portal or a scale associated later, and `SM` is now fixed
+    // by that receiver rather than being a free choice.
+    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver)).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -311,6 +313,10 @@ static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = Static
 static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
 static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = StaticCell::new();
+/// Accepted Bluetooth scan requests, carrying the duration in milliseconds. The
+/// controller sends and the transceiver drains; both live on this board's single
+/// executor, so `NoopRawMutex` matches `COMMAND_CHANNEL` above.
+static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<NoopRawMutex, u16, 2>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
@@ -492,6 +498,13 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();
+
+    // Bluetooth associations, at a range of their own. Appending them to the settings
+    // blob above would instead make every previously stored copy fail to deserialize --
+    // postcard is positional and these blobs carry no version -- and silently reset the
+    // machine to defaults on the first boot after the upgrade.
+    let bluetooth_store = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new(flash, 0x0010_0000..0x0012_0000);
+    let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
 
     info!("Configuration loaded");
     
@@ -731,6 +744,8 @@ async fn main_task(spawner: Spawner) -> ! {
         BoilerConfiguration::default(),   // Boiler configuration
         routine_repository_ref,
         &peripheral_registry,
+        bluetooth_store,
+        Some(bluetooth_scan_channel.sender()),
     );
 
     // Controller will publish configuration automatically in its task loop
@@ -801,7 +816,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let debug_command_sender = debug_commands_channel.sender();
     let debug_command_receiver = debug_commands_channel.receiver();
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_command_sender).unwrap());
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_command_sender, bluetooth_scan_channel.receiver()).unwrap());
 
     // Wire up the structured debug bus: USB CDC transport, periodic sampler,
     // periodic state snapshot, and injected-command handling. The channel itself is

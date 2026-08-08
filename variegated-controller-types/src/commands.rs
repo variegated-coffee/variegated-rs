@@ -115,6 +115,13 @@ pub enum MachineCommand {
     /// parameter because it is a radio-coexistence decision rather than a user
     /// preference.
     ScanForBluetoothPeripherals,
+
+    /// Progress of a discovery scan, relayed from the comms processor.
+    ///
+    /// Not a user command, despite sitting here. The comms processor's only route into
+    /// the controller is this channel, and the controller is what assembles `Status` --
+    /// the same reasoning that puts [`Self::UpdateCommsStatus`] in this enum.
+    UpdateBluetoothScan(crate::bluetooth::BluetoothScanUpdate),
 }
 
 #[cfg(feature = "defmt")]
@@ -164,6 +171,7 @@ impl defmt::Format for MachineCommand {
             MachineCommand::RemoveBluetoothPeripheral(id) => defmt::write!(f, "RemoveBluetoothPeripheral(0x{:04X})", id),
             MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => defmt::write!(f, "SetBluetoothPeripheralEnabled(0x{:04X}, {})", id, enabled),
             MachineCommand::ScanForBluetoothPeripherals => defmt::write!(f, "ScanForBluetoothPeripherals"),
+            MachineCommand::UpdateBluetoothScan(update) => defmt::write!(f, "UpdateBluetoothScan({:?})", update),
         }
     }
 }
