@@ -54,7 +54,12 @@ embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
 
 # esp-hal family. These move as a set.
-esp-alloc = "0.10.0"
+# `internal-heap-stats` for `HeapStats::max_usage`. The heap here is sized against a
+# peak occupancy figure, and until this was enabled that figure came from a one-off
+# measurement recorded in a comment -- which is how the machine ended up panicking on a
+# 128-byte allocation with no way to tell a slow leak from a high-water mark nobody had
+# ever looked at. The feature costs one comparison per allocation.
+esp-alloc = { version = "0.10.0", features = ["internal-heap-stats"] }
 esp-backtrace = "0.19.0"
 esp-bootloader-esp-idf = "0.5.0"
 esp-hal = "1.1.1"

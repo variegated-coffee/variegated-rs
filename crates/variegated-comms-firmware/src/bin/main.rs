@@ -461,34 +461,44 @@ async fn main(spawner: Spawner) -> ! {
     let rtc = Rtc::new(peripherals.LPWR);
 
     // The `#[ram(reclaimed)]` heap comes out of memory the ROM bootloader was using and
-    // costs the stack nothing, so it stays at 64 kB.
+    // costs the stack nothing, so it is free real estate -- and **64 kB is all of it**.
+    // Asking for 96 kB fails to link with
+    // `section '.dram2_uninit' will not fit in region 'dram2_seg': overflowed by 32768
+    // bytes`, which is the exact 32 kB of the increase. Do not spend time trying to grow
+    // this; any further heap has to come out of `.stack`.
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    // 64 -> 48 kB, buying 16 kB of stack.
+    // 48 -> 64 kB. Everything past the 64 kB above comes out of `.stack`, which is the
+    // SRAM remainder, so this line and the stack are in direct competition and there is
+    // no third source.
     //
-    // History, because both directions of this have already drawn blood. `.stack` is the
-    // SRAM *remainder*, so every static here is a subtraction from the one stack the
-    // deepest deserialization recurses into: 71704 bytes overflows and 87256 does not.
-    // But squeezing this allocator to 40 kB broke the other way -- the ESPHome server's
-    // `Vec<EntityConfig>` needs a single 12000-byte contiguous block
-    // (`esphome/server.rs:56`) and `handle_alloc_error` fired. 48 kB is deliberately on
-    // the safe side of that: 8 kB above the figure known to fail, and against a peak
-    // occupancy measured at 28216 bytes across both regions.
+    // Raised because the machine ran out: `memory allocation of 128 bytes failed` at
+    // ~12 minutes with two BLE peripherals connected, and a snapshot shortly before it
+    // read `heap_used: 108808, heap_free: 5880` -- 95% of the 114688 bytes the two
+    // regions gave. A 128-byte request fits in almost any gap, so that was genuine
+    // exhaustion rather than the fragmentation failure below.
     //
-    // What made the old 87256 insufficient is that the deepest excursion got deeper
-    // rather than the budget getting smaller. The frontend's WebSocket client only
-    // started running once it could build again, and `WsMessage` is an enum *wrapping*
-    // `Configuration`, `Status`, `MachineDefinition` and `RoutineStorage` -- so
-    // `postcard::from_bytes::<WsMessage>` on every client message, and `to_allocvec` for
-    // status pushes at up to 5 Hz, recurse strictly deeper than the
-    // `from_bytes_cobs::<..Configuration>` path those numbers were measured against.
+    // **The 28 kB peak this used to be sized against is long dead.** That figure was
+    // measured before the frontend's WebSocket client worked, and `WsMessage` wraps
+    // `Configuration`, `Status`, `MachineDefinition` and `RoutineStorage` -- so every
+    // status push at up to 5 Hz allocates through `to_allocvec`, on top of the ESPHome
+    // server and the pubsub clones. Nothing had looked at the real figure since. The
+    // 1 Hz snapshot task now logs esp-alloc's own high-water mark on every new maximum,
+    // so the next person sizing this has a measurement rather than a comment.
     //
-    // The failure this addresses did not look like a stack overflow. It arrived as a
-    // load access fault at 0xd1371488 inside
-    // `embassy_time_queue_utils::Queue::next_expiration`, because the overrun ran past
-    // the guard and corrupted a `next` pointer in embassy's intrusive timer list, which
-    // lives in task headers in `.bss`. The accompanying "explicit panic" is defmt with
-    // no sink in this build, not the real message. Same shape as the last one.
-    esp_alloc::heap_allocator!(size: 48 * 1024);
+    // History of the other direction, because both have drawn blood:
+    //
+    // - Squeezing this to 40 kB fired `handle_alloc_error` on the ESPHome entity table,
+    //   which needed a single contiguous 12000-byte block. That block no longer exists
+    //   -- the table is built in `.bss` now (`esphome/entity_builder.rs`) -- so the
+    //   contiguity constraint that set the old floor is gone, and what remains is a
+    //   plain capacity question.
+    // - `.stack` at 71704 overflowed and 87256 did not, but treat both as observations
+    //   rather than bounds: the failures here are not reliably reproducible, so a run
+    //   that survived proves less than it looks. A stack overflow on this chip does not
+    //   announce itself either -- the last one arrived as a load access fault inside
+    //   `embassy_time_queue_utils::Queue::next_expiration`, because the overrun corrupted
+    //   a `next` pointer in embassy's intrusive timer list in `.bss`.
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

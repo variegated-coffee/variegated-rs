@@ -24,7 +24,8 @@
 
 use embassy_time::{Instant, Timer};
 use heapless::Vec;
-use portable_atomic::Ordering;
+use portable_atomic::{AtomicU32, Ordering};
+use variegated_log::log_info;
 use variegated_controller_types::debug::{
     CommsState, DebugPayload, DebugStateSnapshot, SourceState,
 };
@@ -38,8 +39,39 @@ use super::{bus, TCP_DEBUG_CLIENTS};
 
 /// Publish one snapshot. Separate from the task so it is readable on its own and so
 /// the cadence lives in exactly one place.
+/// Log the heap's peak occupancy whenever it reaches a new high.
+///
+/// `heap_used` in the snapshot below is an instantaneous sample at 1 Hz, which is the
+/// wrong instrument for sizing a heap: a transient spike between two samples never
+/// appears, and that spike is exactly what decides whether an allocation fails. This is
+/// esp-alloc's own high-water mark, which cannot miss one.
+///
+/// Reported on a new maximum rather than periodically, so a machine at steady state is
+/// silent and the log reads as a record of where the peak actually went. The 4 kB step
+/// keeps a slowly-creeping figure from producing a line a second.
+///
+/// This exists because the figure it replaces was a number in a comment, measured once,
+/// and the machine ran out of heap while that comment still said the peak was 28 kB.
+fn report_heap_high_water() {
+    static LAST_REPORTED: AtomicU32 = AtomicU32::new(0);
+    const REPORT_STEP: u32 = 4096;
+
+    let peak = esp_alloc::HEAP.stats().max_usage as u32;
+    if peak >= LAST_REPORTED.load(Ordering::Relaxed).saturating_add(REPORT_STEP) {
+        LAST_REPORTED.store(peak, Ordering::Relaxed);
+        log_info!(
+            "Heap high-water {} bytes of {} ({} free now)",
+            peak,
+            peak + esp_alloc::HEAP.free() as u32,
+            esp_alloc::HEAP.free() as u32
+        );
+    }
+}
+
 pub fn publish_snapshot() {
     let stats = bus::stats();
+
+    report_heap_high_water();
 
     // `WIFI_RSSI_DBM` holds `NO_RSSI` before the first sample and while the link is
     // down. Mapping that to `None` is the whole reason the mirror is an `i16`.
