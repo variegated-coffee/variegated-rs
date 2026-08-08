@@ -88,20 +88,42 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Listen window for a user-initiated discovery scan.
 ///
-/// A different regime from [`SCAN_WINDOW`] above, and deliberately so. That one is sized
-/// for a background loop that runs forever and must not starve Wi-Fi; this one runs for a
-/// few seconds because somebody is standing at the machine waiting for their scale to
-/// appear, so it buys discovery latency with airtime it only spends briefly.
+/// # These are not the times they look like -- read this before changing them
 ///
-/// 30 ms in 100 ms is a 30% duty cycle. That is heavy on a single-antenna radio also
-/// carrying Wi-Fi and the live links to the peripherals themselves -- the ACAIA driver
-/// drops its connection after a couple of missed heartbeats -- which is why the scan is
-/// time-boxed by the caller and refused outright by the application processor while a
-/// shot is running. If a connected scale turns out not to survive a scan, this pair is
-/// the first thing to relax.
-const DISCOVERY_SCAN_WINDOW: Duration = Duration::from_millis(30);
-/// See [`DISCOVERY_SCAN_WINDOW`].
-const DISCOVERY_SCAN_INTERVAL: Duration = Duration::from_millis(100);
+/// `LeSetScanParams` and `LeCreateConn` take their scan interval and window as
+/// `bt_hci::param::Duration<10_000>`, so trouble-host's `bt_hci_duration` divides what it
+/// is given by 10 000 µs to get the raw HCI value. The Bluetooth spec defines that field
+/// in units of **0.625 ms**. So the number reaching the air is *sixteen times shorter*
+/// than the `Duration` written here, and what actually has to be legal is the raw value:
+/// the spec requires `0x0004..=0x4000`, and window must not exceed interval.
+///
+/// Getting that wrong is not a subtle degradation. 30 ms here divides to a raw 3, which
+/// is below the minimum, and the controller rejects the whole command with
+/// `Invalid HCI Command Parameters` -- no scan at all, which is exactly what happened.
+///
+/// So, concretely:
+///
+/// | written here | raw HCI | on air |
+/// |---|---|---|
+/// | window 300 ms | 30 | 18.75 ms |
+/// | interval 1000 ms | 100 | 62.5 ms |
+///
+/// # Why this regime
+///
+/// Different from [`SCAN_WINDOW`] above, deliberately. That one is sized for a background
+/// loop that runs forever and must not starve Wi-Fi; this one runs for a few seconds
+/// because somebody is standing at the machine waiting for their scale to appear, so it
+/// buys discovery latency with airtime it only spends briefly.
+///
+/// The ratio -- 30% duty cycle -- is what matters and is unaffected by the unit
+/// confusion above. That is heavy for a single-antenna radio also carrying Wi-Fi and the
+/// live links to the peripherals themselves, since the ACAIA driver drops its connection
+/// after a couple of missed heartbeats. Hence the caller's time box and the application
+/// processor refusing a scan outright while a shot is running. If a connected scale turns
+/// out not to survive a scan, widen the interval here first.
+const DISCOVERY_SCAN_WINDOW: Duration = Duration::from_millis(300);
+/// See [`DISCOVERY_SCAN_WINDOW`] -- in particular the note that this is not 1 s on air.
+const DISCOVERY_SCAN_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// How many times to try starting a scan before giving up, and how long to wait between.
 ///
@@ -482,29 +504,27 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
 
         sink.begin();
 
-        // Retried, because the first attempt legitimately fails after pre-empting a
-        // connect, and there is no way to wait for the condition to clear.
+        // Retried against a *transient* refusal, which is a narrower thing than it may
+        // look. The failure this was written for turned out to be a permanent one -- a
+        // scan window below the spec minimum, see `DISCOVERY_SCAN_WINDOW` -- and no
+        // number of retries would have helped; the parameters were simply illegal.
         //
-        // The connect attempts above use a *filtered* accept list, and `Scanner::scan`
-        // opens by calling `set_accept_filter`, which issues `LE Clear Filter Accept
-        // List`. The Bluetooth spec makes that **Command Disallowed while the list is in
-        // use by an outstanding LE Create Connection** -- so the clear is illegal until
-        // the connect this scan interrupted has actually been cancelled.
+        // It earns its place for a different case. `Scanner::scan` opens by calling
+        // `set_accept_filter`, which issues `LE Clear Filter Accept List`, and the spec
+        // makes that Command Disallowed while the list is in use by an outstanding
+        // `LE Create Connection` -- which is precisely the state a scan that pre-empted a
+        // connect leaves behind. Dropping the connect future queues the cancellation
+        // (`OnDrop` -> `connect_command_state.cancel`, which the control runner turns
+        // into `LeCreateConnCancel`), but completion is asynchronous and there is no way
+        // to await it: `CommandState::wait_idle` exists and `connect_command_state` is
+        // private to trouble-host.
         //
-        // Dropping the connect future queues that cancellation (`OnDrop` ->
-        // `connect_command_state.cancel`, which the control runner turns into
-        // `LeCreateConnCancel`), but completion is asynchronous and trouble-host exposes
-        // no way to await it: `CommandState::wait_idle` exists, and
-        // `connect_command_state` is private to the crate.
+        // Retrying rather than sleeping a guessed interval, because it converges as soon
+        // as the controller will accept the command. A failing `scan()` unwinds its own
+        // `OnDrop` and returns the scan command state to idle, so each attempt is clean.
         //
-        // So: retry rather than sleep a guessed interval. Retrying converges as soon as
-        // the controller will accept the command, where a fixed delay is either too short
-        // on a bad day or wasted on every good one. Failing `scan()` unwinds its own
-        // `OnDrop` and returns the scan command state to idle, so each attempt starts
-        // clean.
-        //
-        // Bounded at about a second in total. If it is still refused after that, the
-        // cause is not this race and pretending otherwise would just delay the scan.
+        // Bounded at about a second. Anything still refused after that is a parameter
+        // problem, not a race, and the error is reported through the sink so it says so.
         let mut started = false;
         for attempt in 0..SCAN_START_ATTEMPTS {
             match scanner.scan(&config).await {
