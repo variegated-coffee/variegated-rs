@@ -87,6 +87,15 @@ impl ScanSink for ScanPrinter {
         self.active.store(true, Ordering::Relaxed);
     }
 
+    /// Logged through `variegated_log` rather than left in the manager's `defmt` output,
+    /// which this firmware's debug transports do not carry.
+    fn attempt_failed(&self, error: Option<&trouble_host::Error>) {
+        match error {
+            Some(error) => log_warn!("Bluetooth scan attempt refused: {:?}", error),
+            None => log_warn!("Bluetooth scan attempt refused by the controller"),
+        }
+    }
+
     fn end(&self, started: bool) {
         self.active.store(false, Ordering::Relaxed);
 

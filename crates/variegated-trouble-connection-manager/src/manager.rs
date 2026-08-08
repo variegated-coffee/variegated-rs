@@ -43,6 +43,17 @@ pub trait ScanSink {
     /// list -- and they call for opposite responses: one means the device is not
     /// advertising, the other means the radio never looked.
     fn end(&self, started: bool);
+    /// Called once per failed start attempt, with the host error where there is one.
+    ///
+    /// Exists because this crate logs through `defmt` directly and the firmware's debug
+    /// transports do not carry that, so a refusal reached the operator as silence. The
+    /// HCI status is the whole diagnosis here -- `CommandDisallowed` means something
+    /// still holds the accept list, anything else means this is not the race we think it
+    /// is -- and guessing at it from the outside has already cost two flash cycles.
+    ///
+    /// `None` when the failure came from the controller's own error type, which has no
+    /// `defmt::Format` bound available here.
+    fn attempt_failed(&self, error: Option<&trouble_host::Error>);
 }
 
 /// How long the controller listens for advertisements in each scan pass.
@@ -91,6 +102,16 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const DISCOVERY_SCAN_WINDOW: Duration = Duration::from_millis(30);
 /// See [`DISCOVERY_SCAN_WINDOW`].
 const DISCOVERY_SCAN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How many times to try starting a scan before giving up, and how long to wait between.
+///
+/// Together about a second, which is generously more than one HCI round trip -- the thing
+/// actually being waited for is a `LeCreateConnCancel` reaching the controller and being
+/// acknowledged. See the retry loop in `run_scan` for why this is a retry rather than a
+/// delay.
+const SCAN_START_ATTEMPTS: usize = 5;
+/// See [`SCAN_START_ATTEMPTS`].
+const SCAN_START_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
 /// State for a single managed device
 pub(crate) struct DeviceState<'a, P: PacketPool> {
@@ -460,30 +481,58 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
         };
 
         sink.begin();
-        let started = match scanner.scan(&config).await {
-            Ok(session) => {
-                defmt::info!("[ble] discovery scan started");
-                Timer::after(request.duration).await;
-                // Dropping the session cancels the scan, which the control runner turns
-                // into `LeSetScanEnable(false)`.
-                drop(session);
-                true
+
+        // Retried, because the first attempt legitimately fails after pre-empting a
+        // connect, and there is no way to wait for the condition to clear.
+        //
+        // The connect attempts above use a *filtered* accept list, and `Scanner::scan`
+        // opens by calling `set_accept_filter`, which issues `LE Clear Filter Accept
+        // List`. The Bluetooth spec makes that **Command Disallowed while the list is in
+        // use by an outstanding LE Create Connection** -- so the clear is illegal until
+        // the connect this scan interrupted has actually been cancelled.
+        //
+        // Dropping the connect future queues that cancellation (`OnDrop` ->
+        // `connect_command_state.cancel`, which the control runner turns into
+        // `LeCreateConnCancel`), but completion is asynchronous and trouble-host exposes
+        // no way to await it: `CommandState::wait_idle` exists, and
+        // `connect_command_state` is private to the crate.
+        //
+        // So: retry rather than sleep a guessed interval. Retrying converges as soon as
+        // the controller will accept the command, where a fixed delay is either too short
+        // on a bad day or wasted on every good one. Failing `scan()` unwinds its own
+        // `OnDrop` and returns the scan command state to idle, so each attempt starts
+        // clean.
+        //
+        // Bounded at about a second in total. If it is still refused after that, the
+        // cause is not this race and pretending otherwise would just delay the scan.
+        let mut started = false;
+        for attempt in 0..SCAN_START_ATTEMPTS {
+            match scanner.scan(&config).await {
+                Ok(session) => {
+                    defmt::info!("[ble] discovery scan started");
+                    Timer::after(request.duration).await;
+                    // Dropping the session cancels the scan, which the control runner
+                    // turns into `LeSetScanEnable(false)`.
+                    drop(session);
+                    started = true;
+                    break;
+                }
+                // Matched rather than formatted whole: `BleHostError`'s `Controller` arm
+                // carries the controller's own error type, which has no `defmt::Format`
+                // bound here and would force one on every caller. The host arm is the
+                // informative one anyway -- it is where an HCI status such as
+                // `CommandDisallowed` surfaces.
+                Err(BleHostError::BleHost(e)) => {
+                    defmt::warn!("[ble] scan attempt {} failed: {:?}", attempt, e);
+                    sink.attempt_failed(Some(&e));
+                }
+                Err(_) => {
+                    defmt::warn!("[ble] scan attempt {} failed: controller error", attempt);
+                    sink.attempt_failed(None);
+                }
             }
-            // Matched rather than formatted whole: `BleHostError`'s `Controller` arm
-            // carries the controller's own error type, which has no `defmt::Format`
-            // bound here and would force one on every caller. The host arm is the
-            // informative one anyway -- it is where an HCI status such as
-            // `CommandDisallowed` surfaces, and that is the code that distinguishes "a
-            // connection attempt is still outstanding" from "these parameters are wrong".
-            Err(BleHostError::BleHost(e)) => {
-                defmt::warn!("[ble] discovery scan failed to start: {:?}", e);
-                false
-            }
-            Err(_) => {
-                defmt::warn!("[ble] discovery scan failed to start: controller error");
-                false
-            }
-        };
+            Timer::after(SCAN_START_RETRY_INTERVAL).await;
+        }
         sink.end(started);
 
         // Borrow-checked ordering: `scan` takes `&mut scanner` and the session borrows
