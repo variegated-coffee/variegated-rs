@@ -398,6 +398,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             RemoveBluetoothPeripheral(_) => {}
             SetBluetoothPeripheralEnabled(..) => {}
             ScanForBluetoothPeripherals => {}
+            UpdateBluetoothScan(_) => {}
         }
     }
 
@@ -506,6 +507,14 @@ fn machine_commands() -> Vec<MachineCommand> {
         RemoveBluetoothPeripheral(0xB5D0),
         SetBluetoothPeripheralEnabled(0xB1CA, false),
         ScanForBluetoothPeripherals,
+        // The second variant, and a device with no advertised name -- the empty-string
+        // case a length-prefix bug would sail straight past.
+        UpdateBluetoothScan(BluetoothScanUpdate::Discovered(DiscoveredBluetoothPeripheral {
+            address: [0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78],
+            address_random: false,
+            name: BluetoothName::new(),
+            rssi: -78,
+        })),
     ]
 }
 

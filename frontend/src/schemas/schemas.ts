@@ -325,6 +325,13 @@ export const BluetoothScanStatusSchema = struct({
   discovered: seq(DiscoveredBluetoothPeripheralSchema)
 });
 
+export const BluetoothScanUpdateSchema = enumType('BluetoothScanUpdate', {
+  Discovered: newtypeVariant('Discovered', DiscoveredBluetoothPeripheralSchema),
+  Finished: structVariant('Finished', {
+    reports_dropped: u16()
+  })
+});
+
 export const BoilerControlStateSchema = struct({
   mode: BoilerControlModeSchema,
   values: BoilerControlTargetValuesSchema
@@ -759,7 +766,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   AssociateBluetoothPeripheral: newtypeVariant('AssociateBluetoothPeripheral', BluetoothPeripheralAssociationSchema),
   RemoveBluetoothPeripheral: newtypeVariant('RemoveBluetoothPeripheral', u16()),
   SetBluetoothPeripheralEnabled: tupleVariant('SetBluetoothPeripheralEnabled', u16(), bool()),
-  ScanForBluetoothPeripherals: unitVariant('ScanForBluetoothPeripherals')
+  ScanForBluetoothPeripherals: unitVariant('ScanForBluetoothPeripherals'),
+  UpdateBluetoothScan: newtypeVariant('UpdateBluetoothScan', BluetoothScanUpdateSchema)
 });
 
 export const RoutineStorageSchema = struct({
@@ -800,6 +808,7 @@ export type ActuatorCapability = InferType<typeof ActuatorCapabilitySchema>;
 export type BluetoothDriverKind = InferType<typeof BluetoothDriverKindSchema>;
 export type BluetoothPeripheralAssociation = InferType<typeof BluetoothPeripheralAssociationSchema>;
 export type BluetoothScanStatus = InferType<typeof BluetoothScanStatusSchema>;
+export type BluetoothScanUpdate = InferType<typeof BluetoothScanUpdateSchema>;
 export type BoilerConfiguration = InferType<typeof BoilerConfigurationSchema>;
 export type BoilerControlMode = InferType<typeof BoilerControlModeSchema>;
 export type BoilerControlState = InferType<typeof BoilerControlStateSchema>;

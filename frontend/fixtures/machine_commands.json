@@ -450,5 +450,22 @@
       false
     ]
   },
-  "ScanForBluetoothPeripherals"
+  "ScanForBluetoothPeripherals",
+  {
+    "UpdateBluetoothScan": {
+      "Discovered": {
+        "address": [
+          62,
+          96,
+          235,
+          60,
+          28,
+          120
+        ],
+        "address_random": false,
+        "name": "",
+        "rssi": -78
+      }
+    }
+  }
 ]
