@@ -1262,6 +1262,7 @@ impl<
             comms_status,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
+            bluetooth: Default::default(),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());
@@ -1883,6 +1884,22 @@ impl<
                     Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
                     Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
                 }
+            }
+            // Bluetooth association commands. Accepted and logged, not yet acted on:
+            // the store they mutate and the link that carries the result arrive in the
+            // commits that follow. Enumerated rather than folded into a catch-all so
+            // that the next command added here still has to be handled deliberately.
+            MachineCommand::AssociateBluetoothPeripheral(association) => {
+                log_info!("AssociateBluetoothPeripheral 0x{:04X} (not yet implemented)", association.id);
+            }
+            MachineCommand::RemoveBluetoothPeripheral(id) => {
+                log_info!("RemoveBluetoothPeripheral 0x{:04X} (not yet implemented)", id);
+            }
+            MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => {
+                log_info!("SetBluetoothPeripheralEnabled 0x{:04X}={} (not yet implemented)", id, enabled);
+            }
+            MachineCommand::ScanForBluetoothPeripherals => {
+                log_info!("ScanForBluetoothPeripherals (not yet implemented)");
             }
             #[cfg(not(feature = "pwm-steam-valve"))]
             MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {

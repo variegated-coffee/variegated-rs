@@ -73,6 +73,35 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     /// variant after it and silently mis-decode on any peer built from a different
     /// commit. The same applies to every future variant.
     DebugCommand(crate::debug_command::DebugCommand),
+    /// Ask for the Bluetooth peripheral associations.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// The comms processor sends this at boot and repeats it until answered, because it
+    /// has no persistent storage of its own: the association list is the *only* thing
+    /// that tells it which Bluetooth devices exist, and until it arrives that processor
+    /// has no peripherals at all. An empty list is a complete answer, so the retry has
+    /// to stop on receipt rather than on the list being non-empty.
+    RequestBluetoothPeripherals,
+    /// A device seen during a discovery scan.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// One message per device rather than a list at the end of the scan, so results
+    /// appear in the UI as they are found rather than eight seconds later. Devices are
+    /// de-duplicated on the comms side, but a device may legitimately be reported twice:
+    /// once from its advertisement and again from its scan response, which is where most
+    /// scales put their name.
+    BluetoothPeripheralDiscovered(crate::bluetooth::DiscoveredBluetoothPeripheral),
+    /// A discovery scan has ended.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// `reports_dropped` counts advertising reports the comms processor observed but
+    /// could not forward because its outbound queue was full. Carried rather than
+    /// dropped silently so that a scan which found nothing is distinguishable from one
+    /// that found too much.
+    BluetoothScanFinished { reports_dropped: u16 },
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -109,6 +138,33 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// [`ExternalPeripheralSensorReading`], so commands and measurements address a
     /// scale the same way in both directions.
     ScaleCommand(PeripheralId, ScaleOp),
+    /// The current Bluetooth peripheral associations.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// Sent both in answer to
+    /// [`CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals`] and
+    /// unprompted whenever the list changes, so that associating a scale takes effect
+    /// without waiting for the comms processor to ask again.
+    ///
+    /// The list also rides inside [`Configuration`], which is what the browser reads.
+    /// That is not redundancy for its own sake: the two consumers want different
+    /// cadences. The browser wants the list alongside everything else it renders, and
+    /// the comms processor wants a small message it can act on the moment an address
+    /// changes, without a whole-configuration republish in the way.
+    BluetoothPeripherals(crate::bluetooth::BluetoothPeripheralList),
+    /// Run a Bluetooth discovery scan for `duration_ms`.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// Originates as a user action in the UI, and is routed through this processor
+    /// rather than handled where it arrives. That costs a round trip, and buys the
+    /// only thing that can prevent a scan from breaking a shot: a discovery scan
+    /// occupies a radio shared with Wi-Fi and with the live links to the scales
+    /// themselves, and *this* is the processor that knows whether coffee is being made.
+    StartBluetoothScan { duration_ms: u16 },
 }
 
 /// An operation on a scale, as carried by

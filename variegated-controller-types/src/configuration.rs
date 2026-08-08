@@ -14,6 +14,15 @@ pub struct Configuration {
     pub tank_configurations: FnvIndexMap<TankIndex, TankConfiguration, MAX_TANKS>,
     pub steam_wand_configurations: FnvIndexMap<SteamWandIndex, SteamWandConfiguration, MAX_STEAM_WANDS>,
     pub schedules: Vec<ScheduleItem>,
+    /// Bluetooth peripheral associations.
+    ///
+    /// Like `schedules`, this is not stored as part of the machine's persistent
+    /// configuration blob -- it has its own flash range -- and is folded in here when
+    /// the configuration is assembled for publishing. This copy exists for the browser,
+    /// which already receives `Configuration` and would otherwise need a message of its
+    /// own; the comms processor is told separately, through
+    /// `ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals`.
+    pub bluetooth_peripherals: BluetoothPeripheralList,
 }
 
 impl Configuration {
@@ -26,6 +35,7 @@ impl Configuration {
             tank_configurations: FnvIndexMap::new(),
             steam_wand_configurations: FnvIndexMap::new(),
             schedules: vec![],
+            bluetooth_peripherals: BluetoothPeripheralList::new(),
         }
     }
 
@@ -141,6 +151,19 @@ impl defmt::Format for Configuration {
 
         // Schedule count
         defmt::write!(f, ", schedules: {} items", self.schedules.len());
+
+        // Bluetooth peripheral associations
+        defmt::write!(f, ", bluetooth: [");
+        for association in self.bluetooth_peripherals.iter() {
+            defmt::write!(
+                f,
+                " 0x{:04X}={:?}/{}",
+                association.id,
+                association.driver,
+                association.enabled
+            );
+        }
+        defmt::write!(f, " ]");
 
         defmt::write!(f, " }}");
     }

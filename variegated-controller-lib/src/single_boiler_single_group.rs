@@ -676,6 +676,7 @@ impl<
             comms_status,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
+            bluetooth: Default::default(),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());

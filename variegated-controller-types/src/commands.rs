@@ -90,6 +90,31 @@ pub enum MachineCommand {
 
     /// Set the water dispersal pump strategy for a specific water tap
     SetWaterDispersalPumpStrategy(WaterTapIndex, WaterDispersalPumpStrategy),
+
+    /// Bind a Bluetooth address and driver to a peripheral role.
+    ///
+    /// An upsert, keyed on the association's [`PeripheralId`]. A role cannot be filled
+    /// twice, so associating a device with a peripheral that already has one replaces
+    /// it rather than failing or duplicating.
+    AssociateBluetoothPeripheral(crate::bluetooth::BluetoothPeripheralAssociation),
+
+    /// Forget the association for a peripheral role.
+    RemoveBluetoothPeripheral(PeripheralId),
+
+    /// Stop or resume connecting to an associated peripheral, keeping the association.
+    ///
+    /// Separate from [`Self::RemoveBluetoothPeripheral`] so that switching a scale off
+    /// for a while does not cost the user a discovery scan and a re-pairing to get it
+    /// back.
+    SetBluetoothPeripheralEnabled(PeripheralId, bool),
+
+    /// Run a Bluetooth discovery scan.
+    ///
+    /// May be refused: see
+    /// [`crate::bluetooth::BluetoothScanStatus::blocked`]. The duration is not a
+    /// parameter because it is a radio-coexistence decision rather than a user
+    /// preference.
+    ScanForBluetoothPeripherals,
 }
 
 #[cfg(feature = "defmt")]
@@ -135,6 +160,10 @@ impl defmt::Format for MachineCommand {
             MachineCommand::SetHeatingElementInterlock(enabled) => defmt::write!(f, "SetHeatingElementInterlock({})", enabled),
             MachineCommand::SetHeatingElementContentionStrategy(strategy) => defmt::write!(f, "SetHeatingElementContentionStrategy({:?})", strategy),
             MachineCommand::SetWaterDispersalPumpStrategy(idx, strategy) => defmt::write!(f, "SetWaterDispersalPumpStrategy({}, {:?})", idx, strategy),
+            MachineCommand::AssociateBluetoothPeripheral(a) => defmt::write!(f, "AssociateBluetoothPeripheral(0x{:04X}, {:?})", a.id, a.driver),
+            MachineCommand::RemoveBluetoothPeripheral(id) => defmt::write!(f, "RemoveBluetoothPeripheral(0x{:04X})", id),
+            MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => defmt::write!(f, "SetBluetoothPeripheralEnabled(0x{:04X}, {})", id, enabled),
+            MachineCommand::ScanForBluetoothPeripherals => defmt::write!(f, "ScanForBluetoothPeripherals"),
         }
     }
 }

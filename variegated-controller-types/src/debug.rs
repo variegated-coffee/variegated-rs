@@ -56,7 +56,11 @@ use crate::Status;
 /// History:
 /// * `0x81` -- the envelope's first version.
 /// * `0x82` -- `CommsState` gained `wifi_mac`, `bt_address` and `wifi_ip`.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x82;
+/// * `0x83` -- Bluetooth peripheral associations. `Status` gained `bluetooth`,
+///   `Configuration` gained `bluetooth_peripherals`, and `MachineCommand` gained four
+///   variants. All three reach this wire: the first two through `DebugPayload::Status`
+///   and the configuration relay, the third through `DebugCommand::Machine`.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x83;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 pub const MAX_SAMPLES: usize = 16;

@@ -63,7 +63,15 @@ pub struct Status {
     pub routine_execution: Option<RoutineExecutionStatus>,
     pub comms_status: Option<CommsStatus>,
     pub peripheral_status: PeripheralStatus,
-    pub current_local_time: Option<NaiveDateTime>
+    pub current_local_time: Option<NaiveDateTime>,
+    /// Bluetooth discovery state.
+    ///
+    /// Lives in `Status` rather than in `CommsStatus`, despite originating on the comms
+    /// processor, because it is not a per-second fact about that processor's health. It
+    /// accumulates across a scan and persists after one ends -- the user has to be able
+    /// to read the list in order to pick from it -- and it carries `blocked`, which is a
+    /// decision *this* processor makes and the comms processor never sees.
+    pub bluetooth: BluetoothScanStatus
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
 
@@ -80,6 +88,7 @@ impl Status {
             comms_status: None,
             peripheral_status: PeripheralStatus::default(),
             current_local_time: None,
+            bluetooth: BluetoothScanStatus::default(),
 //            environmental_temperature_sensors: FnvIndexMap::new(),
         }
     }
@@ -234,6 +243,22 @@ impl defmt::Format for Status {
             if let Some(timestamp) = comms.timestamp {
                 defmt::write!(f, " ts:{}", timestamp);
             }
+        }
+
+        // Bluetooth discovery. Only worth a line while something is going on -- this
+        // formats on every published status, and an idle machine has nothing to say.
+        if self.bluetooth.scanning
+            || self.bluetooth.blocked
+            || !self.bluetooth.discovered.is_empty()
+        {
+            defmt::write!(
+                f,
+                ", bt(scanning:{} blocked:{} found:{} dropped:{})",
+                self.bluetooth.scanning,
+                self.bluetooth.blocked,
+                self.bluetooth.discovered.len(),
+                self.bluetooth.reports_dropped
+            );
         }
 
         defmt::write!(f, " }}");

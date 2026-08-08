@@ -71,6 +71,7 @@ pub const PROTOCOL_CONFIG: ProtocolConfig = ProtocolConfig {
 };
 
 // Module declarations
+pub mod bluetooth;
 pub mod commands;
 pub mod communication;
 pub mod configuration;
@@ -87,6 +88,7 @@ pub mod shot_log;
 pub mod status;
 
 // Re-exports for backward compatibility
+pub use bluetooth::*;
 pub use commands::*;
 pub use communication::*;
 pub use configuration::*;
