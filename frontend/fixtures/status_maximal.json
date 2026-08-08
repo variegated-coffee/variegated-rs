@@ -284,7 +284,8 @@
         ],
         "address_random": true,
         "name": "ACAIA-1C00",
-        "rssi": -63
+        "rssi": -63,
+        "suggested_driver": "AcaiaOld"
       },
       {
         "address": [
@@ -297,7 +298,8 @@
         ],
         "address_random": false,
         "name": "",
-        "rssi": -91
+        "rssi": -91,
+        "suggested_driver": null
       }
     ]
   }

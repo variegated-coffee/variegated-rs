@@ -20,6 +20,8 @@ interface BluetoothPeripheralEditorProps {
   takenIds: number[];
   existing: BluetoothPeripheralAssociation | null;
   suggestedName: string;
+  /** Driver inferred from the advertised service UUIDs, if the machine recognised one. */
+  suggestedDriver: BluetoothDriverKind['type'] | null;
   onSave: (association: BluetoothPeripheralAssociation) => void;
   onCancel: () => void;
 }
@@ -43,14 +45,19 @@ const BluetoothPeripheralEditorComponent = ({
   takenIds,
   existing,
   suggestedName,
+  suggestedDriver,
   onSave,
   onCancel
 }: BluetoothPeripheralEditorProps) => {
   const [peripheralId, setPeripheralId] = useState<string>(
     existing ? String(existing.id) : peripheralOptions.length > 0 ? String(peripheralOptions[0][0]) : ''
   );
+  // An existing association's own driver wins, then whatever the device advertised, and
+  // only then a default. The advertised one is right often enough to be worth
+  // pre-selecting and is shown as a hint below, so a wrong guess is visible rather than
+  // silent.
   const [driver, setDriver] = useState<BluetoothDriverKind['type']>(
-    existing ? existing.driver.type : 'AcaiaOld'
+    existing ? existing.driver.type : suggestedDriver ?? 'AcaiaOld'
   );
   const [name, setName] = useState<string>(existing ? existing.name : suggestedName);
   const [enabled, setEnabled] = useState<boolean>(existing ? existing.enabled : true);
@@ -162,6 +169,13 @@ const BluetoothPeripheralEditorComponent = ({
           ))}
         </select>
         <div style={hintStyle}>{DRIVERS.find((d) => d.kind === driver)?.hint}</div>
+        {suggestedDriver && (
+          <div style={{ ...hintStyle, color: suggestedDriver === driver ? '#28a745' : '#856404' }}>
+            {suggestedDriver === driver
+              ? 'This device advertised a service this driver supports.'
+              : 'This device advertised a service the other driver supports — check before saving.'}
+          </div>
+        )}
       </div>
 
       <div style={blockStyle}>

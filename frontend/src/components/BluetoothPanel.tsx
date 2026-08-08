@@ -44,6 +44,7 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
   const { getCommsPeripheralEntries } = useMachine();
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
 
   const peripheralOptions = getCommsPeripheralEntries();
   const takenIds = associations.map((a) => a.id);
@@ -64,9 +65,21 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
     return entry ? `${entry[1].location} (${hex})` : hex;
   };
 
-  // Strongest first: a user picking their scale out of a list wants the one they are
-  // standing next to at the top.
-  const discovered = [...scan.discovered].sort((a, b) => b.rssi - a.rssi);
+  // Recognised devices first, then strongest signal. A user picking their scale wants
+  // the thing the machine knows how to talk to at the top, and after that the one they
+  // are standing next to.
+  const discovered = [...scan.discovered].sort((a, b) => {
+    const recognised = Number(b.suggested_driver !== null) - Number(a.suggested_driver !== null);
+    return recognised !== 0 ? recognised : b.rssi - a.rssi;
+  });
+
+  // Hidden by default, not filtered away. A device that advertises no service UUID is
+  // still perfectly usable -- the service is discovered on connect -- so hiding these
+  // permanently would mean a scale the machine supports being impossible to add. The
+  // count is shown so it is obvious there is more behind the toggle.
+  const recognised = discovered.filter((d) => d.suggested_driver !== null);
+  const unrecognised = discovered.filter((d) => d.suggested_driver === null);
+  const visible = showAll ? discovered : recognised;
 
   if (editing) {
     return (
@@ -81,6 +94,9 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
           takenIds={takenIds}
           existing={editing.mode === 'edit' ? editing.association : null}
           suggestedName={editing.mode === 'new' ? editing.device.name : ''}
+          suggestedDriver={
+            editing.mode === 'new' ? editing.device.suggested_driver?.type ?? null : null
+          }
           onSave={(association) => {
             run(() => bluetoothApi.associatePeripheral(association));
             setEditing(null);
@@ -248,7 +264,28 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
         </div>
       )}
 
-      {discovered.length === 0 ? (
+      {unrecognised.length > 0 && (
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            marginBottom: '0.75rem',
+            fontSize: '0.85rem',
+            color: '#666'
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={showAll}
+            onChange={(e) => setShowAll((e.target as HTMLInputElement).checked)}
+          />
+          Show {unrecognised.length} device{unrecognised.length === 1 ? '' : 's'} that did not
+          advertise a supported service
+        </label>
+      )}
+
+      {visible.length === 0 ? (
         <div
           style={{
             padding: '1.5rem',
@@ -259,11 +296,15 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
             fontSize: '0.9rem'
           }}
         >
-          {scan.scanning ? 'Looking for devices…' : 'No devices found yet.'}
+          {scan.scanning
+            ? 'Looking for devices…'
+            : unrecognised.length > 0
+              ? 'No recognised devices found. Some scales do not advertise their service — tick the box above to see the rest.'
+              : 'No devices found yet.'}
         </div>
       ) : (
         <div>
-          {discovered.map((device) => {
+          {visible.map((device) => {
             const address = formatAddress(device.address);
             const already = associatedAddresses.has(address);
             return (
@@ -285,6 +326,11 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
                     {address}
                   </div>
                 </div>
+                {device.suggested_driver && (
+                  <span style={{ ...pillStyle, backgroundColor: '#007bff' }}>
+                    {device.suggested_driver.type}
+                  </span>
+                )}
                 <span style={{ fontSize: '0.8rem', color: '#666' }}>{device.rssi} dBm</span>
                 {already ? (
                   <span style={{ ...pillStyle, backgroundColor: '#28a745' }}>ASSOCIATED</span>

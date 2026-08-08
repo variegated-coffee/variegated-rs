@@ -259,12 +259,16 @@ fn status_maximal() -> Status {
                     address_random: true,
                     name: bluetooth_name("ACAIA-1C00"),
                     rssi: -63,
+                    suggested_driver: Some(BluetoothDriverKind::AcaiaOld),
                 },
                 DiscoveredBluetoothPeripheral {
                     address: [0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78],
                     address_random: false,
                     name: BluetoothName::new(),
                     rssi: -91,
+                    // The unrecognised case, so the `Option` discriminant is exercised in
+                    // both directions within one fixture.
+                    suggested_driver: None,
                 },
             ])
             .expect("fits"),
@@ -514,6 +518,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             address_random: false,
             name: BluetoothName::new(),
             rssi: -78,
+            suggested_driver: Some(BluetoothDriverKind::BelkaPortal),
         })),
     ]
 }

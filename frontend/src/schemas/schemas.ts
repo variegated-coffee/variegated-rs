@@ -115,13 +115,6 @@ export const DerivedFormulaSchema = enumType('DerivedFormula', {
   })
 });
 
-export const DiscoveredBluetoothPeripheralSchema = struct({
-  address: tuple(u8(), u8(), u8(), u8(), u8(), u8()),
-  address_random: bool(),
-  name: string(),
-  rssi: i8()
-});
-
 export const DurationSchema = struct({
   secs: u64(),
   nanos: u32()
@@ -318,20 +311,6 @@ export const BluetoothPeripheralAssociationSchema = struct({
   name: string()
 });
 
-export const BluetoothScanStatusSchema = struct({
-  scanning: bool(),
-  blocked: bool(),
-  reports_dropped: u16(),
-  discovered: seq(DiscoveredBluetoothPeripheralSchema)
-});
-
-export const BluetoothScanUpdateSchema = enumType('BluetoothScanUpdate', {
-  Discovered: newtypeVariant('Discovered', DiscoveredBluetoothPeripheralSchema),
-  Finished: structVariant('Finished', {
-    reports_dropped: u16()
-  })
-});
-
 export const BoilerControlStateSchema = struct({
   mode: BoilerControlModeSchema,
   values: BoilerControlTargetValuesSchema
@@ -366,6 +345,14 @@ export const DerivedParameterSchema = struct({
   name: string(),
   unit: option(ParameterUnitSchema),
   formula: DerivedFormulaSchema
+});
+
+export const DiscoveredBluetoothPeripheralSchema = struct({
+  address: tuple(u8(), u8(), u8(), u8(), u8(), u8()),
+  address_random: bool(),
+  name: string(),
+  rssi: i8(),
+  suggested_driver: option(BluetoothDriverKindSchema)
 });
 
 export const EnvironmentalSensorDefinitionSchema = struct({
@@ -576,6 +563,20 @@ export const WaterTapDefinitionSchema = struct({
   sensors: seq(SensorCapabilitySchema),
   actuators: seq(ActuatorCapabilitySchema),
   control_modes: seq(ControlModeCapabilitySchema)
+});
+
+export const BluetoothScanStatusSchema = struct({
+  scanning: bool(),
+  blocked: bool(),
+  reports_dropped: u16(),
+  discovered: seq(DiscoveredBluetoothPeripheralSchema)
+});
+
+export const BluetoothScanUpdateSchema = enumType('BluetoothScanUpdate', {
+  Discovered: newtypeVariant('Discovered', DiscoveredBluetoothPeripheralSchema),
+  Finished: structVariant('Finished', {
+    reports_dropped: u16()
+  })
 });
 
 export const BoilerStatusSchema = struct({

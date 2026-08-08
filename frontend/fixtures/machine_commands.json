@@ -464,7 +464,8 @@
         ],
         "address_random": false,
         "name": "",
-        "rssi": -78
+        "rssi": -78,
+        "suggested_driver": "BelkaPortal"
       }
     }
   }

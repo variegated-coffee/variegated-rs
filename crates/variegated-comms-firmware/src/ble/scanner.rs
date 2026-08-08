@@ -9,9 +9,11 @@ use heapless::Deque;
 use heapless::index_map::FnvIndexMap;
 use portable_atomic::{AtomicBool, AtomicU16, Ordering};
 use trouble_host::prelude::*;
+use variegated_belka_portal_trouble_driver::BELKA_SERVICE_UUID;
 use variegated_controller_types::bluetooth::{
-    bluetooth_name, BluetoothName, DiscoveredBluetoothPeripheral,
+    bluetooth_name, BluetoothDriverKind, BluetoothName, DiscoveredBluetoothPeripheral,
 };
+use variegated_scale_trouble_driver::acaia_old::ACAIA_OLD_SERVICE_UUID;
 use variegated_trouble_connection_manager::ScanSink;
 
 use crate::channels::BLE_RESCAN_PENDING;
@@ -52,10 +54,13 @@ pub struct ScanPrinter {
     /// Whether a discovery scan is running, so that devices seen incidentally while the
     /// connection loop is connecting are not reported as scan results.
     active: AtomicBool,
-    /// Addresses reported during the current scan, and whether the report carried a name.
+    /// Addresses reported during the current scan, and what those reports carried --
+    /// [`SEEN_NAME`] and [`SEEN_DRIVER`].
     ///
-    /// The `bool` is the whole trick -- see [`Self::on_adv_reports`].
-    reported: RefCell<FnvIndexMap<BdAddr, bool, SCAN_REPORTED_CAPACITY>>,
+    /// Flags rather than a "have we sent this" bool, because a device's name and its
+    /// service UUIDs usually arrive in *different* advertising reports, and both are
+    /// worth forwarding. See [`Self::on_adv_reports`].
+    reported: RefCell<FnvIndexMap<BdAddr, u8, SCAN_REPORTED_CAPACITY>>,
     results: Channel<CriticalSectionRawMutex, ScanReport, SCAN_RESULT_CAPACITY>,
     dropped: AtomicU16,
 }
@@ -116,15 +121,59 @@ impl ScanSink for ScanPrinter {
     }
 }
 
-/// The advertised local name, or empty if the device advertised none.
+/// Weakest signal worth reporting, in dBm.
 ///
-/// `AdStructure`'s name variants carry raw bytes rather than `&str`, and the bytes are
-/// chosen by whatever device is in radio range -- so this validates as UTF-8 and
-/// truncates on a character boundary. `bluetooth_name` does the latter; a bare slice
-/// would panic on a multi-byte character straddling the limit.
-fn local_name(data: &[u8]) -> BluetoothName {
+/// A filter, not a preference: reports below this never reach the application processor,
+/// which keeps both the UART and the sixteen-entry result list for devices the user could
+/// plausibly be holding. Without it a scan in a flat returns every phone, watch and
+/// television in range, and the scale the user actually wants can be crowded out of a
+/// bounded list by furniture.
+///
+/// -80 dBm is deliberately generous. A peripheral sitting on the machine reads around -50
+/// and one in the same room rarely falls below -70, so this discards a great deal of
+/// noise while leaving a wide margin against a scale in an awkward spot or behind a
+/// portafilter.
+const MIN_REPORTED_RSSI: i8 = -80;
+
+/// Which driver, if any, claims a service this device advertised.
+///
+/// Compares against the driver crates' own UUID constants rather than repeating the
+/// numbers, so a driver that changes its service cannot silently stop being recognised
+/// here.
+///
+/// Recognition is a *hint*. Many devices advertise no service UUIDs at all -- the data is
+/// optional and the payload is small -- and a scale is perfectly usable without them,
+/// since the service is discovered on connect regardless. So this pre-fills the driver
+/// and ranks the list; it never decides what the user is allowed to see.
+fn driver_for_service(uuid: &Uuid) -> Option<BluetoothDriverKind> {
+    if *uuid == ACAIA_OLD_SERVICE_UUID {
+        Some(BluetoothDriverKind::AcaiaOld)
+    } else if *uuid == BELKA_SERVICE_UUID {
+        Some(BluetoothDriverKind::BelkaPortal)
+    } else {
+        None
+    }
+}
+
+/// What one advertising payload tells us about a device.
+///
+/// Decoded in a single pass because a report is decoded on every advertisement from every
+/// device in range, which during a scan is a great many.
+struct Advertisement {
+    /// The advertised local name, or empty if the device advertised none.
+    ///
+    /// `AdStructure`'s name variants carry raw bytes rather than `&str`, and the bytes
+    /// are chosen by whatever device is in radio range -- so this is validated as UTF-8
+    /// and truncated on a character boundary. A bare slice would panic on a multi-byte
+    /// character straddling the limit.
+    name: BluetoothName,
+    driver: Option<BluetoothDriverKind>,
+}
+
+fn decode_advertisement(data: &[u8]) -> Advertisement {
     let mut complete: Option<&[u8]> = None;
     let mut shortened: Option<&[u8]> = None;
+    let mut driver = None;
 
     for structure in AdStructure::decode(data) {
         match structure {
@@ -134,13 +183,39 @@ fn local_name(data: &[u8]) -> BluetoothName {
             Ok(AdStructure::ShortenedLocalName(bytes)) if shortened.is_none() => {
                 shortened = Some(bytes)
             }
+            // Advertised as raw little-endian bytes, so they are rebuilt into a `Uuid`
+            // and compared against the drivers' own constants.
+            Ok(AdStructure::ServiceUuids16(uuids)) => {
+                for uuid in uuids {
+                    if let Some(found) =
+                        driver_for_service(&Uuid::new_short(u16::from_le_bytes(*uuid)))
+                    {
+                        driver = Some(found);
+                    }
+                }
+            }
+            Ok(AdStructure::ServiceUuids128(uuids)) => {
+                for uuid in uuids {
+                    if let Some(found) = driver_for_service(&Uuid::new_long(*uuid)) {
+                        driver = Some(found);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     let bytes = complete.or(shortened).unwrap_or(&[]);
-    bluetooth_name(core::str::from_utf8(bytes).unwrap_or(""))
+    Advertisement {
+        name: bluetooth_name(core::str::from_utf8(bytes).unwrap_or("")),
+        driver,
+    }
 }
+
+/// This address has been reported with a usable name.
+const SEEN_NAME: u8 = 1 << 0;
+/// This address has been reported with a recognised service UUID.
+const SEEN_DRIVER: u8 = 1 << 1;
 
 impl EventHandler for ScanPrinter {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
@@ -187,23 +262,39 @@ impl EventHandler for ScanPrinter {
                 continue;
             }
 
-            let name = local_name(report.data);
-            let has_name = !name.is_empty();
+            // Too far away to be the device someone is standing next to. Dropped here
+            // rather than in the UI so it costs no UART traffic and, more importantly,
+            // no slot in the application processor's bounded result list.
+            if report.rssi < MIN_REPORTED_RSSI {
+                continue;
+            }
+
+            let advertisement = decode_advertisement(report.data);
+
+            let mut flags = 0u8;
+            if !advertisement.name.is_empty() {
+                flags |= SEEN_NAME;
+            }
+            if advertisement.driver.is_some() {
+                flags |= SEEN_DRIVER;
+            }
 
             // **Not first-wins, and this is the subtle part.** Under active scanning a
             // device answers twice: an `AdvInd`, which usually carries flags and service
             // UUIDs but no name, and then a `ScanRsp`, which is where most scales put
-            // theirs. Dedup on first sight alone would therefore capture the nameless
-            // report and discard the one with the name, and every device would reach the
-            // user as a bare address -- which looks like a name-decoding bug and sends
-            // you into `AdStructure` when the fault is here.
+            // theirs. Dedup on first sight alone would capture whichever arrived first
+            // and discard the other, so a device would reach the user missing either its
+            // name or its driver -- which looks like a decoding bug and sends you into
+            // `AdStructure` when the fault is here.
             //
-            // So: at most two reports per address, the second only if it adds a name.
+            // So a repeat is forwarded only when it carries something the previous
+            // reports did not. The application processor merges rather than replaces, so
+            // the two halves add up there; see its `Discovered` arm.
             {
                 let reported = self.reported.borrow();
                 match reported.get(&report.addr) {
-                    Some(true) => continue,
-                    Some(false) if !has_name => continue,
+                    // Adds nothing over what has already been sent.
+                    Some(seen) if flags & !seen == 0 => continue,
                     _ => {}
                 }
             }
@@ -215,8 +306,9 @@ impl EventHandler for ScanPrinter {
             let device = DiscoveredBluetoothPeripheral {
                 address,
                 address_random: report.addr_kind == AddrKind::RANDOM,
-                name,
+                name: advertisement.name,
                 rssi: report.rssi,
+                suggested_driver: advertisement.driver,
             };
 
             // A synchronous callback cannot await, so a full queue drops rather than
@@ -229,7 +321,9 @@ impl EventHandler for ScanPrinter {
             if self.results.try_send(ScanReport::Discovered(device)).is_err() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             } else {
-                let _ = self.reported.borrow_mut().insert(report.addr, has_name);
+                let mut reported = self.reported.borrow_mut();
+                let seen = reported.get(&report.addr).copied().unwrap_or(0);
+                let _ = reported.insert(report.addr, seen | flags);
             }
         }
     }
