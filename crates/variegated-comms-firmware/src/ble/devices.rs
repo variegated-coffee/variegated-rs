@@ -19,9 +19,10 @@ use variegated_trouble_connection_manager::BleConnectionManager;
 
 use crate::ble::status;
 use crate::channels::{
-    BLE_RECONNECT_REQUEST, SCALE_TARE_REQUEST,
+    BLE_RECONNECT_REQUEST, SCALE_COMMAND_CHANNEL,
     SENSOR_READING_CAPACITY,
 };
+use variegated_controller_types::ScaleOp;
 use crate::config::{
     BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID, BLUETOOTH_SCALE_ENDPOINT_FLOW,
     BLUETOOTH_SCALE_ENDPOINT_WEIGHT,
@@ -437,6 +438,14 @@ async fn acaia_measurement_loop(
     acaia_address: BdAddr,
     sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
+    // Held for the whole loop, not taken per connection. `PubSubChannel` hands out a
+    // fixed number of subscriber slots and only returns them on drop, so acquiring one
+    // inside the reconnect loop would leak a slot on every retry -- and this loop retries
+    // every five seconds for as long as the scale is switched off.
+    let mut scale_commands = SCALE_COMMAND_CHANNEL
+        .subscriber()
+        .expect("scale command subscriber slots are sized for every scale loop");
+
     loop {
         // Check if connected
         let is_connected = {
@@ -474,15 +483,19 @@ async fn acaia_measurement_loop(
                             log_info!("ACAIA scale initialized successfully");
                             set_scale_connected(true);
 
-                            // Discard any tare that arrived while the scale was down.
+                            // Discard any scale op that arrived while the scale was down.
                             //
-                            // `Signal` latches, so without this a tare asked for during
-                            // a disconnect would fire the moment the link came back --
-                            // possibly minutes later, and possibly mid-shot. A stale
-                            // tare is worse than a dropped one: the operator who asked
-                            // has long since moved on, and zeroing a scale under a
-                            // running extraction corrupts it.
-                            SCALE_TARE_REQUEST.reset();
+                            // The subscriber queues rather than latching, but the hazard
+                            // is the same one the `Signal` had: a tare asked for during a
+                            // disconnect would fire the moment the link came back --
+                            // possibly minutes later, and possibly mid-shot. A stale tare
+                            // is worse than a dropped one, because the operator who asked
+                            // has long since moved on and zeroing a scale under a running
+                            // extraction corrupts it.
+                            //
+                            // Draining in a loop, where the `Signal` needed one `reset()`:
+                            // the queue can hold more than one entry.
+                            while scale_commands.try_next_message_pure().is_some() {}
 
                             // Send initial heartbeat to trigger data flow
                             log_info!("Sending initial heartbeat");
@@ -517,7 +530,7 @@ async fn acaia_measurement_loop(
                                 match select3(
                                     stream.next(),
                                     Timer::after(Duration::from_secs(1)),
-                                    SCALE_TARE_REQUEST.wait(),
+                                    scale_commands.next_message_pure(),
                                 ).await {
                                     Either3::First(result) => {
                                         match result {
@@ -611,30 +624,33 @@ async fn acaia_measurement_loop(
                                             break;
                                         }
                                     }
-                                    Either3::Third(peripheral_id) => {
+                                    Either3::Third((peripheral_id, op)) => {
                                         // The id is checked, not assumed. Nothing has
                                         // validated it upstream -- unlike
                                         // `BLE_RECONNECT_REQUEST`, it arrives off the
                                         // UART from the other processor rather than from
-                                        // this firmware's own dispatcher -- and this loop
-                                        // owns exactly one of the three scale roles
-                                        // `config.rs` names. Today only group 1 exists,
-                                        // so this never rejects; it is written now
-                                        // because the day a second scale is added is the
-                                        // day an unchecked tare would zero the wrong one.
+                                        // this firmware's own dispatcher -- and every
+                                        // scale loop now sees every op, because the
+                                        // channel broadcasts to all subscribers. An
+                                        // unchecked tare would zero every scale on the
+                                        // machine.
                                         //
                                         // An `if`, not an early `continue`: the
                                         // heartbeat check at the bottom of this loop
                                         // body is what keeps the link alive, and a
                                         // `continue` here would skip it.
                                         if peripheral_id == BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID {
-                                            log_info!("Taring ACAIA scale");
-                                            if let Err(e) = gatt.send_tare().await {
-                                                log_error!("Failed to send ACAIA tare: {:?}", e);
+                                            match op {
+                                                ScaleOp::Tare => {
+                                                    log_info!("Taring ACAIA scale");
+                                                    if let Err(e) = gatt.send_tare().await {
+                                                        log_error!("Failed to send ACAIA tare: {:?}", e);
+                                                    }
+                                                }
                                             }
                                         } else {
                                             log_info!(
-                                                "Ignoring tare for scale 0x{:04X}, this loop owns 0x{:04X}",
+                                                "Ignoring scale op for 0x{:04X}, this loop owns 0x{:04X}",
                                                 peripheral_id,
                                                 BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID
                                             );

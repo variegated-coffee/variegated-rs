@@ -22,7 +22,7 @@ use crate::debug::{bus, commands, TCP_DEBUG_CLIENTS};
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
-    ROUTINE_CACHE, SCALE_TARE_REQUEST, SENSOR_READING_CAPACITY,
+    ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
 };
 
@@ -263,9 +263,17 @@ pub async fn start(
                                 match op {
                                     ScaleOp::Tare => {
                                         log_info!("Received tare for scale 0x{:04X}", peripheral_id);
-                                        SCALE_TARE_REQUEST.signal(peripheral_id);
                                     }
                                 }
+                                // `immediate_publisher`, never `publish().await`: this
+                                // runs in the UART reader, where back-pressure stalls
+                                // `Status` and every debug frame behind it. It needs no
+                                // publisher slot and cannot fail; a full queue evicts the
+                                // oldest entry, which for a latest-wins op is the right
+                                // loss.
+                                SCALE_COMMAND_CHANNEL
+                                    .immediate_publisher()
+                                    .publish_immediate((peripheral_id, op));
                             }
                             ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals(list) => {
                                 log_info!("Received {} Bluetooth associations", list.len());

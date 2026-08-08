@@ -6,8 +6,8 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
 use portable_atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
-use variegated_controller_types::bluetooth::BluetoothPeripheralList;
-use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, RoutineList, Status};
+use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
+use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineList, ScaleOp, Status};
 use variegated_controller_types::debug_command::DebugCommand;
 use esphome_device::{ClientEvent, StateChange};
 
@@ -112,21 +112,41 @@ pub static SNTP_RESYNC_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::ne
 /// consumer never has to answer for one.
 pub static BLE_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::new();
 
-/// A tare, raised by the application processor and consumed by the scale's measurement
-/// loop in `ble::devices`.
+/// Scale operations raised by the application processor and consumed by the measurement
+/// loops in `ble::devices`.
 ///
-/// Carries the peripheral id rather than a bare `()`, because a machine can have more
-/// than one Bluetooth scale and the loop that receives this owns exactly one of them.
-/// Unlike `BLE_RECONNECT_REQUEST` above, nothing has validated the id before it arrives
-/// -- it comes off the UART from the other processor, not from the local dispatcher --
-/// so the consumer checks it against its own before acting.
+/// Carries the peripheral id rather than a bare op, because a machine can have more than
+/// one Bluetooth scale and each loop owns exactly one of them. Unlike
+/// `BLE_RECONNECT_REQUEST` above, nothing has validated the id before it arrives -- it
+/// comes off the UART from the other processor, not from the local dispatcher -- so each
+/// consumer checks it against its own before acting.
 ///
-/// Latest-wins is right here for the same reason as the others, with one wrinkle: a
-/// tare raised while the scale is disconnected would otherwise sit latched and fire on
-/// the next connect, possibly minutes later and in the middle of a different shot. The
-/// consumer resets it once the scale is initialised, so only a tare asked for while the
-/// link was up survives.
-pub static SCALE_TARE_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::new();
+/// **Not a `Signal`, and that is the whole reason this is a channel.** The block above
+/// spells out `Signal`'s constraint: `wait()` holds a single waker, so a second
+/// concurrent waiter displaces and re-wakes the first forever. One scale meant one
+/// waiter and the constraint was satisfied by accident; with a peripheral set the
+/// application processor decides at runtime there can be up to
+/// `MAX_BLUETOOTH_PERIPHERALS` scale loops waiting at once. That failure mode does not
+/// panic or log -- it silently wedges, so a tare would simply never arrive, and
+/// intermittently.
+///
+/// Depth 1 with latest-wins semantics, matching what `Signal` gave: an operator who
+/// asks twice wants one tare. Published with `immediate_publisher`, which needs no
+/// publisher slot and never awaits -- the same non-blocking contract the UART reader
+/// requires everywhere else.
+///
+/// The staleness wrinkle is unchanged and still handled by the consumer: a tare raised
+/// while the scale is disconnected would otherwise sit queued and fire on the next
+/// connect, possibly minutes later and in the middle of a different shot. Each loop
+/// drains its subscriber once the scale is initialised, so only a tare asked for while
+/// the link was up survives.
+pub static SCALE_COMMAND_CHANNEL: PubSubChannel<
+    CriticalSectionRawMutex,
+    (PeripheralId, ScaleOp),
+    1,
+    MAX_BLUETOOTH_PERIPHERALS,
+    1,
+> = PubSubChannel::new();
 
 /// Read and cleared by `ble::scanner::ScanPrinter` on the next advertising report.
 ///
