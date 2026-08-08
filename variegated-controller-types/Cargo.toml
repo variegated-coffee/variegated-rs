@@ -4,7 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-test = false
+# `test = true`, unlike this crate's neighbours, because `bluetooth::reconcile_bluetooth_slots`
+# is pure logic whose two failure modes are silent: claims keyed on list position drop every
+# peripheral's connection when one is deleted, and two associations sharing an address make
+# each one's release tear down the other's link. Neither is reachable from a smoke test.
+# Run on the host, and `--no-default-features` is not optional -- the default set pulls in
+# defmt, whose `links = "defmt"` linker script a host test binary cannot satisfy, and which
+# fails as "Too many sections!" rather than as anything mentioning defmt:
+#
+#   cargo test -p variegated-controller-types --target aarch64-apple-darwin \
+#       --no-default-features --features std,serde
 bench = false
 
 [dependencies]

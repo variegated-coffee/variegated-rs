@@ -202,6 +202,133 @@ impl defmt::Format for BluetoothScanStatus {
     }
 }
 
+/// One peripheral, as handed to whichever worker is responsible for connecting to it.
+///
+/// **Everything here affects the connection, and nothing that does not is here.** That
+/// is the whole design: `PartialEq` on this type *is* the "does this need a reconnect?"
+/// test, so it cannot be got wrong by comparing the wrong subset of fields.
+///
+/// The two omissions are deliberate:
+///
+/// - `name` is absent because renaming a peripheral must not disturb a live connection.
+///   Had this held the whole association, deriving equality would tear down and rebuild
+///   the link every time a user corrected a typo in a label -- on a scale, mid-shot.
+/// - `enabled` is absent because a disabled association is simply not assigned. Carrying
+///   the flag down here would mean holding a slot open for a peripheral that has been
+///   told not to connect, and there are only [`MAX_BLUETOOTH_PERIPHERALS`] of them.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BluetoothSlotAssignment {
+    pub id: PeripheralId,
+    pub address: [u8; 6],
+    pub address_random: bool,
+    pub driver: BluetoothDriverKind,
+}
+
+/// Which worker serves which peripheral.
+pub type BluetoothSlotAssignments = [Option<BluetoothSlotAssignment>; MAX_BLUETOOTH_PERIPHERALS];
+
+/// Fold an association list into an existing set of slot claims, returning whether
+/// anything changed.
+///
+/// # Why claims are keyed on `PeripheralId` and not on list position
+///
+/// The obvious mapping -- worker *i* serves association *i* -- is wrong in a way that
+/// only shows up in use. The list is ordered by whoever edited it, so deleting the first
+/// of three associations renumbers the other two; every worker then sees a different
+/// assignment, tears down, and reconnects. **Removing one peripheral would drop the link
+/// to every other one**, including a scale in the middle of a shot. Claims keyed on the
+/// id survive their neighbours being added and removed.
+///
+/// Lives here, rather than beside the workers that consume it, because it is pure and it
+/// is the part most worth testing: both failure modes above are silent, and neither is
+/// reachable from a smoke test.
+pub fn reconcile_bluetooth_slots(
+    assignments: &mut BluetoothSlotAssignments,
+    list: &BluetoothPeripheralList,
+    // Called for each entry that is refused, so the caller can log it. Refusals are not
+    // returned as an error because they do not stop the reconcile -- the other
+    // associations are still valid and still want connecting.
+    mut rejected: impl FnMut(PeripheralId, BluetoothSlotRejection),
+) -> bool {
+    let previous = *assignments;
+
+    // Pass 1: what the list asks for, with duplicates refused.
+    //
+    // Two associations sharing an id, or sharing an address, are both refused rather
+    // than merged. The address case is the dangerous one: a connection manager keys its
+    // device table on the address, so two workers claiming one address would have each
+    // one's release tear down the other's live connection. Keep-first, because keep-last
+    // would let a bad new entry displace a working one.
+    //
+    // Disabled associations never enter this list. That is what makes "disabled" release
+    // a slot for someone else rather than hold one open.
+    let mut wanted: heapless::Vec<BluetoothSlotAssignment, MAX_BLUETOOTH_PERIPHERALS> =
+        heapless::Vec::new();
+    for association in list.iter() {
+        if !association.enabled {
+            continue;
+        }
+        let candidate = BluetoothSlotAssignment {
+            id: association.id,
+            address: association.address,
+            address_random: association.address_random,
+            driver: association.driver,
+        };
+        if wanted.iter().any(|w| w.id == candidate.id) {
+            rejected(candidate.id, BluetoothSlotRejection::DuplicateId);
+            continue;
+        }
+        if wanted.iter().any(|w| w.address == candidate.address) {
+            rejected(candidate.id, BluetoothSlotRejection::DuplicateAddress);
+            continue;
+        }
+        if wanted.push(candidate).is_err() {
+            rejected(candidate.id, BluetoothSlotRejection::NoFreeSlot);
+        }
+    }
+
+    // Pass 2: release claims whose peripheral is gone; update those still wanted on
+    // different terms.
+    //
+    // Updated in place rather than released and re-assigned, so a peripheral that merely
+    // moved to a new address keeps its slot, and so a slot never briefly reads as idle
+    // for a peripheral that is still configured.
+    for assignment in assignments.iter_mut() {
+        let Some(current) = *assignment else { continue };
+        match wanted.iter().find(|w| w.id == current.id) {
+            Some(want) if *want == current => {}
+            Some(want) => *assignment = Some(*want),
+            None => *assignment = None,
+        }
+    }
+
+    // Pass 3: everything still unclaimed takes the lowest free slot.
+    for want in wanted.iter() {
+        if assignments.iter().any(|a| a.map(|a| a.id) == Some(want.id)) {
+            continue;
+        }
+        match assignments.iter_mut().find(|a| a.is_none()) {
+            Some(free) => *free = Some(*want),
+            None => rejected(want.id, BluetoothSlotRejection::NoFreeSlot),
+        }
+    }
+
+    previous != *assignments
+}
+
+/// Why an association did not get a slot.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BluetoothSlotRejection {
+    /// Another association already claims this peripheral id.
+    DuplicateId,
+    /// Another association already claims this address.
+    DuplicateAddress,
+    /// More enabled associations than there are slots.
+    NoFreeSlot,
+}
+
 /// Progress of a discovery scan, as it arrives from the comms processor.
 ///
 /// Carried by [`crate::MachineCommand::UpdateBluetoothScan`], which is not a user
@@ -279,6 +406,157 @@ impl BluetoothAssociations {
             }
             None => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn association(
+        id: PeripheralId,
+        address_last_byte: u8,
+        enabled: bool,
+    ) -> BluetoothPeripheralAssociation {
+        BluetoothPeripheralAssociation {
+            id,
+            address: [0x11, 0x22, 0x33, 0x44, 0x55, address_last_byte],
+            address_random: true,
+            driver: BluetoothDriverKind::AcaiaOld,
+            enabled,
+            name: bluetooth_name("scale"),
+        }
+    }
+
+    fn list(items: &[BluetoothPeripheralAssociation]) -> BluetoothPeripheralList {
+        BluetoothPeripheralList::from_slice(items).expect("fits")
+    }
+
+    fn reconcile(
+        assignments: &mut BluetoothSlotAssignments,
+        items: &[BluetoothPeripheralAssociation],
+    ) -> bool {
+        reconcile_bluetooth_slots(assignments, &list(items), |_, _| {})
+    }
+
+    /// The failure this whole design exists to prevent.
+    ///
+    /// With claims keyed on list position, deleting the first of three associations
+    /// renumbers the rest and every worker sees a changed assignment -- so removing one
+    /// peripheral drops the link to every other one, including a scale mid-shot.
+    #[test]
+    fn removing_one_peripheral_leaves_the_others_where_they_were() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        reconcile(
+            &mut assignments,
+            &[association(0xB5C0, 1, true), association(0xB5C1, 2, true), association(0xB1CA, 3, true)],
+        );
+        let before = assignments;
+
+        // Drop the *first* entry, which is the case position-keying gets wrong.
+        let changed = reconcile(
+            &mut assignments,
+            &[association(0xB5C1, 2, true), association(0xB1CA, 3, true)],
+        );
+
+        assert!(changed);
+        assert_eq!(assignments[0], None, "the removed peripheral's slot should be free");
+        assert_eq!(
+            (assignments[1], assignments[2]),
+            (before[1], before[2]),
+            "the surviving peripherals moved slots, which would drop their connections"
+        );
+    }
+
+    /// A rename must not reach the workers at all: an association differing only in its
+    /// name produces no change, so nothing reconnects.
+    #[test]
+    fn renaming_a_peripheral_changes_nothing() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        reconcile(&mut assignments, &[association(0xB5C0, 1, true)]);
+        let before = assignments;
+
+        let mut renamed = association(0xB5C0, 1, true);
+        renamed.name = bluetooth_name("Definitely a different label");
+
+        assert!(!reconcile(&mut assignments, &[renamed]), "a rename asked for a reconnect");
+        assert_eq!(assignments, before);
+    }
+
+    /// Two associations on one address would have each worker's release tear down the
+    /// other's live connection, because the connection manager keys its device table on
+    /// the address. Keep-first: a bad new entry must not displace a working one.
+    #[test]
+    fn a_duplicate_address_is_refused_and_the_first_claim_survives() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        let mut rejections = alloc::vec::Vec::new();
+        reconcile_bluetooth_slots(
+            &mut assignments,
+            &list(&[association(0xB5C0, 1, true), association(0xB5C1, 1, true)]),
+            |id, why| rejections.push((id, why)),
+        );
+
+        assert_eq!(rejections, [(0xB5C1, BluetoothSlotRejection::DuplicateAddress)]);
+        assert_eq!(assignments[0].map(|a| a.id), Some(0xB5C0));
+        assert_eq!(assignments[1], None);
+    }
+
+    #[test]
+    fn a_duplicate_peripheral_id_is_refused() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        let mut rejections = alloc::vec::Vec::new();
+        reconcile_bluetooth_slots(
+            &mut assignments,
+            &list(&[association(0xB5C0, 1, true), association(0xB5C0, 2, true)]),
+            |id, why| rejections.push((id, why)),
+        );
+
+        assert_eq!(rejections, [(0xB5C0, BluetoothSlotRejection::DuplicateId)]);
+        assert_eq!(assignments[0].map(|a| a.address[5]), Some(1));
+        assert_eq!(assignments[1], None);
+    }
+
+    /// Disabling frees the slot rather than holding it, which is what lets a user park a
+    /// peripheral they are not using without spending one of four.
+    #[test]
+    fn disabling_releases_the_slot_and_re_enabling_takes_one_again() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        reconcile(&mut assignments, &[association(0xB5C0, 1, true)]);
+        assert_eq!(assignments[0].map(|a| a.id), Some(0xB5C0));
+
+        assert!(reconcile(&mut assignments, &[association(0xB5C0, 1, false)]));
+        assert_eq!(assignments[0], None);
+
+        assert!(reconcile(&mut assignments, &[association(0xB5C0, 1, true)]));
+        assert_eq!(assignments[0].map(|a| a.id), Some(0xB5C0));
+    }
+
+    /// A peripheral that moved to a new address keeps its slot. Releasing and
+    /// re-assigning would make it briefly read as unassigned, and the application
+    /// processor drops readings for a peripheral missing from the status map.
+    #[test]
+    fn a_re_addressed_peripheral_keeps_its_slot() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        reconcile(&mut assignments, &[association(0xB5C0, 1, true), association(0xB1CA, 2, true)]);
+
+        assert!(reconcile(
+            &mut assignments,
+            &[association(0xB5C0, 9, true), association(0xB1CA, 2, true)]
+        ));
+
+        assert_eq!(assignments[0].map(|a| a.id), Some(0xB5C0));
+        assert_eq!(assignments[0].map(|a| a.address[5]), Some(9));
+        assert_eq!(assignments[1].map(|a| a.id), Some(0xB1CA));
+    }
+
+    /// Reconciling the same list twice must report no change, or every republish of an
+    /// unchanged configuration would bounce every connection.
+    #[test]
+    fn an_unchanged_list_reports_no_change() {
+        let mut assignments = BluetoothSlotAssignments::default();
+        let items = [association(0xB5C0, 1, true), association(0xB1CA, 2, true)];
+        assert!(reconcile(&mut assignments, &items));
+        assert!(!reconcile(&mut assignments, &items));
     }
 }
 
