@@ -10,7 +10,7 @@ use esphome_device::entity_type::select::SelectConfig;
 use esphome_device::api::{EntityCategory, SensorStateClass, NumberMode};
 use esphome_device::entity_type::sensor::SensorConfig;
 use esphome_device::entity_type::number::NumberConfig;
-use variegated_controller_types::{Configuration, BoilerIndex, GroupIndex, WaterTapIndex, TankIndex, SteamWandIndex, BoilerConfiguration, GroupConfiguration, WaterTapConfiguration, TankConfiguration, SteamWandConfiguration, MachineDefinition, Status, SensorCapability, ActuatorCapability, ControlModeCapability, BoilerControlMode};
+use variegated_controller_types::{Configuration, BoilerIndex, GroupIndex, WaterTapIndex, TankIndex, SteamWandIndex, BoilerConfiguration, GroupConfiguration, WaterTapConfiguration, TankConfiguration, SteamWandConfiguration, MachineDefinition, Status, SensorCapability, ActuatorCapability, ControlModeCapability, BoilerControlMode, MAX_BOILERS};
 
 // Entity type constants for key generation
 const ENTITY_TYPE_BOILER: u32 = 0x01;
@@ -258,6 +258,57 @@ pub fn string_to_machine_mode(s: &str) -> Option<variegated_controller_types::Ma
     }
 }
 
+/// A component-indexed entity id, resolved from a table in flash rather than built on
+/// the heap.
+///
+/// # What this replaces and why
+///
+/// Every `object_id` and `unique_id` here used to be
+/// `indexed_id!("boiler_", i, "_temp")` -- a heap allocation,
+/// permanently leaked, for a string whose every possible value is known at compile time.
+/// About 150 of them on a dual-boiler machine, each costing its own bytes plus the
+/// allocator's per-block overhead, on a processor that has run out of heap.
+///
+/// The two ids are also always *equal*, so each pair was allocating the same string
+/// twice. Here both call sites resolve to the same `&'static str`.
+///
+/// The table is `static` and holds only string literals, so it lives in `.rodata` --
+/// flash-mapped on this chip -- and costs no RAM at all.
+///
+/// # The out-of-range arm
+///
+/// Indices come from the keys of the configuration's component maps, which are `u8` and
+/// in principle unbounded, so the lookup cannot be an index. A component numbered beyond
+/// [`MAX_INDEXED`] is a configuration this firmware cannot describe; it gets a shared
+/// fallback id, which Home Assistant will show as a single conflated entity rather than
+/// the firmware refusing to start. Deliberately visible rather than silent: the
+/// alternative was a panic on a machine that heats water.
+macro_rules! indexed_id {
+    ($prefix:literal, $index:expr, $suffix:literal) => {{
+        static TABLE: [&str; MAX_INDEXED] = [
+            concat!($prefix, "0", $suffix),
+            concat!($prefix, "1", $suffix),
+            concat!($prefix, "2", $suffix),
+            concat!($prefix, "3", $suffix),
+            concat!($prefix, "4", $suffix),
+            concat!($prefix, "5", $suffix),
+            concat!($prefix, "6", $suffix),
+            concat!($prefix, "7", $suffix),
+        ];
+        TABLE
+            .get($index as usize)
+            .copied()
+            .unwrap_or(concat!($prefix, "out_of_range", $suffix))
+    }};
+}
+
+/// How many component indices [`indexed_id`] generates strings for.
+///
+/// `MAX_BOILERS`, which is the largest of the component maxima -- one table shape covers
+/// every component type, and the few unused entries on a four-group machine are literals
+/// in flash rather than anything that occupies RAM.
+const MAX_INDEXED: usize = MAX_BOILERS;
+
 /// Ceiling on the entity table.
 ///
 /// A dual-boiler machine builds about 100. 128 leaves headroom for another component
@@ -407,10 +458,10 @@ fn build_boiler_entities(
     // Temperature sensor (only if boiler has temperature sensor)
     if has_temperature_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_temp", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMPERATURE),
             name: Box::leak(format!("{} Temperature", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp"),
             icon: "",
             unit_of_measurement: "°C",
             accuracy_decimals: 1,
@@ -425,10 +476,10 @@ fn build_boiler_entities(
     // Pressure sensor (only if boiler has pressure sensor)
     if has_pressure_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_pressure", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pressure"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PRESSURE),
             name: Box::leak(format!("{} Pressure", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pressure", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pressure"),
             icon: "",
             unit_of_measurement: "bar",
             accuracy_decimals: 2,
@@ -443,10 +494,10 @@ fn build_boiler_entities(
     // Water level sensor (only if boiler has water level sensor)
     if has_water_level_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_water_level", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_water_level"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_WATER_LEVEL),
             name: Box::leak(format!("{} Water Level", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_water_level", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_water_level"),
             icon: "mdi:water-percent",
             unit_of_measurement: "%",
             accuracy_decimals: 0,
@@ -461,10 +512,10 @@ fn build_boiler_entities(
     // Temperature setpoint (only if temperature control is available)
     if has_temperature_control {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_setpoint", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_setpoint"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_SETPOINT),
             name: Box::leak(format!("{} Temperature Setpoint", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_setpoint", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_setpoint"),
             icon: "mdi:thermometer",
             min_value: 10.0,
             max_value: 150.0,
@@ -480,10 +531,10 @@ fn build_boiler_entities(
     // Pressure setpoint (only if pressure control is available)
     if has_pressure_control {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_pressure_setpoint", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pressure_setpoint"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PRESSURE_SETPOINT),
             name: Box::leak(format!("{} Pressure Setpoint", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pressure_setpoint", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pressure_setpoint"),
             icon: "mdi:gauge",
             min_value: 0.0,
             max_value: config.max_pressure.unwrap_or(15.0),
@@ -500,10 +551,10 @@ fn build_boiler_entities(
     let available_modes = get_available_control_modes(boiler_def);
     if available_modes.len() > 1 {
         entities.push(EntityConfig::Select(SelectConfig {
-            object_id: Box::leak(format!("boiler_{}_control_mode", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_control_mode"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_CONTROL_MODE),
             name: Box::leak(format!("{} Control Mode", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_control_mode", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_control_mode"),
             icon: "mdi:tune",
             options: Box::leak(available_modes.into_boxed_slice()),
             disabled_by_default: false,
@@ -514,10 +565,10 @@ fn build_boiler_entities(
     // Temperature PID parameters (only if temperature control is available)
     if has_temperature_control {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_kp", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_kp"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KP),
             name: Box::leak(format!("{} Temperature kP", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_kp", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_kp"),
             icon: "mdi:tune",
             min_value: 0.0,
             max_value: 100.0,
@@ -530,10 +581,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_ki", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_ki"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KI),
             name: Box::leak(format!("{} Temperature kI", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_ki", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_ki"),
             icon: "mdi:tune",
             min_value: 0.0,
             max_value: 10.0,
@@ -546,10 +597,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_kd", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_kd"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KD),
             name: Box::leak(format!("{} Temperature kD", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_kd", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_kd"),
             icon: "mdi:tune",
             min_value: 0.0,
             max_value: 10.0,
@@ -563,10 +614,10 @@ fn build_boiler_entities(
 
         // Temperature PID Limits
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_kp_upper_limit", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_kp_upper_limit"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KP_UPPER_LIMIT),
             name: Box::leak(format!("{} Temperature kP Upper Limit", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_kp_upper_limit", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_kp_upper_limit"),
             icon: "mdi:tune-vertical",
             min_value: 0.0,
             max_value: 200.0,
@@ -579,10 +630,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_kp_lower_limit", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_kp_lower_limit"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KP_LOWER_LIMIT),
             name: Box::leak(format!("{} Temperature kP Lower Limit", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_kp_lower_limit", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_kp_lower_limit"),
             icon: "mdi:tune-vertical",
             min_value: -200.0,
             max_value: 0.0,
@@ -595,10 +646,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_ki_upper_limit", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_ki_upper_limit"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KI_UPPER_LIMIT),
             name: Box::leak(format!("{} Temperature kI Upper Limit", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_ki_upper_limit", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_ki_upper_limit"),
             icon: "mdi:tune-vertical",
             min_value: 0.0,
             max_value: 200.0,
@@ -611,10 +662,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_ki_lower_limit", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_ki_lower_limit"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KI_LOWER_LIMIT),
             name: Box::leak(format!("{} Temperature kI Lower Limit", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_ki_lower_limit", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_ki_lower_limit"),
             icon: "mdi:tune-vertical",
             min_value: -200.0,
             max_value: 0.0,
@@ -627,10 +678,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_kd_upper_limit", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_kd_upper_limit"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KD_UPPER_LIMIT),
             name: Box::leak(format!("{} Temperature kD Upper Limit", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_kd_upper_limit", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_kd_upper_limit"),
             icon: "mdi:tune-vertical",
             min_value: 0.0,
             max_value: 20.0,
@@ -643,10 +694,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_temp_kd_lower_limit", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_temp_kd_lower_limit"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_TEMP_KD_LOWER_LIMIT),
             name: Box::leak(format!("{} Temperature kD Lower Limit", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_temp_kd_lower_limit", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_temp_kd_lower_limit"),
             icon: "mdi:tune-vertical",
             min_value: -200.0,
             max_value: 0.0,
@@ -662,10 +713,10 @@ fn build_boiler_entities(
     // Pressure PID parameters (only if pressure control is available)
     if has_pressure_control {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_pressure_kp", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pressure_kp"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PRESSURE_KP),
             name: Box::leak(format!("{} Pressure kP", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pressure_kp", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pressure_kp"),
             icon: "mdi:tune",
             min_value: 0.0,
             max_value: 100.0,
@@ -678,10 +729,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_pressure_ki", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pressure_ki"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PRESSURE_KI),
             name: Box::leak(format!("{} Pressure kI", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pressure_ki", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pressure_ki"),
             icon: "mdi:tune",
             min_value: 0.0,
             max_value: 10.0,
@@ -694,10 +745,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("boiler_{}_pressure_kd", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pressure_kd"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PRESSURE_KD),
             name: Box::leak(format!("{} Pressure kD", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pressure_kd", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pressure_kd"),
             icon: "mdi:tune",
             min_value: 0.0,
             max_value: 10.0,
@@ -713,10 +764,10 @@ fn build_boiler_entities(
     // Duty cycle sensor (only if heating element is available)
     if has_heating_element {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_duty_cycle", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_duty_cycle"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_DUTY_CYCLE),
             name: Box::leak(format!("{} Duty Cycle", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_duty_cycle", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_duty_cycle"),
             icon: "",
             unit_of_measurement: "%",
             accuracy_decimals: 0,
@@ -729,10 +780,10 @@ fn build_boiler_entities(
 
         // PID term sensors (only if heating element is available)
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_pid_p_term", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pid_p_term"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PID_P_TERM),
             name: Box::leak(format!("{} PID P Term", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pid_p_term", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pid_p_term"),
             icon: "mdi:chart-line-variant",
             unit_of_measurement: "",
             accuracy_decimals: 3,
@@ -744,10 +795,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_pid_i_term", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pid_i_term"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PID_I_TERM),
             name: Box::leak(format!("{} PID I Term", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pid_i_term", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pid_i_term"),
             icon: "mdi:chart-line-variant",
             unit_of_measurement: "",
             accuracy_decimals: 3,
@@ -759,10 +810,10 @@ fn build_boiler_entities(
         }));
 
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("boiler_{}_pid_d_term", boiler_index).into_boxed_str()),
+            object_id: indexed_id!("boiler_", boiler_index, "_pid_d_term"),
             key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_PID_D_TERM),
             name: Box::leak(format!("{} PID D Term", boiler_name).into_boxed_str()),
-            unique_id: Box::leak(format!("boiler_{}_pid_d_term", boiler_index).into_boxed_str()),
+            unique_id: indexed_id!("boiler_", boiler_index, "_pid_d_term"),
             icon: "mdi:chart-line-variant",
             unit_of_measurement: "",
             accuracy_decimals: 3,
@@ -778,10 +829,10 @@ fn build_boiler_entities(
     if has_temperature_sensor {
         if let Some(_max_temp) = config.max_temperature {
             entities.push(EntityConfig::Number(NumberConfig {
-                object_id: Box::leak(format!("boiler_{}_max_temp", boiler_index).into_boxed_str()),
+                object_id: indexed_id!("boiler_", boiler_index, "_max_temp"),
                 key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_MAX_TEMPERATURE),
                 name: Box::leak(format!("{} Max Temperature", boiler_name).into_boxed_str()),
-                unique_id: Box::leak(format!("boiler_{}_max_temp", boiler_index).into_boxed_str()),
+                unique_id: indexed_id!("boiler_", boiler_index, "_max_temp"),
                 icon: "mdi:thermometer-high",
                 min_value: 10.0,
                 max_value: 150.0,
@@ -799,10 +850,10 @@ fn build_boiler_entities(
     if has_pressure_sensor {
         if let Some(_max_pressure) = config.max_pressure {
             entities.push(EntityConfig::Number(NumberConfig {
-                object_id: Box::leak(format!("boiler_{}_max_pressure", boiler_index).into_boxed_str()),
+                object_id: indexed_id!("boiler_", boiler_index, "_max_pressure"),
                 key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_MAX_PRESSURE),
                 name: Box::leak(format!("{} Max Pressure", boiler_name).into_boxed_str()),
-                unique_id: Box::leak(format!("boiler_{}_max_pressure", boiler_index).into_boxed_str()),
+                unique_id: indexed_id!("boiler_", boiler_index, "_max_pressure"),
                 icon: "mdi:gauge-high",
                 min_value: 5.0,
                 max_value: 20.0,
@@ -822,10 +873,10 @@ fn build_boiler_entities(
             // Fill threshold
             if let Some(_fill_threshold) = fill_config.fill_threshold {
                 entities.push(EntityConfig::Number(NumberConfig {
-                    object_id: Box::leak(format!("boiler_{}_fill_threshold", boiler_index).into_boxed_str()),
+                    object_id: indexed_id!("boiler_", boiler_index, "_fill_threshold"),
                     key: generate_key(ENTITY_TYPE_BOILER, boiler_index, BOILER_FILL_THRESHOLD),
                     name: Box::leak(format!("{} Fill Threshold", boiler_name).into_boxed_str()),
-                    unique_id: Box::leak(format!("boiler_{}_fill_threshold", boiler_index).into_boxed_str()),
+                    unique_id: indexed_id!("boiler_", boiler_index, "_fill_threshold"),
                     icon: "mdi:water-percent",
                     min_value: 0.0,
                     max_value: 100.0,
@@ -871,10 +922,10 @@ fn build_group_entities(
     // Input flow rate sensor (only if input flow sensor is available)
     if has_input_flow_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_input_flow_rate", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_input_flow_rate"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_INPUT_FLOW_RATE),
             name: Box::leak(format!("{} Input Flow Rate", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_input_flow_rate", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_input_flow_rate"),
             icon: "",
             unit_of_measurement: "ml/s",
             accuracy_decimals: 1,
@@ -889,10 +940,10 @@ fn build_group_entities(
     // Output flow rate sensor (only if output flow sensor is available)
     if has_output_flow_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_output_flow_rate", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_output_flow_rate"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_OUTPUT_FLOW_RATE),
             name: Box::leak(format!("{} Output Flow Rate", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_output_flow_rate", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_output_flow_rate"),
             icon: "mdi:pipe",
             unit_of_measurement: "ml/s",
             accuracy_decimals: 1,
@@ -907,10 +958,10 @@ fn build_group_entities(
     // Weight sensor (only if weight sensor is available)
     if has_weight_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_weight", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_weight"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_WEIGHT),
             name: Box::leak(format!("{} Weight", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_weight", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_weight"),
             icon: "mdi:scale",
             unit_of_measurement: "g",
             accuracy_decimals: 1,
@@ -924,10 +975,10 @@ fn build_group_entities(
 
     // Is brewing binary sensor (always present for groups)
     entities.push(EntityConfig::BinarySensor(BinarySensorConfig {
-        object_id: Box::leak(format!("group_{}_is_brewing", group_index).into_boxed_str()),
+        object_id: indexed_id!("group_", group_index, "_is_brewing"),
         key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_IS_BREWING),
         name: Box::leak(format!("{} Is Brewing", group_name).into_boxed_str()),
-        unique_id: Box::leak(format!("group_{}_is_brewing", group_index).into_boxed_str()),
+        unique_id: indexed_id!("group_", group_index, "_is_brewing"),
         icon: "mdi:coffee",
         device_class: "",
         disabled_by_default: false,
@@ -937,10 +988,10 @@ fn build_group_entities(
 
     // Brew time sensor (always present for groups)
     entities.push(EntityConfig::Sensor(SensorConfig {
-        object_id: Box::leak(format!("group_{}_brew_time", group_index).into_boxed_str()),
+        object_id: indexed_id!("group_", group_index, "_brew_time"),
         key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_BREW_TIME),
         name: Box::leak(format!("{} Brew Time", group_name).into_boxed_str()),
-        unique_id: Box::leak(format!("group_{}_brew_time", group_index).into_boxed_str()),
+        unique_id: indexed_id!("group_", group_index, "_brew_time"),
         icon: "mdi:timer",
         unit_of_measurement: "s",
         accuracy_decimals: 1,
@@ -954,10 +1005,10 @@ fn build_group_entities(
     // Pump duty cycle sensor (only if pump is available)
     if has_pump {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_pump_duty_cycle", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_pump_duty_cycle"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_PUMP_DUTY_CYCLE),
             name: Box::leak(format!("{} Pump Duty Cycle", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_pump_duty_cycle", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_pump_duty_cycle"),
             icon: "",
             unit_of_measurement: "%",
             accuracy_decimals: 0,
@@ -970,10 +1021,10 @@ fn build_group_entities(
 
         // PID term sensors (only if pump is available)
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_pid_p_term", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_pid_p_term"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_PID_P_TERM),
             name: Box::leak(format!("{} PID P Term", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_pid_p_term", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_pid_p_term"),
             icon: "mdi:chart-line-variant",
             unit_of_measurement: "",
             accuracy_decimals: 3,
@@ -985,10 +1036,10 @@ fn build_group_entities(
         }));
 
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_pid_i_term", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_pid_i_term"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_PID_I_TERM),
             name: Box::leak(format!("{} PID I Term", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_pid_i_term", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_pid_i_term"),
             icon: "mdi:chart-line-variant",
             unit_of_measurement: "",
             accuracy_decimals: 3,
@@ -1000,10 +1051,10 @@ fn build_group_entities(
         }));
 
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("group_{}_pid_d_term", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_pid_d_term"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_PID_D_TERM),
             name: Box::leak(format!("{} PID D Term", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_pid_d_term", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_pid_d_term"),
             icon: "mdi:chart-line-variant",
             unit_of_measurement: "",
             accuracy_decimals: 3,
@@ -1018,10 +1069,10 @@ fn build_group_entities(
     // Flow rate setpoint (only if flow rate control is available)
     if has_flow_rate_control {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("group_{}_flow_rate_setpoint", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_flow_rate_setpoint"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_FLOW_RATE_SETPOINT),
             name: Box::leak(format!("{} Flow Rate Setpoint", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_flow_rate_setpoint", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_flow_rate_setpoint"),
             icon: "mdi:speedometer",
             min_value: 0.0,
             max_value: 50.0,
@@ -1037,10 +1088,10 @@ fn build_group_entities(
     // Output flow rate setpoint (only if output flow rate control is available)
     if has_output_flow_rate_control {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("group_{}_output_flow_rate_setpoint", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_output_flow_rate_setpoint"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_OUTPUT_FLOW_RATE_SETPOINT),
             name: Box::leak(format!("{} Output Flow Rate Setpoint", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_output_flow_rate_setpoint", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_output_flow_rate_setpoint"),
             icon: "mdi:speedometer",
             min_value: 0.0,
             max_value: 50.0,
@@ -1054,10 +1105,10 @@ fn build_group_entities(
     }
 
     entities.push(EntityConfig::Number(NumberConfig {
-        object_id: Box::leak(format!("group_{}_max_brew_time", group_index).into_boxed_str()),
+        object_id: indexed_id!("group_", group_index, "_max_brew_time"),
         key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_MAX_BREW_TIME),
         name: Box::leak(format!("{} Max Brew Time", group_name).into_boxed_str()),
-        unique_id: Box::leak(format!("group_{}_max_brew_time", group_index).into_boxed_str()),
+        unique_id: indexed_id!("group_", group_index, "_max_brew_time"),
         icon: "mdi:timer-stop",
         min_value: 0.0,
         max_value: 600.0,
@@ -1072,10 +1123,10 @@ fn build_group_entities(
     // Auto tare enabled (only if scale tare capability is available)
     if has_scale_tare {
         entities.push(EntityConfig::Switch(SwitchConfig {
-            object_id: Box::leak(format!("group_{}_auto_tare_enabled", group_index).into_boxed_str()),
+            object_id: indexed_id!("group_", group_index, "_auto_tare_enabled"),
             key: generate_key(ENTITY_TYPE_GROUP, group_index, GROUP_AUTO_TARE_ENABLED),
             name: Box::leak(format!("{} Auto Tare Enabled", group_name).into_boxed_str()),
-            unique_id: Box::leak(format!("group_{}_auto_tare_enabled", group_index).into_boxed_str()),
+            unique_id: indexed_id!("group_", group_index, "_auto_tare_enabled"),
             icon: "mdi:scale-balance",
             disabled_by_default: false,
             entity_category: EntityCategory::Config,
@@ -1105,10 +1156,10 @@ fn build_water_tap_entities(
 
     // Is dispensing binary sensor (always present for water taps)
     entities.push(EntityConfig::BinarySensor(BinarySensorConfig {
-        object_id: Box::leak(format!("water_tap_{}_is_dispensing", water_tap_index).into_boxed_str()),
+        object_id: indexed_id!("water_tap_", water_tap_index, "_is_dispensing"),
         key: generate_key(ENTITY_TYPE_WATER_TAP, water_tap_index, WATER_TAP_IS_DISPENSING),
         name: Box::leak(format!("{} Is Dispensing", water_tap_name).into_boxed_str()),
-        unique_id: Box::leak(format!("water_tap_{}_is_dispensing", water_tap_index).into_boxed_str()),
+        unique_id: indexed_id!("water_tap_", water_tap_index, "_is_dispensing"),
         icon: "mdi:water",
         device_class: "",
         disabled_by_default: false,
@@ -1119,10 +1170,10 @@ fn build_water_tap_entities(
     // Temperature target (if configured)
     if let Some(_temp_target) = config.temperature_target {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("water_tap_{}_temp_target", water_tap_index).into_boxed_str()),
+            object_id: indexed_id!("water_tap_", water_tap_index, "_temp_target"),
             key: generate_key(ENTITY_TYPE_WATER_TAP, water_tap_index, WATER_TAP_TEMPERATURE_TARGET),
             name: Box::leak(format!("{} Temperature Target", water_tap_name).into_boxed_str()),
-            unique_id: Box::leak(format!("water_tap_{}_temp_target", water_tap_index).into_boxed_str()),
+            unique_id: indexed_id!("water_tap_", water_tap_index, "_temp_target"),
             icon: "mdi:thermometer",
             min_value: 20.0,
             max_value: 100.0,
@@ -1136,10 +1187,10 @@ fn build_water_tap_entities(
     }
 
     entities.push(EntityConfig::Number(NumberConfig {
-        object_id: Box::leak(format!("water_tap_{}_max_dispense_time", water_tap_index).into_boxed_str()),
+        object_id: indexed_id!("water_tap_", water_tap_index, "_max_dispense_time"),
         key: generate_key(ENTITY_TYPE_WATER_TAP, water_tap_index, WATER_TAP_MAX_DISPENSE_TIME),
         name: Box::leak(format!("{} Max Dispense Time", water_tap_name).into_boxed_str()),
-        unique_id: Box::leak(format!("water_tap_{}_max_dispense_time", water_tap_index).into_boxed_str()),
+        unique_id: indexed_id!("water_tap_", water_tap_index, "_max_dispense_time"),
         icon: "mdi:timer-stop",
         min_value: 5.0,
         max_value: 300.0,
@@ -1154,10 +1205,10 @@ fn build_water_tap_entities(
     // Flow rate limit (if configured)
     if let Some(_flow_rate_limit) = config.flow_rate_limit {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("water_tap_{}_flow_rate_limit", water_tap_index).into_boxed_str()),
+            object_id: indexed_id!("water_tap_", water_tap_index, "_flow_rate_limit"),
             key: generate_key(ENTITY_TYPE_WATER_TAP, water_tap_index, WATER_TAP_FLOW_RATE_LIMIT),
             name: Box::leak(format!("{} Flow Rate Limit", water_tap_name).into_boxed_str()),
-            unique_id: Box::leak(format!("water_tap_{}_flow_rate_limit", water_tap_index).into_boxed_str()),
+            unique_id: indexed_id!("water_tap_", water_tap_index, "_flow_rate_limit"),
             icon: "mdi:speedometer",
             min_value: 0.5,
             max_value: 50.0,
@@ -1191,10 +1242,10 @@ fn build_steam_wand_entities(
 
     // Is steaming binary sensor (always present for steam wands)
     entities.push(EntityConfig::BinarySensor(BinarySensorConfig {
-        object_id: Box::leak(format!("steam_wand_{}_is_steaming", steam_wand_index).into_boxed_str()),
+        object_id: indexed_id!("steam_wand_", steam_wand_index, "_is_steaming"),
         key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_IS_STEAMING),
         name: Box::leak(format!("{} Is Steaming", steam_wand_name).into_boxed_str()),
-        unique_id: Box::leak(format!("steam_wand_{}_is_steaming", steam_wand_index).into_boxed_str()),
+        unique_id: indexed_id!("steam_wand_", steam_wand_index, "_is_steaming"),
         icon: "mdi:steam",
         device_class: "",
         disabled_by_default: false,
@@ -1204,10 +1255,10 @@ fn build_steam_wand_entities(
 
     // Valve openness sensor (always present for steam wands)
     entities.push(EntityConfig::Sensor(SensorConfig {
-        object_id: Box::leak(format!("steam_wand_{}_valve_openness", steam_wand_index).into_boxed_str()),
+        object_id: indexed_id!("steam_wand_", steam_wand_index, "_valve_openness"),
         key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_VALVE_OPENNESS),
         name: Box::leak(format!("{} Valve Openness", steam_wand_name).into_boxed_str()),
-        unique_id: Box::leak(format!("steam_wand_{}_valve_openness", steam_wand_index).into_boxed_str()),
+        unique_id: indexed_id!("steam_wand_", steam_wand_index, "_valve_openness"),
         icon: "mdi:valve",
         unit_of_measurement: "%",
         accuracy_decimals: 0,
@@ -1221,10 +1272,10 @@ fn build_steam_wand_entities(
     // Temperature target (if configured)
     if let Some(_temp_target) = config.temperature_target {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("steam_wand_{}_temp_target", steam_wand_index).into_boxed_str()),
+            object_id: indexed_id!("steam_wand_", steam_wand_index, "_temp_target"),
             key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_TEMPERATURE_TARGET),
             name: Box::leak(format!("{} Temperature Target", steam_wand_name).into_boxed_str()),
-            unique_id: Box::leak(format!("steam_wand_{}_temp_target", steam_wand_index).into_boxed_str()),
+            unique_id: indexed_id!("steam_wand_", steam_wand_index, "_temp_target"),
             icon: "mdi:thermometer",
             min_value: 100.0,
             max_value: 160.0,
@@ -1240,10 +1291,10 @@ fn build_steam_wand_entities(
     // Openness (if configured)
     if let Some(_openness) = config.openness {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("steam_wand_{}_openness", steam_wand_index).into_boxed_str()),
+            object_id: indexed_id!("steam_wand_", steam_wand_index, "_openness"),
             key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_OPENNESS),
             name: Box::leak(format!("{} Openness", steam_wand_name).into_boxed_str()),
-            unique_id: Box::leak(format!("steam_wand_{}_openness", steam_wand_index).into_boxed_str()),
+            unique_id: indexed_id!("steam_wand_", steam_wand_index, "_openness"),
             icon: "mdi:gauge",
             min_value: 0.0,
             max_value: 100.0,
@@ -1259,10 +1310,10 @@ fn build_steam_wand_entities(
     // Purge time (if configured)
     if let Some(_purge_time) = config.purge_time_seconds {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("steam_wand_{}_purge_time", steam_wand_index).into_boxed_str()),
+            object_id: indexed_id!("steam_wand_", steam_wand_index, "_purge_time"),
             key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_PURGE_TIME),
             name: Box::leak(format!("{} Purge Time", steam_wand_name).into_boxed_str()),
-            unique_id: Box::leak(format!("steam_wand_{}_purge_time", steam_wand_index).into_boxed_str()),
+            unique_id: indexed_id!("steam_wand_", steam_wand_index, "_purge_time"),
             icon: "mdi:timer",
             min_value: 1.0,
             max_value: 10.0,
@@ -1278,10 +1329,10 @@ fn build_steam_wand_entities(
     // Max steam time (if configured)
     if let Some(_max_steam_time) = config.max_steam_time_seconds {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("steam_wand_{}_max_steam_time", steam_wand_index).into_boxed_str()),
+            object_id: indexed_id!("steam_wand_", steam_wand_index, "_max_steam_time"),
             key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_MAX_STEAM_TIME),
             name: Box::leak(format!("{} Max Steam Time", steam_wand_name).into_boxed_str()),
-            unique_id: Box::leak(format!("steam_wand_{}_max_steam_time", steam_wand_index).into_boxed_str()),
+            unique_id: indexed_id!("steam_wand_", steam_wand_index, "_max_steam_time"),
             icon: "mdi:timer-stop",
             min_value: 30.0,
             max_value: 300.0,
@@ -1296,10 +1347,10 @@ fn build_steam_wand_entities(
 
     // Auto purge enabled switch
     entities.push(EntityConfig::Switch(SwitchConfig {
-        object_id: Box::leak(format!("steam_wand_{}_auto_purge_enabled", steam_wand_index).into_boxed_str()),
+        object_id: indexed_id!("steam_wand_", steam_wand_index, "_auto_purge_enabled"),
         key: generate_key(ENTITY_TYPE_STEAM_WAND, steam_wand_index, STEAM_WAND_AUTO_PURGE_ENABLED),
         name: Box::leak(format!("{} Auto Purge Enabled", steam_wand_name).into_boxed_str()),
-        unique_id: Box::leak(format!("steam_wand_{}_auto_purge_enabled", steam_wand_index).into_boxed_str()),
+        unique_id: indexed_id!("steam_wand_", steam_wand_index, "_auto_purge_enabled"),
         icon: "mdi:auto-fix",
         disabled_by_default: false,
         entity_category: EntityCategory::Config,
@@ -1332,10 +1383,10 @@ fn build_tank_entities(
     // Water level sensor (only if tank has water level sensor)
     if has_water_level_sensor {
         entities.push(EntityConfig::Sensor(SensorConfig {
-            object_id: Box::leak(format!("tank_{}_water_level", tank_index).into_boxed_str()),
+            object_id: indexed_id!("tank_", tank_index, "_water_level"),
             key: generate_key(ENTITY_TYPE_TANK, tank_index, TANK_WATER_LEVEL),
             name: Box::leak(format!("{} Water Level", tank_name).into_boxed_str()),
-            unique_id: Box::leak(format!("tank_{}_water_level", tank_index).into_boxed_str()),
+            unique_id: indexed_id!("tank_", tank_index, "_water_level"),
             icon: "mdi:water-percent",
             unit_of_measurement: "%",
             accuracy_decimals: 0,
@@ -1350,10 +1401,10 @@ fn build_tank_entities(
     // Low level warning threshold (if configured)
     if let Some(_threshold) = config.low_level_warning_threshold {
         entities.push(EntityConfig::Number(NumberConfig {
-            object_id: Box::leak(format!("tank_{}_low_level_threshold", tank_index).into_boxed_str()),
+            object_id: indexed_id!("tank_", tank_index, "_low_level_threshold"),
             key: generate_key(ENTITY_TYPE_TANK, tank_index, TANK_LOW_LEVEL_WARNING_THRESHOLD),
             name: Box::leak(format!("{} Low Level Warning Threshold", tank_name).into_boxed_str()),
-            unique_id: Box::leak(format!("tank_{}_low_level_threshold", tank_index).into_boxed_str()),
+            unique_id: indexed_id!("tank_", tank_index, "_low_level_threshold"),
             icon: "mdi:water-alert",
             min_value: 0.0,
             max_value: 100.0,
