@@ -4,7 +4,7 @@ pub mod devices;
 pub mod scanner;
 pub mod status;
 
-pub use devices::ble_devices_task;
+pub use devices::{ble_devices_task, ble_slot_task};
 pub use scanner::ScanPrinter;
 
 use bt_hci::controller::ExternalController;

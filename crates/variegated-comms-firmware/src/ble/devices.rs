@@ -6,9 +6,10 @@ use embassy_futures::join::join;
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
+use embassy_sync::pubsub::Subscriber;
+use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Instant, Timer};
 use esp_radio::ble::controller::BleConnector;
-use portable_atomic::Ordering;
 use trouble_host::prelude::*;
 use variegated_belka_portal_trouble_driver::BelkaPortalDriver;
 use variegated_controller_types::ExternalPeripheralSensorReading;
@@ -19,45 +20,31 @@ use variegated_trouble_connection_manager::BleConnectionManager;
 
 use crate::ble::status;
 use crate::channels::{
-    BLE_RECONNECT_REQUEST, SCALE_COMMAND_CHANNEL,
+    BLE_RECONNECT_REQUEST, BT_ASSOCIATIONS, SCALE_COMMAND_CHANNEL,
     SENSOR_READING_CAPACITY,
 };
-use variegated_controller_types::ScaleOp;
-use crate::config::{
-    BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID, BLUETOOTH_SCALE_ENDPOINT_FLOW,
-    BLUETOOTH_SCALE_ENDPOINT_WEIGHT,
+use variegated_controller_types::bluetooth::{
+    reconcile_bluetooth_slots, BluetoothDriverKind, BluetoothSlotAssignment,
+    BluetoothSlotAssignments, MAX_BLUETOOTH_PERIPHERALS,
 };
+use variegated_controller_types::{PeripheralId, ScaleOp};
+use variegated_log::log_warn;
+use crate::config::{BLUETOOTH_SCALE_ENDPOINT_FLOW, BLUETOOTH_SCALE_ENDPOINT_WEIGHT};
 use variegated_adc_tools::{ConversionParameters, KalmanFilterParameters};
 
-/// Slot serving the Belka portal while the peripheral set is still compiled in.
+/// One entry per slot: the peripheral it should be serving, or `None`.
 ///
-/// Temporary. These two constants disappear when the measurement loops start taking
-/// their slot as an argument; until then they keep the reporting path -- which is now
-/// driven by the slot table -- describing the same two peripherals it always did.
-const BELKA_SLOT: usize = 0;
-/// Slot serving the group 1 scale. See [`BELKA_SLOT`].
-const SCALE_SLOT: usize = 1;
-
-/// Set the Belka connection state.
-///
-/// The edge detection that used to live here now lives in `ble::status`, so that every
-/// caller is edge triggered by construction rather than by remembering to be -- see
-/// [`crate::ble::status::set_slot_connected`] for why emitting on every call would turn
-/// the debug ring over on its own.
-fn set_belka_connected(connected: bool) {
-    status::set_slot_connected(BELKA_SLOT, connected);
-}
-
-/// Set the group 1 scale connection state.
-///
-/// Called from where the *Belka* loop sets its own -- after the GATT client exists --
-/// rather than from the earlier link-layer `is_connected()` poll. The two differ during a
-/// link that connects but never completes service discovery, and reporting a scale as
-/// connected in that window would be a worse lie than reporting it disconnected: the
-/// application processor gates brew-by-weight on this.
-fn set_scale_connected(connected: bool) {
-    status::set_slot_connected(SCALE_SLOT, connected);
-}
+/// Written only by [`reconcile_associations_loop`], read by the slot tasks. Separate
+/// from `BT_ASSOCIATIONS` because the two answer different questions -- that one is what
+/// the user configured, this is which of four fixed workers is responsible for what --
+/// and because the mapping has to be *stable*: see
+/// [`reconcile_bluetooth_slots`] for why deriving it from list position instead would
+/// drop every peripheral's link whenever one was deleted.
+static SLOT_ASSIGNMENTS: Watch<
+    CriticalSectionRawMutex,
+    BluetoothSlotAssignments,
+    MAX_BLUETOOTH_PERIPHERALS,
+> = Watch::new();
 
 /// Number of weight samples the flow estimator differences across.
 ///
@@ -202,51 +189,221 @@ impl FlowEstimator {
 
 /// BLE devices management task
 ///
-/// Manages connections to Belka Portal and ACAIA scale, running their measurement loops.
+/// Runs the connection manager alongside the two loops that have no slot of their own:
+/// the reconciler that decides which slot serves what, and the reconnect listener.
+/// The per-peripheral work happens in [`ble_slot_task`], spawned once per slot.
 #[embassy_executor::task]
 pub async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
-    stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
-    belka_address: BdAddr,
-    acaia_address: BdAddr,
-    sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
     let handle = manager.handle();
 
-    // Claim the two slots the compiled-in peripherals occupy, so the status map, the
-    // debug snapshot and `ReconnectBle` all describe them. This is what the reconciler
-    // will do instead once the association list drives the peripheral set.
-    status::set_slot_peripheral(BELKA_SLOT, Some(BELKA_PERIPHERAL_ID));
-    status::set_slot_peripheral(SCALE_SLOT, Some(BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID));
-
-    // Register both devices and enable auto-connection
-    {
-        // Register Belka Portal
-        let device_handle = handle.register_device(belka_address);
-        let driver = BelkaPortalDriver::new(device_handle, stack);
-        driver.set_maintain_connection(true).await;
-
-        // Register ACAIA scale
-        let device_handle = handle.register_device(acaia_address);
-        let driver = AcaiaOldDriver::new(device_handle, stack);
-        driver.set_maintain_connection(true).await;
-    }
-
-    log_info!("BLE Devices: Configured Belka {:?} and ACAIA {:?}", belka_address, acaia_address);
-
-    // Run connection manager, the device measurement loop, and the injected-command
-    // listener concurrently.
     join(
         manager.run(),
-        join(
-            join(
-                belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
-                acaia_measurement_loop(handle.clone(), stack, acaia_address, sensor_sender),
-            ),
-            reconnect_request_loop(handle.clone(), belka_address),
-        ),
+        join(reconcile_associations_loop(), reconnect_request_loop(handle.clone())),
     )
     .await;
+}
+
+/// Translate the association list into slot assignments.
+///
+/// **The sole writer of [`SLOT_ASSIGNMENTS`].** Everything about which worker serves
+/// which peripheral is decided here, so the slot tasks never have to agree with each
+/// other about anything.
+///
+/// The decision itself is [`reconcile_bluetooth_slots`], which lives in
+/// `variegated-controller-types` because it is pure and because its two failure modes --
+/// claims keyed on list position, and two associations sharing an address -- are silent
+/// and worth testing. This loop is the part that cannot be: waiting, logging, and
+/// publishing.
+async fn reconcile_associations_loop() {
+    let mut associations = BT_ASSOCIATIONS
+        .receiver()
+        .expect("the association watch is sized for this receiver");
+    let sender = SLOT_ASSIGNMENTS.sender();
+    let mut assignments = BluetoothSlotAssignments::default();
+
+    loop {
+        let list = associations.changed().await;
+
+        let changed = reconcile_bluetooth_slots(&mut assignments, &list, |id, why| {
+            // Logged rather than swallowed: a peripheral that is configured and simply
+            // never connects is the hardest kind of fault to find from the outside.
+            log_warn!("Bluetooth association 0x{:04X} refused: {:?}", id, why);
+            bus::emit_event(DebugEvent::CommandRejected {
+                reason: variegated_controller_types::debug::name("bt_association"),
+            });
+        });
+
+        if changed {
+            for (slot, assignment) in assignments.iter().enumerate() {
+                match assignment {
+                    Some(a) => log_info!("BLE slot {} serves 0x{:04X} ({:?})", slot, a.id, a.driver),
+                    None => log_info!("BLE slot {} is idle", slot),
+                }
+            }
+            sender.send(assignments);
+        }
+    }
+}
+
+/// One BLE peripheral, whichever one this slot is currently assigned.
+///
+/// Four of these are spawned at boot and live forever, picking up and putting down
+/// peripherals as the association list changes. A task per *slot* rather than per
+/// peripheral because a task cannot be unspawned: an association the user deletes has to
+/// leave something behind, and an idle worker is a much smaller thing to leave than a
+/// leaked one.
+///
+/// Everything BLE here is `!Send` -- `RefCell` in the manager, and `Connection` is not
+/// `Send` -- so these must be spawned onto the same executor as the manager. That is not
+/// enforced by a bound; `Spawner::spawn` simply will not accept them anywhere else.
+///
+/// # Where the memory goes
+///
+/// `pool_size` allocates this task's future `MAX_BLUETOOTH_PERIPHERALS` times in `.bss`,
+/// whether or not any peripheral is associated. Left inline, the driver future would
+/// dominate it -- the ACAIA loop carries a `FlowEstimator` with a sample deque, a median
+/// window and a Kalman filter -- and four copies measured 23936 bytes, taken straight out
+/// of `.stack`, which is the SRAM remainder.
+///
+/// So the driver is boxed instead; see the note at the allocation. What is left here is
+/// the loop's own state, and the cost of a peripheral is paid only while one is
+/// connected.
+#[embassy_executor::task(pool_size = MAX_BLUETOOTH_PERIPHERALS)]
+pub async fn ble_slot_task(
+    slot: usize,
+    manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
+) {
+    let handle = manager.handle();
+    let mut assignments = SLOT_ASSIGNMENTS
+        .receiver()
+        .expect("the slot assignment watch is sized for one receiver per slot");
+
+    // Acquired once, for the life of the task rather than the life of an assignment.
+    // `PubSubChannel` returns subscriber slots only on drop, so taking one per
+    // assignment would leak one every time a peripheral was re-associated.
+    let mut scale_commands = SCALE_COMMAND_CHANNEL
+        .subscriber()
+        .expect("the scale command channel is sized for one subscriber per slot");
+
+    let mut current: Option<BluetoothSlotAssignment> = None;
+
+    loop {
+        // Read the authoritative value rather than relying on having been notified.
+        // Change notifications are what wake this loop, but they are not what it trusts:
+        // re-reading here means a slot that missed one -- because it was busy tearing a
+        // connection down -- corrects itself on the next pass instead of serving a
+        // peripheral nobody asked for.
+        let desired = SLOT_ASSIGNMENTS.try_get().and_then(|all| all[slot]);
+
+        if current != desired {
+            if let Some(previous) = current {
+                log_info!("BLE slot {}: releasing 0x{:04X}", slot, previous.id);
+                // Order matters. `release` disconnects and frees the manager's table
+                // entry; `set_slot_peripheral(_, None)` is what emits the disconnect for
+                // the outgoing peripheral, which nothing else will now that this slot's
+                // driver loop is gone.
+                handle.register_device(BdAddr::new(previous.address)).release();
+                status::set_slot_peripheral(slot, None);
+            }
+
+            current = desired;
+
+            if let Some(next) = current {
+                log_info!(
+                    "BLE slot {}: taking 0x{:04X} ({:?})",
+                    slot,
+                    next.id,
+                    next.driver
+                );
+                status::set_slot_peripheral(slot, Some(next.id));
+                handle
+                    .register_device(BdAddr::new(next.address))
+                    .set_maintain_connection(true)
+                    .await;
+            }
+        }
+
+        let Some(assignment) = current else {
+            // Idle. Nothing to run, so park until this slot is given something.
+            assignments.changed_and(|all| all[slot] != current).await;
+            continue;
+        };
+
+        // Boxed, and the reason is which memory it comes out of.
+        //
+        // This future is about 10 kB -- the ACAIA arm dominates, carrying a
+        // `FlowEstimator` with a sample deque, a median window and a Kalman filter. Left
+        // inline it is part of the task future, which `pool_size` allocates
+        // `MAX_BLUETOOTH_PERIPHERALS` times in `.bss`, so a machine with one scale would
+        // pay for four of them permanently.
+        //
+        // `.stack` is the SRAM *remainder* here, so that is a direct subtraction from it,
+        // and the block above `esp_alloc::heap_allocator!` in `main` records that 87256
+        // bytes of stack has already proved insufficient once. Not a budget to spend
+        // 40 kB of speculatively.
+        //
+        // Measured across this one change: `.bss` 242648 -> 200960 and `.stack`
+        // 103416 -> 145104, i.e. **41688 bytes**, which also recovers what the two
+        // hand-written loops this replaced were costing before any of it.
+        //
+        // The heap can afford it. The first 64 kB is `#[ram(reclaimed)]` -- memory the
+        // ROM bootloader was using, which costs the stack nothing at all -- and measured
+        // peak occupancy across both regions is 28 kB of 112 kB. The cost here is also
+        // paid per *connected* peripheral rather than per slot, so the common one- or
+        // two-peripheral machine spends 10-21 kB of that, not 40.
+        //
+        // One allocation per *assignment*, not per reconnect: the retry loops live inside
+        // the measurement loops, and the `select` below only completes when this slot's
+        // assignment changes. So this runs when a user associates or removes a
+        // peripheral, a handful of times in the life of a machine -- long-lived, few and
+        // large, which is the least fragmenting shape for the first-fit allocator here.
+        // Worth keeping in mind if `MAX_BLUETOOTH_PERIPHERALS` ever rises: four connected
+        // at once is ~42 kB, and the ESPHome server still needs a single contiguous
+        // 12000-byte block (`esphome/server.rs`), which is the allocation that has
+        // actually failed here before.
+        //
+        // A failed allocation is `handle_alloc_error`: a clean panic and a reboot. Worse
+        // than a `.bss` slot that cannot fail, better than what it buys -- the last stack
+        // overflow on this firmware did not panic, it corrupted a `next` pointer in
+        // embassy's timer list and surfaced as a load access fault somewhere unrelated.
+        let driver = alloc::boxed::Box::pin(async {
+            match assignment.driver {
+                BluetoothDriverKind::BelkaPortal => {
+                    belka_measurement_loop(
+                        handle.clone(),
+                        stack,
+                        BdAddr::new(assignment.address),
+                        assignment.id,
+                        slot,
+                        sensor_sender,
+                    )
+                    .await
+                }
+                BluetoothDriverKind::AcaiaOld => {
+                    acaia_measurement_loop(
+                        handle.clone(),
+                        stack,
+                        BdAddr::new(assignment.address),
+                        assignment.id,
+                        slot,
+                        sensor_sender,
+                        &mut scale_commands,
+                    )
+                    .await
+                }
+            }
+        });
+
+        // `changed_and` marks a value as seen only when the predicate holds, so a change
+        // that reassigns a *different* slot re-parks this one instead of cancelling a
+        // working driver. Without that, editing any association would interrupt every
+        // peripheral on the machine.
+        select(driver, assignments.changed_and(|all| all[slot] != current)).await;
+    }
 }
 
 /// Serve `CommsDebugOp::ReconnectBle`.
@@ -262,44 +419,59 @@ pub async fn ble_devices_task(
 /// "already connected" is precisely the state an operator reaches for this command
 /// from, when the link is nominally up and behaving badly.
 ///
-/// Ids this firmware does not know are rejected by the dispatcher, before the signal,
-/// so anything arriving here is one this loop can act on. It is still matched rather
-/// than assumed: the two lists are in different modules and are allowed to drift.
+/// Ids this firmware is not serving are rejected by the dispatcher, before the signal,
+/// so anything arriving here is one this loop can act on. The address is still looked up
+/// rather than assumed: the dispatcher tests assignment, this needs the address, and the
+/// association list can change between the two.
 async fn reconnect_request_loop(
     handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
-    belka_address: BdAddr,
 ) {
     loop {
         let id = BLE_RECONNECT_REQUEST.wait().await;
-        if id != BELKA_PERIPHERAL_ID {
-            continue;
-        }
 
-        let device_handle = handle.register_device(belka_address);
+        // Resolved from the current assignments rather than from a compiled-in address,
+        // and the lookup can legitimately fail: the peripheral may have been
+        // disassociated in the moment between the dispatcher accepting the command and
+        // this loop being woken.
+        let Some(assignment) = SLOT_ASSIGNMENTS
+            .try_get()
+            .and_then(|all| all.iter().flatten().find(|a| a.id == id).copied())
+        else {
+            log_info!("Reconnect requested for 0x{:04X}, which is no longer assigned", id);
+            continue;
+        };
+
+        let device_handle = handle.register_device(BdAddr::new(assignment.address));
         // `with_connection` borrows the manager's `RefCell` for the length of the
         // closure only, and the closure is synchronous, so this cannot overlap the
         // manager's own `borrow_mut` across an await.
         match device_handle.with_connection(|connection| connection.disconnect()) {
             Ok(()) => {
-                log_info!("Reconnect requested for Belka Portal; dropping the connection");
-                // The manager sees the dead connection on its next pass and emits the
-                // `BlePeripheralDisconnected`/`BlePeripheralConnected` pair through
-                // `set_belka_connected`, so this site deliberately emits nothing: the
-                // events that follow describe what actually happened, and one here
+                log_info!("Reconnect requested for 0x{:04X}; dropping the connection", id);
+                // The manager sees the dead connection on its next pass and the slot's
+                // measurement loop emits the `BlePeripheralDisconnected`/
+                // `BlePeripheralConnected` pair, so this site deliberately emits nothing:
+                // the events that follow describe what actually happened, and one here
                 // would announce an outcome that has not been reached yet.
             }
             // Not connected. Nothing to drop, and the manager is already retrying once
             // a second, so the request is satisfied by what is already happening.
-            Err(()) => log_info!("Reconnect requested for Belka Portal, which is not connected"),
+            Err(()) => log_info!("Reconnect requested for 0x{:04X}, which is not connected", id),
         }
     }
 }
 
 /// Belka Portal measurement loop
+///
+/// Reports under whatever [`PeripheralId`] the association gave it, rather than a
+/// compiled-in one: the id names the *role* the device fills on this machine, and the
+/// application processor routes on it.
 async fn belka_measurement_loop(
     handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     belka_address: BdAddr,
+    peripheral_id: PeripheralId,
+    slot: usize,
     sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
     Timer::after(Duration::from_millis(300)).await;
@@ -331,7 +503,7 @@ async fn belka_measurement_loop(
                 log_info!("GATT client created, running task...");
 
                 // Signal that Belka is connected
-                set_belka_connected(true);
+                status::set_slot_connected(slot, true);
 
                 // Run GATT client task alongside operations, exit when either completes
                 let _ = select(gatt.task(), async {
@@ -366,7 +538,7 @@ async fn belka_measurement_loop(
 
                                                 // Send EC reading (endpoint 0)
                                                 let ec_reading = ExternalPeripheralSensorReading {
-                                                    id: BELKA_PERIPHERAL_ID,
+                                                    id: peripheral_id,
                                                     endpoint: 0,
                                                     value: measurement.ec,
                                                 };
@@ -374,7 +546,7 @@ async fn belka_measurement_loop(
 
                                                 // Send temperature reading (endpoint 1)
                                                 let temp_reading = ExternalPeripheralSensorReading {
-                                                    id: BELKA_PERIPHERAL_ID,
+                                                    id: peripheral_id,
                                                     endpoint: 1,
                                                     value: measurement.temperature,
                                                 };
@@ -382,7 +554,7 @@ async fn belka_measurement_loop(
 
                                                 // Send battery reading (endpoint 2)
                                                 let battery_reading = ExternalPeripheralSensorReading {
-                                                    id: BELKA_PERIPHERAL_ID,
+                                                    id: peripheral_id,
                                                     endpoint: 2,
                                                     value: measurement.battery as f32,
                                                 };
@@ -397,7 +569,7 @@ async fn belka_measurement_loop(
                                     Either::Second(is_connected) => {
                                         if !is_connected {
                                             log_info!("Connection lost during measurements, exiting");
-                                            set_belka_connected(false);
+                                            status::set_slot_connected(slot, false);
                                             break;
                                         }
                                     }
@@ -412,11 +584,11 @@ async fn belka_measurement_loop(
                 log_info!("GATT join completed, connection dropped");
 
                 // Signal disconnection
-                set_belka_connected(false);
+                status::set_slot_connected(slot, false);
             }
             Err(e) => {
                 log_error!("Failed to create GATT client: {:?}", e);
-                set_belka_connected(false);
+                status::set_slot_connected(slot, false);
             }
         }
 
@@ -428,24 +600,22 @@ async fn belka_measurement_loop(
 
 /// ACAIA scale measurement loop
 ///
-/// Reports under [`BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID`] rather than an ACAIA-specific
-/// id: the id names the scale's role on the machine, so swapping in a different make of
-/// scale here does not move the readings to a different address on the application
-/// processor. See the note in `config.rs`.
+/// Reports under whatever [`PeripheralId`] the association gave it rather than an
+/// ACAIA-specific id: the id names the scale's *role* on the machine, so swapping in a
+/// different make of scale does not move the readings to a different address on the
+/// application processor. See the note in `config.rs`.
+///
+/// The subscriber is borrowed rather than taken, because it belongs to the slot and
+/// outlives any one assignment -- see [`ble_slot_task`].
 async fn acaia_measurement_loop(
     handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     acaia_address: BdAddr,
+    peripheral_id: PeripheralId,
+    slot: usize,
     sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
+    scale_commands: &mut Subscriber<'static, CriticalSectionRawMutex, (PeripheralId, ScaleOp), 1, MAX_BLUETOOTH_PERIPHERALS, 1>,
 ) {
-    // Held for the whole loop, not taken per connection. `PubSubChannel` hands out a
-    // fixed number of subscriber slots and only returns them on drop, so acquiring one
-    // inside the reconnect loop would leak a slot on every retry -- and this loop retries
-    // every five seconds for as long as the scale is switched off.
-    let mut scale_commands = SCALE_COMMAND_CHANNEL
-        .subscriber()
-        .expect("scale command subscriber slots are sized for every scale loop");
-
     loop {
         // Check if connected
         let is_connected = {
@@ -456,7 +626,7 @@ async fn acaia_measurement_loop(
 
         if !is_connected {
             //info!("ACAIA scale not connected, waiting...");
-            set_scale_connected(false);
+            status::set_slot_connected(slot, false);
             Timer::after(Duration::from_secs(1)).await;
             continue;
         }
@@ -481,7 +651,7 @@ async fn acaia_measurement_loop(
                     match gatt.initialize().await {
                         Ok(mut stream) => {
                             log_info!("ACAIA scale initialized successfully");
-                            set_scale_connected(true);
+                            status::set_slot_connected(slot, true);
 
                             // Discard any scale op that arrived while the scale was down.
                             //
@@ -563,7 +733,7 @@ async fn acaia_measurement_loop(
                                                         // full channel costs one sample rather than the
                                                         // connection.
                                                         let weight_reading = ExternalPeripheralSensorReading {
-                                                            id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+                                                            id: peripheral_id,
                                                             endpoint: BLUETOOTH_SCALE_ENDPOINT_WEIGHT,
                                                             value: w.weight,
                                                         };
@@ -598,7 +768,7 @@ async fn acaia_measurement_loop(
                                                         // twice. The weight flag already reports it.
                                                         if let Some(flow_rate) = flow.push(Instant::now(), w.weight) {
                                                             let flow_reading = ExternalPeripheralSensorReading {
-                                                                id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+                                                                id: peripheral_id,
                                                                 endpoint: BLUETOOTH_SCALE_ENDPOINT_FLOW,
                                                                 value: flow_rate,
                                                             };
@@ -624,7 +794,11 @@ async fn acaia_measurement_loop(
                                             break;
                                         }
                                     }
-                                    Either3::Third((peripheral_id, op)) => {
+                                    // `target` rather than `peripheral_id`: this loop now
+                                    // has an id of its own, and shadowing it here would
+                                    // make the comparison below compare a thing to
+                                    // itself.
+                                    Either3::Third((target, op)) => {
                                         // The id is checked, not assumed. Nothing has
                                         // validated it upstream -- unlike
                                         // `BLE_RECONNECT_REQUEST`, it arrives off the
@@ -639,10 +813,10 @@ async fn acaia_measurement_loop(
                                         // heartbeat check at the bottom of this loop
                                         // body is what keeps the link alive, and a
                                         // `continue` here would skip it.
-                                        if peripheral_id == BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID {
+                                        if target == peripheral_id {
                                             match op {
                                                 ScaleOp::Tare => {
-                                                    log_info!("Taring ACAIA scale");
+                                                    log_info!("Taring scale 0x{:04X}", peripheral_id);
                                                     if let Err(e) = gatt.send_tare().await {
                                                         log_error!("Failed to send ACAIA tare: {:?}", e);
                                                     }
@@ -651,8 +825,8 @@ async fn acaia_measurement_loop(
                                         } else {
                                             log_info!(
                                                 "Ignoring scale op for 0x{:04X}, this loop owns 0x{:04X}",
-                                                peripheral_id,
-                                                BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID
+                                                target,
+                                                peripheral_id
                                             );
                                         }
                                     }
@@ -675,11 +849,11 @@ async fn acaia_measurement_loop(
                     }
                 }).await;
                 log_info!("ACAIA GATT task completed, connection dropped");
-                set_scale_connected(false);
+                status::set_slot_connected(slot, false);
             }
             Err(e) => {
                 log_error!("Failed to create ACAIA GATT client: {:?}", e);
-                set_scale_connected(false);
+                status::set_slot_connected(slot, false);
             }
         }
 

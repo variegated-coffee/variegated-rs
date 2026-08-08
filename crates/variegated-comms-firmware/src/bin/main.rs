@@ -36,7 +36,7 @@ use trouble_host::prelude::*;
 // Library imports
 use variegated_comms_firmware::{
     application_processor,
-    ble::{ble_devices_task, ble_runner_task, ScanPrinter},
+    ble::{ble_devices_task, ble_runner_task, ble_slot_task, ScanPrinter},
     channels::{
         ApplicationConfigurationChannel, ApplicationStatusChannel, ApplicationRoutineChannel,
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
@@ -44,7 +44,7 @@ use variegated_comms_firmware::{
         StateChangeChannel, CLIENT_EVENT_CAPACITY, SENSOR_READING_CHANNEL,
         DEBUG_COMMAND_CHANNEL,
     },
-    config::{uart_config, acaia_address, belka_address},
+    config::uart_config,
     debug,
     esphome::esphome_server_task,
     http::{http_server_task, cache_update_task},
@@ -55,6 +55,7 @@ use variegated_comms_firmware::{
     wifi::{connection_task, net_task},
 };
 use esphome_device::ClientEvent;
+use variegated_controller_types::bluetooth::MAX_BLUETOOTH_PERIPHERALS;
 use variegated_controller_types::debug::{name, text, DebugEvent, Severity};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
@@ -662,7 +663,15 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn BLE tasks
     spawn_or_report!(spawner, "ble_runner", ble_runner_task(runner, printer));
-    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager, stack, belka_address(), acaia_address(), sensor_reading_sender));
+    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager));
+    // One worker per slot, spawned unconditionally and idle until the application
+    // processor says what to connect to. There is no peripheral list at this point --
+    // this firmware stores none -- so spawning per peripheral is not an option even in
+    // principle; a task cannot be created later from a context that has no `Spawner`,
+    // and cannot be destroyed at all.
+    for slot in 0..MAX_BLUETOOTH_PERIPHERALS {
+        spawn_or_report!(spawner, "ble_slot", ble_slot_task(slot, connection_manager, stack, sensor_reading_sender));
+    }
     log_info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;

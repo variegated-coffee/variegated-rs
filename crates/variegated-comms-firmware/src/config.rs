@@ -1,7 +1,5 @@
 //! Configuration constants for the comms firmware
 
-use trouble_host::prelude::BdAddr;
-
 // WiFi configuration
 pub const SSID: &str = env!("SSID");
 pub const PASSWORD: &str = env!("PASSWORD");
@@ -46,10 +44,10 @@ pub const TCP_COMMANDS_ENABLED: bool = ALLOW_TCP_COMMANDS.is_some();
 pub const NTP_SERVER: &str = "pool.ntp.org";
 pub const USEC_IN_SEC: u64 = 1_000_000;
 
-// BLE device addresses
-pub fn belka_address() -> BdAddr {
-    BdAddr::new([0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78])
-}
+// BLE device addresses used to live here, one `fn` per peripheral. They are now
+// associations held by the application processor and pushed over the inter-processor
+// link, so this firmware learns what to connect to at runtime and changing a scale no
+// longer means reflashing. See `ble::devices`.
 
 // BLE peripheral IDs
 pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
@@ -67,6 +65,12 @@ pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
 /// readings drive brew-by-weight, and `D` for dose scales, which weigh the basket
 /// before and after and never participate in a live control loop. Grouping them by
 /// prefix means a future range check can tell the two apart without a match arm per id.
+///
+/// These are no longer read by anything in this firmware -- which peripheral fills which
+/// role is now an association the application processor sends. They are kept because
+/// they are the *vocabulary* both processors and the user interface pick from, and
+/// because the numbers have to agree across all three; deleting them would leave that
+/// agreement recorded nowhere.
 pub const BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID: u16 = 0xB5C0;
 pub const BLUETOOTH_GROUP_2_SCALE_PERIPHERAL_ID: u16 = 0xB5C1;
 pub const BLUETOOTH_DOSE_SCALE_1_PERIPHERAL_ID: u16 = 0xB5D0;
@@ -81,10 +85,6 @@ pub const BLUETOOTH_DOSE_SCALE_1_PERIPHERAL_ID: u16 = 0xB5D0;
 /// sites so the contract is at least stated on the side that produces it.
 pub const BLUETOOTH_SCALE_ENDPOINT_WEIGHT: u8 = 0;
 pub const BLUETOOTH_SCALE_ENDPOINT_FLOW: u8 = 1;
-
-pub fn acaia_address() -> BdAddr {
-    BdAddr::new([0x2f, 0xa0, 0x1a, 0x97, 0x1c, 0x00])
-}
 
 // UART configuration for application processor
 pub fn uart_config() -> esp_hal::uart::Config {
