@@ -41,10 +41,18 @@ use variegated_controller_types::debug_command::{CommsDebugOp, DebugCommand};
 use variegated_controller_types::CommsProcessorToApplicationProcessorMessage;
 
 use crate::channels::{
-    BLE_RECONNECT_REQUEST, BLE_RESCAN_PENDING, SNTP_RESYNC_REQUEST, WIFI_RECONNECT_REQUEST,
+    BLE_RECONNECT_REQUEST, BLE_RESCAN_PENDING, BLE_SCAN_REQUEST, SNTP_RESYNC_REQUEST,
+    WIFI_RECONNECT_REQUEST,
 };
-use crate::config::BELKA_PERIPHERAL_ID;
 use crate::debug::bus;
+
+/// How long a `RescanBle` scan runs.
+///
+/// Fixed here rather than taken from the debug command, which carries no duration: the
+/// figure is a radio-coexistence judgement, not an operator preference. It matches what
+/// the application processor asks for so that the two paths behave identically -- an
+/// operator debugging a scan should be watching the same thing the user sees.
+const DEBUG_RESCAN_DURATION_MS: u16 = 8_000;
 
 /// Both versions in one [`Name`] (32 bytes), so the event says what to do rather than
 /// just that something went wrong. Worst case is `cmd wire v0xff, expected v0xff` at
@@ -112,18 +120,21 @@ fn dispatch_comms(op: CommsDebugOp) {
         // clock is wrong waits up to five minutes to find out whether it can be
         // fixed. The resulting `SntpSynced`/`SntpFailed` is the answer.
         CommsDebugOp::ResyncSntp => SNTP_RESYNC_REQUEST.signal(()),
-        // Deliberately **not** a disconnect of anything.
+        // Runs a real discovery scan, which this firmware gained along with runtime
+        // peripheral association. It used only to un-suppress the log, because there was
+        // no free-running scan to restart -- the connection manager scanned solely inside
+        // a filtered `connect` for a device it already maintained.
         //
-        // This firmware has no free-running scan to restart: the connection manager
-        // scans only inside a filtered `connect` for a device it is already
-        // maintaining, and it retries those once a second regardless. So the only
-        // thing "rescan" can honestly mean here is "tell me what you can see" --
-        // which `ScanPrinter` suppresses after the first sighting of each address, and
-        // this flag un-suppresses. Making it drop live connections instead would be a
-        // destructive action under a non-destructive name, on a machine whose
-        // peripherals report water quality.
+        // Still **not** a disconnect of anything: live links survive a scan, only new
+        // connection attempts pause. A destructive action under a non-destructive name
+        // would be wrong on a machine whose peripherals report water quality.
+        //
+        // The log suppressor is cleared as well, because an operator reaching for this
+        // over a debug transport is watching the log, and results otherwise go to the
+        // application processor rather than to them.
         CommsDebugOp::RescanBle => {
             BLE_RESCAN_PENDING.store(true, Ordering::Relaxed);
+            BLE_SCAN_REQUEST.signal(DEBUG_RESCAN_DURATION_MS);
             bus::emit_event(DebugEvent::BleScanStarted);
         }
         // Rejected here rather than at the consumer, so the refusal is attributable to

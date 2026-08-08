@@ -354,6 +354,9 @@ async fn application_processor_task(
         variegated_controller_types::debug_command::DebugCommand,
         { variegated_comms_firmware::channels::DEBUG_COMMAND_CAPACITY },
     >,
+    // The scanner owns the queue and this task drains it. Passed as a `&'static` scanner
+    // rather than a receiver so the borrow is obviously tied to the `mk_static!` object.
+    scanner: &'static ScanPrinter,
 ) {
     let status_publisher = status_channel.publisher().unwrap();
     let config_publisher = config_channel.publisher().unwrap();
@@ -370,6 +373,7 @@ async fn application_processor_task(
         command_receiver,
         sensor_reading_receiver,
         debug_command_receiver,
+        scanner.results(),
     )
     .await;
 }
@@ -555,13 +559,20 @@ async fn main(spawner: Spawner) -> ! {
 
     let (rx, tx) = uart.split();
 
+    // Created here, well before the radio exists, because two tasks need it and they are
+    // spawned at opposite ends of this function: the application processor task drains
+    // its result queue, and the BLE runner delivers advertising reports to it.
+    // `ScanPrinter::new` is `const` and touches no hardware, so there is nothing to order
+    // it against.
+    let printer = mk_static!(ScanPrinter, ScanPrinter::new());
+
     // Spawn application processor tasks.
     //
     // embassy-executor 0.10 moved the fallibility from `Spawner::spawn` (which
     // now returns `()`) onto the `#[task]` function itself. A failed spawn used to
     // be discarded silently; `spawn_or_report!` turns it into a `SpawnFailed` event
     // instead. See the macro's doc comment for why an event and not `unwrap`.
-    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver()));
+    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver(), printer));
     spawn_or_report!(spawner, "status_listener", status_listener_task(status_channel));
     log_info!("Application processor tasks spawned");
 
@@ -649,9 +660,6 @@ async fn main(spawner: Spawner) -> ! {
     // Build BLE host
     let Host { central, runner, .. } = stack.build();
 
-    // Create scan printer for logging discovered devices
-    let printer = mk_static!(ScanPrinter, ScanPrinter::new());
-
     // Create connection manager
     let connection_manager = mk_static!(
         BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
@@ -663,7 +671,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn BLE tasks
     spawn_or_report!(spawner, "ble_runner", ble_runner_task(runner, printer));
-    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager));
+    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager, printer));
     // One worker per slot, spawned unconditionally and idle until the application
     // processor says what to connect to. There is no peripheral list at this point --
     // this firmware stores none -- so spawning per peripheral is not an option even in

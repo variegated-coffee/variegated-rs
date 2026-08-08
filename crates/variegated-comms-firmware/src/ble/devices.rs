@@ -18,11 +18,13 @@ use crate::debug::bus;
 use variegated_scale_trouble_driver::acaia_old::{AcaiaOldDriver, ScaleEvent};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
+use crate::ble::scanner::ScanPrinter;
 use crate::ble::status;
 use crate::channels::{
-    BLE_RECONNECT_REQUEST, BT_ASSOCIATIONS, SCALE_COMMAND_CHANNEL,
+    BLE_RECONNECT_REQUEST, BLE_SCAN_REQUEST, BT_ASSOCIATIONS, SCALE_COMMAND_CHANNEL,
     SENSOR_READING_CAPACITY,
 };
+use variegated_trouble_connection_manager::ScanRequest;
 use variegated_controller_types::bluetooth::{
     reconcile_bluetooth_slots, BluetoothDriverKind, BluetoothSlotAssignment,
     BluetoothSlotAssignments, MAX_BLUETOOTH_PERIPHERALS,
@@ -195,14 +197,40 @@ impl FlowEstimator {
 #[embassy_executor::task]
 pub async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+    scanner: &'static ScanPrinter,
 ) {
     let handle = manager.handle();
 
     join(
-        manager.run(),
-        join(reconcile_associations_loop(), reconnect_request_loop(handle.clone())),
+        manager.run(scanner),
+        join(
+            reconcile_associations_loop(),
+            join(reconnect_request_loop(handle.clone()), scan_request_loop(manager)),
+        ),
     )
     .await;
+}
+
+/// Forward scan requests from the application processor to the connection manager.
+///
+/// A hop rather than a direct call because the two ends cannot reach each other: the
+/// request arrives in the UART reader, which holds no manager and must not await, while
+/// the manager is owned by this task. `Signal::signal` bridges them without either
+/// blocking.
+async fn scan_request_loop(
+    manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+) {
+    loop {
+        let duration_ms = BLE_SCAN_REQUEST.wait().await;
+        log_info!("Bluetooth scan requested for {} ms", duration_ms);
+        manager.request_scan(ScanRequest {
+            duration: Duration::from_millis(duration_ms as u64),
+            // Active, because a passive scan sees advertisements only, and most scales
+            // put their name in the scan response. A pick-list of bare addresses is not
+            // one a human can use.
+            active: true,
+        });
+    }
 }
 
 /// Translate the association list into slot assignments.

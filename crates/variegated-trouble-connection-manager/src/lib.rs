@@ -10,7 +10,7 @@ mod manager;
 mod types;
 
 pub use handle::{DeviceHandle, ManagerHandle};
-pub use manager::{BleConnectionManager, BleConnectionManagerShared};
+pub use manager::{BleConnectionManager, BleConnectionManagerShared, ScanRequest, ScanSink};
 pub use types::{ConnectionState, DeviceEvent};
 
 /// Re-export trouble-host types for convenience

@@ -23,8 +23,9 @@ use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
-    BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
+    BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
 };
+use crate::ble::scanner::{ScanReport, SCAN_RESULT_CAPACITY};
 
 /// Start the application processor communication
 pub async fn start(
@@ -36,6 +37,10 @@ pub async fn start(
     command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
     sensor_reading_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
     debug_command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>,
+    // Discovered devices, from `ble::scanner`. Owned by the scanner rather than being a
+    // static here, because the scanner is the only thing that writes it and this task is
+    // the only thing that reads it.
+    scan_result_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ScanReport, SCAN_RESULT_CAPACITY>,
 ) {
     log_info!("Starting UART transceiver");
 
@@ -302,7 +307,14 @@ pub async fn start(
                                 BT_PERIPHERALS_RECEIVED.store(true, Ordering::Relaxed);
                             }
                             ApplicationProcessorToCommsProcessorMessage::StartBluetoothScan { duration_ms } => {
-                                log_info!("Received Bluetooth scan request for {} ms (not yet implemented)", duration_ms);
+                                // Already vetted: the application processor refuses a scan
+                                // while a shot is running, because it is the only side
+                                // that knows. Nothing to check here.
+                                //
+                                // `signal`, never `send().await` -- see the `ScaleCommand`
+                                // arm above for why this task must not block.
+                                log_info!("Received Bluetooth scan request for {} ms", duration_ms);
+                                BLE_SCAN_REQUEST.signal(duration_ms);
                             }
                         }
 
@@ -388,11 +400,19 @@ pub async fn start(
             // anything a debug host injected, and injected commands cannot starve the
             // three paths this link exists for. It shares the timer's arm because the
             // periodic work in that arm is the least urgent thing here.
+            // Scan results nest one level deeper still, below the injected debug
+            // commands, and that is where they belong: a scan result is the most
+            // droppable thing on this link. The device is still advertising and will be
+            // reported again, whereas a lost sensor reading is a hole in a control
+            // signal.
             match select4(
                 COMMS_STATUS_SIGNAL.wait(),
                 command_receiver.receive(),
                 sensor_reading_receiver.receive(),
-                select(Timer::after(timeout), debug_command_receiver.receive()),
+                select(
+                    Timer::after(timeout),
+                    select(debug_command_receiver.receive(), scan_result_receiver.receive()),
+                ),
             ).await {
                 Either4::First(comms_status) => {
                     let message = CommsProcessorToApplicationProcessorMessage::CommsStatus(comms_status.clone());
@@ -471,7 +491,7 @@ pub async fn start(
                 // back the message for the link if there is one. This is the only
                 // place that touches the UART, which is why the dispatch lives in this
                 // loop rather than in a task of its own.
-                Either4::Fourth(Either::Second(debug_command)) => {
+                Either4::Fourth(Either::Second(Either::First(debug_command))) => {
                     if let Some(message) = commands::dispatch(debug_command) {
                         // Not `.expect(..)`, unlike every other write in this loop.
                         // Those carry the machine's own traffic and a UART that has
@@ -488,6 +508,34 @@ pub async fn start(
                             }
                             Err(_) => log_error!("Failed to serialize injected debug command"),
                         }
+                    }
+                }
+                // One device seen during a discovery scan.
+                //
+                // Sent as it is found rather than batched at the end, so the list fills in
+                // front of the user instead of appearing eight seconds later. A device may
+                // legitimately arrive twice: once from its advertisement and once from the
+                // scan response that carries its name -- see `ble::scanner`.
+                Either4::Fourth(Either::Second(Either::Second(report))) => {
+                    let message = match report {
+                        ScanReport::Discovered(device) => {
+                            CommsProcessorToApplicationProcessorMessage::BluetoothPeripheralDiscovered(device)
+                        }
+                        ScanReport::Finished { reports_dropped } => {
+                            log_info!("Bluetooth scan finished, {} reports dropped", reports_dropped);
+                            CommsProcessorToApplicationProcessorMessage::BluetoothScanFinished { reports_dropped }
+                        }
+                    };
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if tx.write_async(&serialized_message).await.is_err() {
+                                log_error!("Failed to write discovered Bluetooth peripheral");
+                            }
+                        }
+                        // Not `.expect(..)`: a malformed advertising name is chosen by
+                        // whatever device is in radio range, and taking the machine down
+                        // over one would hand anyone with a BLE radio a way to do it.
+                        Err(_) => log_error!("Failed to serialize discovered Bluetooth peripheral"),
                     }
                 }
                 Either4::Fourth(Either::First(_)) => {

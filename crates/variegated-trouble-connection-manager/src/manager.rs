@@ -7,8 +7,37 @@ use trouble_host::PacketPool;
 use bt_hci::controller::ControllerCmdSync;
 use bt_hci::cmd::le::{LeSetScanParams, LeSetScanEnable};
 
+use embassy_futures::select::{select, Either};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
+
 use crate::handle::ManagerHandle;
 use crate::types::ConnectionState;
+
+/// A request to stop maintaining connections for a moment and look for new devices.
+#[derive(Clone, Copy)]
+pub struct ScanRequest {
+    pub duration: Duration,
+    /// Whether to solicit scan responses.
+    ///
+    /// **True for discovery.** Most peripherals put their name in the scan response
+    /// rather than the advertisement, so a passive scan finds devices that are all
+    /// address and no label -- useless for a list a human has to pick from. The cost is
+    /// that the radio transmits, which is why the connection loop's own scans (below)
+    /// stay passive.
+    pub active: bool,
+}
+
+/// What a scan reports to, so the manager does not have to know how results are carried.
+///
+/// Reports themselves never come through here: they arrive at the host's `EventHandler`,
+/// which is driven by a different task entirely. This is only the bracket, which is what
+/// lets the handler tell "a device seen during the scan the user asked for" from "a
+/// device seen incidentally while connecting".
+pub trait ScanSink {
+    fn begin(&self);
+    fn end(&self);
+}
 
 /// How long the controller listens for advertisements in each scan pass.
 ///
@@ -39,6 +68,23 @@ const SCAN_WINDOW: Duration = Duration::from_millis(150);
 /// case nearer 2 s. That leaves room to lengthen this further if Wi-Fi still needs the
 /// airtime.
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Listen window for a user-initiated discovery scan.
+///
+/// A different regime from [`SCAN_WINDOW`] above, and deliberately so. That one is sized
+/// for a background loop that runs forever and must not starve Wi-Fi; this one runs for a
+/// few seconds because somebody is standing at the machine waiting for their scale to
+/// appear, so it buys discovery latency with airtime it only spends briefly.
+///
+/// 30 ms in 100 ms is a 30% duty cycle. That is heavy on a single-antenna radio also
+/// carrying Wi-Fi and the live links to the peripherals themselves -- the ACAIA driver
+/// drops its connection after a couple of missed heartbeats -- which is why the scan is
+/// time-boxed by the caller and refused outright by the application processor while a
+/// shot is running. If a connected scale turns out not to survive a scan, this pair is
+/// the first thing to relax.
+const DISCOVERY_SCAN_WINDOW: Duration = Duration::from_millis(30);
+/// See [`DISCOVERY_SCAN_WINDOW`].
+const DISCOVERY_SCAN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// State for a single managed device
 pub(crate) struct DeviceState<'a, P: PacketPool> {
@@ -155,6 +201,11 @@ impl<'a, P: PacketPool> BleConnectionManagerShared<'a, P> {
 pub struct BleConnectionManager<'a, C: Controller, P: PacketPool> {
     central: RefCell<Option<Central<'a, C, P>>>,
     shared: RefCell<BleConnectionManagerShared<'a, P>>,
+    /// Pending discovery request, consumed by [`Self::run`].
+    ///
+    /// A `Signal` with exactly one waiter -- `run` -- and latest-wins, which is the right
+    /// reading of a user pressing "scan" twice: they want one scan, not two queued.
+    scan_request: Signal<CriticalSectionRawMutex, ScanRequest>,
 }
 
 impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
@@ -163,7 +214,17 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
         Self {
             central: RefCell::new(Some(central)),
             shared: RefCell::new(BleConnectionManagerShared::new()),
+            scan_request: Signal::new(),
         }
+    }
+
+    /// Ask for a discovery scan.
+    ///
+    /// Never awaits and never fails, so it is callable from the UART reader, where
+    /// back-pressure would stall every other message on the link. The scan itself happens
+    /// inside [`Self::run`], because that is the only place that can hold the `Central`.
+    pub fn request_scan(&self, request: ScanRequest) {
+        self.scan_request.signal(request);
     }
 
     /// Get a manager handle
@@ -186,9 +247,22 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
     /// Main connection manager loop
     ///
     /// This task should be spawned and will run forever, managing all registered devices.
-    /// It owns Central and performs all connection operations.
-    pub async fn run(&self) -> ! {
+    /// It owns Central and performs all connection operations -- including discovery
+    /// scans, which cannot happen anywhere else: `Scanner::new` consumes the `Central`,
+    /// and this loop holds it borrowed across every `connect` await.
+    pub async fn run<S: ScanSink>(&self, sink: &S) -> !
+    where
+        C: ControllerCmdSync<LeSetScanParams> + ControllerCmdSync<LeSetScanEnable>,
+    {
         loop {
+            // Handled before anything else in the pass, so a request that arrived while
+            // the previous pass was connecting is served promptly rather than after
+            // another round of attempts.
+            if let Some(request) = self.scan_request.try_take() {
+                self.run_scan(request, sink).await;
+                continue;
+            }
+
             // Collect devices that need connection (quickly borrow shared state)
             let to_connect: Vec<BdAddr, 8> = {
                 let shared = self.shared.borrow();
@@ -237,12 +311,52 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                 };
 
                 // Attempt connection - no borrow held during async operation!
+                //
+                // Raced against a scan request, and the race is what makes "scan"
+                // responsive. Each attempt runs for up to ten seconds, and with four
+                // peripherals switched off the loop would otherwise take forty seconds to
+                // reach the check at the top -- long enough that a user presses the button
+                // again, and again.
+                //
+                // Dropping the `connect` future is trouble-host's supported cancellation:
+                // `Central::connect` installs an `OnDrop` that cancels the connection
+                // command state, which the control runner turns into `LeCreateConnCancel`.
                 defmt::info!("Calling central.connect() for {}", address);
-                let result = embassy_time::with_timeout(
+                // The guard is bound rather than left as a temporary, and it is held
+                // across the await either way -- it always was, when this was a single
+                // `with_timeout(..).await` expression. That is the fact that forces
+                // `run_scan` to live in this loop: for the whole of a connect attempt,
+                // nothing else can borrow the `Central`.
+                //
+                // Dropped at the end of this iteration, including on the `break` below,
+                // which is what lets the next pass hand it to the scanner.
+                let mut central = self.central.borrow_mut();
+                let attempt = embassy_time::with_timeout(
                     Duration::from_secs(10),
-                    self.central.borrow_mut().as_mut().expect("Central should exist").connect(&config),
-                )
-                .await;
+                    central.as_mut().expect("Central should exist").connect(&config),
+                );
+
+                let result = match select(attempt, self.scan_request.wait()).await {
+                    Either::First(result) => result,
+                    Either::Second(request) => {
+                        defmt::info!("Scan requested; abandoning the connect attempt for {}", address);
+                        {
+                            let mut shared = self.shared.borrow_mut();
+                            if let Some(state) = shared.devices.get_mut(address) {
+                                // Start the cooldown, exactly as a failed attempt does.
+                                // Without it this device would be retried immediately
+                                // after the scan, with no gap.
+                                state.state = ConnectionState::Disconnected;
+                                state.last_disconnect = Some(embassy_time::Instant::now());
+                            }
+                        }
+                        // Put it back rather than acting on it here: the top of the loop
+                        // is the one place that runs a scan, and duplicating that would
+                        // mean two sites that have to agree about the `Central`.
+                        self.scan_request.signal(request);
+                        break;
+                    }
+                };
 
                 // Store result
                 {
@@ -305,5 +419,56 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
             // Sleep between maintenance cycles
             Timer::after(Duration::from_millis(1000)).await;
         }
+    }
+
+    /// Run one discovery scan, then hand the `Central` back to the connection loop.
+    ///
+    /// Live connections survive this. `LeSetScanEnable` does not touch established ACL
+    /// links -- only new connection attempts are paused, which is the whole reason the
+    /// scan is time-boxed rather than left running.
+    async fn run_scan<S: ScanSink>(&self, request: ScanRequest, sink: &S)
+    where
+        C: ControllerCmdSync<LeSetScanParams> + ControllerCmdSync<LeSetScanEnable>,
+    {
+        // `take`, and this is why `central` is an `Option`: `Scanner::new` consumes the
+        // `Central` by value and `into_inner` gives it back.
+        let Some(central) = self.central.borrow_mut().take() else {
+            defmt::warn!("[ble] scan requested with no central available");
+            return;
+        };
+        let mut scanner = Scanner::new(central);
+
+        let config = ScanConfig {
+            active: request.active,
+            // Empty, which trouble-host turns into `BasicUnfiltered` -- the opposite of
+            // the connect path above, which filters to a single address.
+            filter_accept_list: &[],
+            interval: DISCOVERY_SCAN_INTERVAL,
+            window: DISCOVERY_SCAN_WINDOW,
+            // Zero means "no controller-side deadline". The time box below is ours,
+            // deliberately: `ScanSession` in trouble-host 0.6 has no awaitable
+            // completion -- its `deadline` and `done` fields are written and never
+            // polled -- so waiting on the session would wait forever.
+            timeout: Duration::from_secs(0),
+            ..Default::default()
+        };
+
+        sink.begin();
+        match scanner.scan(&config).await {
+            Ok(session) => {
+                defmt::info!("[ble] discovery scan started");
+                Timer::after(request.duration).await;
+                // Dropping the session cancels the scan, which the control runner turns
+                // into `LeSetScanEnable(false)`.
+                drop(session);
+            }
+            Err(_e) => defmt::warn!("[ble] discovery scan failed to start"),
+        }
+        sink.end();
+
+        // Borrow-checked ordering: `scan` takes `&mut scanner` and the session borrows
+        // it, so the session is necessarily dropped before this line.
+        *self.central.borrow_mut() = Some(scanner.into_inner());
+        defmt::info!("[ble] discovery scan finished; resuming connections");
     }
 }

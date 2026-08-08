@@ -148,6 +148,16 @@ pub static SCALE_COMMAND_CHANNEL: PubSubChannel<
     1,
 > = PubSubChannel::new();
 
+/// A discovery scan, requested by the application processor, carrying its duration in
+/// milliseconds.
+///
+/// One consumer -- the forwarding loop in `ble::devices`, which is where a `&'static`
+/// connection manager is in scope. The UART reader cannot call the manager directly:
+/// nothing hands it one, and it must not await.
+///
+/// Latest-wins, which is the right reading of a user pressing the button twice.
+pub static BLE_SCAN_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::new();
+
 /// Read and cleared by `ble::scanner::ScanPrinter` on the next advertising report.
 ///
 /// An atomic rather than a `Signal` because the consumer is an `EventHandler`
