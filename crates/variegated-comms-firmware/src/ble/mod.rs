@@ -2,6 +2,7 @@
 
 pub mod devices;
 pub mod scanner;
+pub mod status;
 
 pub use devices::ble_devices_task;
 pub use scanner::ScanPrinter;

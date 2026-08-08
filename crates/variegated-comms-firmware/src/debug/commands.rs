@@ -131,7 +131,12 @@ fn dispatch_comms(op: CommsDebugOp) {
         // nothing will match would look from the outside exactly like a reconnect that
         // was attempted and quietly achieved nothing.
         CommsDebugOp::ReconnectBle(id) => {
-            if id == BELKA_PERIPHERAL_ID {
+            // Tested against the peripherals actually assigned to slots, not against a
+            // compile-time id. The set is whatever the application processor last
+            // associated, so an id that was valid a minute ago may not be now -- and an
+            // operator asking to reconnect a peripheral this firmware is not running
+            // should be told so.
+            if crate::ble::status::is_assigned(id) {
                 BLE_RECONNECT_REQUEST.signal(id);
             } else {
                 bus::emit_event(DebugEvent::CommandRejected {

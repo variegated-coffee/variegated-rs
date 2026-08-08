@@ -194,17 +194,16 @@ pub static CLIENT_EVENT_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, Cli
 pub const SENSOR_READING_CAPACITY: usize = 16;
 pub static SENSOR_READING_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>> = StaticCell::new();
 
-// Belka Connection Status - updated by belka_measurement_loop, read by comms_status_signaller_task
-pub static BELKA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
-
-// Bluetooth group 1 scale connection status - updated by acaia_measurement_loop, read
-// by comms_status_signaller_task and the debug snapshot.
+// The per-peripheral connection flags that used to live here -- one for the Belka
+// portal, one for the group 1 scale -- are now `ble::status`, which keeps a slot table
+// instead. Two named statics could not survive a peripheral set the application
+// processor decides at runtime, and holding the peripheral's identity and its connection
+// state under one lock is what stops a reassignment from being read half-and-half.
 //
-// This is what the application processor's `BluetoothScale` gates its readings on: it
-// drops everything until it is told the link is up, so with no entry in
-// `CommsStatus.peripheral_connection_status` the weights would cross the UART and be
-// discarded on arrival.
-pub static SCALE_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
+// What has not changed is why any of it exists: the application processor's
+// `BluetoothScale` drops every reading until it is told the link is up, so a peripheral
+// missing from `CommsStatus.peripheral_connection_status` streams weights across the
+// UART that are discarded on arrival.
 
 // Time Sync Status - set by sntp_task once the RTC holds a real wall-clock
 // time, read by comms_status_signaller_task.

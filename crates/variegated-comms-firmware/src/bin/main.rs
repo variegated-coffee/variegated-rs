@@ -237,8 +237,9 @@ async fn comms_status_signaller_task(
     rtc: &'static esp_hal::rtc_cntl::Rtc<'static>,
     stack: embassy_net::Stack<'static>,
 ) {
-    use variegated_comms_firmware::channels::{BELKA_CONNECTION_STATUS, COMMS_STATUS_SIGNAL, NO_IPV4, SCALE_CONNECTION_STATUS, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_RSSI_SIGNAL};
-    use variegated_comms_firmware::config::{BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID, USEC_IN_SEC};
+    use variegated_comms_firmware::ble;
+    use variegated_comms_firmware::channels::{COMMS_STATUS_SIGNAL, NO_IPV4, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::config::USEC_IN_SEC;
     use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
     use heapless::index_map::FnvIndexMap;
     use portable_atomic::Ordering;
@@ -264,12 +265,6 @@ async fn comms_status_signaller_task(
         // Get WiFi RSSI from signal (updated by connection_task)
         let wifi_rssi = WIFI_RSSI_SIGNAL.try_take().unwrap_or(None);
 
-        // Get Belka connection status (updated by belka_measurement_loop)
-        let belka_connected = BELKA_CONNECTION_STATUS.load(Ordering::Relaxed);
-
-        // Get group 1 scale connection status (updated by acaia_measurement_loop)
-        let scale_connected = SCALE_CONNECTION_STATUS.load(Ordering::Relaxed);
-
         // Refresh the debug snapshot's view of the DHCP lease. `config_v4` is `None`
         // before DHCP completes and again once the lease is dropped, and `NO_IPV4`
         // carries that through as `None` rather than as `0.0.0.0`.
@@ -288,23 +283,11 @@ async fn comms_status_signaller_task(
         // `dispatch_connection_status` call, and the devices on that side drop readings
         // until they get one. A peripheral missing from here streams data that is
         // silently discarded on arrival.
+        // Filled from the slot table, which reports an entry for every *assigned*
+        // peripheral whether or not it is currently connected -- see
+        // `ble::status::fill_connection_status` for why that distinction is load bearing.
         let mut peripheral_connection_status = FnvIndexMap::new();
-        let _ = peripheral_connection_status.insert(
-            BELKA_PERIPHERAL_ID,
-            WirelessConnectionStatus {
-                connected: belka_connected,
-                rssi: None,
-            }
-        );
-        let _ = peripheral_connection_status.insert(
-            BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
-            WirelessConnectionStatus {
-                connected: scale_connected,
-                // The connection manager exposes no per-connection RSSI, so this stays
-                // `None` rather than guessing -- same as Belka above.
-                rssi: None,
-            }
-        );
+        ble::status::fill_connection_status(&mut peripheral_connection_status);
 
         let comms_status = CommsStatus {
             wifi_connected,

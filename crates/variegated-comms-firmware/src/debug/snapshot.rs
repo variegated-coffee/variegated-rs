@@ -30,10 +30,9 @@ use variegated_controller_types::debug::{
 };
 
 use crate::channels::{
-    load_address48, BELKA_CONNECTION_STATUS, BT_ADDRESS, LAST_SNTP_SYNC_MS, NO_IPV4, NO_RSSI,
-    SCALE_CONNECTION_STATUS, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_MAC, WIFI_RSSI_DBM,
+    load_address48, BT_ADDRESS, LAST_SNTP_SYNC_MS, NO_IPV4, NO_RSSI,
+    TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_MAC, WIFI_RSSI_DBM,
 };
-use crate::config::{BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID};
 
 use super::{bus, TCP_DEBUG_CLIENTS};
 
@@ -69,20 +68,15 @@ pub fn publish_snapshot() {
         None
     };
 
-    // Every peripheral this firmware maintains a connection to. An empty vector means
+    // Every peripheral this firmware currently has a connection to. An empty vector means
     // "nothing connected", not "not determined".
     //
-    // Both entries are always tested, regardless of which measurement loops are
-    // currently wired up in `ble::devices` -- a flag that no loop sets simply stays
-    // `false`, which is exactly what the snapshot should then report. Gating this on
-    // which loops are live is how the previous version of this comment went stale.
+    // Read from the slot table rather than from a fixed pair of flags, because which
+    // peripherals exist is no longer a property of this binary -- it is whatever the
+    // application processor last associated. A slot serving nothing contributes nothing,
+    // which is exactly what the snapshot should then report.
     let mut ble_connected: Vec<u16, 8> = Vec::new();
-    if BELKA_CONNECTION_STATUS.load(Ordering::Relaxed) {
-        let _ = ble_connected.push(BELKA_PERIPHERAL_ID);
-    }
-    if SCALE_CONNECTION_STATUS.load(Ordering::Relaxed) {
-        let _ = ble_connected.push(BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID);
-    }
+    crate::ble::status::connected_ids(&mut ble_connected);
 
     // The station MAC is written in `main` before this task is spawned, so the
     // sentinel is unreachable here in practice. Falling back to all-zeros rather

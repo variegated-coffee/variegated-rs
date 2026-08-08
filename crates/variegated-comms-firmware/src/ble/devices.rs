@@ -17,8 +17,9 @@ use crate::debug::bus;
 use variegated_scale_trouble_driver::acaia_old::{AcaiaOldDriver, ScaleEvent};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
+use crate::ble::status;
 use crate::channels::{
-    BELKA_CONNECTION_STATUS, BLE_RECONNECT_REQUEST, SCALE_CONNECTION_STATUS, SCALE_TARE_REQUEST,
+    BLE_RECONNECT_REQUEST, SCALE_TARE_REQUEST,
     SENSOR_READING_CAPACITY,
 };
 use crate::config::{
@@ -27,56 +28,34 @@ use crate::config::{
 };
 use variegated_adc_tools::{ConversionParameters, KalmanFilterParameters};
 
-/// Set the Belka connection flag, emitting a typed event only when it actually
-/// changes.
+/// Slot serving the Belka portal while the peripheral set is still compiled in.
 ///
-/// The four `BELKA_CONNECTION_STATUS.store(..)` sites this replaces are not all
-/// transitions. Three of them -- the GATT-client failure arm, the join-completed
-/// arm and the connection-lost arm -- sit in a five-second retry loop, and two of
-/// those can run with the flag already `false`. Storing unconditionally is
-/// harmless; *emitting* unconditionally would not be, because `emit_event`
-/// bypasses the log suppressor: a peripheral that is powered off but advertising,
-/// or one whose GATT connect keeps failing, would put a `BlePeripheralDisconnected`
-/// into a 16-slot ring every five seconds indefinitely.
+/// Temporary. These two constants disappear when the measurement loops start taking
+/// their slot as an argument; until then they keep the reporting path -- which is now
+/// driven by the slot table -- describing the same two peripherals it always did.
+const BELKA_SLOT: usize = 0;
+/// Slot serving the group 1 scale. See [`BELKA_SLOT`].
+const SCALE_SLOT: usize = 1;
+
+/// Set the Belka connection state.
 ///
-/// `swap` makes the edge the condition rather than the call site, so every caller
-/// is edge triggered by construction and no future caller can reintroduce the
-/// problem. Steady state -- connected or disconnected -- is silent, and the level
-/// is carried by `CommsState::ble_connected` in the 1 Hz snapshot.
+/// The edge detection that used to live here now lives in `ble::status`, so that every
+/// caller is edge triggered by construction rather than by remembering to be -- see
+/// [`crate::ble::status::set_slot_connected`] for why emitting on every call would turn
+/// the debug ring over on its own.
 fn set_belka_connected(connected: bool) {
-    if BELKA_CONNECTION_STATUS.swap(connected, Ordering::Relaxed) == connected {
-        return;
-    }
-    bus::emit_event(if connected {
-        DebugEvent::BlePeripheralConnected { id: BELKA_PERIPHERAL_ID }
-    } else {
-        DebugEvent::BlePeripheralDisconnected { id: BELKA_PERIPHERAL_ID }
-    });
+    status::set_slot_connected(BELKA_SLOT, connected);
 }
 
-/// Set the group 1 scale connection flag, emitting a typed event only on a change.
+/// Set the group 1 scale connection state.
 ///
-/// A copy of [`set_belka_connected`], and the `swap`-as-edge-detector above is load
-/// bearing for the same reason: the scale's measurement loop clears this on four
-/// separate paths, three of which sit inside a five-second retry cycle and can run with
-/// the flag already `false`. `emit_event` bypasses the log suppressor, so an
-/// unconditional emit would push a `BlePeripheralDisconnected` into a 16-slot ring every
-/// five seconds for as long as the scale is off its charger and out of range.
-///
-/// It is set from where the *Belka* loop sets its own -- after the GATT client exists --
-/// rather than from the earlier link-layer `is_connected()` poll. The two differ during
-/// a link that connects but never completes service discovery, and reporting a scale as
+/// Called from where the *Belka* loop sets its own -- after the GATT client exists --
+/// rather than from the earlier link-layer `is_connected()` poll. The two differ during a
+/// link that connects but never completes service discovery, and reporting a scale as
 /// connected in that window would be a worse lie than reporting it disconnected: the
 /// application processor gates brew-by-weight on this.
 fn set_scale_connected(connected: bool) {
-    if SCALE_CONNECTION_STATUS.swap(connected, Ordering::Relaxed) == connected {
-        return;
-    }
-    bus::emit_event(if connected {
-        DebugEvent::BlePeripheralConnected { id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID }
-    } else {
-        DebugEvent::BlePeripheralDisconnected { id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID }
-    });
+    status::set_slot_connected(SCALE_SLOT, connected);
 }
 
 /// Number of weight samples the flow estimator differences across.
@@ -232,6 +211,12 @@ pub async fn ble_devices_task(
     sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
     let handle = manager.handle();
+
+    // Claim the two slots the compiled-in peripherals occupy, so the status map, the
+    // debug snapshot and `ReconnectBle` all describe them. This is what the reconciler
+    // will do instead once the association list drives the peripheral set.
+    status::set_slot_peripheral(BELKA_SLOT, Some(BELKA_PERIPHERAL_ID));
+    status::set_slot_peripheral(SCALE_SLOT, Some(BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID));
 
     // Register both devices and enable auto-connection
     {
