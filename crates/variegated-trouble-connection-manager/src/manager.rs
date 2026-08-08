@@ -76,8 +76,63 @@ impl<'a, P: PacketPool> BleConnectionManagerShared<'a, P> {
                 state: ConnectionState::Disconnected,
                 last_disconnect: None,
             };
-            let _ = self.devices.insert(address, state);
+            // Capacity is a const generic on a heapless map, so this is the one failure
+            // the caller cannot see coming and cannot recover from. It used to be
+            // `let _ =`, which meant a full map turned `set_maintain_connection(_, true)`
+            // into a silent no-op: the device is never connected, never reported, and
+            // nothing anywhere says why. Registering more devices than the map holds is
+            // a caller bug, so say so rather than hiding it.
+            if self.devices.insert(address, state).is_err() {
+                defmt::error!(
+                    "Device table full ({} entries); refusing to register {}",
+                    self.devices.len(),
+                    address
+                );
+            }
         }
+    }
+
+    /// Stop maintaining a device, drop its link, and free its slot in the table.
+    ///
+    /// The counterpart to the auto-registration in [`Self::set_maintain_connection`].
+    /// Without it the table is append-only: clearing `maintain_connection` leaves the
+    /// entry in place forever, so a user re-pairing a peripheral a handful of times
+    /// exhausts the eight slots and every subsequent registration fails.
+    ///
+    /// **The `disconnect` is not optional.** Dropping the stored [`Connection`] only
+    /// releases one refcount; the controller keeps the ACL link up until supervision
+    /// timeout, which is seconds to tens of seconds. For that whole window the
+    /// peripheral still believes it is connected, and a `connect` for the same address
+    /// -- exactly what happens when a slot is reassigned to a device that was just
+    /// released -- collides with a link that is nominally still alive.
+    ///
+    /// Synchronous, deliberately. `Connection::disconnect` only queues a request for the
+    /// control runner to service, so there is nothing to await, and callers need to be
+    /// able to run this during a cancellation teardown where they cannot.
+    pub(crate) fn remove_device(&mut self, address: BdAddr) {
+        if let Some(state) = self.devices.get_mut(&address) {
+            defmt::info!("Removing device {} from the table", address);
+            state.maintain_connection = false;
+            if let Some(connection) = state.connection.take() {
+                connection.disconnect();
+            }
+        }
+        let _ = self.devices.remove(&address);
+    }
+
+    /// Every address currently in the table, connected or not.
+    ///
+    /// For auditing only: a caller that tracks which devices it has registered can
+    /// compare against this and report a discrepancy. Deliberately not paired with a
+    /// "remove everything unclaimed" helper -- an orphan here means some caller failed
+    /// to release what it registered, and collecting it silently would hide that bug
+    /// while leaving its cause in place.
+    pub(crate) fn registered_addresses(&self) -> Vec<BdAddr, 8> {
+        let mut addrs = Vec::new();
+        for address in self.devices.keys() {
+            let _ = addrs.push(*address);
+        }
+        addrs
     }
 
     /// Get connection state for a device

@@ -34,6 +34,23 @@ impl<'a, C: Controller, P: PacketPool> ManagerHandle<'a, C, P> {
             _phantom: PhantomData,
         }
     }
+
+    /// Drop a device from the manager entirely: stop maintaining it, disconnect it, and
+    /// free its slot in the device table.
+    ///
+    /// See [`BleConnectionManagerShared::remove_device`] for why the disconnect matters.
+    /// Prefer [`DeviceHandle::release`] where a handle is already in scope; this exists
+    /// for callers that know an address but never held a handle for it.
+    pub fn unregister_device(&self, address: BdAddr) {
+        self.shared.borrow_mut().remove_device(address);
+    }
+
+    /// Every address currently in the device table, for auditing against the caller's
+    /// own idea of what it has registered. See
+    /// [`BleConnectionManagerShared::registered_addresses`].
+    pub fn registered_addresses(&self) -> heapless::Vec<BdAddr, 8> {
+        self.shared.borrow().registered_addresses()
+    }
 }
 
 impl<'a, C: Controller, P: PacketPool> Clone for ManagerHandle<'a, C, P> {
@@ -61,6 +78,21 @@ impl<'a, C: Controller, P: PacketPool> DeviceHandle<'a, C, P> {
     pub async fn set_maintain_connection(&self, maintain: bool) {
         let mut shared = self.shared.borrow_mut();
         shared.set_maintain_connection(self.address, maintain);
+    }
+
+    /// Undo the registration: stop maintaining this device, drop its link, and free its
+    /// slot in the manager's device table.
+    ///
+    /// See [`BleConnectionManagerShared::remove_device`] for why this disconnects rather
+    /// than merely clearing the flag, and why leaving the entry behind is not harmless.
+    ///
+    /// A plain `fn`, unlike its `set_maintain_connection` sibling above, which is `async`
+    /// without ever awaiting. That distinction is worth keeping: a caller tearing a
+    /// device down in response to a cancelled future has no await point to spend, and the
+    /// `RefCell` borrow here is confined to the call, so it cannot overlap the manager's
+    /// own `borrow_mut` across a yield.
+    pub fn release(&self) {
+        self.shared.borrow_mut().remove_device(self.address);
     }
 
     /// Get the current connection state for this device
