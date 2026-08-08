@@ -626,9 +626,10 @@ static PUMP_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVol
 // which kind of scale it has.
 #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
 static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
-// Gravity only: it derives a rate of change from its own samples. A Bluetooth scale
-// reports weight and nothing else.
-#[cfg(feature = "gravity")]
+// Shared, like the weight watch above. Gravity reads a rate of change off its own board;
+// the Bluetooth scale's is derived on the comms processor, close to the samples, and
+// arrives on a second endpoint. Either way one producer publishes g/s here.
+#[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
 static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 #[cfg(feature = "gravity")]
 static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
@@ -1157,7 +1158,7 @@ async fn main_task(
 
     #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
     let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
-    #[cfg(feature = "gravity")]
+    #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
     let output_flow_sig: &'static Watch<_, _, 3> = OUTPUT_FLOW_SIGNAL.init(Watch::new());
     #[cfg(feature = "gravity")]
     let gravity_connected_sig: &'static Signal<NoopRawMutex, bool> = GRAVITY_CONNECTED_SIGNAL.init(Signal::new());
@@ -1203,6 +1204,7 @@ async fn main_task(
         BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
         bluetooth_group_1_scale_update_channel.receiver(),
         Some(output_weight_sig.sender()),
+        Some(output_flow_sig.sender()),
     ).with_connected_signal(bluetooth_group_1_scale_connected_sig);
 
     #[cfg(feature = "bluetooth-group-1-scale")]
@@ -1597,6 +1599,16 @@ async fn main_task(
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
         Some(input_volume_sig.receiver().unwrap()),
+        // Output flow. Was an unconditional `None`, which is why
+        // `GroupStatus.output_flow_rate` has always been absent on this machine and why
+        // `GroupBrewControlMode::OutputFlowRate` had no process variable to work from.
+        //
+        // Gravity's path is deliberately left as it was: it publishes a rate of change
+        // into `output_flow_sig` that nothing reads. Wiring it is a one-line change, but
+        // it is a separate question from this one and untested on that hardware.
+        #[cfg(feature = "bluetooth-group-1-scale")]
+        Some(output_flow_sig.receiver().unwrap()),
+        #[cfg(not(feature = "bluetooth-group-1-scale"))]
         None,
         #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
         Some(output_weight_sig.receiver().unwrap()),

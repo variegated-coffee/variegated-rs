@@ -30,8 +30,8 @@ use embassy_sync::signal::Signal;
 use embassy_sync::watch::Sender as WatchSender;
 use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::{
-    ExternalPeripheralSensorReading, PeripheralId, PeripheralStatusProvider, PeripheralType,
-    ScaleOp, WeightType,
+    ExternalPeripheralSensorReading, FlowRateType, PeripheralId, PeripheralStatusProvider,
+    PeripheralType, ScaleOp, WeightType,
 };
 
 use crate::scale::{ScaleController, ScaleError};
@@ -40,9 +40,23 @@ use crate::{SensorReading, WithTask};
 /// Endpoint carrying weight in grams.
 ///
 /// This is a wire contract with the comms processor, which stamps it on every scale
-/// reading it forwards. Scales have no second quantity today; the endpoint exists so
-/// that adding one (flow rate, battery) does not require a new message type.
+/// reading it forwards, and whose `config.rs` carries the matching pair of constants.
+/// The numbers must agree; nothing checks them, because the two firmwares are separate
+/// binaries on separate chips.
 pub const BLUETOOTH_SCALE_ENDPOINT_WEIGHT: u8 = 0;
+
+/// Endpoint carrying gravimetric flow rate in grams per second.
+///
+/// Derived on the comms processor, which is where the sample timing is least corrupted --
+/// differentiation is the operation that latency between samples ruins, and the UART hop
+/// adds exactly that. Some scales report flow natively; this endpoint does not
+/// distinguish, which is the point.
+///
+/// It arrives as *mass* flow, g/s, and lands in a `FlowRateType` that is nominally ml/s.
+/// That is deliberate and needs no conversion: this codebase already treats coffee as
+/// 1 g/ml when deriving output volume from output weight. The label is off by the density
+/// of espresso, a few percent, and consistently so on both sides.
+pub const BLUETOOTH_SCALE_ENDPOINT_FLOW: u8 = 1;
 
 /// Message type for Bluetooth scale updates from the comms layer
 #[derive(Clone, Debug, Format)]
@@ -64,6 +78,9 @@ pub struct BluetoothScale<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZ
     /// Output weight watch sender
     weight_sender: Option<WatchSender<'a, NoopRawMutex, SensorReading<WeightType>, N>>,
 
+    /// Output flow rate watch sender
+    flow_sender: Option<WatchSender<'a, NoopRawMutex, SensorReading<FlowRateType>, N>>,
+
     /// Signal for connection status (used by status provider)
     connected_signal: Option<&'a Signal<NoopRawMutex, bool>>,
 
@@ -78,11 +95,13 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
         peripheral_id: PeripheralId,
         update_receiver: Receiver<'a, M, BluetoothScaleUpdate, UPDATE_CHAN_SIZE>,
         weight_sender: Option<WatchSender<'a, NoopRawMutex, SensorReading<WeightType>, N>>,
+        flow_sender: Option<WatchSender<'a, NoopRawMutex, SensorReading<FlowRateType>, N>>,
     ) -> Self {
         Self {
             peripheral_id,
             update_receiver,
             weight_sender,
+            flow_sender,
             connected_signal: None,
             is_connected: false,
         }
@@ -112,17 +131,28 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
         }
     }
 
-    /// Push a zero weight on disconnect.
+    /// Push zeros on disconnect.
     ///
-    /// A `Watch` holds its last value indefinitely, so without this the final weight
+    /// A `Watch` holds its last value indefinitely, so without this the final readings
     /// before the link dropped would sit there being read as live. For brew-by-weight
     /// that is the dangerous failure: a shot targeting 36 g against a frozen 18 g
     /// never reaches its target and never stops. Zero is not a *correct* weight either,
     /// but it is an obviously wrong one, and it fails in the direction that ends a shot
     /// rather than prolonging it. `PeripheralStatus` carries the real answer -- that
     /// the scale is gone -- for consumers that check it.
+    ///
+    /// It matters more for flow than for weight. Flow is a PID process variable
+    /// (`GroupBrewControlMode::OutputFlowRate`), so a frozen value does not merely display
+    /// wrong -- it makes the loop chase a setpoint against a number that has stopped
+    /// responding to the pump, which is the classic way to wind an integrator up.
     fn publish_zeros(&self) {
         if let Some(ref sender) = self.weight_sender {
+            sender.send(SensorReading {
+                raw: 0.0,
+                transformed: 0.0,
+            });
+        }
+        if let Some(ref sender) = self.flow_sender {
             sender.send(SensorReading {
                 raw: 0.0,
                 transformed: 0.0,
@@ -141,6 +171,14 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
         match endpoint {
             BLUETOOTH_SCALE_ENDPOINT_WEIGHT => {
                 if let Some(ref sender) = self.weight_sender {
+                    sender.send(SensorReading {
+                        raw: value,
+                        transformed: value,
+                    });
+                }
+            }
+            BLUETOOTH_SCALE_ENDPOINT_FLOW => {
+                if let Some(ref sender) = self.flow_sender {
                     sender.send(SensorReading {
                         raw: value,
                         transformed: value,
