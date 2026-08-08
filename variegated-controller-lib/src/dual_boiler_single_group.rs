@@ -2050,18 +2050,30 @@ impl<
             }
             MachineCommand::UpdateBluetoothScan(update) => match update {
                 BluetoothScanUpdate::Discovered(device) => {
-                    // Replace rather than append when the address is already listed. The
-                    // comms processor sends a device twice on purpose -- once from its
-                    // advertisement and again from its scan response, which is where most
-                    // scales put their name -- so the second report is an improvement on
-                    // the first, not a duplicate.
+                    // **Merged, not replaced.** The comms processor reports a device more
+                    // than once on purpose: a name and a set of service UUIDs usually
+                    // arrive in different advertising reports -- the name in the scan
+                    // response, the UUIDs in the advertisement -- and each is forwarded
+                    // when it adds something. Overwriting would keep whichever came last
+                    // and throw away the other half.
                     match self
                         .bluetooth_status
                         .discovered
                         .iter_mut()
                         .find(|d| d.address == device.address)
                     {
-                        Some(existing) => *existing = device,
+                        Some(existing) => {
+                            if !device.name.is_empty() {
+                                existing.name = device.name;
+                            }
+                            if device.suggested_driver.is_some() {
+                                existing.suggested_driver = device.suggested_driver;
+                            }
+                            // `rssi` is deliberately left at the first sighting, matching
+                            // what the field claims. It ranks the list; it is not a
+                            // measurement, and re-reading it per report would make the
+                            // order jump around while the user is reading it.
+                        }
                         None => {
                             if self.bluetooth_status.discovered.push(device).is_err() {
                                 // Counted where the UI already looks for "results were

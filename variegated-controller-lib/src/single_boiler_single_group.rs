@@ -1222,16 +1222,24 @@ impl<
             }
             MachineCommand::UpdateBluetoothScan(update) => match update {
                 BluetoothScanUpdate::Discovered(device) => {
-                    // Replace rather than append on a repeat address: the comms processor
-                    // reports a device twice on purpose, once from its advertisement and
-                    // again from its scan response, and the second carries the name.
+                    // Merged, not replaced -- a device's name and its service UUIDs
+                    // usually arrive in different advertising reports, and overwriting
+                    // would keep whichever came last. See the equivalent in
+                    // `dual_boiler_single_group`.
                     match self
                         .bluetooth_status
                         .discovered
                         .iter_mut()
                         .find(|d| d.address == device.address)
                     {
-                        Some(existing) => *existing = device,
+                        Some(existing) => {
+                            if !device.name.is_empty() {
+                                existing.name = device.name;
+                            }
+                            if device.suggested_driver.is_some() {
+                                existing.suggested_driver = device.suggested_driver;
+                            }
+                        }
                         None => {
                             if self.bluetooth_status.discovered.push(device).is_err() {
                                 self.bluetooth_status.reports_dropped =

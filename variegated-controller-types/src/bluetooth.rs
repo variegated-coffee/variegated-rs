@@ -154,6 +154,15 @@ pub struct DiscoveredBluetoothPeripheral {
     /// comms processor for why. Good enough to sort a pick-list by, which is all it is
     /// for; not a measurement.
     pub rssi: i8,
+    /// The driver whose service this device advertised, if the comms processor
+    /// recognised one.
+    ///
+    /// **`None` does not mean "unsupported".** Plenty of devices advertise a name and no
+    /// service UUID at all, and a scale that does so is still perfectly usable -- the
+    /// service is discovered on connect either way. So this is a hint for ranking and for
+    /// pre-filling the driver, never a reason to hide a device: the failure it would
+    /// cause is the user's own scale missing from the list with no way to add it.
+    pub suggested_driver: Option<BluetoothDriverKind>,
 }
 
 /// How many scan results are carried at once.
