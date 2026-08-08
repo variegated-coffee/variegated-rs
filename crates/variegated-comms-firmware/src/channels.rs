@@ -3,8 +3,10 @@ use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use embassy_sync::signal::Signal;
 use embassy_sync::channel::{Channel, Sender, Receiver};
 use embassy_sync::mutex::Mutex;
+use embassy_sync::watch::Watch;
 use portable_atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
+use variegated_controller_types::bluetooth::BluetoothPeripheralList;
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, RoutineList, Status};
 use variegated_controller_types::debug_command::DebugCommand;
 use esphome_device::{ClientEvent, StateChange};
@@ -132,6 +134,39 @@ pub static SCALE_TARE_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::ne
 /// callback invoked from the BLE runner, not an async task: it cannot await, so it
 /// needs a flag it can test and clear in place.
 pub static BLE_RESCAN_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// The Bluetooth peripheral associations, as last received from the application
+/// processor.
+///
+/// This firmware has no persistent storage, so this is the *only* thing that says which
+/// Bluetooth devices exist. Until it arrives there are no peripherals at all.
+///
+/// A `Watch` rather than the `Signal` its neighbours above use, for two reasons. It has
+/// more than one interested party -- the reconciler waits on changes, while the status
+/// signaller and the debug dispatcher want to read the current value -- and `Signal`
+/// permits exactly one waiter, per the note above. And `Watch::try_get` is a
+/// non-consuming read that needs no receiver slot, so those readers cost nothing; a
+/// `PubSubChannel` would make each of them burn a subscriber.
+///
+/// Written from the UART reader with `send`, which never awaits and never fails. That is
+/// the same no-back-pressure requirement `SCALE_TARE_REQUEST.signal()` has, and for the
+/// same reason: blocking that task blocks `Status` and every debug frame behind it.
+pub static BT_ASSOCIATIONS: Watch<
+    CriticalSectionRawMutex,
+    BluetoothPeripheralList,
+    BT_ASSOCIATION_RECEIVERS,
+> = Watch::new();
+
+/// Receiver slots on [`BT_ASSOCIATIONS`]. One, for the reconciler in `ble::devices`.
+/// Everything else reads with `try_get`, which needs no slot.
+pub const BT_ASSOCIATION_RECEIVERS: usize = 1;
+
+/// Whether the application processor has ever answered `RequestBluetoothPeripherals`.
+///
+/// Set on **receipt**, never on the list being non-empty. A machine with nothing paired
+/// answers with an empty list, and that is a complete answer -- testing for emptiness
+/// would make such a machine re-ask every ten seconds forever.
+pub static BT_PERIPHERALS_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 // Comms Status Command - internal commands to update CommsStatus
 pub enum CommsStatusCommand {

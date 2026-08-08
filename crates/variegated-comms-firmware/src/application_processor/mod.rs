@@ -23,6 +23,7 @@ use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     ROUTINE_CACHE, SCALE_TARE_REQUEST, SENSOR_READING_CAPACITY,
+    BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
 };
 
 /// Start the application processor communication
@@ -266,12 +267,31 @@ pub async fn start(
                                     }
                                 }
                             }
-                            // Received and logged, not yet acted on -- the association
-                            // registry and the scan path arrive in the commits that
-                            // follow. Until then this firmware still runs the
-                            // compiled-in peripherals.
                             ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals(list) => {
-                                log_info!("Received {} Bluetooth associations (not yet applied)", list.len());
+                                log_info!("Received {} Bluetooth associations", list.len());
+                                for association in list.iter() {
+                                    log_info!(
+                                        "  0x{:04X} {:?} enabled={} addr={:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                                        association.id,
+                                        association.driver,
+                                        association.enabled,
+                                        association.address[0], association.address[1],
+                                        association.address[2], association.address[3],
+                                        association.address[4], association.address[5],
+                                    );
+                                }
+
+                                // `send`, not `send_if_modified` or a comparison here: the
+                                // reconciler on the other end is what decides whether a
+                                // change is worth acting on, and it compares the fields
+                                // that matter rather than the whole struct. Filtering here
+                                // would duplicate that judgement in a place that does not
+                                // know a rename from a re-address.
+                                BT_ASSOCIATIONS.sender().send(list);
+
+                                // On receipt, not on the list being non-empty. See the
+                                // note on the flag itself.
+                                BT_PERIPHERALS_RECEIVED.store(true, Ordering::Relaxed);
                             }
                             ApplicationProcessorToCommsProcessorMessage::StartBluetoothScan { duration_ms } => {
                                 log_info!("Received Bluetooth scan request for {} ms (not yet implemented)", duration_ms);
@@ -312,6 +332,14 @@ pub async fn start(
         tx.write_async(&serialized_message).await
             .expect("Failed to write RequestRoutines");
         log_warn!("Sent initial RequestRoutines command on startup");
+
+        // Send initial RequestBluetoothPeripherals command on startup
+        let request_bluetooth_message = CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals;
+        let serialized_message = postcard::to_allocvec_cobs(&request_bluetooth_message)
+            .expect("Failed to serialize RequestBluetoothPeripherals");
+        tx.write_async(&serialized_message).await
+            .expect("Failed to write RequestBluetoothPeripherals");
+        log_warn!("Sent initial RequestBluetoothPeripherals command on startup");
 
         // Track last request times for periodic operations
         let mut last_routine_request = Instant::now();
@@ -381,6 +409,17 @@ pub async fn start(
                         MachineCommand::UpdateRoutine(_, _) |
                         MachineCommand::RemoveRoutine(_) => {
                             Some(CommsProcessorToApplicationProcessorMessage::RequestRoutines)
+                        }
+                        // Belt and braces. The application processor pushes the new list
+                        // unprompted when it changes, so this request is normally
+                        // redundant -- but a command that alters the peripheral set and
+                        // then leaves this processor connected to the *old* address is a
+                        // bad enough failure to be worth one extra frame half a second
+                        // later.
+                        MachineCommand::AssociateBluetoothPeripheral(_) |
+                        MachineCommand::RemoveBluetoothPeripheral(_) |
+                        MachineCommand::SetBluetoothPeripheralEnabled(_, _) => {
+                            Some(CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals)
                         }
                         _ => None
                     };
@@ -478,6 +517,22 @@ pub async fn start(
                             tx.write_async(&serialized_message).await
                                 .expect("Failed to write RequestMachineDefinition");
                             log_warn!("Sent periodic RequestMachineDefinition command (still waiting for response)");
+                        }
+
+                        // Only send RequestBluetoothPeripherals if we haven't received the
+                        // list yet.
+                        //
+                        // The flag is set on *receipt*, never on the list being non-empty.
+                        // A machine with nothing paired has an empty list as its complete
+                        // and correct answer, and testing for emptiness instead would make
+                        // that machine re-ask every ten seconds for as long as it runs.
+                        if !BT_PERIPHERALS_RECEIVED.load(Ordering::Relaxed) {
+                            let request_bluetooth_message = CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals;
+                            let serialized_message = postcard::to_allocvec_cobs(&request_bluetooth_message)
+                                .expect("Failed to serialize RequestBluetoothPeripherals");
+                            tx.write_async(&serialized_message).await
+                                .expect("Failed to write RequestBluetoothPeripherals");
+                            log_warn!("Sent periodic RequestBluetoothPeripherals command (still waiting for response)");
                         }
 
                         last_config_retry = Instant::now();
