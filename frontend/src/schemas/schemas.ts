@@ -903,3 +903,4 @@ export type GroupStatusEntry = [number, GroupStatus];
 export type WaterTapStatusEntry = [number, WaterTapStatus];
 export type SteamWandStatusEntry = [number, SteamWandStatus];
 export type RoutineEntry = [number, Routine];
+export type PeripheralEntry = [number, PeripheralDefinition];

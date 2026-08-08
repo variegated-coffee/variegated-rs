@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ScheduleBuilder } from './components/ScheduleBuilder';
+import { BluetoothPanel } from './components/BluetoothPanel';
 import { RoutineBuilder } from './components/routine/RoutineBuilder';
 import { StatusDisplay } from './components/StatusDisplay';
 import { ConfigurationPanel } from './components/ConfigurationPanel';
@@ -155,6 +156,24 @@ export function App() {
 
         {/* Configuration Panel */}
         <ConfigurationPanel configuration={config as Configuration} />
+
+        {/* Bluetooth peripherals */}
+        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+          <BluetoothPanel
+            associations={(config as Configuration)?.bluetooth_peripherals || []}
+            scan={(status as Status).bluetooth}
+            // The connection map is keyed by peripheral id and only exists once the comms
+            // processor has reported in, so an absent entry reads as "not connected"
+            // rather than as an error.
+            connected={
+              new Map(
+                Array.from((status as Status).comms_status?.peripheral_connection_status ?? []).map(
+                  ([id, wireless]) => [id, wireless.connected]
+                )
+              )
+            }
+          />
+        </section>
 
         {/* Schedules */}
         <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>

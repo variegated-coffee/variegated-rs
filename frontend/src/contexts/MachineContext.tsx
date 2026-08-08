@@ -7,7 +7,8 @@ import {
   BoilerEntry,
   GroupEntry,
   WaterTapEntry,
-  SteamWandEntry
+  SteamWandEntry,
+  PeripheralEntry
 } from '../schemas/schemas';
 
 interface MachineContextType {
@@ -29,6 +30,7 @@ interface MachineContextType {
   getGroupEntries: () => GroupEntry[];
   getWaterTapEntries: () => WaterTapEntry[];
   getSteamWandEntries: () => SteamWandEntry[];
+  getCommsPeripheralEntries: () => PeripheralEntry[];
 }
 
 const MachineContext = createContext<MachineContextType | undefined>(undefined);
@@ -126,6 +128,23 @@ export function MachineProvider({
     return machineDefinition ? Array.from(machineDefinition.steam_wands.entries()) : [];
   }, [machineDefinition]);
 
+  /**
+   * Peripherals the comms processor owns, which are the only ones a Bluetooth
+   * association can name.
+   *
+   * The machine definition is where the role vocabulary already lives — which ids this
+   * machine has and what each one is — so the Bluetooth page picks from it rather than
+   * carrying a hardcoded list that would drift from the firmware's.
+   */
+  const getCommsPeripheralEntries = useCallback((): PeripheralEntry[] => {
+    if (!machineDefinition) {
+      return [];
+    }
+    return Array.from(machineDefinition.peripherals.entries()).filter(
+      ([, definition]) => definition.via_comms_mcu
+    );
+  }, [machineDefinition]);
+
   const value: MachineContextType = useMemo(() => ({
     machineDefinition,
     getBoilerName,
@@ -145,6 +164,7 @@ export function MachineProvider({
     getGroupEntries,
     getWaterTapEntries,
     getSteamWandEntries,
+    getCommsPeripheralEntries,
   }), [
     machineDefinition,
     getBoilerName,
@@ -164,6 +184,7 @@ export function MachineProvider({
     getGroupEntries,
     getWaterTapEntries,
     getSteamWandEntries,
+    getCommsPeripheralEntries,
   ]);
 
   return (

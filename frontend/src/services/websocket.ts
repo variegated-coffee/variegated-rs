@@ -16,7 +16,8 @@ import {
   PumpConfiguration,
   Routine,
   RoutineIndex,
-  ScheduleItem
+  ScheduleItem,
+  BluetoothPeripheralAssociation
 } from '../schemas/schemas';
 
 export interface WebSocketServiceCallbacks {
@@ -442,6 +443,33 @@ export class WebSocketService {
     this.sendMachineCommand({
       type: 'RemoveScheduleItem',
       value: index
+    });
+  }
+
+  associateBluetoothPeripheral(association: BluetoothPeripheralAssociation): void {
+    this.sendMachineCommand({
+      type: 'AssociateBluetoothPeripheral',
+      value: association
+    });
+  }
+
+  removeBluetoothPeripheral(peripheralId: number): void {
+    this.sendMachineCommand({
+      type: 'RemoveBluetoothPeripheral',
+      value: peripheralId
+    });
+  }
+
+  setBluetoothPeripheralEnabled(peripheralId: number, enabled: boolean): void {
+    this.sendMachineCommand({
+      type: 'SetBluetoothPeripheralEnabled',
+      value: [peripheralId, enabled]
+    });
+  }
+
+  scanForBluetoothPeripherals(): void {
+    this.sendMachineCommand({
+      type: 'ScanForBluetoothPeripherals'
     });
   }
 }
