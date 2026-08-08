@@ -10,5 +10,11 @@
   "peripheral_status": {
     "peripherals": {}
   },
-  "current_local_time": null
+  "current_local_time": null,
+  "bluetooth": {
+    "scanning": false,
+    "blocked": false,
+    "reports_dropped": 0,
+    "discovered": []
+  }
 }

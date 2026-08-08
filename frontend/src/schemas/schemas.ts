@@ -52,6 +52,11 @@ export const ActuatorCapabilitySchema = enumType('ActuatorCapability', {
   ScaleTare: unitVariant('ScaleTare')
 });
 
+export const BluetoothDriverKindSchema = enumType('BluetoothDriverKind', {
+  BelkaPortal: unitVariant('BelkaPortal'),
+  AcaiaOld: unitVariant('AcaiaOld')
+});
+
 export const BoilerControlModeSchema = enumType('BoilerControlMode', {
   Temperature: unitVariant('Temperature'),
   Pressure: unitVariant('Pressure'),
@@ -108,6 +113,13 @@ export const DerivedFormulaSchema = enumType('DerivedFormula', {
   Product: structVariant('Product', {
     params: seq(u8())
   })
+});
+
+export const DiscoveredBluetoothPeripheralSchema = struct({
+  address: tuple(u8(), u8(), u8(), u8(), u8(), u8()),
+  address_random: bool(),
+  name: string(),
+  rssi: i8()
 });
 
 export const DurationSchema = struct({
@@ -295,6 +307,22 @@ export const WaterTapStatusSchema = struct({
 export const WirelessConnectionStatusSchema = struct({
   connected: bool(),
   rssi: option(i8())
+});
+
+export const BluetoothPeripheralAssociationSchema = struct({
+  id: u16(),
+  address: tuple(u8(), u8(), u8(), u8(), u8(), u8()),
+  address_random: bool(),
+  driver: BluetoothDriverKindSchema,
+  enabled: bool(),
+  name: string()
+});
+
+export const BluetoothScanStatusSchema = struct({
+  scanning: bool(),
+  blocked: bool(),
+  reports_dropped: u16(),
+  discovered: seq(DiscoveredBluetoothPeripheralSchema)
 });
 
 export const BoilerControlStateSchema = struct({
@@ -655,7 +683,8 @@ export const ConfigurationSchema = struct({
   water_tap_configurations: map(u8(), WaterTapConfigurationSchema),
   tank_configurations: map(u8(), TankConfigurationSchema),
   steam_wand_configurations: map(u8(), SteamWandConfigurationSchema),
-  schedules: seq(ScheduleItemSchema)
+  schedules: seq(ScheduleItemSchema),
+  bluetooth_peripherals: seq(BluetoothPeripheralAssociationSchema)
 });
 
 export const RoutineStepSchema = struct({
@@ -674,7 +703,8 @@ export const StatusSchema = struct({
   routine_execution: option(RoutineExecutionStatusSchema),
   comms_status: option(CommsStatusSchema),
   peripheral_status: PeripheralStatusSchema,
-  current_local_time: option(string())
+  current_local_time: option(string()),
+  bluetooth: BluetoothScanStatusSchema
 });
 
 export const RoutineSchema = struct({
@@ -725,7 +755,11 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), f32()),
   SetHeatingElementInterlock: newtypeVariant('SetHeatingElementInterlock', bool()),
   SetHeatingElementContentionStrategy: newtypeVariant('SetHeatingElementContentionStrategy', HeatingElementContentionStrategySchema),
-  SetWaterDispersalPumpStrategy: tupleVariant('SetWaterDispersalPumpStrategy', u8(), WaterDispersalPumpStrategySchema)
+  SetWaterDispersalPumpStrategy: tupleVariant('SetWaterDispersalPumpStrategy', u8(), WaterDispersalPumpStrategySchema),
+  AssociateBluetoothPeripheral: newtypeVariant('AssociateBluetoothPeripheral', BluetoothPeripheralAssociationSchema),
+  RemoveBluetoothPeripheral: newtypeVariant('RemoveBluetoothPeripheral', u16()),
+  SetBluetoothPeripheralEnabled: tupleVariant('SetBluetoothPeripheralEnabled', u16(), bool()),
+  ScanForBluetoothPeripherals: unitVariant('ScanForBluetoothPeripherals')
 });
 
 export const RoutineStorageSchema = struct({
@@ -763,6 +797,9 @@ export type SetWaterTapPumpConfigurationRequest = InferType<typeof SetWaterTapPu
 export type SetFillPumpConfigurationRequest = InferType<typeof SetFillPumpConfigurationRequestSchema>;
 export type SetSteamValveOpennessRequest = InferType<typeof SetSteamValveOpennessRequestSchema>;
 export type ActuatorCapability = InferType<typeof ActuatorCapabilitySchema>;
+export type BluetoothDriverKind = InferType<typeof BluetoothDriverKindSchema>;
+export type BluetoothPeripheralAssociation = InferType<typeof BluetoothPeripheralAssociationSchema>;
+export type BluetoothScanStatus = InferType<typeof BluetoothScanStatusSchema>;
 export type BoilerConfiguration = InferType<typeof BoilerConfigurationSchema>;
 export type BoilerControlMode = InferType<typeof BoilerControlModeSchema>;
 export type BoilerControlState = InferType<typeof BoilerControlStateSchema>;
@@ -777,6 +814,7 @@ export type ControlCurve = InferType<typeof ControlCurveSchema>;
 export type ControlModeCapability = InferType<typeof ControlModeCapabilitySchema>;
 export type DerivedFormula = InferType<typeof DerivedFormulaSchema>;
 export type DerivedParameter = InferType<typeof DerivedParameterSchema>;
+export type DiscoveredBluetoothPeripheral = InferType<typeof DiscoveredBluetoothPeripheralSchema>;
 export type Duration = InferType<typeof DurationSchema>;
 export type EnvironmentalSensorDefinition = InferType<typeof EnvironmentalSensorDefinitionSchema>;
 export type EnvironmentalSensorType = InferType<typeof EnvironmentalSensorTypeSchema>;

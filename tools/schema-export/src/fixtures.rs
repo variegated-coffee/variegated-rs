@@ -245,6 +245,30 @@ fn status_maximal() -> Status {
                 .and_hms_opt(9, 30, 0)
                 .expect("valid time"),
         ),
+        bluetooth: BluetoothScanStatus {
+            scanning: true,
+            blocked: true,
+            reports_dropped: 3,
+            // Two entries, and deliberately not the same shape as each other: one
+            // random-address device with a name, one public-address device with none.
+            // A single entry would let a decoder that mixed up `address_random` and the
+            // name's length prefix still round-trip.
+            discovered: heapless::Vec::from_slice(&[
+                DiscoveredBluetoothPeripheral {
+                    address: [0x2F, 0xA0, 0x1A, 0x97, 0x1C, 0x00],
+                    address_random: true,
+                    name: bluetooth_name("ACAIA-1C00"),
+                    rssi: -63,
+                },
+                DiscoveredBluetoothPeripheral {
+                    address: [0x3E, 0x60, 0xEB, 0x3C, 0x1C, 0x78],
+                    address_random: false,
+                    name: BluetoothName::new(),
+                    rssi: -91,
+                },
+            ])
+            .expect("fits"),
+        },
     }
 }
 
@@ -264,6 +288,7 @@ fn status_minimal() -> Status {
         comms_status: None,
         peripheral_status: PeripheralStatus { peripherals: FnvIndexMap::new() },
         current_local_time: None,
+        bluetooth: BluetoothScanStatus::default(),
     }
 }
 
@@ -369,6 +394,10 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetHeatingElementInterlock(_) => {}
             SetHeatingElementContentionStrategy(_) => {}
             SetWaterDispersalPumpStrategy(..) => {}
+            AssociateBluetoothPeripheral(_) => {}
+            RemoveBluetoothPeripheral(_) => {}
+            SetBluetoothPeripheralEnabled(..) => {}
+            ScanForBluetoothPeripherals => {}
         }
     }
 
@@ -464,6 +493,19 @@ fn machine_commands() -> Vec<MachineCommand> {
         SetHeatingElementInterlock(true),
         SetHeatingElementContentionStrategy(HeatingElementContentionStrategy::Proportional),
         SetWaterDispersalPumpStrategy(0, WaterDispersalPumpStrategy::NoPump),
+        // `AcaiaOld` rather than the first variant, and a non-empty name, so a decoder
+        // that defaulted either would not round-trip.
+        AssociateBluetoothPeripheral(BluetoothPeripheralAssociation {
+            id: 0xB5C0,
+            address: [0x2F, 0xA0, 0x1A, 0x97, 0x1C, 0x00],
+            address_random: true,
+            driver: BluetoothDriverKind::AcaiaOld,
+            enabled: true,
+            name: bluetooth_name("Group 1 scale"),
+        }),
+        RemoveBluetoothPeripheral(0xB5D0),
+        SetBluetoothPeripheralEnabled(0xB1CA, false),
+        ScanForBluetoothPeripherals,
     ]
 }
 

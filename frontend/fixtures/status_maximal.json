@@ -267,5 +267,38 @@
       }
     }
   },
-  "current_local_time": "2026-08-07T09:30:00"
+  "current_local_time": "2026-08-07T09:30:00",
+  "bluetooth": {
+    "scanning": true,
+    "blocked": true,
+    "reports_dropped": 3,
+    "discovered": [
+      {
+        "address": [
+          47,
+          160,
+          26,
+          151,
+          28,
+          0
+        ],
+        "address_random": true,
+        "name": "ACAIA-1C00",
+        "rssi": -63
+      },
+      {
+        "address": [
+          62,
+          96,
+          235,
+          60,
+          28,
+          120
+        ],
+        "address_random": false,
+        "name": "",
+        "rssi": -91
+      }
+    ]
+  }
 }

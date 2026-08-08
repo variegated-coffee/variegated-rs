@@ -266,6 +266,16 @@ pub async fn start(
                                     }
                                 }
                             }
+                            // Received and logged, not yet acted on -- the association
+                            // registry and the scan path arrive in the commits that
+                            // follow. Until then this firmware still runs the
+                            // compiled-in peripherals.
+                            ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals(list) => {
+                                log_info!("Received {} Bluetooth associations (not yet applied)", list.len());
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::StartBluetoothScan { duration_ms } => {
+                                log_info!("Received Bluetooth scan request for {} ms (not yet implemented)", duration_ms);
+                            }
                         }
 
                         window = remaining;

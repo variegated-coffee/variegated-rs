@@ -423,5 +423,32 @@
       0,
       "NoPump"
     ]
-  }
+  },
+  {
+    "AssociateBluetoothPeripheral": {
+      "id": 46528,
+      "address": [
+        47,
+        160,
+        26,
+        151,
+        28,
+        0
+      ],
+      "address_random": true,
+      "driver": "AcaiaOld",
+      "enabled": true,
+      "name": "Group 1 scale"
+    }
+  },
+  {
+    "RemoveBluetoothPeripheral": 46544
+  },
+  {
+    "SetBluetoothPeripheralEnabled": [
+      45514,
+      false
+    ]
+  },
+  "ScanForBluetoothPeripherals"
 ]
