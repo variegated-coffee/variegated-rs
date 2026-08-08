@@ -290,14 +290,15 @@ async fn reconcile_associations_loop() {
 /// # Where the memory goes
 ///
 /// `pool_size` allocates this task's future `MAX_BLUETOOTH_PERIPHERALS` times in `.bss`,
-/// whether or not any peripheral is associated. Left inline, the driver future would
-/// dominate it -- the ACAIA loop carries a `FlowEstimator` with a sample deque, a median
-/// window and a Kalman filter -- and four copies measured 23936 bytes, taken straight out
-/// of `.stack`, which is the SRAM remainder.
+/// whether or not any peripheral is associated, and the driver future inside dominates it
+/// -- the ACAIA loop carries a `FlowEstimator` with a sample deque, a median window and a
+/// Kalman filter. Four copies cost about 42 kB, taken out of `.stack`, which is the SRAM
+/// remainder.
 ///
-/// So the driver is boxed instead; see the note at the allocation. What is left here is
-/// the loop's own state, and the cost of a peripheral is paid only while one is
-/// connected.
+/// That is the price of this being a fixed pool, and it is paid deliberately: see the
+/// note at the driver future below for what happened when it was moved to the heap
+/// instead. **`MAX_BLUETOOTH_PERIPHERALS` is the lever here** -- each slot is ~10 kB of
+/// `.bss` whether or not it ever serves anything.
 #[embassy_executor::task(pool_size = MAX_BLUETOOTH_PERIPHERALS)]
 pub async fn ble_slot_task(
     slot: usize,
@@ -361,44 +362,32 @@ pub async fn ble_slot_task(
             continue;
         };
 
-        // Boxed, and the reason is which memory it comes out of.
+        // Inline, in `.bss`, and **not** on the heap. This was boxed once; it panicked
+        // the machine, and the reason is worth stating so nobody boxes it again.
         //
         // This future is about 10 kB -- the ACAIA arm dominates, carrying a
-        // `FlowEstimator` with a sample deque, a median window and a Kalman filter. Left
-        // inline it is part of the task future, which `pool_size` allocates
-        // `MAX_BLUETOOTH_PERIPHERALS` times in `.bss`, so a machine with one scale would
-        // pay for four of them permanently.
+        // `FlowEstimator` with a sample deque, a median window and a Kalman filter. On
+        // the heap that would be ~10 kB per *connected* peripheral rather than
+        // `MAX_BLUETOOTH_PERIPHERALS` times in `.bss`, which is genuinely cheaper on a
+        // machine with one scale, and it bought 41688 bytes of `.stack`.
         //
-        // `.stack` is the SRAM *remainder* here, so that is a direct subtraction from it,
-        // and the block above `esp_alloc::heap_allocator!` in `main` records that 87256
-        // bytes of stack has already proved insufficient once. Not a budget to spend
-        // 40 kB of speculatively.
+        // What it cost was **contiguity**, which is the property that actually matters
+        // here. `esp_alloc` gives each region its own `linked_list_allocator::Heap` and
+        // tries them in registration order, so an allocation must fit contiguously
+        // *within a single region*. The ESPHome server needs one 12000-byte block for its
+        // entity table (`esphome/server.rs`), which it leaks and holds forever. A 10 kB
+        // block dropped into a region, alongside the constant small churn of
+        // `to_allocvec_cobs` on the UART path, can leave that region with ample free space
+        // and no 12000-byte run left in it -- and then the request fails outright and
+        // `handle_alloc_error` takes the machine down. Observed exactly that, at 52 s
+        // uptime, with `memory allocation of 12000 bytes failed`.
         //
-        // Measured across this one change: `.bss` 242648 -> 200960 and `.stack`
-        // 103416 -> 145104, i.e. **41688 bytes**, which also recovers what the two
-        // hand-written loops this replaced were costing before any of it.
+        // Growing the heap does not fix that: more total space is not more contiguous
+        // space, and the two large permanent consumers are almost the same size, so they
+        // fragment each other whichever order they arrive in.
         //
-        // The heap can afford it. The first 64 kB is `#[ram(reclaimed)]` -- memory the
-        // ROM bootloader was using, which costs the stack nothing at all -- and measured
-        // peak occupancy across both regions is 28 kB of 112 kB. The cost here is also
-        // paid per *connected* peripheral rather than per slot, so the common one- or
-        // two-peripheral machine spends 10-21 kB of that, not 40.
-        //
-        // One allocation per *assignment*, not per reconnect: the retry loops live inside
-        // the measurement loops, and the `select` below only completes when this slot's
-        // assignment changes. So this runs when a user associates or removes a
-        // peripheral, a handful of times in the life of a machine -- long-lived, few and
-        // large, which is the least fragmenting shape for the first-fit allocator here.
-        // Worth keeping in mind if `MAX_BLUETOOTH_PERIPHERALS` ever rises: four connected
-        // at once is ~42 kB, and the ESPHome server still needs a single contiguous
-        // 12000-byte block (`esphome/server.rs`), which is the allocation that has
-        // actually failed here before.
-        //
-        // A failed allocation is `handle_alloc_error`: a clean panic and a reboot. Worse
-        // than a `.bss` slot that cannot fail, better than what it buys -- the last stack
-        // overflow on this firmware did not panic, it corrupted a `next` pointer in
-        // embassy's timer list and surfaced as a load access fault somewhere unrelated.
-        let driver = alloc::boxed::Box::pin(async {
+        // `.bss` cannot fail. That is the whole argument for paying for it up front.
+        let driver = async {
             match assignment.driver {
                 BluetoothDriverKind::BelkaPortal => {
                     belka_measurement_loop(
@@ -424,7 +413,7 @@ pub async fn ble_slot_task(
                     .await
                 }
             }
-        });
+        };
 
         // `changed_and` marks a value as seen only when the predicate holds, so a change
         // that reassigns a *different* slot re-parks this one instead of cancelling a
