@@ -258,3 +258,30 @@ Each step compiles and runs.
    the UI drops its connection.
 5. **Empty association list read as "not yet answered"** — a machine with nothing paired
    would re-request forever. The received flag is set on receipt, not on non-emptiness.
+
+## Open: stack margin (unresolved, 2026-08-08)
+
+One panic on the first boot after a flash, not reproduced on the second. Ruled out: it
+was not a heap allocation failure.
+
+What is established:
+
+- The BLE driver's poll function allocates a **22,688-byte** stack frame
+  (`sub sp, sp, a2` where `a2 = 0x6000 - 0x760`, at the top of
+  `<Pin<Box<{ble_slot_task driver}>> as Future>::poll`). That is ~16% of `.stack` in a
+  single frame, sitting beneath the whole GATT and notification path.
+- It is probably **not** a regression from the slot rework: the same driver code was
+  previously inlined into `ble_devices_task`'s poll, so a comparable frame existed there.
+  Not yet confirmed against a pre-Phase-8 binary.
+- `Box::pin` is *not* materialising the ~10 kB future on the stack — the slot task's poll
+  frame is 192 bytes and the boxed poll's fixed part is 256. That hypothesis is dead.
+- `.stack` is 145,104 after boxing, versus 128,312 before the slot rework.
+
+**The figures in `main.rs`'s `heap_allocator!` block are observations, not bounds.** It
+records "71704 overflows and 87256 does not"; if the failure is non-deterministic then
+those runs simply did not trip, which is not the same as a limit. Do not tune against
+them.
+
+Next step if this resurfaces: measure rather than infer. Paint the stack at boot and
+report the high-water mark in the 1 Hz debug snapshot alongside `heap_used`/`heap_free`,
+so the real margin is visible under load instead of being argued from section sizes.
