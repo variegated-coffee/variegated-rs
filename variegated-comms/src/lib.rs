@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use core::cell::RefCell;
 use chrono::{DateTime, Utc};
 use defmt::{error, info};
-use embassy_futures::join::join5;
+use embassy_futures::join::{join, join5};
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::blocking_mutex::Mutex;
@@ -22,10 +22,12 @@ use variegated_controller_types::{
     Configuration,
     MachineCommand,
     MachineDefinition,
+    PeripheralId,
+    ScaleOp,
     Status
 };
 use variegated_debug::bus;
-use embassy_sync::channel::{Channel, Sender};
+use embassy_sync::channel::{Channel, Receiver as ChannelReceiver, Sender};
 use postcard::accumulator::{CobsAccumulator, FeedResult};
 use variegated_controller_lib::routine::RoutineRepository;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
@@ -59,7 +61,7 @@ const MIN_PLAUSIBLE_UNIX_TIME: u64 = 1_577_836_800;
 /// caller's to choose: `variegated_debug::usb_cdc::CommandSink` fixes it to
 /// `CriticalSectionRawMutex`, and injected commands from both transports have to
 /// converge on that one channel.
-pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
+pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, SM: embassy_sync::blocking_mutex::raw::RawMutex, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
     mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
     // The baud rate `uart_tx`/`uart_rx` were configured with -- see the note on
@@ -72,6 +74,12 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     machine_definition: MachineDefinition,
     external_sensor_dispatcher: Option<&D>,
     debug_command_sender: Sender<'static, DM, DebugCommand, 4>,
+    // Commands for a scale owned by the comms processor, from a
+    // `variegated_hal::scale::bluetooth::BluetoothScaleController`. `None` on machines
+    // with no such scale. The element type is the wire payload itself, so this arm
+    // wraps rather than translates -- and it is `(PeripheralId, ScaleOp)` rather than a
+    // bare op because one machine can carry several scales.
+    scale_command_receiver: Option<ChannelReceiver<'static, SM, (PeripheralId, ScaleOp), 4>>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -400,8 +408,49 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                 }
             }
         },
-        // `tx_sender` is `Copy`, so the four futures above are unaffected by this
-        // one taking a handle of its own.
-        debug_relay::relay(tx_sender, link_baud),
+        // `join5` is embassy-futures' maximum arity, so the sixth concurrent future
+        // is nested here rather than promoted. Nesting is free -- `join` polls both
+        // arms on every wake exactly as a hypothetical `join6` would -- and it keeps
+        // the five existing arms textually where they were.
+        //
+        // `tx_sender` is `Copy`, so the four futures above are unaffected by these
+        // two taking handles of their own.
+        join(
+            debug_relay::relay(tx_sender, link_baud),
+            async {
+                // Scale commands bound for a scale the comms processor owns.
+                //
+                // `Group`'s `Box<dyn ScaleController>` cannot reach `tx_channel` --
+                // it is a local of this function, and the controller lives in a
+                // different task entirely -- so a `BluetoothScaleController` pushes
+                // onto a static channel and this arm is what puts it on the wire.
+                //
+                // `Option`, because only a machine that actually has a Bluetooth
+                // scale has such a channel; `single-boiler` and the Belka-less
+                // `dual-boiler` build pass `None` and this arm parks forever.
+                let Some(receiver) = scale_command_receiver else {
+                    core::future::pending::<()>().await;
+                    return;
+                };
+
+                loop {
+                    let (peripheral_id, op) = receiver.receive().await;
+
+                    // `send().await`, not the `try_send` + reserved-capacity dance
+                    // `debug_relay` performs. That reservation exists to stop
+                    // high-rate debug frames from filling the shared ten-slot queue
+                    // and blocking machine traffic. A tare *is* machine traffic and
+                    // arrives at most once a shot, so it belongs on the same footing
+                    // as `Status` and `Configuration` above.
+                    let response = ApplicationProcessorToCommsProcessorMessage::ScaleCommand(peripheral_id, op);
+                    if let Ok(output) = to_allocvec_cobs(&response) {
+                        let _ = tx_sender.send(output).await;
+                        info!("Sent scale command to ESP32 for peripheral {}", peripheral_id);
+                    } else {
+                        info!("Failed to serialize scale command");
+                    }
+                }
+            },
+        ),
     ).await;
 }

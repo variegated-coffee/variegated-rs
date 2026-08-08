@@ -97,4 +97,31 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// the relay's per-window byte budget anyway. See
     /// `variegated_debug::relay::relayable`.
     Debug(crate::debug::DebugFrame),
+    /// An operation on a scale owned by the comms processor.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// The [`PeripheralId`] is mandatory and positional because there is no default
+    /// scale: the comms processor names three scale roles (group 1, group 2, and a
+    /// dose scale), and an operation that arrived without one would have to guess
+    /// which to act on. It is the same id the readings travel under in
+    /// [`ExternalPeripheralSensorReading`], so commands and measurements address a
+    /// scale the same way in both directions.
+    ScaleCommand(PeripheralId, ScaleOp),
+}
+
+/// An operation on a scale, as carried by
+/// [`ApplicationProcessorToCommsProcessorMessage::ScaleCommand`].
+///
+/// Only `Tare` today, because it is the only one the ACAIA driver can perform --
+/// there is no zero-calibration or reference-weight command in that protocol. The
+/// enum exists rather than a bare "tare" message so that a scale which *does* support
+/// calibration can be added without a second wire variant. Append, never insert.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScaleOp {
+    Tare,
 }

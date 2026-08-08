@@ -110,6 +110,10 @@ use variegated_hal::noop::NoopOutputPin;
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
 #[cfg(feature = "belka")]
 use variegated_hal::external_sensor::belka::{BelkaDevice, BelkaUpdate, BelkaStatusProvider};
+#[cfg(feature = "bluetooth-group-1-scale")]
+use variegated_hal::scale::bluetooth::{
+    BluetoothScale, BluetoothScaleController, BluetoothScaleStatusProvider, BluetoothScaleUpdate,
+};
 use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
@@ -168,8 +172,46 @@ pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 #[cfg(feature = "belka")]
 pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
 
-// Embassy task wrapper for ESP transceiver (dual-boiler) with Belka dispatcher
-#[cfg(feature = "belka")]
+/// The scale under group 1, owned by the comms processor.
+///
+/// **This must equal `BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID` in the comms firmware's
+/// `config.rs`.** The two firmwares are separate binaries on separate chips, so the
+/// compiler cannot check it; a mismatch is silent, and shows up as weights that
+/// arrive over the UART and are dropped by the dispatcher for want of a matching id.
+/// `BELKA_PERIPHERAL_ID` above is duplicated the same way, for the same reason.
+#[cfg(feature = "bluetooth-group-1-scale")]
+pub const BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID: u16 = 0xB5C0;
+
+// The group has one scale, and the two implementations cannot share it.
+//
+// It is not just that `Group` has a single `scale_controller` and a single
+// `output_weight_sensor` -- an ordering could pick a winner for those. It is that
+// `GravityDevice` and `BluetoothScale` are both *senders* on `OUTPUT_WEIGHT_SIGNAL`,
+// and a `Watch` keeps whatever was written last. Two producers at different rates
+// would interleave into a weight series belonging to neither scale, and brew-by-weight
+// would read it as one. That failure is invisible until a shot goes wrong, so it is
+// refused at compile time instead.
+#[cfg(all(feature = "gravity", feature = "bluetooth-group-1-scale"))]
+compile_error!(
+    "features `gravity` and `bluetooth-group-1-scale` are mutually exclusive: both publish \
+     to the group's weight watch, and the group has only one scale. Pick one."
+);
+
+/// Whichever scale this build's group actually has, for consumers that care about "the
+/// group scale" rather than about a particular make of one -- the display's connection
+/// indicator being the only one today.
+#[cfg(feature = "bluetooth-group-1-scale")]
+pub const GROUP_SCALE_PERIPHERAL_ID: u16 = BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID;
+#[cfg(all(feature = "gravity", not(feature = "bluetooth-group-1-scale")))]
+pub const GROUP_SCALE_PERIPHERAL_ID: u16 = GRAVITY_PERIPHERAL_ID;
+
+// Embassy task wrapper for ESP transceiver (dual-boiler)
+//
+// One variant, not one per feature. This used to be a `belka` / `not(belka)` pair whose
+// only difference was passing `Some(dispatcher)` versus `None`; with a second comms-fed
+// device that pairing would have become a matrix. `ExternalDeviceDispatcher` is always
+// present and cfg-gates its *fields* instead, so the feature set changes what it routes
+// rather than whether it exists.
 #[embassy_executor::task]
 async fn esp_transceiver_task(
     esp_p: Esp32Peripherals,
@@ -178,8 +220,9 @@ async fn esp_transceiver_task(
     command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
     machine_definition: MachineDefinition,
     routine_repository: &'static RoutineRepositoryMutex,
-    dispatcher: &'static BelkaDispatcher,
+    dispatcher: &'static ExternalDeviceDispatcher,
     debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
+    scale_command_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::ScaleOp), 4>>,
 ) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart: the budget is a fraction of the link, and a stale figure
@@ -201,40 +244,7 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender).await;
-}
-
-// Embassy task wrapper for ESP transceiver (dual-boiler) without Belka
-#[cfg(not(feature = "belka"))]
-#[embassy_executor::task]
-async fn esp_transceiver_task(
-    esp_p: Esp32Peripherals,
-    status_receiver: Subscriber<'static, SyncSendRawMutex, Status, 1, STATUS_RECEIVERS, 1>,
-    configuration_receiver: Subscriber<'static, SyncSendRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>,
-    command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
-    machine_definition: MachineDefinition,
-    routine_repository: &'static RoutineRepositoryMutex,
-    debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
-) {
-    // See the belka variant above: one binding for the UART and the relay budget.
-    let baudrate = 576_000;
-    let mut config = uart::Config::default();
-    config.baudrate = baudrate;
-
-    let mut uart = Uart::new_with_rtscts(
-        esp_p.uart,
-        esp_p.tx_pin,
-        esp_p.rx_pin,
-        esp_p.rts_pin,
-        esp_p.cts_pin,
-        Irqs,
-        esp_p.dma_rx,
-        esp_p.dma_tx,
-        config
-    );
-    let (uart_tx, uart_rx) = uart.split();
-
-    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver).await;
 }
 
 
@@ -611,8 +621,13 @@ static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 
 static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 static PUMP_TACHO_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static PUMP_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
-#[cfg(feature = "gravity")]
+// Shared by both scale implementations -- whichever one is compiled in publishes here
+// and `Group.output_weight_sensor` reads from it, so the controller above never learns
+// which kind of scale it has.
+#[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
 static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
+// Gravity only: it derives a rate of change from its own samples. A Bluetooth scale
+// reports weight and nothing else.
 #[cfg(feature = "gravity")]
 static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 #[cfg(feature = "gravity")]
@@ -633,8 +648,21 @@ static OUTPUT_TEMP_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<Temperatu
 static OUTPUT_EC_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<variegated_controller_types::ECType>, 3>> = StaticCell::new();
 #[cfg(feature = "belka")]
 static BELKA_STATUS_PROVIDER: StaticCell<BelkaStatusProvider<'static>> = StaticCell::new();
-#[cfg(feature = "belka")]
-static BELKA_DISPATCHER: StaticCell<BelkaDispatcher> = StaticCell::new();
+
+// Bluetooth group 1 scale statics
+#[cfg(feature = "bluetooth-group-1-scale")]
+static BLUETOOTH_GROUP_1_SCALE_UPDATE_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, BluetoothScaleUpdate, 10>> = StaticCell::new();
+#[cfg(feature = "bluetooth-group-1-scale")]
+static BLUETOOTH_GROUP_1_SCALE_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
+#[cfg(feature = "bluetooth-group-1-scale")]
+static BLUETOOTH_GROUP_1_SCALE_STATUS_PROVIDER: StaticCell<BluetoothScaleStatusProvider<'static>> = StaticCell::new();
+// The controller sends here and `esp_transceiver_main` drains it. `SyncSendRawMutex`
+// because the two ends live on different cores: the controller is inside the machine
+// controller's future, the receiver inside the transceiver task.
+#[cfg(feature = "bluetooth-group-1-scale")]
+static BLUETOOTH_SCALE_COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::ScaleOp), 4>> = StaticCell::new();
+
+static EXTERNAL_DEVICE_DISPATCHER: StaticCell<ExternalDeviceDispatcher> = StaticCell::new();
 
 // Heating element coordination signals
 static INTERLOCK_ENABLED_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, bool>> = StaticCell::new();
@@ -726,25 +754,63 @@ async fn storage_task(
     }
 }
 
-// Belka Portal dispatcher implementation
-#[cfg(feature = "belka")]
-struct BelkaDispatcher {
+/// Routes readings and connection changes from the comms processor to whichever
+/// comms-fed devices this build has.
+///
+/// The comms layer registers exactly one `&'static dyn ExternalSensorDispatcher` and
+/// hands it *every* reading, regardless of id, so the id filtering has to happen here.
+/// Each device gets its own channel and its own id; a reading matching neither is
+/// dropped, which is what happens today to anything the comms processor forwards for a
+/// peripheral this build does not know about.
+///
+/// The fields are cfg-gated rather than the whole struct, so adding a third device is a
+/// field and two match arms rather than another dispatcher type.
+struct ExternalDeviceDispatcher {
+    #[cfg(feature = "belka")]
     belka_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, BelkaUpdate, 10>,
+    #[cfg(feature = "belka")]
     belka_peripheral_id: variegated_controller_types::PeripheralId,
+
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    group_1_scale_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, BluetoothScaleUpdate, 10>,
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    group_1_scale_peripheral_id: variegated_controller_types::PeripheralId,
 }
 
-#[cfg(feature = "belka")]
-impl ExternalSensorDispatcher for BelkaDispatcher {
+impl ExternalSensorDispatcher for ExternalDeviceDispatcher {
     fn dispatch_reading(&self, reading: &variegated_controller_types::ExternalPeripheralSensorReading) {
+        #[cfg(feature = "belka")]
         if reading.id == self.belka_peripheral_id {
             let _ = self.belka_sender.try_send(BelkaUpdate::Reading(reading.clone()));
+            return;
         }
+
+        #[cfg(feature = "bluetooth-group-1-scale")]
+        if reading.id == self.group_1_scale_peripheral_id {
+            // `try_send`, so a full channel drops one weight rather than blocking the
+            // UART reader this runs on. A scale notifies far faster than the Belka
+            // Portal, and the next weight supersedes this one within ~100 ms.
+            let _ = self.group_1_scale_sender.try_send(BluetoothScaleUpdate::Reading(reading.clone()));
+            return;
+        }
+
+        let _ = reading;
     }
 
     fn dispatch_connection_status(&self, peripheral_id: variegated_controller_types::PeripheralId, connected: bool) {
+        #[cfg(feature = "belka")]
         if peripheral_id == self.belka_peripheral_id {
             let _ = self.belka_sender.try_send(BelkaUpdate::ConnectionChanged(connected));
+            return;
         }
+
+        #[cfg(feature = "bluetooth-group-1-scale")]
+        if peripheral_id == self.group_1_scale_peripheral_id {
+            let _ = self.group_1_scale_sender.try_send(BluetoothScaleUpdate::ConnectionChanged(connected));
+            return;
+        }
+
+        let _ = (peripheral_id, connected);
     }
 }
 
@@ -757,14 +823,13 @@ async fn belka_task(
     device.task().await;
 }
 
-// No-op dispatcher for when Belka is not enabled
-#[cfg(not(feature = "belka"))]
-struct NoopDispatcher;
-
-#[cfg(not(feature = "belka"))]
-impl ExternalSensorDispatcher for NoopDispatcher {
-    fn dispatch_reading(&self, _reading: &variegated_controller_types::ExternalPeripheralSensorReading) {}
-    fn dispatch_connection_status(&self, _peripheral_id: variegated_controller_types::PeripheralId, _connected: bool) {}
+// Bluetooth scale device task
+#[cfg(feature = "bluetooth-group-1-scale")]
+#[embassy_executor::task]
+async fn bluetooth_group_1_scale_task(
+    mut device: BluetoothScale<'static, CriticalSectionRawMutex, 3, 10>,
+) {
+    device.task().await;
 }
 
 #[embassy_executor::task]
@@ -1090,7 +1155,7 @@ async fn main_task(
         }
     }
 
-    #[cfg(feature = "gravity")]
+    #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
     let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
     #[cfg(feature = "gravity")]
     let output_flow_sig: &'static Watch<_, _, 3> = OUTPUT_FLOW_SIGNAL.init(Watch::new());
@@ -1122,12 +1187,43 @@ async fn main_task(
     #[cfg(feature = "gravity")]
     log_info!("Gravity sensor initialized - will attempt connection with retry");
 
-    #[cfg(feature = "gravity")]
+    // Bluetooth group 1 scale initialization
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    let bluetooth_group_1_scale_update_channel: &'static Channel<CriticalSectionRawMutex, BluetoothScaleUpdate, 10> =
+        BLUETOOTH_GROUP_1_SCALE_UPDATE_CHANNEL.init(Channel::new());
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    let bluetooth_group_1_scale_connected_sig: &'static Signal<NoopRawMutex, bool> =
+        BLUETOOTH_GROUP_1_SCALE_CONNECTED_SIGNAL.init(Signal::new());
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    let bluetooth_scale_command_channel: &'static Channel<_, _, 4> =
+        BLUETOOTH_SCALE_COMMAND_CHANNEL.init(Channel::new());
+
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    let bluetooth_group_1_scale = BluetoothScale::new(
+        BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+        bluetooth_group_1_scale_update_channel.receiver(),
+        Some(output_weight_sig.sender()),
+    ).with_connected_signal(bluetooth_group_1_scale_connected_sig);
+
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    log_info!("Bluetooth group 1 scale initialized - waiting for comms processor");
+
+    // The Bluetooth scale wins when both are compiled in. `Group` has exactly one
+    // `output_weight_sensor`, so the two cannot coexist; the ordering here is what
+    // decides, and it is deliberate rather than incidental -- a build that names a
+    // Bluetooth scale explicitly meant to use it.
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(BluetoothScaleController::new(
+        BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+        bluetooth_scale_command_channel.sender(),
+    )));
+
+    #[cfg(all(feature = "gravity", not(feature = "bluetooth-group-1-scale")))]
     let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(GravityController::new(
         gravity_command_channel.sender()
     )));
 
-    #[cfg(not(feature = "gravity"))]
+    #[cfg(not(any(feature = "gravity", feature = "bluetooth-group-1-scale")))]
     let scale_controller: Option<Box<dyn ScaleController>> = None;
 
     // Belka Portal external sensor initialization
@@ -1492,15 +1588,19 @@ async fn main_task(
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
         None,
-        None, //scale_controller,
+        // Was `None, //scale_controller` -- the controller was constructed and dropped
+        // on the floor, which is why `scale_tare()` and the calibration commands were
+        // silently no-ops on this machine. Note that attaching it also makes the
+        // automatic tare at the start of every brew live.
+        scale_controller,
         None,
         Some(brew_boiler_pressure_watch.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
         Some(input_volume_sig.receiver().unwrap()),
         None,
-        #[cfg(feature = "gravity")]
+        #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
         Some(output_weight_sig.receiver().unwrap()),
-        #[cfg(not(feature = "gravity"))]
+        #[cfg(not(any(feature = "gravity", feature = "bluetooth-group-1-scale")))]
         None,
         #[cfg(feature = "belka")]
         Some(output_temp_watch.receiver().unwrap()),
@@ -1534,12 +1634,27 @@ async fn main_task(
         let belka_status_provider = BELKA_STATUS_PROVIDER.init(BelkaStatusProvider::new(BELKA_PERIPHERAL_ID, belka_connected_sig));
         peripheral_registry.register(belka_status_provider);
     }
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    {
+        let bluetooth_group_1_scale_status_provider = BLUETOOTH_GROUP_1_SCALE_STATUS_PROVIDER.init(
+            BluetoothScaleStatusProvider::new(
+                BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+                bluetooth_group_1_scale_connected_sig,
+            ),
+        );
+        peripheral_registry.register(bluetooth_group_1_scale_status_provider);
+    }
 
-    // Initialize Belka dispatcher
-    #[cfg(feature = "belka")]
-    let belka_dispatcher: &'static BelkaDispatcher = BELKA_DISPATCHER.init(BelkaDispatcher {
+    // Initialize the external device dispatcher
+    let external_device_dispatcher: &'static ExternalDeviceDispatcher = EXTERNAL_DEVICE_DISPATCHER.init(ExternalDeviceDispatcher {
+        #[cfg(feature = "belka")]
         belka_sender: belka_update_channel.sender(),
+        #[cfg(feature = "belka")]
         belka_peripheral_id: BELKA_PERIPHERAL_ID,
+        #[cfg(feature = "bluetooth-group-1-scale")]
+        group_1_scale_sender: bluetooth_group_1_scale_update_channel.sender(),
+        #[cfg(feature = "bluetooth-group-1-scale")]
+        group_1_scale_peripheral_id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
     });
 
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
@@ -1617,6 +1732,11 @@ async fn main_task(
     let _ = group_actuators.push(ActuatorCapability::Pump);
     let _ = group_actuators.push(ActuatorCapability::ThreeWayValve);
     let _ = group_actuators.push(ActuatorCapability::HeatingElement);
+    // Advertised only when the group actually has a scale to tare. The comms processor
+    // builds its ESPHome tare button off this capability, so listing it unconditionally
+    // would put a button in the UI that silently does nothing.
+    #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
+    let _ = group_actuators.push(ActuatorCapability::ScaleTare);
 
     let mut group_control_modes = heapless::Vec::new();
     let _ = group_control_modes.push(ControlModeCapability::FlowRatePid);
@@ -1678,9 +1798,16 @@ async fn main_task(
     };
     let _ = machine_definition.add_tank(0, tank_def);
 
-    // Add scale peripheral if present
+    // Add the Gravity scale peripheral
+    //
+    // The `if let Some(..) = &group.scale_controller` guard these blocks used to carry
+    // was never satisfied, because the group was built with `None` for its scale
+    // controller -- so neither peripheral was ever advertised to the comms processor.
+    // The guard is gone rather than repaired: a peripheral's presence in this build is
+    // what the `#[cfg]` already states, and for the Belka Portal -- which is not a
+    // scale and has no controller -- testing the scale controller was never meaningful.
     #[cfg(feature = "gravity")]
-    if let Some(scale_controller) = &group.scale_controller {
+    {
         let mut scale_capabilities = heapless::Vec::new();
         let _ = scale_capabilities.push(SensorCapability::Weight);
 
@@ -1694,9 +1821,33 @@ async fn main_task(
         let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
     }
 
-    // Add scale peripheral if present
+    // Add the Bluetooth group 1 scale peripheral
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    {
+        let mut scale_capabilities = heapless::Vec::new();
+        let _ = scale_capabilities.push(SensorCapability::Weight);
+
+        let scale_def = PeripheralDefinition {
+            peripheral_type: PeripheralType::Scale,
+            location: heapless::String::try_from("Group 1").unwrap(),
+            // No calibration: the ACAIA protocol has no zero or reference-weight
+            // command, so `BluetoothScaleController::get_capabilities` reports false
+            // for both and this has to agree.
+            capabilities: scale_capabilities,
+            support_calibration: false,
+            // The scale's radio, GATT client and vendor protocol all live on the comms
+            // processor; this side only ever sees decoded readings. Set on the Belka
+            // Portal below too, which reaches us the same way and had it wrong -- the
+            // field is declared and serialised but read nowhere yet, so both were
+            // `false` by default rather than by intent.
+            via_comms_mcu: true,
+        };
+        let _ = machine_definition.add_peripheral(BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID, scale_def);
+    }
+
+    // Add the Belka Portal peripheral
     #[cfg(feature = "belka")]
-    if let Some(scale_controller) = &group.scale_controller {
+    {
         let mut portal_capabilities = heapless::Vec::new();
         let _ = portal_capabilities.push(SensorCapability::ElectricalConductivity);
         let _ = portal_capabilities.push(SensorCapability::Temperature);
@@ -1706,7 +1857,7 @@ async fn main_task(
             location: heapless::String::try_from("Cup").unwrap(),
             capabilities: portal_capabilities,
             support_calibration: false,
-            via_comms_mcu: false,
+            via_comms_mcu: true,
         };
         let _ = machine_definition.add_peripheral(BELKA_PERIPHERAL_ID, scale_def);
     }
@@ -1776,14 +1927,20 @@ async fn main_task(
     let debug_command_receiver = debug_commands_channel.receiver();
 
     // Spawn the ESP transceiver task
-    #[cfg(feature = "belka")]
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, belka_dispatcher, debug_command_sender)));
-    #[cfg(not(feature = "belka"))]
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, debug_command_sender)));
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    let scale_command_receiver = Some(bluetooth_scale_command_channel.receiver());
+    #[cfg(not(feature = "bluetooth-group-1-scale"))]
+    let scale_command_receiver = None;
+
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver)));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]
     spawner.spawn(unwrap!(belka_task(belka_device)));
+
+    // Spawn the Bluetooth group 1 scale device task
+    #[cfg(feature = "bluetooth-group-1-scale")]
+    spawner.spawn(unwrap!(bluetooth_group_1_scale_task(bluetooth_group_1_scale)));
 
     // Create configuration subscriber for debug logger and spawn the task
     let debug_configuration_receiver = configuration_channel.subscriber().expect("Failed to get debug configuration subscriber");

@@ -91,11 +91,16 @@ default = ["rp235xb"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
-dual-boiler = ["tft-display", "gravity", "gear-pump", "belka"]
+dual-boiler = ["tft-display", "gear-pump", "belka", "bluetooth-group-1-scale"]
 single-boiler = ["dep:oled_async", "dep:display-interface-spi", "gravity"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
 gravity = ["dep:variegated-gravity-driver"]
 belka = []
+# A Bluetooth scale under group 1, reached through the comms processor rather than
+# over I2C. Mutually exclusive with `gravity`: both publish to the group's weight
+# watch. Cargo features are additive and cannot express that, so `dual-boiler` enforces
+# it with a `compile_error!` instead -- see the note at the top of its `main.rs`.
+bluetooth-group-1-scale = []
 gear-pump = []
 pwm-steam-valve = ["variegated-controller-lib/pwm-steam-valve"]
 

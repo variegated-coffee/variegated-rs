@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use async_trait::async_trait;
 use defmt::Format;
 
+pub mod bluetooth;
 pub mod gravity;
 
 #[derive(Debug, Format)]

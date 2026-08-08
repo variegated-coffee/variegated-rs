@@ -143,7 +143,11 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     );
 
     let (uart_tx, uart_rx) = uart.split();
-    esp_transceiver_main::<_, _, NoopDispatcher, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender).await;
+    // No Bluetooth scale on this machine -- its scale is the I2C Gravity, driven
+    // locally -- so there is no scale-command channel to drain. `NoopRawMutex` is an
+    // arbitrary choice for the unused `SM`: `None` carries no receiver, so nothing is
+    // ever locked with it.
+    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]

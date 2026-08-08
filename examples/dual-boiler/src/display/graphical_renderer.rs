@@ -27,7 +27,8 @@ use u8g2_fonts::{
 use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState};
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
-use crate::GRAVITY_PERIPHERAL_ID;
+#[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
+use crate::GROUP_SCALE_PERIPHERAL_ID;
 #[cfg(feature = "belka")]
 use crate::BELKA_PERIPHERAL_ID;
 use variegated_timekeeping::DateTimeInZone;
@@ -270,10 +271,16 @@ impl GraphicalDisplayState {
         y += 15;
 
         // Scale status (S)
+        //
+        // Still drawn on a build with no scale at all, so the indicator column keeps
+        // its layout; it simply reads red forever, which is true.
+        #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
         let scale_connected = self.shared_state.status.peripheral_status.peripherals
-            .get(&GRAVITY_PERIPHERAL_ID)
+            .get(&GROUP_SCALE_PERIPHERAL_ID)
             .map(|info| info.is_available)
             .unwrap_or(false);
+        #[cfg(not(any(feature = "gravity", feature = "bluetooth-group-1-scale")))]
+        let scale_connected = false;
         let scale_color = if scale_connected { Rgb565::GREEN } else { Rgb565::RED };
         small_font.render_aligned(
             format_args!("S"),
