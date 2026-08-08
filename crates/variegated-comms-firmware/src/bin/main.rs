@@ -603,10 +603,20 @@ async fn main(spawner: Spawner) -> ! {
     // remainder, so every unused slot here is stack the deepest postcard recursion
     // does not get. The three were worth 2752 bytes together.
     //
-    // - `CONNS = 3`. This is a central and connects to exactly two peripherals, the
-    //   Belka portal and the scale. The third is margin for a reconnect that overlaps
-    //   a not-yet-reaped stale connection, which the manager's maintenance pass can
-    //   briefly produce.
+    // - `CONNS = 5`. This is a central, and the set of peripherals it connects to is no
+    //   longer a build-time fact: associations arrive from the application processor at
+    //   runtime, up to `MAX_BLUETOOTH_PERIPHERALS` of them. Four, plus one of margin for
+    //   a reconnect that overlaps a not-yet-reaped stale connection.
+    //
+    //   That margin matters more than it used to. Releasing a device now calls
+    //   `Connection::disconnect`, and the controller holds the ACL link until it has
+    //   serviced that -- so a slot reassigned to a new address while the old link is
+    //   still tearing down is a *designed-in* state, not the occasional artefact of a
+    //   reaping pass it was when the set was fixed.
+    //
+    //   Measured, not estimated: 3 -> 5 moved `.bss` 217560 -> 218712 and `.stack`
+    //   129464 -> 128312, i.e. 1152 bytes, ~576 per connection slot, taken out of the
+    //   stack exactly as the paragraph above says. 125 kB of stack remains.
     // - `CHANNELS = 2`. `ChannelStorage` is *dynamic L2CAP connection-oriented*
     //   channels only -- GATT does not use it, it rides the fixed ATT CID through
     //   `ConnectionStorage::gatt_client`. Nothing here opens a CoC channel: both
@@ -621,7 +631,7 @@ async fn main(spawner: Spawner) -> ! {
     // If any of those three claims stops being true, this line is the thing that
     // fails, and it fails at connect/advertise time rather than at compile time.
     let ble_resources = mk_static!(
-        HostResources<DefaultPacketPool, 3, 2, 1>,
+        HostResources<DefaultPacketPool, 5, 2, 1>,
         HostResources::new()
     );
 
