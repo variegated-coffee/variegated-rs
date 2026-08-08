@@ -110,6 +110,22 @@ pub static SNTP_RESYNC_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::ne
 /// consumer never has to answer for one.
 pub static BLE_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::new();
 
+/// A tare, raised by the application processor and consumed by the scale's measurement
+/// loop in `ble::devices`.
+///
+/// Carries the peripheral id rather than a bare `()`, because a machine can have more
+/// than one Bluetooth scale and the loop that receives this owns exactly one of them.
+/// Unlike `BLE_RECONNECT_REQUEST` above, nothing has validated the id before it arrives
+/// -- it comes off the UART from the other processor, not from the local dispatcher --
+/// so the consumer checks it against its own before acting.
+///
+/// Latest-wins is right here for the same reason as the others, with one wrinkle: a
+/// tare raised while the scale is disconnected would otherwise sit latched and fire on
+/// the next connect, possibly minutes later and in the middle of a different shot. The
+/// consumer resets it once the scale is initialised, so only a tare asked for while the
+/// link was up survives.
+pub static SCALE_TARE_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal::new();
+
 /// Read and cleared by `ble::scanner::ScanPrinter` on the next advertising report.
 ///
 /// An atomic rather than a `Signal` because the consumer is an `EventHandler`
@@ -145,6 +161,15 @@ pub static SENSOR_READING_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, E
 
 // Belka Connection Status - updated by belka_measurement_loop, read by comms_status_signaller_task
 pub static BELKA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
+
+// Bluetooth group 1 scale connection status - updated by acaia_measurement_loop, read
+// by comms_status_signaller_task and the debug snapshot.
+//
+// This is what the application processor's `BluetoothScale` gates its readings on: it
+// drops everything until it is told the link is up, so with no entry in
+// `CommsStatus.peripheral_connection_status` the weights would cross the UART and be
+// discarded on arrival.
+pub static SCALE_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
 
 // Time Sync Status - set by sntp_task once the RTC holds a real wall-clock
 // time, read by comms_status_signaller_task.

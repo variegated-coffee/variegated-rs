@@ -54,6 +54,23 @@ pub fn belka_address() -> BdAddr {
 // BLE peripheral IDs
 pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
 
+/// Bluetooth scale peripheral ids.
+///
+/// These name a *role* on the machine, not a make of scale: `GROUP_1` is whatever
+/// scale sits under the first group's spout, whether that is an ACAIA, a Bookoo, or
+/// something not yet written. The driver that fills the role is a build-time choice
+/// in `ble/devices.rs`; the id is what the application processor routes on, and it
+/// has to stay stable across driver changes or the AP's dispatcher would need editing
+/// every time the scale on the bench changed.
+///
+/// The `0xB5C_` / `0xB5D_` split separates the two roles: `C` for group scales, whose
+/// readings drive brew-by-weight, and `D` for dose scales, which weigh the basket
+/// before and after and never participate in a live control loop. Grouping them by
+/// prefix means a future range check can tell the two apart without a match arm per id.
+pub const BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID: u16 = 0xB5C0;
+pub const BLUETOOTH_GROUP_2_SCALE_PERIPHERAL_ID: u16 = 0xB5C1;
+pub const BLUETOOTH_DOSE_SCALE_1_PERIPHERAL_ID: u16 = 0xB5D0;
+
 pub fn acaia_address() -> BdAddr {
     BdAddr::new([0x2f, 0xa0, 0x1a, 0x97, 0x1c, 0x00])
 }

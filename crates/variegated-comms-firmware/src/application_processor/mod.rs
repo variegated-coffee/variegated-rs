@@ -12,7 +12,7 @@ use postcard::accumulator::{CobsAccumulator, FeedResult};
 use portable_atomic::{AtomicBool, Ordering};
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage, CommsProcessorToApplicationProcessorMessage,
-    ExternalPeripheralSensorReading, MachineCommand,
+    ExternalPeripheralSensorReading, MachineCommand, ScaleOp,
 };
 use variegated_controller_types::debug::DebugEvent;
 use variegated_controller_types::debug_command::DebugCommand;
@@ -22,7 +22,7 @@ use crate::debug::{bus, commands, TCP_DEBUG_CLIENTS};
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
-    ROUTINE_CACHE, SENSOR_READING_CAPACITY,
+    ROUTINE_CACHE, SCALE_TARE_REQUEST, SENSOR_READING_CAPACITY,
 };
 
 /// Start the application processor communication
@@ -246,6 +246,24 @@ pub async fn start(
                                 // policy decision, not a lost frame.
                                 if relayable(&frame.payload) {
                                     bus::BUS.immediate_publisher().publish_immediate(frame);
+                                }
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::ScaleCommand(peripheral_id, op) => {
+                                // Forwarded with the id intact, not resolved to a scale
+                                // here. This task has no view of which scales are
+                                // connected -- that lives in `ble::devices` -- so the
+                                // loop that owns a scale is the one that decides whether
+                                // a command is addressed to it.
+                                //
+                                // `signal()`, never `send().await`: this runs in the UART
+                                // reader, and the `Debug(frame)` arm above spells out why
+                                // back-pressure here is unacceptable. `signal` neither
+                                // awaits nor fails.
+                                match op {
+                                    ScaleOp::Tare => {
+                                        log_info!("Received tare for scale 0x{:04X}", peripheral_id);
+                                        SCALE_TARE_REQUEST.signal(peripheral_id);
+                                    }
                                 }
                             }
                         }

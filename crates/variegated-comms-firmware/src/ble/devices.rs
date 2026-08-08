@@ -3,7 +3,7 @@
 use bt_hci::controller::ExternalController;
 use variegated_log::{log_error, log_info};
 use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
@@ -17,8 +17,11 @@ use crate::debug::bus;
 use variegated_scale_trouble_driver::acaia_old::{AcaiaOldDriver, ScaleEvent};
 use variegated_trouble_connection_manager::BleConnectionManager;
 
-use crate::channels::{BELKA_CONNECTION_STATUS, BLE_RECONNECT_REQUEST, SENSOR_READING_CAPACITY};
-use crate::config::BELKA_PERIPHERAL_ID;
+use crate::channels::{
+    BELKA_CONNECTION_STATUS, BLE_RECONNECT_REQUEST, SCALE_CONNECTION_STATUS, SCALE_TARE_REQUEST,
+    SENSOR_READING_CAPACITY,
+};
+use crate::config::{BELKA_PERIPHERAL_ID, BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID};
 
 /// Set the Belka connection flag, emitting a typed event only when it actually
 /// changes.
@@ -47,9 +50,36 @@ fn set_belka_connected(connected: bool) {
     });
 }
 
+/// Set the group 1 scale connection flag, emitting a typed event only on a change.
+///
+/// A copy of [`set_belka_connected`], and the `swap`-as-edge-detector above is load
+/// bearing for the same reason: the scale's measurement loop clears this on four
+/// separate paths, three of which sit inside a five-second retry cycle and can run with
+/// the flag already `false`. `emit_event` bypasses the log suppressor, so an
+/// unconditional emit would push a `BlePeripheralDisconnected` into a 16-slot ring every
+/// five seconds for as long as the scale is off its charger and out of range.
+///
+/// It is set from where the *Belka* loop sets its own -- after the GATT client exists --
+/// rather than from the earlier link-layer `is_connected()` poll. The two differ during
+/// a link that connects but never completes service discovery, and reporting a scale as
+/// connected in that window would be a worse lie than reporting it disconnected: the
+/// application processor gates brew-by-weight on this.
+fn set_scale_connected(connected: bool) {
+    if SCALE_CONNECTION_STATUS.swap(connected, Ordering::Relaxed) == connected {
+        return;
+    }
+    bus::emit_event(if connected {
+        DebugEvent::BlePeripheralConnected { id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID }
+    } else {
+        DebugEvent::BlePeripheralDisconnected { id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID }
+    });
+}
+
 /// BLE devices management task
 ///
 /// Manages connections to Belka Portal and ACAIA scale, running their measurement loops.
+///
+/// Belka is currently commented out while the ACAIA scale driver is being brought up.
 #[embassy_executor::task]
 pub async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
@@ -62,15 +92,15 @@ pub async fn ble_devices_task(
 
     // Register both devices and enable auto-connection
     {
-        // Register Belka Portal
+/*        // Register Belka Portal
         let device_handle = handle.register_device(belka_address);
         let driver = BelkaPortalDriver::new(device_handle, stack);
-        driver.set_maintain_connection(true).await;
+        driver.set_maintain_connection(true).await; */
 
-/*        // Register ACAIA scale
+        // Register ACAIA scale
         let device_handle = handle.register_device(acaia_address);
         let driver = AcaiaOldDriver::new(device_handle, stack);
-        driver.set_maintain_connection(true).await; */
+        driver.set_maintain_connection(true).await;
     }
 
     log_info!("BLE Devices: Configured Belka {:?} and ACAIA {:?}", belka_address, acaia_address);
@@ -81,8 +111,8 @@ pub async fn ble_devices_task(
         manager.run(),
 //        join(
             join(
-                belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
-                //acaia_measurement_loop(handle, stack, acaia_address),
+                //belka_measurement_loop(handle.clone(), stack, belka_address, sensor_sender),
+                acaia_measurement_loop(handle.clone(), stack, acaia_address, sensor_sender),
                 reconnect_request_loop(handle.clone(), belka_address),
             ),
 //        ),
@@ -137,6 +167,7 @@ async fn reconnect_request_loop(
 }
 
 /// Belka Portal measurement loop
+#[allow(dead_code)] // Temporarily unwired; see `ble_devices_task`.
 async fn belka_measurement_loop(
     handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
@@ -268,10 +299,16 @@ async fn belka_measurement_loop(
 }
 
 /// ACAIA scale measurement loop
+///
+/// Reports under [`BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID`] rather than an ACAIA-specific
+/// id: the id names the scale's role on the machine, so swapping in a different make of
+/// scale here does not move the readings to a different address on the application
+/// processor. See the note in `config.rs`.
 async fn acaia_measurement_loop(
     handle: variegated_trouble_connection_manager::ManagerHandle<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     acaia_address: BdAddr,
+    sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
 ) {
     loop {
         // Check if connected
@@ -283,6 +320,7 @@ async fn acaia_measurement_loop(
 
         if !is_connected {
             //info!("ACAIA scale not connected, waiting...");
+            set_scale_connected(false);
             Timer::after(Duration::from_secs(1)).await;
             continue;
         }
@@ -307,6 +345,17 @@ async fn acaia_measurement_loop(
                     match gatt.initialize().await {
                         Ok(mut stream) => {
                             log_info!("ACAIA scale initialized successfully");
+                            set_scale_connected(true);
+
+                            // Discard any tare that arrived while the scale was down.
+                            //
+                            // `Signal` latches, so without this a tare asked for during
+                            // a disconnect would fire the moment the link came back --
+                            // possibly minutes later, and possibly mid-shot. A stale
+                            // tare is worse than a dropped one: the operator who asked
+                            // has long since moved on, and zeroing a scale under a
+                            // running extraction corrupts it.
+                            SCALE_TARE_REQUEST.reset();
 
                             // Send initial heartbeat to trigger data flow
                             log_info!("Sending initial heartbeat");
@@ -315,19 +364,79 @@ async fn acaia_measurement_loop(
                             }
 
                             let mut last_heartbeat = Instant::now();
+                            // Edge-triggers the "channel full" log below. A persistently
+                            // full channel would otherwise log at the notification rate,
+                            // which is the same 10-20 Hz flood the drop exists to avoid.
+                            let mut dropping_weights = false;
 
                             loop {
-                                // Race between: getting next event and periodic timer
-                                match select(
+                                // Race between: next event, periodic timer, and a tare.
+                                //
+                                // `select3` polls in declaration order, so weights keep
+                                // priority over a tare -- which is right: the tare is a
+                                // single write and can wait a notification, while a
+                                // dropped weight is a gap in a control signal.
+                                //
+                                // `send_tare` takes `&self` and `stream` borrows `&gatt`
+                                // too, so both are shared borrows and this needs no
+                                // restructuring. It is also a single characteristic
+                                // write on the path `send_heartbeat` already uses, so it
+                                // cannot stall the loop long enough to miss the ~3 s
+                                // heartbeat deadline that keeps the scale connected.
+                                match select3(
                                     stream.next(),
-                                    Timer::after(Duration::from_secs(1))
+                                    Timer::after(Duration::from_secs(1)),
+                                    SCALE_TARE_REQUEST.wait(),
                                 ).await {
-                                    Either::First(result) => {
+                                    Either3::First(result) => {
                                         match result {
                                             Ok(event) => {
                                                 match event {
                                                     ScaleEvent::Weight(w) => {
                                                         log_info!("Scale Weight: {} g", w.weight);
+
+                                                        // `try_send`, where the Belka loop awaits.
+                                                        //
+                                                        // The difference is the sample rate and what a
+                                                        // late sample is worth. Belka notifies about once
+                                                        // a second and its three readings are a slow
+                                                        // trend, so blocking for a slot is free and never
+                                                        // happens. A scale notifies ten to twenty times a
+                                                        // second, and the 16-slot channel is drained by a
+                                                        // single `select4` loop that also serialises status
+                                                        // and writes the UART -- so it *can* back up.
+                                                        //
+                                                        // Awaiting there would be actively harmful, and not
+                                                        // only because the sample is stale by the time it
+                                                        // lands: `send_heartbeat` below runs in this same
+                                                        // loop body, so a blocked send stops the heartbeat,
+                                                        // and the scale drops the link within seconds. That
+                                                        // would turn transient UART backpressure into a BLE
+                                                        // disconnect and a five-second reconnect cycle.
+                                                        //
+                                                        // Dropping is the right failure: the next weight
+                                                        // arrives in 50-100 ms and supersedes this one, so a
+                                                        // full channel costs one sample rather than the
+                                                        // connection.
+                                                        let weight_reading = ExternalPeripheralSensorReading {
+                                                            id: BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
+                                                            endpoint: 0,
+                                                            value: w.weight,
+                                                        };
+                                                        match sensor_sender.try_send(weight_reading) {
+                                                            Ok(()) => {
+                                                                if dropping_weights {
+                                                                    dropping_weights = false;
+                                                                    log_info!("Sensor channel drained, forwarding scale weights again");
+                                                                }
+                                                            }
+                                                            Err(_) => {
+                                                                if !dropping_weights {
+                                                                    dropping_weights = true;
+                                                                    log_error!("Sensor channel full, dropping scale weights");
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -337,7 +446,7 @@ async fn acaia_measurement_loop(
                                             }
                                         }
                                     }
-                                    Either::Second(_) => {
+                                    Either3::Second(_) => {
                                         // Check connection
                                         let device_handle = handle.register_device(acaia_address);
                                         let driver = AcaiaOldDriver::new(device_handle, stack);
@@ -346,6 +455,35 @@ async fn acaia_measurement_loop(
                                         if !is_connected {
                                             log_info!("ACAIA connection lost during measurements, exiting");
                                             break;
+                                        }
+                                    }
+                                    Either3::Third(peripheral_id) => {
+                                        // The id is checked, not assumed. Nothing has
+                                        // validated it upstream -- unlike
+                                        // `BLE_RECONNECT_REQUEST`, it arrives off the
+                                        // UART from the other processor rather than from
+                                        // this firmware's own dispatcher -- and this loop
+                                        // owns exactly one of the three scale roles
+                                        // `config.rs` names. Today only group 1 exists,
+                                        // so this never rejects; it is written now
+                                        // because the day a second scale is added is the
+                                        // day an unchecked tare would zero the wrong one.
+                                        //
+                                        // An `if`, not an early `continue`: the
+                                        // heartbeat check at the bottom of this loop
+                                        // body is what keeps the link alive, and a
+                                        // `continue` here would skip it.
+                                        if peripheral_id == BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID {
+                                            log_info!("Taring ACAIA scale");
+                                            if let Err(e) = gatt.send_tare().await {
+                                                log_error!("Failed to send ACAIA tare: {:?}", e);
+                                            }
+                                        } else {
+                                            log_info!(
+                                                "Ignoring tare for scale 0x{:04X}, this loop owns 0x{:04X}",
+                                                peripheral_id,
+                                                BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID
+                                            );
                                         }
                                     }
                                 }
@@ -367,9 +505,11 @@ async fn acaia_measurement_loop(
                     }
                 }).await;
                 log_info!("ACAIA GATT task completed, connection dropped");
+                set_scale_connected(false);
             }
             Err(e) => {
                 log_error!("Failed to create ACAIA GATT client: {:?}", e);
+                set_scale_connected(false);
             }
         }
 
