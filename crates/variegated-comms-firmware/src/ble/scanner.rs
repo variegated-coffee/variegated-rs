@@ -119,6 +119,32 @@ impl ScanSink for ScanPrinter {
             log_info!("Scan-finished report dropped: result queue still full");
         }
     }
+
+    // The connect-lifecycle hooks exist only to reach the sampler: `define_counters!`
+    // makes its id enum private to `instrumentation`, and the manager is a third crate
+    // besides, so this impl is the one place that can see both ends.
+    //
+    // Counters rather than log lines, unlike the two above. These fire on every attempt
+    // in every pass -- a machine with two peripherals switched off produces them
+    // continuously -- so as text they would fill the 16-slot event ring and evict the
+    // events worth reading. As a sampled series they are free and can be differenced
+    // into a rate.
+
+    fn connect_attempt(&self, _address: BdAddr, waited: embassy_time::Duration) {
+        crate::instrumentation::note_ble_connect_attempt(waited);
+    }
+
+    fn connect_timed_out(&self, _address: BdAddr) {
+        crate::instrumentation::note_ble_connect_timeout();
+    }
+
+    fn connect_error(&self, _address: BdAddr) {
+        crate::instrumentation::note_ble_connect_error();
+    }
+
+    fn connect_abandoned(&self, _address: BdAddr) {
+        crate::instrumentation::note_ble_connect_abandoned();
+    }
 }
 
 /// Weakest signal worth reporting, in dBm.
@@ -234,6 +260,12 @@ impl EventHandler for ScanPrinter {
         }
 
         while let Some(Ok(report)) = it.next() {
+            // Before the `active` check below, deliberately: this counts what the radio
+            // heard, not what the UI was told about. Reports arriving outside a discovery
+            // scan are exactly the ones that say the receiver is still working while
+            // nobody is asking it for a pick-list.
+            crate::instrumentation::note_ble_adv_report();
+
             log_info!("Adv report: {:?}", report);
 
             // Decode and print advertising data structures

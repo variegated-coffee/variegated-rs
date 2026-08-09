@@ -54,6 +54,44 @@ pub trait ScanSink {
     /// `None` when the failure came from the controller's own error type, which has no
     /// `defmt::Format` bound available here.
     fn attempt_failed(&self, error: Option<&trouble_host::Error>);
+
+    // -- Connect lifecycle ---------------------------------------------------------
+    //
+    // Not scanning, despite the trait's name, and kept here rather than in a second
+    // trait because there is exactly one thing on the other end of both and `run` takes
+    // one `sink`. They exist for the same reason `attempt_failed` does: this crate logs
+    // with raw `defmt`, which the firmware's debug transports do not carry, so every
+    // outcome below currently reaches the operator as silence.
+    //
+    // **Deliberately without default bodies.** One implementor exists, and a hook that
+    // can be silently left unimplemented is a hook that will be, at which point a metric
+    // reads a flat zero and gets believed.
+
+    /// An attempt is about to start, after `waited` spent queued behind other addresses
+    /// in the same pass.
+    ///
+    /// The wait is the interesting half: attempts are serialized through one `Central`
+    /// and each runs up to ten seconds, so a device four places down the list can be
+    /// half a minute from being tried without anything having failed.
+    fn connect_attempt(&self, address: BdAddr, waited: Duration);
+
+    /// The ten-second `with_timeout` expired -- the controller never established a link.
+    ///
+    /// Distinct from [`Self::connect_error`] because they mean opposite things: this is
+    /// "we listened and heard nothing", which on a shared antenna is as likely to be
+    /// airtime as an absent device.
+    fn connect_timed_out(&self, address: BdAddr);
+
+    /// The host returned an error rather than timing out.
+    fn connect_error(&self, address: BdAddr);
+
+    /// A scan request arrived mid-attempt and the attempt was dropped for it.
+    ///
+    /// Worth counting separately from a timeout: the device may have been about to
+    /// connect, and the abandonment also starts the same two-second cooldown a failure
+    /// does, so a stream of scan requests can starve a connect indefinitely without
+    /// producing a single failure.
+    fn connect_abandoned(&self, address: BdAddr);
 }
 
 /// How long the controller listens for advertisements in each scan pass.
@@ -336,6 +374,11 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                 addrs
             };
 
+            // When this pass started trying to connect. Each attempt reports how long it
+            // waited from here, which is what makes the serialization visible: the
+            // addresses are tried one at a time and each may take ten seconds.
+            let pass_start = embassy_time::Instant::now();
+
             // Try to connect to each device (Central is owned by self, no borrow issues!)
             for address in to_connect.iter() {
                 // Mark as connecting
@@ -346,6 +389,7 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                         state.state = ConnectionState::Connecting;
                     }
                 }
+                sink.connect_attempt(*address, pass_start.elapsed());
 
                 // Create connection configuration
                 let config = ConnectConfig {
@@ -389,6 +433,7 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                     Either::First(result) => result,
                     Either::Second(request) => {
                         defmt::info!("Scan requested; abandoning the connect attempt for {}", address);
+                        sink.connect_abandoned(*address);
                         {
                             let mut shared = self.shared.borrow_mut();
                             if let Some(state) = shared.devices.get_mut(address) {
@@ -431,11 +476,13 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                             // since nothing has changed since the last attempt.
                             Ok(Err(_e)) => {
                                 defmt::warn!("Failed to connect to device {}", address);
+                                sink.connect_error(*address);
                                 state.state = ConnectionState::Disconnected;
                                 state.last_disconnect = Some(embassy_time::Instant::now());
                             }
                             Err(_) => {
                                 defmt::warn!("Connection timeout for device {}", address);
+                                sink.connect_timed_out(*address);
                                 state.state = ConnectionState::Disconnected;
                                 state.last_disconnect = Some(embassy_time::Instant::now());
                             }

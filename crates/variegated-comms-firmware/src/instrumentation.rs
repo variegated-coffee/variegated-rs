@@ -32,10 +32,17 @@
 //!
 //! # Budget
 //!
-//! `MAX_SAMPLES` is 16, for counters and indicators alike, and one `CounterSamples`
-//! frame carries the whole array. The counters below use 14 of the 16. That is most of
-//! the firmware's permanent budget spent on the network, which is defensible while this
-//! is the subsystem that keeps going wrong, but it is worth knowing before adding more:
+//! `MAX_SAMPLES` is 24, for counters and indicators alike, and one `CounterSamples` frame
+//! carries the whole array. This module uses **19 counters and 5 indicators**: 14 network
+//! counters, 5 BLE ones, 3 network indicators and 2 BLE ones.
+//!
+//! It was 16 until the BLE connect metrics needed room, and raising it cost a
+//! `DEBUG_PROTOCOL_VERSION` bump -- see the history note on that constant for why a change
+//! that alters no encoded byte still needs one. Before adding more, consider retiring
+//! network counters instead: the flood investigation described above is concluded, and
+//! `NetRxArp`, `NetRxIpv6` and `NetRxOther` in particular are unlikely to say anything
+//! again.
+//!
 //! `Sampler::new` asserts the count and will fail loudly at startup rather than silently
 //! truncate.
 
@@ -91,6 +98,51 @@ define_counters! {
         /// here, which a `WifiLost` event in a 16-slot ring cannot give you once the
         /// ring has turned over.
         WifiDisconnects = 13,
+
+        // -- BLE connect path ------------------------------------------------------
+        //
+        // Added for a failure that only appears under load: with ESPHome, a websocket,
+        // a debug socket and a connected scale all live, a Belka Portal will not
+        // connect, and with fewer of them running it will. The candidates are executor
+        // starvation and 2.4 GHz airtime, and these exist to tell them apart. They read
+        // against the `NetRx*` counters above, which is the point of putting them in the
+        // same sampler: one timebase, one frame, no clock skew between the two halves.
+        //
+        // **None of the five carries the address.** A counter has no dimensions, so a
+        // machine with a Belka and a scale reports their attempts and failures added
+        // together, and telling them apart means knowing which peripherals were switched
+        // on. That is a real limit on reading these, and the alternative -- a counter per
+        // slot -- costs four times the budget for a distinction that only matters while
+        // more than one peripheral misbehaves at once.
+
+        /// Advertising reports delivered to the host's event handler.
+        ///
+        /// **This does not observe the connect path**, and that is worth knowing before
+        /// reading it: connects use `LeCreateConn` with a filter accept list, and a
+        /// controller matching the accept list itself emits no advertising reports. So
+        /// this counts discovery scans, which is still the cleanest available proxy for
+        /// "can the radio hear anything right now" -- run one scan idle and one under
+        /// load and compare.
+        BleAdvReports = 14,
+        /// Connect attempts started. The denominator for the three below; without it a
+        /// rising failure count cannot be told from a rising attempt rate.
+        BleConnectAttempts = 15,
+        /// Attempts where the ten-second timeout expired.
+        ///
+        /// The one to watch for this bug. A timeout means the controller listened and
+        /// never saw the peripheral -- which on a single antenna shared with a loaded
+        /// Wi-Fi stack is as easily airtime as an absent device, hence `BleAdvReports`
+        /// and `BleRunnerGapMaxMs` next to it.
+        BleConnectTimeouts = 16,
+        /// Attempts the host failed outright, rather than timing out. A different fault
+        /// entirely: the stack said no, so the radio is not the place to look.
+        BleConnectErrors = 17,
+        /// Attempts dropped part-way because a scan request arrived.
+        ///
+        /// Nonzero here means connects are losing races to scans, and since an abandoned
+        /// attempt starts the same two-second cooldown a failure does, a device can be
+        /// starved indefinitely without ever recording a timeout.
+        BleConnectAbandoned = 18,
     }
 }
 
@@ -121,6 +173,28 @@ define_indicators! {
         NetRxLastUdpPort = 1,
         /// Destination port of the most recent frame counted into `NetRxTcp`.
         NetRxLastTcpPort = 2,
+
+        /// The longest interval between consecutive polls of the BLE host runner during
+        /// the last sample period, in milliseconds.
+        ///
+        /// **This is the executor-starvation measurement.** The runner is what drains HCI;
+        /// if the seventeen tasks on this executor keep it from being polled, BLE stops
+        /// servicing events without anything in the BLE code being wrong. A connect
+        /// failing while this reads tens of milliseconds rules that out and points at the
+        /// radio; a connect failing while this reads hundreds or thousands points here.
+        ///
+        /// Same read-and-clear shape as [`IndicatorId::NetRxGapMaxMs`], and the same
+        /// caveat in reverse: unlike embassy-net, this future is not merely idle when
+        /// nothing has arrived -- `run_with_handler` is always waiting on the controller
+        /// -- so a large value here is not explained away by a quiet link.
+        BleRunnerGapMaxMs = 3,
+        /// The longest a connect attempt waited to start, in milliseconds.
+        ///
+        /// Attempts are serialized through one `Central` and each may run for ten
+        /// seconds, so this is how long an address sat behind the others in its pass. It
+        /// separates "the Belka's attempt failed" from "the Belka's attempt barely
+        /// happened", which look identical from a timeout count alone.
+        BleConnectWaitMaxMs = 4,
     }
 }
 
@@ -144,13 +218,74 @@ static LAST_RX_CALL_US: AtomicU32 = AtomicU32::new(0);
 /// looked", which is what a sampled series wants.
 static MAX_GAP_US: AtomicU32 = AtomicU32::new(0);
 
+/// When the BLE host runner was last polled, in microseconds, truncated to 32 bits.
+///
+/// Same truncation argument as [`LAST_RX_CALL_US`]: only wrapping differences are taken,
+/// and zero doubles as "no poll yet".
+static LAST_BLE_POLL_US: AtomicU32 = AtomicU32::new(0);
+
+/// Running maximum BLE runner poll gap, taken and cleared by the sampler.
+static MAX_BLE_GAP_US: AtomicU32 = AtomicU32::new(0);
+
+/// Running maximum connect queue wait, in milliseconds, taken and cleared by the sampler.
+///
+/// Milliseconds rather than microseconds here, unlike the two gaps above: the value comes
+/// in as an `embassy_time::Duration` already and the interesting range is seconds, so
+/// there is no resolution to protect.
+static MAX_CONNECT_WAIT_MS: AtomicU32 = AtomicU32::new(0);
+
 /// Record that a Wi-Fi association was lost.
 ///
-/// The only counter here that is not the network probe's own, and the only reason this
-/// module exposes anything: `define_counters!` expands to a private enum, so every
-/// increment has to happen in the module that declares the ids.
+/// The first of the counters here that is not the network probe's own, and the reason
+/// this module exposes anything at all: `define_counters!` expands to a private enum, so
+/// every increment has to happen in the module that declares the ids. The BLE shims below
+/// exist for the same reason, with one turn more of it -- the connection manager is a
+/// separate crate, so it reaches these through the `ScanSink` impl in `ble::scanner`
+/// rather than calling them directly.
 pub fn note_wifi_disconnect() {
     COUNTERS.handle(CounterId::WifiDisconnects).increment();
+}
+
+/// Record one advertising report delivered to the event handler.
+///
+/// Called per report rather than per batch: `on_adv_reports` receives an iterator whose
+/// length is the controller's batching decision, not a fact about the air.
+pub fn note_ble_adv_report() {
+    COUNTERS.handle(CounterId::BleAdvReports).increment();
+}
+
+/// Record a connect attempt starting, and how long it waited to.
+pub fn note_ble_connect_attempt(waited: Duration) {
+    COUNTERS.handle(CounterId::BleConnectAttempts).increment();
+    MAX_CONNECT_WAIT_MS.fetch_max(waited.as_millis() as u32, Ordering::Relaxed);
+}
+
+/// Record a connect attempt that hit its timeout.
+pub fn note_ble_connect_timeout() {
+    COUNTERS.handle(CounterId::BleConnectTimeouts).increment();
+}
+
+/// Record a connect attempt the host failed.
+pub fn note_ble_connect_error() {
+    COUNTERS.handle(CounterId::BleConnectErrors).increment();
+}
+
+/// Record a connect attempt dropped for a scan request.
+pub fn note_ble_connect_abandoned() {
+    COUNTERS.handle(CounterId::BleConnectAbandoned).increment();
+}
+
+/// Record that the BLE host runner was polled.
+///
+/// Called from the poll wrapper in `ble::ble_runner_task`, so the interval it measures is
+/// the executor's, not the radio's.
+pub fn note_ble_runner_poll() {
+    let now = Instant::now().as_micros() as u32;
+    let last = LAST_BLE_POLL_US.swap(now, Ordering::Relaxed);
+    if last == 0 {
+        return;
+    }
+    MAX_BLE_GAP_US.fetch_max(now.wrapping_sub(last), Ordering::Relaxed);
 }
 
 /// Record how long it has been since embassy-net last drained the driver.
@@ -351,6 +486,12 @@ pub async fn sampler_task() -> ! {
         INDICATORS
             .handle(IndicatorId::NetRxGapMaxMs)
             .set((MAX_GAP_US.swap(0, Ordering::Relaxed) / 1000) as u64);
+        INDICATORS
+            .handle(IndicatorId::BleRunnerGapMaxMs)
+            .set((MAX_BLE_GAP_US.swap(0, Ordering::Relaxed) / 1000) as u64);
+        INDICATORS
+            .handle(IndicatorId::BleConnectWaitMaxMs)
+            .set(MAX_CONNECT_WAIT_MS.swap(0, Ordering::Relaxed) as u64);
 
         bus::publish(sampler.counter_payload());
         bus::publish(sampler.indicator_payload());
