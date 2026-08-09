@@ -98,3 +98,39 @@ pub fn uart_config() -> esp_hal::uart::Config {
             rts: esp_hal::uart::RtsConfig::Enabled(122),
         })
 }
+
+/// Line rate of the debug wire on UART0.
+///
+/// The standard rate, so anything that opens a serial port works without being told: it is
+/// `variegated-debug-tui`'s default for `--baud`, every terminal's default, and what a
+/// USB-UART adapter comes up at.
+///
+/// **The throughput consequence is real and worth knowing.** At 8N1 this is 11.5 kB/s, so
+/// a maximal 2048-byte frame occupies the wire for ~178 ms and the wire carries at most
+/// ~5.6 of them per second. Most frames are far smaller -- a log line or an event, not a
+/// snapshot -- but under a burst the bus will lag, and lag is counted as dropped frames in
+/// `bus::stats()`. If those counts become a problem, this is the number to raise; the
+/// write timeout below follows it automatically.
+///
+/// Not the 576 kbaud of the application-processor link above, which was chosen against a
+/// short board trace with hardware flow control at both ends. This one goes to whatever
+/// adapter is to hand.
+///
+/// **The host must match it.** Unlike the USB-Serial-JTAG this replaced, a real UART has
+/// no negotiation: a mismatched rate produces framing garbage rather than an error.
+pub const DEBUG_UART_BAUD: u32 = 115_200;
+
+/// UART configuration for the debug wire.
+///
+/// **No hardware flow control**, unlike the application-processor link. Only TX and RX are
+/// wired, so enabling CTS would stall the transmitter against a pin nobody drives -- the
+/// exact unbounded block the debug path is built to avoid. Without it the transmitter
+/// always drains at the line rate, which is what makes a bounded write here honest rather
+/// than hopeful.
+pub fn debug_uart_config() -> esp_hal::uart::Config {
+    esp_hal::uart::Config::default()
+        .with_baudrate(DEBUG_UART_BAUD)
+        .with_data_bits(esp_hal::uart::DataBits::_8)
+        .with_parity(esp_hal::uart::Parity::None)
+        .with_stop_bits(esp_hal::uart::StopBits::_1)
+}

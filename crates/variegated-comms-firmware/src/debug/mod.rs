@@ -30,7 +30,7 @@ pub mod commands;
 pub mod panic_console;
 pub mod snapshot;
 pub mod tcp;
-pub mod usb;
+pub mod uart;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;

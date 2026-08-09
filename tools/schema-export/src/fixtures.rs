@@ -276,6 +276,40 @@ fn status_maximal() -> Status {
             ])
             .expect("fits"),
         },
+        // One of each value variant, and both kinds of key -- a named one and an
+        // `Other`. A block of three identical-shaped entries would round-trip even if
+        // the decoder confused the key's discriminant with the value's.
+        pending_shot_annotations: {
+            let mut annotations = ShotAnnotations::new();
+            annotations
+                .set(ShotAnnotationKey::DoseWeight, ShotAnnotationValue::Number(18.5))
+                .expect("fits");
+            annotations
+                .set(
+                    ShotAnnotationKey::Beans,
+                    ShotAnnotationValue::Text(
+                        heapless::String::try_from("Drop Coffee / Kenya Karimikui")
+                            .expect("fits"),
+                    ),
+                )
+                .expect("fits");
+            annotations
+                .set(
+                    ShotAnnotationKey::Other(
+                        heapless::String::try_from("basket").expect("fits"),
+                    ),
+                    ShotAnnotationValue::Text(
+                        heapless::String::try_from("VST 18g").expect("fits"),
+                    ),
+                )
+                .expect("fits");
+            annotations
+        },
+        // `Some(true)` here against `None` in the minimal fixture. A field carrying the
+        // same value in every fixture is one the round-trip test cannot tell apart from
+        // a hard-coded constant -- and `Option` is exactly where postcard's encoding
+        // differs between the cases.
+        sd_card_present: Some(true),
     }
 }
 
@@ -297,6 +331,10 @@ fn status_minimal() -> Status {
         peripheral_status: PeripheralStatus { peripherals: FnvIndexMap::new() },
         current_local_time: None,
         bluetooth: BluetoothScanStatus::default(),
+        pending_shot_annotations: ShotAnnotations::new(),
+        // `None`, not `Some(false)` -- the third state, which is the one a `bool` could
+        // never have expressed and the one a UI is most likely to render wrongly.
+        sd_card_present: None,
     }
 }
 
@@ -407,6 +445,9 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetBluetoothPeripheralEnabled(..) => {}
             ScanForBluetoothPeripherals => {}
             UpdateBluetoothScan(_) => {}
+            SetShotAnnotations(..) => {}
+            SetPendingShotAnnotations(_) => {}
+            TagDoseFromScale(_) => {}
         }
     }
 
@@ -524,7 +565,51 @@ fn machine_commands() -> Vec<MachineCommand> {
             rssi: -78,
             suggested_driver: Some(BluetoothDriverKind::BelkaPortal),
         })),
+        // A dated shot, and a maximal-ish annotation block. `Some(day)` here against the
+        // `None` day exercised by `SetPendingShotAnnotations`'s neighbour below would be
+        // the obvious pairing, but this command is the only one carrying a `ShotLogId`,
+        // so it takes the `Some` case and the `None` case is covered by the id round-trip
+        // tests in `variegated-controller-types`.
+        SetShotAnnotations(
+            ShotLogId { day: Some(20_260_809), time: 14_320_512 },
+            shot_annotations(),
+        ),
+        SetPendingShotAnnotations(ShotAnnotations::new()),
+        TagDoseFromScale(ScaleSelector::GroupScale(0)),
     ]
+}
+
+/// An annotation block using every key kind and every value kind.
+///
+/// One of each rather than eight of one: the failure a fixture catches here is a decoder
+/// that confuses the key's discriminant with the value's, and identical entries would
+/// round-trip straight past it.
+fn shot_annotations() -> ShotAnnotations {
+    let mut annotations = ShotAnnotations::new();
+    annotations
+        .set(ShotAnnotationKey::DoseWeight, ShotAnnotationValue::Number(18.0))
+        .expect("fits");
+    annotations
+        .set(
+            ShotAnnotationKey::Beans,
+            ShotAnnotationValue::Text(
+                heapless::String::try_from("Koppi / Ethiopia Guji").expect("fits"),
+            ),
+        )
+        .expect("fits");
+    annotations
+        .set(
+            ShotAnnotationKey::GrindSize,
+            ShotAnnotationValue::Text(heapless::String::try_from("4.2").expect("fits")),
+        )
+        .expect("fits");
+    annotations
+        .set(
+            ShotAnnotationKey::Other(heapless::String::try_from("water").expect("fits")),
+            ShotAnnotationValue::Text(heapless::String::try_from("ZeroWater").expect("fits")),
+        )
+        .expect("fits");
+    annotations
 }
 
 pub fn all() -> Vec<Fixture> {
@@ -549,7 +634,49 @@ pub fn all() -> Vec<Fixture> {
             "WsMessageSchema",
             &WsMessage::RequestRoutines,
         ),
+        fixture("shot_log_list", "ShotLogListSchema", &shot_log_list()),
     ]
+}
+
+/// A listing as `GET /shots` returns it.
+///
+/// Three entries, deliberately unlike each other: a dated shot with a full annotation
+/// block, a dated shot with none, and an **undated** one. The last is the case a
+/// frontend is most likely to get wrong -- `day: None` renders as `NODATE` on the card
+/// and has to reach the download URL as that literal rather than as "null" -- and it is
+/// the only place `ShotLogId`'s `Option` is exercised as `None` in a fixture.
+///
+/// `truncated: true`, because that is the value a UI must not ignore and therefore the
+/// one worth pinning: a capped list rendered as the whole card is a silent wrong answer.
+fn shot_log_list() -> ShotLogList {
+    let mut beans_only = ShotAnnotations::new();
+    beans_only
+        .set(
+            ShotAnnotationKey::Beans,
+            ShotAnnotationValue::Text(heapless::String::try_from("Morgon / Sisters").expect("fits")),
+        )
+        .expect("fits");
+
+    ShotLogList {
+        entries: vec![
+            ShotLogListEntry {
+                id: ShotLogId { day: Some(20_260_809), time: 16_423_349 },
+                size_bytes: 51_291,
+                annotations: shot_annotations(),
+            },
+            ShotLogListEntry {
+                id: ShotLogId { day: Some(20_260_809), time: 15_495_678 },
+                size_bytes: 5_847,
+                annotations: beans_only,
+            },
+            ShotLogListEntry {
+                id: ShotLogId { day: None, time: 42 },
+                size_bytes: 1_024,
+                annotations: ShotAnnotations::new(),
+            },
+        ],
+        truncated: true,
+    }
 }
 
 /// Write every fixture to `dir` as a `.bin`/`.json` pair, plus an index the harness

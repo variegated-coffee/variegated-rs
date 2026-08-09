@@ -1,5 +1,12 @@
 //! The last thing this processor ever writes: a panic banner and backtrace, as raw
-//! bytes, on the same USB-Serial-JTAG wire the structured stream uses.
+//! bytes, on the same UART0 wire the structured stream uses.
+//!
+//! Being on a UART rather than USB-Serial-JTAG matters most *here*, of everywhere it
+//! matters. A panic is exactly when the host's view of a USB device is least reliable --
+//! the device may be about to be reset by the watchdog, taking its enumeration with it --
+//! and the panic banner is exactly the output you cannot afford to lose to that. A UART
+//! has no enumeration to lose: the bytes are on the wire as soon as they are in the FIFO,
+//! and a receiver that was already listening sees them.
 //!
 //! # Why this exists at all
 //!
@@ -55,86 +62,78 @@
 //!   A decoder only acts on a run when the next delimiter arrives, and the next
 //!   delimiter after a panic is one a dead processor is never going to send.
 
-use esp_hal::peripherals::USB_DEVICE;
+use esp_hal::peripherals::UART0;
 // The decoder's own per-byte predicate, imported rather than restated. These are two
 // halves of one rule living in two crates, and a copy that drifted would silence the
 // panic path at the far end with nothing here to show for it.
 use variegated_debug_codec::is_text_byte;
 
-/// How many times to re-check the IN endpoint before giving up on a byte.
+/// How many times to re-check the transmit FIFO before giving up on a byte.
 ///
-/// A host that is draining frees a 64-byte buffer in well under a millisecond, so any
-/// plausible value clears this by orders of magnitude; a host that is not attached
-/// never frees it at all, so no value is too small. At a 160 MHz core clock this is a
-/// few tens of milliseconds of spinning before the handler concludes nobody is
-/// listening and goes to its halt loop -- long enough not to truncate a backtrace on a
-/// slow host, short enough not to be the reason the chip fails to reset.
+/// Generous to the point of irrelevance in normal operation: the FIFO drains at the line
+/// rate whatever is on the other end, so a slot frees every ~11 µs at
+/// [`crate::config::DEBUG_UART_BAUD`] and this is never approached. It stays because the
+/// panic path must not be the reason the chip fails to reset -- if the transmitter is
+/// wedged for a reason this code cannot see (a clock gated by whatever caused the panic,
+/// flow control somehow asserted), the handler gives up and reaches its halt loop, leaving
+/// the watchdog free to reset on schedule.
+///
+/// It is far less load-bearing than it was on USB-Serial-JTAG, where "no host attached"
+/// was a permanent and entirely ordinary state in which the FIFO *never* drained. On a
+/// UART there is no such state.
 const SPIN_LIMIT: u32 = 2_000_000;
 
-/// The IN endpoint FIFO packet size, and the unit the hardware sends in.
-const PACKET: usize = 64;
+/// Depth of the UART transmit FIFO, and therefore the fullness threshold to wait on.
+const TX_FIFO_DEPTH: u32 = 128;
 
 /// Substituted for any byte the host's text classifier would refuse.
 const REPLACEMENT: u8 = b'?';
 
-/// A blocking, bounded writer on USB-Serial-JTAG, driven entirely through the
-/// peripheral's static register accessor.
+/// A blocking, bounded writer on UART0, driven entirely through the peripheral's static
+/// register accessor.
 ///
-/// **No `esp_hal` driver is constructed, and that is deliberate.**
-/// `UsbSerialJtag::new` goes through `PeripheralClockControl::enable`, which takes
-/// `PERIPHERAL_REF_COUNT` -- a `NonReentrantMutex` whose re-entry path is itself a
-/// panic. A panic taken inside *any* driver constructor (and this firmware builds a
-/// good many: UART, TimerGroup, BleConnector, the Wi-Fi stack) would therefore recurse
-/// through the panic handler instead of printing anything. The panic path should be
-/// the code least able to fail, so it touches no lock and allocates no driver: it
-/// reads and writes `ep1`/`ep1_conf` directly, exactly as
-/// [`crate::debug::usb::run`] already reads `serial_in_ep_data_free`.
+/// **No `esp_hal` driver is constructed, and that is deliberate.** `Uart::new` goes
+/// through `PeripheralClockControl::enable`, which takes `PERIPHERAL_REF_COUNT` -- a
+/// `NonReentrantMutex` whose re-entry path is itself a panic. A panic taken inside *any*
+/// driver constructor (and this firmware builds a good many: UART, TimerGroup,
+/// BleConnector, the Wi-Fi stack) would therefore recurse through the panic handler
+/// instead of printing anything. The panic path should be the code least able to fail, so
+/// it touches no lock and allocates no driver: it reads `status` and writes `fifo`
+/// directly.
 ///
-/// The cost is one narrow window: a panic before `main` reaches
-/// `UsbSerialJtag::new(peripherals.USB_DEVICE)` finds the peripheral clock ungated and
-/// produces nothing. That window is the top of `main` -- `esp_hal::init`, the logger
-/// install, the heap allocators and the channel `init`s -- and trading it for the
-/// removal of a recursion hazard that spans every driver constructor in the firmware
-/// is clearly the right way round.
+/// It also cannot use the running transport's `UartTx`, which is owned by a task and
+/// borrowed by whatever was mid-write when the machine died.
+///
+/// The cost is one narrow window: a panic before `main` configures UART0 finds the
+/// peripheral unclocked and its pins unassigned, and produces nothing. That window is the
+/// top of `main`, and trading it for the removal of a recursion hazard that spans every
+/// driver constructor is clearly the right way round.
 pub struct PanicConsole {
-    /// Bytes written into the current packet, so it can be marked done at 64 rather
-    /// than relying on a flush that would then block on an unattached host.
-    in_packet: usize,
-    /// Set once a spin ran out. Every later write is skipped rather than re-spending
-    /// the budget: with no host attached the first `SPIN_LIMIT` is diagnostic and
-    /// every one after it is dead time, and a backtrace is many writes long.
+    /// Set once a spin ran out. Every later write is skipped rather than re-spending the
+    /// budget: a backtrace is many writes long, and if the first byte could not get out
+    /// none of the rest will either.
     abandoned: bool,
 }
 
 impl PanicConsole {
-    /// Start writing on USB-Serial-JTAG regardless of who else holds it.
+    /// Start writing on UART0 regardless of who else holds it.
     ///
     /// # Safety
     ///
     /// Only sound from a panic handler, or somewhere else where it is known that no
     /// task will ever run again. Anywhere else this interleaves with the transport in
-    /// [`crate::debug::usb`], which owns the same endpoint.
+    /// [`crate::debug::uart`], which owns the same peripheral.
     pub unsafe fn seize() -> Self {
-        Self { in_packet: 0, abandoned: false }
+        Self { abandoned: false }
     }
 
-    /// Whether the IN endpoint has room for another byte -- the same
-    /// `serial_in_ep_data_free` bit [`crate::debug::usb::run`] consults, and the
-    /// reason neither path can use `esp-hal`'s blocking `write`, which spins on a
-    /// different and unbounded condition.
+    /// Whether the transmit FIFO has room for another byte.
+    ///
+    /// `txfifo_cnt` is the number of bytes waiting, so room exists while it is below the
+    /// FIFO depth. Read directly rather than through `esp-hal`'s blocking `write`, which
+    /// spins on a different and unbounded condition.
     fn has_room() -> bool {
-        USB_DEVICE::regs()
-            .ep1_conf()
-            .read()
-            .serial_in_ep_data_free()
-            .bit_is_set()
-    }
-
-    /// Hand the current packet to the hardware.
-    fn mark_packet_done() {
-        USB_DEVICE::regs()
-            .ep1_conf()
-            .modify(|_, w| w.wr_done().set_bit());
+        UART0::regs().status().read().txfifo_cnt().bits() < TX_FIFO_DEPTH as u8
     }
 
     /// Push one byte with no filtering at all. Every caller goes through this; only
@@ -153,14 +152,9 @@ impl PanicConsole {
             }
             core::hint::spin_loop();
         }
-        USB_DEVICE::regs()
-            .ep1()
-            .write(|w| unsafe { w.rdwr_byte().bits(byte) });
-        self.in_packet += 1;
-        if self.in_packet == PACKET {
-            self.in_packet = 0;
-            Self::mark_packet_done();
-        }
+        UART0::regs()
+            .fifo()
+            .write(|w| unsafe { w.rxfifo_rd_byte().bits(byte) });
     }
 
     /// Write text, substituting `?` for anything the host would refuse.
@@ -191,12 +185,27 @@ impl PanicConsole {
         self.put(0x00);
     }
 
-    /// Push out a part-filled packet. Called once, at the very end: calling it per
-    /// line would emit a short USB packet per line for no benefit.
+    /// Wait for the transmitter to actually drain before the caller halts.
+    ///
+    /// On USB-Serial-JTAG this marked a part-filled packet done, because bytes sat in an
+    /// endpoint buffer until something said "send". A UART needs the opposite: the bytes
+    /// are already going out, but the caller is about to halt the processor and the
+    /// watchdog is about to reset it, and a reset mid-frame truncates whatever is still in
+    /// the FIFO. So this drains rather than flushes.
+    ///
+    /// Bounded by the same [`SPIN_LIMIT`], and for the same reason: the panic path must
+    /// never be why the chip fails to reset.
     pub fn flush(&mut self) {
-        if self.in_packet > 0 {
-            self.in_packet = 0;
-            Self::mark_packet_done();
+        if self.abandoned {
+            return;
+        }
+        let mut spins = 0u32;
+        while UART0::regs().status().read().txfifo_cnt().bits() > 0 {
+            spins += 1;
+            if spins >= SPIN_LIMIT {
+                return;
+            }
+            core::hint::spin_loop();
         }
     }
 }

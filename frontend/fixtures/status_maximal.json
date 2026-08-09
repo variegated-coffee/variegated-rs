@@ -306,5 +306,30 @@
         "suggested_driver": null
       }
     ]
-  }
+  },
+  "pending_shot_annotations": {
+    "entries": [
+      {
+        "key": "DoseWeight",
+        "value": {
+          "Number": 18.5
+        }
+      },
+      {
+        "key": "Beans",
+        "value": {
+          "Text": "Drop Coffee / Kenya Karimikui"
+        }
+      },
+      {
+        "key": {
+          "Other": "basket"
+        },
+        "value": {
+          "Text": "VST 18g"
+        }
+      }
+    ]
+  },
+  "sd_card_present": true
 }

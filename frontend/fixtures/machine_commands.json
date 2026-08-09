@@ -468,5 +468,53 @@
         "suggested_driver": "BelkaPortal"
       }
     }
+  },
+  {
+    "SetShotAnnotations": [
+      {
+        "day": 20260809,
+        "time": 14320512
+      },
+      {
+        "entries": [
+          {
+            "key": "DoseWeight",
+            "value": {
+              "Number": 18.0
+            }
+          },
+          {
+            "key": "Beans",
+            "value": {
+              "Text": "Koppi / Ethiopia Guji"
+            }
+          },
+          {
+            "key": "GrindSize",
+            "value": {
+              "Text": "4.2"
+            }
+          },
+          {
+            "key": {
+              "Other": "water"
+            },
+            "value": {
+              "Text": "ZeroWater"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "SetPendingShotAnnotations": {
+      "entries": []
+    }
+  },
+  {
+    "TagDoseFromScale": {
+      "GroupScale": 0
+    }
   }
 ]

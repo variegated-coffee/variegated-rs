@@ -240,6 +240,10 @@ export const RoutineTypeSchema = enumType('RoutineType', {
   HardwareButtonMapped: unitVariant('HardwareButtonMapped')
 });
 
+export const ScaleSelectorSchema = enumType('ScaleSelector', {
+  GroupScale: newtypeVariant('GroupScale', u8())
+});
+
 export const ScheduleTriggerSchema = struct({
   on_minute: u8(),
   on_hour: u8(),
@@ -262,6 +266,23 @@ export const SensorCapabilitySchema = enumType('SensorCapability', {
 export const SetSteamValveOpennessRequestSchema = struct({
   steam_wand_index: u8(),
   openness: u8()
+});
+
+export const ShotAnnotationKeySchema = enumType('ShotAnnotationKey', {
+  DoseWeight: unitVariant('DoseWeight'),
+  Beans: unitVariant('Beans'),
+  GrindSize: unitVariant('GrindSize'),
+  Other: newtypeVariant('Other', string())
+});
+
+export const ShotAnnotationValueSchema = enumType('ShotAnnotationValue', {
+  Number: newtypeVariant('Number', f32()),
+  Text: newtypeVariant('Text', string())
+});
+
+export const ShotLogIdSchema = struct({
+  day: option(u32()),
+  time: u32()
 });
 
 export const ShotStateSchema = enumType('ShotState', {
@@ -513,6 +534,11 @@ export const SetWaterTapPumpConfigurationRequestSchema = struct({
   pump_configuration: PumpConfigurationSchema
 });
 
+export const ShotAnnotationSchema = struct({
+  key: ShotAnnotationKeySchema,
+  value: ShotAnnotationValueSchema
+});
+
 export const StateConditionSchema = enumType('StateCondition', {
   Brewing: newtypeVariant('Brewing', u8()),
   NotBrewing: newtypeVariant('NotBrewing', u8()),
@@ -628,6 +654,10 @@ export const ScheduleItemSchema = struct({
   commands: seq(ScheduleActionSchema)
 });
 
+export const ShotAnnotationsSchema = struct({
+  entries: seq(ShotAnnotationSchema)
+});
+
 export const BoilerConfigurationSchema = struct({
   temperature_pid_parameters: PidParametersSchema,
   pressure_pid_parameters: PidParametersSchema,
@@ -684,6 +714,12 @@ export const SetPidParametersRequestSchema = struct({
   pid_parameters: PidParametersSchema
 });
 
+export const ShotLogListEntrySchema = struct({
+  id: ShotLogIdSchema,
+  size_bytes: u32(),
+  annotations: ShotAnnotationsSchema
+});
+
 export const ConfigurationSchema = struct({
   machine_config: MachineConfigurationSchema,
   boiler_configurations: map(u8(), BoilerConfigurationSchema),
@@ -701,6 +737,11 @@ export const RoutineStepSchema = struct({
   description: option(string())
 });
 
+export const ShotLogListSchema = struct({
+  entries: seq(ShotLogListEntrySchema),
+  truncated: bool()
+});
+
 export const StatusSchema = struct({
   boiler_statuses: map(u8(), BoilerStatusSchema),
   group_statuses: map(u8(), GroupStatusSchema),
@@ -713,7 +754,9 @@ export const StatusSchema = struct({
   comms_status_age: option(DurationSchema),
   peripheral_status: PeripheralStatusSchema,
   current_local_time: option(string()),
-  bluetooth: BluetoothScanStatusSchema
+  bluetooth: BluetoothScanStatusSchema,
+  pending_shot_annotations: ShotAnnotationsSchema,
+  sd_card_present: option(bool())
 });
 
 export const RoutineSchema = struct({
@@ -769,7 +812,10 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   RemoveBluetoothPeripheral: newtypeVariant('RemoveBluetoothPeripheral', u16()),
   SetBluetoothPeripheralEnabled: tupleVariant('SetBluetoothPeripheralEnabled', u16(), bool()),
   ScanForBluetoothPeripherals: unitVariant('ScanForBluetoothPeripherals'),
-  UpdateBluetoothScan: newtypeVariant('UpdateBluetoothScan', BluetoothScanUpdateSchema)
+  UpdateBluetoothScan: newtypeVariant('UpdateBluetoothScan', BluetoothScanUpdateSchema),
+  SetShotAnnotations: tupleVariant('SetShotAnnotations', ShotLogIdSchema, ShotAnnotationsSchema),
+  SetPendingShotAnnotations: newtypeVariant('SetPendingShotAnnotations', ShotAnnotationsSchema),
+  TagDoseFromScale: newtypeVariant('TagDoseFromScale', ScaleSelectorSchema)
 });
 
 export const RoutineStorageSchema = struct({
@@ -793,6 +839,7 @@ export const WsMessageSchema = enumType('WsMessage', {
   SendMachineCommand: newtypeVariant('SendMachineCommand', MachineCommandSchema)
 });
 
+export type ShotLogList = InferType<typeof ShotLogListSchema>;
 export type Status = InferType<typeof StatusSchema>;
 export type Configuration = InferType<typeof ConfigurationSchema>;
 export type MachineDefinition = InferType<typeof MachineDefinitionSchema>;
@@ -865,10 +912,17 @@ export type RoutineParameter = InferType<typeof RoutineParameterSchema>;
 export type RoutineStep = InferType<typeof RoutineStepSchema>;
 export type RoutineStepExitType = InferType<typeof RoutineStepExitTypeSchema>;
 export type RoutineType = InferType<typeof RoutineTypeSchema>;
+export type ScaleSelector = InferType<typeof ScaleSelectorSchema>;
 export type ScheduleAction = InferType<typeof ScheduleActionSchema>;
 export type ScheduleItem = InferType<typeof ScheduleItemSchema>;
 export type ScheduleTrigger = InferType<typeof ScheduleTriggerSchema>;
 export type SensorCapability = InferType<typeof SensorCapabilitySchema>;
+export type ShotAnnotation = InferType<typeof ShotAnnotationSchema>;
+export type ShotAnnotationKey = InferType<typeof ShotAnnotationKeySchema>;
+export type ShotAnnotationValue = InferType<typeof ShotAnnotationValueSchema>;
+export type ShotAnnotations = InferType<typeof ShotAnnotationsSchema>;
+export type ShotLogId = InferType<typeof ShotLogIdSchema>;
+export type ShotLogListEntry = InferType<typeof ShotLogListEntrySchema>;
 export type ShotState = InferType<typeof ShotStateSchema>;
 export type StateCondition = InferType<typeof StateConditionSchema>;
 export type SteamWandConfiguration = InferType<typeof SteamWandConfigurationSchema>;

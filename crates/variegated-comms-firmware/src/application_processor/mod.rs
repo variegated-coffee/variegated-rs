@@ -24,6 +24,7 @@ use crate::channels::{
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
+    ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
 };
 use crate::ble::scanner::{ScanReport, SCAN_RESULT_CAPACITY};
 
@@ -191,14 +192,42 @@ pub async fn start(
                                     *guard = Some(routine_list);
                                 }
                             }
-                            ApplicationProcessorToCommsProcessorMessage::ShotLogList(_shot_log_list) => {
-                                log_info!("Received shot log list (not yet implemented)");
+                            // The four shot-log replies, handed to whichever HTTP handler
+                            // is waiting in `shot_log_request`.
+                            //
+                            // `signal` rather than a channel send, and it cannot block:
+                            // this is the UART reader, and stalling it behind a client
+                            // that has already given up would hold every other message on
+                            // the link -- status, sensor readings, configuration -- behind
+                            // a download nobody is waiting for any more. A `Signal` holds
+                            // one value, so an unclaimed reply is simply displaced by the
+                            // next, and `shot_log_request` resets it before asking.
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogList(shot_log_list) => {
+                                SHOT_LOG_REPLY.signal(ShotLogReply::List(shot_log_list));
                             }
-                            ApplicationProcessorToCommsProcessorMessage::ShotLogEntry(_shot_log_entry) => {
-                                log_info!("Received shot log entry (not yet implemented)");
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogChunk { id, offset, total, last, bytes } => {
+                                SHOT_LOG_REPLY.signal(ShotLogReply::Chunk {
+                                    id,
+                                    offset,
+                                    total,
+                                    last,
+                                    // Copied to the heap on the way in. The wire type is a
+                                    // fixed `heapless::Vec`, but the signal that carries it
+                                    // onward must not be -- see `ShotLogReply`.
+                                    bytes: bytes.to_vec(),
+                                });
                             }
-                            ApplicationProcessorToCommsProcessorMessage::ShotLogEntryDataPoint(_data_point) => {
-                                log_info!("Received shot log data point (not yet implemented)");
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogAnnotations { id, annotations } => {
+                                SHOT_LOG_REPLY.signal(ShotLogReply::Annotations { id, annotations });
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogError(e) => {
+                                // An explicit refusal -- no card, no storage, or a request
+                                // already in flight. Signalled like any other reply so the
+                                // waiter fails immediately with a reason, instead of
+                                // sitting out its timeout and reporting "not responding"
+                                // about a machine that is fine and simply has no card.
+                                log_warn!("Shot log request refused: {:?}", e);
+                                SHOT_LOG_REPLY.signal(ShotLogReply::Error(e));
                             }
                             ApplicationProcessorToCommsProcessorMessage::Debug(frame) => {
                                 // A relayed application-processor debug frame, put
@@ -411,7 +440,17 @@ pub async fn start(
                 sensor_reading_receiver.receive(),
                 select(
                     Timer::after(timeout),
-                    select(debug_command_receiver.receive(), scan_result_receiver.receive()),
+                    select(
+                        debug_command_receiver.receive(),
+                        // Shot-log requests sit *above* scan results and below injected
+                        // debug commands. Above, because the comment on scan results
+                        // holds and is the whole distinction: a scan result is genuinely
+                        // droppable -- the device is still advertising and will be
+                        // reported again -- whereas a shot-log request has an HTTP client
+                        // blocked on it with a timeout, and dropping one turns into a 503
+                        // for the user.
+                        select(SHOT_LOG_REQUEST.wait(), scan_result_receiver.receive()),
+                    ),
                 ),
             ).await {
                 Either4::First(comms_status) => {
@@ -516,7 +555,39 @@ pub async fn start(
                 // front of the user instead of appearing eight seconds later. A device may
                 // legitimately arrive twice: once from its advertisement and once from the
                 // scan response that carries its name -- see `ble::scanner`.
-                Either4::Fourth(Either::Second(Either::Second(report))) => {
+                // An HTTP handler wants something off the SD card.
+                //
+                // Only reads travel this way. `SetShotAnnotations` is a `MachineCommand`
+                // and goes out through the command arm above like every other write --
+                // it is the reads that need an answer, and therefore a request/reply
+                // pairing at all.
+                Either4::Fourth(Either::Second(Either::Second(Either::First(request)))) => {
+                    let message = match request {
+                        ShotLogRequest::List { limit } => {
+                            CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit }
+                        }
+                        ShotLogRequest::Chunk { id, offset } => {
+                            CommsProcessorToApplicationProcessorMessage::RequestShotLogChunk {
+                                id,
+                                offset,
+                            }
+                        }
+                    };
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if tx.write_async(&serialized_message).await.is_err() {
+                                log_error!("Failed to write shot log request to UART");
+                            }
+                        }
+                        // Not `.expect(..)`, for the same reason as the debug arm above:
+                        // this carries something an HTTP client asked for, and panicking
+                        // the processor that owns Wi-Fi and BLE over it would hand anyone
+                        // on port 80 a way to take the machine down. The requester is
+                        // waiting on a timeout and will get a 503.
+                        Err(_) => log_error!("Failed to serialize shot log request"),
+                    }
+                }
+                Either4::Fourth(Either::Second(Either::Second(Either::Second(report)))) => {
                     let message = match report {
                         ScanReport::Discovered(device) => {
                             CommsProcessorToApplicationProcessorMessage::BluetoothPeripheralDiscovered(device)

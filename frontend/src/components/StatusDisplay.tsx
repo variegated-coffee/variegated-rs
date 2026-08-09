@@ -158,6 +158,43 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
           </div>
         </div>
 
+        {/* SD card.
+            Shown here rather than only inside the shot-log panel, because an absent card
+            is the explanation for an empty shot list and is worth seeing without opening
+            the panel to find out.
+
+            Hidden entirely when `sd_card_present` is null -- this build has no SD
+            storage, so there is nothing for a user to act on. Note the explicit `!==
+            null`: `!status.sd_card_present` would be true for null as well and would
+            render "No card" on a machine that never had a slot. */}
+        {status.sd_card_present !== null && (
+          <div
+            style={{
+              flex: '1 1 auto',
+              padding: '0.75rem 1rem',
+              backgroundColor: '#f8f9fa',
+              borderRadius: '6px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center'
+            }}
+          >
+            <span style={{ fontWeight: '500' }}>SD card:</span>
+            <span
+              style={{
+                padding: '0.25rem 0.75rem',
+                backgroundColor: status.sd_card_present ? '#28a745' : '#dc3545',
+                color: 'white',
+                borderRadius: '12px',
+                fontSize: '0.875rem',
+                fontWeight: '500'
+              }}
+            >
+              {status.sd_card_present ? 'Inserted' : 'No card'}
+            </span>
+          </div>
+        )}
+
         {/* WiFi Status */}
         {status.comms_status && (
           <div

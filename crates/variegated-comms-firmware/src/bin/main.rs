@@ -44,7 +44,7 @@ use variegated_comms_firmware::{
         StateChangeChannel, CLIENT_EVENT_CAPACITY, SENSOR_READING_CHANNEL,
         DEBUG_COMMAND_CHANNEL,
     },
-    config::uart_config,
+    config::{debug_uart_config, uart_config},
     debug,
     esphome::esphome_server_task,
     http::{http_server_task, cache_update_task},
@@ -302,19 +302,24 @@ async fn comms_status_signaller_task(
     }
 }
 
-/// The structured debug stream's transport, on the peripheral `esp-println` used to
-/// share. `esp-println` is now `no-op` -- it has no output target at all, on this or
-/// any other peripheral (see its entry in Cargo.toml) -- so this task owns
-/// USB-Serial-JTAG outright while the executor is running. The one other writer is
-/// the panic handler above, which takes it by force after the executor has stopped.
+/// The structured debug stream's wire transport, on UART0 at GPIO16/17.
+///
+/// This task owns UART0 outright while the executor is running. The one other writer is
+/// the panic handler above, which takes the peripheral by force after the executor has
+/// stopped -- see [`debug::panic_console`] for why it goes through the registers rather
+/// than through this task's `UartTx`.
+///
+/// `esp-println` is `no-op` and has no output target at all (see its entry in
+/// Cargo.toml), so nothing else can put bytes on this wire and interleave them into the
+/// COBS stream.
 #[embassy_executor::task]
-async fn debug_usb_task(
-    usb_rx: esp_hal::usb_serial_jtag::UsbSerialJtagRx<'static, esp_hal::Async>,
-    usb_tx: esp_hal::usb_serial_jtag::UsbSerialJtagTx<'static, esp_hal::Async>,
+async fn debug_uart_task(
+    debug_rx: esp_hal::uart::UartRx<'static, esp_hal::Async>,
+    debug_tx: esp_hal::uart::UartTx<'static, esp_hal::Async>,
     sink: debug::CommandSink,
     subscriber: Option<debug::BusSubscriber>,
 ) {
-    debug::usb::run(usb_rx, usb_tx, sink, subscriber).await;
+    debug::uart::run(debug_rx, debug_tx, sink, subscriber).await;
 }
 
 /// The structured debug stream's network transport: one client at a time on 9090,
@@ -504,6 +509,19 @@ async fn main(spawner: Spawner) -> ! {
     //   announce itself either -- the last one arrived as a load access fault inside
     //   `embassy_time_queue_utils::Queue::next_expiration`, because the overrun corrupted
     //   a `next` pointer in embassy's intrusive timer list in `.bss`.
+    // - **85608 crashed consistently**, which is the tightest failing figure on record and
+    //   sits *above* the 71704 that failed before -- so the 87256 that survived is not a
+    //   floor either. It arrived as a defmt panic followed by a load access fault in
+    //   `chip_v7_set_chan` with `mtval=0x00000005`: the same shape as the entry above,
+    //   a corrupted pointer in someone else's `.bss`, in a different victim.
+    //
+    //   The cause was the shot-log download path putting a 1 kB chunk buffer in a
+    //   `Signal` and holding another across two awaits in the HTTP handler, which the
+    //   task pool multiplied. Moving those bytes to the heap returned 10240 to `.stack`
+    //   (95848). Measure with `rust-size -A` and `rust-nm --print-size --size-sort`
+    //   before blaming the stack for anything: `.stack` is whatever SRAM is left after
+    //   `.data` and `.bss`, so the number is computable from any build, and every byte
+    //   of static costs a byte of stack one for one.
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     // Initialize application processor channels
@@ -525,8 +543,27 @@ async fn main(spawner: Spawner) -> ! {
     //
     // `split()` returns (rx, tx) in that order -- not the (tx, rx) that most of the
     // rest of esp-hal uses.
-    let usb = esp_hal::usb_serial_jtag::UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
-    let (usb_rx, usb_tx) = usb.split();
+    // UART0 on GPIO16/17, the chip's default console pins.
+    //
+    // This carries the structured debug stream and injected commands, and it replaced
+    // USB-Serial-JTAG for one reason: USB-Serial-JTAG is enumerated by the host, so it is
+    // precisely the wire that vanishes when the device you are trying to observe crashes
+    // or sits in a reset loop -- which is when the stream is worth having. A UART has no
+    // enumeration and no attach state; bytes leave at the line rate regardless.
+    //
+    // USB-Serial-JTAG is left alone and unclaimed. It still works for flashing, and
+    // nothing writes to it: `esp-println` is `no-op` (see Cargo.toml).
+    //
+    // Only TX and RX are wired, so `debug_uart_config` leaves hardware flow control off --
+    // enabling CTS against a pin nobody drives would stall the transmitter forever.
+    //
+    // `split()` on a UART returns (rx, tx), the same order `UsbSerialJtag` used.
+    let debug_uart = esp_hal::uart::Uart::new(peripherals.UART0, debug_uart_config())
+        .expect("Failed to create debug UART")
+        .with_tx(peripherals.GPIO16)
+        .with_rx(peripherals.GPIO17)
+        .into_async();
+    let (debug_rx, debug_tx) = debug_uart.split();
     // The station MAC, mirrored for `CommsState::wifi_mac`.
     //
     // Read here, before the snapshot task is spawned, so no snapshot can ever observe
@@ -547,7 +584,7 @@ async fn main(spawner: Spawner) -> ! {
         store_address48(&WIFI_MAC, bytes);
     }
 
-    spawn_or_report!(spawner, "debug_usb", debug_usb_task(usb_rx, usb_tx, debug_command_channel.sender(), debug_subscriber));
+    spawn_or_report!(spawner, "debug_uart", debug_uart_task(debug_rx, debug_tx, debug_command_channel.sender(), debug_subscriber));
     // The 1 Hz `CommsState` snapshot. Spawned next to the transport rather than with
     // the network tasks: it reads atomics and bus counters only, so it is useful
     // from the first second of the boot and does not depend on anything below.

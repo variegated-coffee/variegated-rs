@@ -6,7 +6,9 @@ use variegated_comms_api_types::api_types::{
     SetSteamValveOpennessRequest, SetWaterTapPumpConfigurationRequest,
 };
 use variegated_comms_api_types::ws_types::WsMessage;
-use variegated_controller_types::{Configuration, MachineCommand, MachineDefinition, Status};
+use variegated_controller_types::{
+    Configuration, MachineCommand, MachineDefinition, ShotLogList, Status,
+};
 use variegated_postcard_schema::Registry;
 
 /// Register every root, in a fixed order.
@@ -19,6 +21,12 @@ use variegated_postcard_schema::Registry;
 /// type's identity, since a lifetime cannot change a serialized shape.
 pub fn registry() -> Registry {
     let mut reg = Registry::new();
+
+    // Fetched over HTTP rather than pushed: `GET /shots` is answered on an explicit
+    // refresh, so unlike everything below it this never arrives unsolicited. It still
+    // needs to be a root -- nothing else reaches it, since `Status` carries only the
+    // *pending* annotations and not the stored list.
+    reg.root::<ShotLogList>();
 
     // Pushed by the firmware over the WebSocket.
     reg.root::<Status>();

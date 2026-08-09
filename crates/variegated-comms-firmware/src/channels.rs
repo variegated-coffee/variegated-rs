@@ -8,6 +8,9 @@ use portable_atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineList, ScaleOp, Status};
+use variegated_controller_types::shot_log::{
+    ShotAnnotations, ShotLogId, ShotLogList, ShotLogStorageError,
+};
 use variegated_controller_types::debug_command::DebugCommand;
 use esphome_device::{ClientEvent, StateChange};
 
@@ -313,4 +316,117 @@ pub fn load_address48(slot: &AtomicU64) -> Option<[u8; 6]> {
         *b = (packed >> (8 * (5 - i))) as u8;
     }
     Some(bytes)
+}
+
+// ============================================================================
+// Shot log
+// ============================================================================
+
+/// What an HTTP handler wants from the application processor's SD card.
+///
+/// Mirrors two variants of `CommsProcessorToApplicationProcessorMessage` rather than
+/// carrying that type directly: the wire enum also holds a `MachineCommand` and a
+/// `CommsStatus`, and a `Signal` stores its payload inline, so signalling the wire type
+/// would cost a permanently-resident static the size of its largest variant.
+///
+/// Writes are absent on purpose. `SetShotAnnotations` travels as a `MachineCommand`
+/// through `MACHINE_COMMAND_CHANNEL` like every other write, so it needs nothing here;
+/// only the two reads have to wait for an answer.
+#[derive(Clone, Debug)]
+pub enum ShotLogRequest {
+    List { limit: u16 },
+    Chunk { id: ShotLogId, offset: u32 },
+}
+
+/// What came back.
+///
+/// **`Chunk` carries its bytes on the heap, not inline.** A `heapless::Vec<u8,
+/// SHOT_LOG_CHUNK_LEN>` here would make this enum a kilobyte wide, and a `Signal` stores
+/// its payload inline -- so `SHOT_LOG_REPLY` would spend 1,052 bytes of SRAM permanently
+/// to carry data that exists for milliseconds. On this chip that is not merely wasteful:
+/// `.stack` is laid out as the SRAM left over after `.data` and `.bss`, so **every byte
+/// of static costs a byte of stack, one for one**, and the stack here has overflowed
+/// before. It also inflated the HTTP task pool, since the download handler holds a chunk
+/// across two awaits.
+///
+/// The heap is the right home for transient bulk: 128 kB of it, with esp-alloc's
+/// high-water mark logged every second, against a stack that cannot be measured at all.
+///
+/// The wire type keeps its `heapless::Vec` -- see
+/// `ApplicationProcessorToCommsProcessorMessage::ShotLogChunk`. That one is decoded into
+/// a transient, and the application processor has no allocator to spare.
+#[derive(Clone, Debug)]
+pub enum ShotLogReply {
+    List(ShotLogList),
+    Chunk {
+        id: ShotLogId,
+        offset: u32,
+        total: u32,
+        last: bool,
+        bytes: alloc::vec::Vec<u8>,
+    },
+    Annotations {
+        id: ShotLogId,
+        annotations: ShotAnnotations,
+    },
+    /// The application processor refused, and said why.
+    Error(ShotLogStorageError),
+}
+
+/// Why a shot-log request produced nothing usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShotLogRequestError {
+    /// No answer within the timeout. The application processor is wedged, the link is
+    /// down, or a reply was lost -- from here those are indistinguishable, which is why
+    /// [`ShotLogReply::Error`] exists to carry the cases the far side *can* name.
+    Timeout,
+    /// The far side answered, but not the question that was asked.
+    ///
+    /// Only reachable if two requests are somehow in flight at once, which
+    /// [`SHOT_LOG_LOCK`] exists to prevent. Reported rather than ignored: silently
+    /// accepting a mismatched chunk would splice one shot's bytes into another's
+    /// download.
+    Mismatched,
+}
+
+/// Requests bound for the application processor, picked up by its sender task.
+pub static SHOT_LOG_REQUEST: Signal<CriticalSectionRawMutex, ShotLogRequest> = Signal::new();
+
+/// Answers, published by the receiver task.
+pub static SHOT_LOG_REPLY: Signal<CriticalSectionRawMutex, ShotLogReply> = Signal::new();
+
+/// Serialises shot-log requests to exactly one in flight.
+///
+/// This is what makes a protocol with **no correlation id** safe. Two concurrent
+/// requesters -- and there can be two, since the HTTP server runs more than one
+/// connection handler -- would each take whichever reply arrived first. The lock plus the
+/// `reset()` in [`shot_log_request`] means a reply can only ever belong to the request
+/// currently holding it.
+///
+/// It also bounds the damage from a download: a second client asking for a list waits its
+/// turn rather than interleaving chunk requests into the first client's file.
+pub static SHOT_LOG_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+
+/// Ask the application processor for something and wait for the answer.
+///
+/// Deliberately **not cached**, unlike [`ROUTINE_CACHE`]. A shot list is asked for on an
+/// explicit refresh and a chunk is asked for once per download; caching either would cost
+/// permanent `.bss` on a device with 512 kB of it, to save a round trip nobody is waiting
+/// on twice.
+pub async fn shot_log_request(
+    request: ShotLogRequest,
+    timeout: embassy_time::Duration,
+) -> Result<ShotLogReply, ShotLogRequestError> {
+    let _guard = SHOT_LOG_LOCK.lock().await;
+
+    // Inside the lock, and before the request goes out. A previous requester that timed
+    // out may have left its answer here; taking it as the reply to *this* request is the
+    // exact failure the lock cannot prevent on its own, because that reply arrives after
+    // the previous holder has already let go.
+    SHOT_LOG_REPLY.reset();
+    SHOT_LOG_REQUEST.signal(request);
+
+    embassy_time::with_timeout(timeout, SHOT_LOG_REPLY.wait())
+        .await
+        .map_err(|_| ShotLogRequestError::Timeout)
 }

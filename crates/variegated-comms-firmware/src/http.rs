@@ -23,6 +23,47 @@ use edge_http::DEFAULT_MAX_HEADERS_COUNT;
 /// in `main.rs`. See the note at its construction in `http_server_task`; these two
 /// numbers are one decision and have to move together.
 type HttpServer = Server<2, DEFAULT_BUF_SIZE, DEFAULT_MAX_HEADERS_COUNT>;
+
+/// How long to wait for the application processor to answer a shot-log request.
+///
+/// Generous, because the answer comes off an SD card behind a bus lease the display also
+/// wants, and `BUS_LEASE_TIMEOUT` alone is two seconds. Finite, because this blocks one
+/// of only two HTTP handler slots, so an unbounded wait would let a wedged application
+/// processor take the web UI down with it.
+const SHOT_LOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(5);
+
+/// How many shots `GET /shots` asks for.
+///
+/// A fixed cap rather than a query parameter: the path is matched exactly, so a
+/// `?limit=` would need query-string parsing that nothing else here does. The reply
+/// carries `truncated`, which is what a UI needs in order to say "the most recent N"
+/// rather than implying it has the whole card.
+const SHOT_LIST_LIMIT: u16 = 50;
+
+/// Turn a refusal from the application processor into something worth showing a user.
+///
+/// Each of these is a different action on the user's part, which is the whole reason
+/// `ShotLogError` was added to the wire rather than letting every failure time out into
+/// one indistinguishable "not responding".
+fn shot_log_error_message(error: ShotLogStorageError) -> &'static str {
+    match error {
+        ShotLogStorageError::CardNotPresent => "No SD card in the machine",
+        ShotLogStorageError::NotExfat => "The SD card is not formatted exFAT",
+        ShotLogStorageError::BusUnavailable => "The machine is busy; try again",
+        ShotLogStorageError::NotFound => "No such shot",
+        ShotLogStorageError::CrcError => "That shot is corrupt on the card",
+        // Not corruption, and worth saying so: the file is intact, it was just written in
+        // a format this firmware does not read. Nothing the user can do about it, but
+        // "corrupt" would send them looking for a damaged card.
+        ShotLogStorageError::UnsupportedVersion => {
+            "That shot was recorded by a different firmware version"
+        }
+        ShotLogStorageError::ReadError
+        | ShotLogStorageError::WriteError
+        | ShotLogStorageError::SerializationError
+        | ShotLogStorageError::DirectoryError => "The machine could not read the SD card",
+    }
+}
 use edge_http::io::Error;
 use edge_http::Method;
 use edge_nal::TcpBind;
@@ -33,8 +74,9 @@ use embassy_futures::select::{select, Either};
 use variegated_controller_types::{
     BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlTargetValuesUpdate,
     MachineCommand, MachineMode, PidParameterTarget, Routine, RoutineIndex, RoutineList,
-    ScheduleItem, Status,
+    ScaleSelector, ScheduleItem, Status,
 };
+use variegated_controller_types::shot_log::{ShotAnnotations, ShotLogId, ShotLogStorageError};
 
 use crate::api_types::{
     RoutineStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
@@ -42,8 +84,9 @@ use crate::api_types::{
     SetSteamValveOpennessRequest, SetWaterTapPumpConfigurationRequest,
 };
 use crate::channels::{
-    ApplicationConfigurationSubscriber, ApplicationStatusSubscriber, MachineCommandSender,
-    CONFIG_CACHE, MACHINE_DEFINITION, ROUTINE_CACHE, STATUS_CACHE,
+    shot_log_request, ApplicationConfigurationSubscriber, ApplicationStatusSubscriber,
+    MachineCommandSender, ShotLogReply, ShotLogRequest, CONFIG_CACHE, MACHINE_DEFINITION,
+    ROUTINE_CACHE, STATUS_CACHE,
 };
 
 /// HTTP request handler
@@ -1096,6 +1139,307 @@ impl HttpHandler {
         index_str.parse().ok()
     }
 
+    /// Split `/shots/<day>/<time>[/tail]` into the shot it names and whatever follows.
+    ///
+    /// Returns the trailing segment so one parser serves both the download
+    /// (`/shots/20260809/16423349`) and the annotation edit
+    /// (`/shots/20260809/16423349/annotations`) -- the alternative is two nearly
+    /// identical parsers that can disagree about what a valid id looks like.
+    ///
+    /// The day component goes through [`ShotLogId::parse_dir_name`], the same function
+    /// the storage layer uses when walking the card, so `NODATE` is accepted here exactly
+    /// where it is accepted there and a stray directory is rejected in both places. The
+    /// time component is checked for eight digits rather than merely parsed, so `/shots/
+    /// 20260809/7` cannot address the shot stored as `00000007`.
+    fn parse_shot_path(path: &str) -> Option<(ShotLogId, &str)> {
+        let rest = path.strip_prefix("/shots/")?;
+        let (day_str, tail) = rest.split_once('/')?;
+        let day = ShotLogId::parse_dir_name(day_str)?;
+
+        let (time_str, remainder) = match tail.split_once('/') {
+            Some((time, remainder)) => (time, remainder),
+            None => (tail, ""),
+        };
+        if time_str.len() != 8 || !time_str.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let time = time_str.parse().ok()?;
+
+        Some((ShotLogId { day, time }, remainder))
+    }
+
+    // GET /shots
+    async fn handle_get_shots<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("GET /shots");
+
+        match shot_log_request(
+            ShotLogRequest::List { limit: SHOT_LIST_LIMIT },
+            SHOT_LOG_TIMEOUT,
+        )
+        .await
+        {
+            Ok(ShotLogReply::List(list)) => match postcard::to_allocvec(&list) {
+                Ok(binary) => Self::send_binary(conn, &binary).await,
+                Err(e) => {
+                    log_error!("Failed to serialize shot log list: {:?}", defmt::Debug2Format(&e));
+                    Self::send_internal_error(conn, "Failed to serialize shot log list").await
+                }
+            },
+            Ok(ShotLogReply::Error(e)) => {
+                log_info!("Shot log list refused: {:?}", e);
+                Self::send_unavailable(conn, shot_log_error_message(e)).await
+            }
+            Ok(_) => {
+                // The far side answered a different question. Unreachable while
+                // `SHOT_LOG_LOCK` holds requests to one at a time; reported rather than
+                // ignored so that if it ever does happen it is visible.
+                log_error!("Shot log list: unexpected reply kind");
+                Self::send_internal_error(conn, "Unexpected shot log reply").await
+            }
+            Err(_) => Self::send_unavailable(conn, "Machine did not answer in time").await,
+        }
+    }
+
+    // GET /shots/<day>/<time>
+    //
+    // Streams the record as it sits on the card, byte for byte -- the download *is* the
+    // stored file, so a host can decode it with the same code the firmware wrote it with.
+    async fn handle_get_shot<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+        id: ShotLogId,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("GET /shots/{}/{}", id.dir_name().as_str(), id.file_name().as_str());
+
+        // The first chunk is fetched *before* the response is started, and that ordering
+        // is the whole error-handling story: `initiate_response` commits to a status
+        // code, after which "no card" can only be expressed by hanging up mid-body. Ask
+        // first, and a missing shot is a clean 404 and an absent card a clean 503.
+        let first = match shot_log_request(
+            ShotLogRequest::Chunk { id, offset: 0 },
+            SHOT_LOG_TIMEOUT,
+        )
+        .await
+        {
+            Ok(ShotLogReply::Chunk { bytes, total, last, .. }) => (bytes, total, last),
+            Ok(ShotLogReply::Error(ShotLogStorageError::NotFound)) => {
+                return Self::send_not_found(conn).await;
+            }
+            Ok(ShotLogReply::Error(e)) => {
+                return Self::send_unavailable(conn, shot_log_error_message(e)).await;
+            }
+            Ok(_) => {
+                log_error!("Shot log chunk: unexpected reply kind");
+                return Self::send_internal_error(conn, "Unexpected shot log reply").await;
+            }
+            Err(_) => {
+                return Self::send_unavailable(conn, "Machine did not answer in time").await;
+            }
+        };
+        let (first_bytes, total, mut last) = first;
+
+        // `<day>-<time>.BIN`, so a browser's download folder keeps shots distinguishable
+        // -- the on-card name is only unique within its day directory.
+        let mut filename = heapless::String::<64>::new();
+        let _ = core::fmt::Write::write_fmt(
+            &mut filename,
+            format_args!(
+                "attachment; filename=\"{}-{}\"",
+                id.dir_name().as_str(),
+                id.file_name().as_str()
+            ),
+        );
+
+        // No `Content-Length`. `initiate_response` never sets one, and edge-http falls
+        // back to chunked transfer-encoding on HTTP/1.1 -- which is what lets this stream
+        // a 50 kB record through a 1 kB buffer instead of assembling it in RAM first.
+        conn.initiate_response(
+            200,
+            Some("OK"),
+            &[
+                ("Content-Type", "application/octet-stream"),
+                ("Content-Disposition", filename.as_str()),
+            ],
+        )
+        .await?;
+        conn.write_all(&first_bytes).await?;
+
+        let mut offset = first_bytes.len() as u32;
+        while !last {
+            // Lockstep: request, wait, write, advance. That halves the throughput a
+            // windowed scheme could reach and is the right trade -- it needs no
+            // reordering, no second buffer and no state beyond `offset`, and the peak
+            // memory is one chunk on a device where that is the binding constraint.
+            match shot_log_request(ShotLogRequest::Chunk { id, offset }, SHOT_LOG_TIMEOUT).await {
+                Ok(ShotLogReply::Chunk {
+                    id: reply_id,
+                    offset: reply_offset,
+                    bytes,
+                    last: is_last,
+                    ..
+                }) => {
+                    // The echo check. `SHOT_LOG_LOCK` should make this impossible, but
+                    // splicing one shot's bytes into another's download is a corruption
+                    // no consumer could detect, so it is worth the comparison.
+                    if reply_id != id || reply_offset != offset {
+                        log_error!("Shot log chunk: reply does not match the request");
+                        break;
+                    }
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    conn.write_all(&bytes).await?;
+                    offset += bytes.len() as u32;
+                    last = is_last;
+                }
+                // Past this point the status is already sent, so a failure can only be
+                // expressed by ending the body early. Logged with the offset so a
+                // truncated download is diagnosable from the device rather than only
+                // from a byte count on the client.
+                Ok(ShotLogReply::Error(e)) => {
+                    log_error!("Shot log download failed at offset {}: {:?}", offset, e);
+                    break;
+                }
+                Ok(_) => {
+                    log_error!("Shot log download: unexpected reply kind at offset {}", offset);
+                    break;
+                }
+                Err(_) => {
+                    log_error!("Shot log download timed out at offset {} of {}", offset, total);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // PUT /shots/<day>/<time>/annotations
+    async fn handle_put_shot_annotations<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+        id: ShotLogId,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("PUT /shots/{}/{}/annotations", id.dir_name().as_str(), id.file_name().as_str());
+
+        let Some(annotations) = Self::read_annotations_body(conn).await? else {
+            return Self::send_bad_request(conn, "Invalid postcard data").await;
+        };
+
+        // A `MachineCommand` like every other write, rather than a shot-log request: the
+        // application processor's controller is the single interpreter of commands, and
+        // routing an edit around it would give the same operation two different paths
+        // depending on whether it arrived over HTTP or over the debug link.
+        //
+        // Fire and forget, therefore. The confirmation comes back as a
+        // `ShotLogAnnotations` reply that nothing is currently waiting on; a client that
+        // wants to see the result re-reads the list.
+        self.send_command(conn, MachineCommand::SetShotAnnotations(id, annotations), "Annotations updated")
+            .await
+    }
+
+    // PUT /shots/pending
+    async fn handle_put_pending_annotations<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("PUT /shots/pending");
+
+        let Some(annotations) = Self::read_annotations_body(conn).await? else {
+            return Self::send_bad_request(conn, "Invalid postcard data").await;
+        };
+
+        self.send_command(
+            conn,
+            MachineCommand::SetPendingShotAnnotations(annotations),
+            "Pending annotations updated",
+        )
+        .await
+    }
+
+    /// Read a postcard-encoded [`ShotAnnotations`] body.
+    ///
+    /// The body is a bare `ShotAnnotations` rather than a wrapper request type, because
+    /// the only other field such a wrapper would carry is the shot id -- and that is in
+    /// the URL, where it also serves the download. One fewer type to keep in step with
+    /// the frontend, and `ShotAnnotations` already reaches the generated schema through
+    /// `Status`.
+    ///
+    /// 1024 bytes is comfortably above a maximal block (545), and bounded because this
+    /// runs on a device with 512 kB of RAM and the length comes from the client.
+    async fn read_annotations_body<T, const N: usize>(
+        conn: &mut ServerConnection<'_, T, N>,
+    ) -> Result<Option<ShotAnnotations>, Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        let body = Self::read_body(conn, 1024).await?;
+        match postcard::from_bytes::<ShotAnnotations>(&body) {
+            Ok(annotations) => Ok(Some(annotations)),
+            Err(e) => {
+                log_error!("Failed to deserialize ShotAnnotations: {:?}", defmt::Debug2Format(&e));
+                Ok(None)
+            }
+        }
+    }
+
+    /// Queue a command and answer, or report the queue full.
+    ///
+    /// Extracted because five shot-log routes would otherwise repeat the same
+    /// `try_send` / 200 / 503 block, and a divergence between copies would show up as one
+    /// route silently succeeding where another reports failure.
+    async fn send_command<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+        command: MachineCommand,
+        success: &str,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        match self.command_sender.try_send(command) {
+            Ok(_) => Self::send_text(conn, 200, "OK", success).await,
+            Err(_) => {
+                log_error!("Command channel full");
+                Self::send_unavailable(conn, "Command channel full").await
+            }
+        }
+    }
+
+    // POST /command/tag-dose-from-scale/<group>
+    async fn handle_tag_dose_from_scale<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+        group: u8,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("POST /command/tag-dose-from-scale/{}", group);
+
+        self.send_command(
+            conn,
+            MachineCommand::TagDoseFromScale(ScaleSelector::GroupScale(group)),
+            "Dose tagged",
+        )
+        .await
+    }
+
     // Parse u8 index
     fn parse_path_u8_index(path: &str, prefix: &str) -> Option<u8> {
         let index_str = path.strip_prefix(prefix)?;
@@ -1161,6 +1505,29 @@ impl Handler for HttpHandler {
             (Method::Get, "/machine-definition") => self.handle_get_machine_definition(conn).await,
             (Method::Get, "/routines") => self.handle_get_routines(conn).await,
 
+            // Shot log.
+            //
+            // `/shots/pending` is matched before the `/shots/` id pattern below. It has
+            // to be: `parse_shot_path` would reject "pending" as a day, so the order is
+            // not load-bearing for correctness -- but relying on that would mean a future
+            // day format that happened to accept it would silently steal this route.
+            (Method::Get, "/shots") => self.handle_get_shots(conn).await,
+            (Method::Put, "/shots/pending") => self.handle_put_pending_annotations(conn).await,
+            (Method::Get, p) if p.starts_with("/shots/") => {
+                match Self::parse_shot_path(p) {
+                    Some((id, "")) => self.handle_get_shot(conn, id).await,
+                    _ => Self::send_bad_request(conn, "Invalid shot path").await,
+                }
+            }
+            (Method::Put, p) if p.starts_with("/shots/") => {
+                match Self::parse_shot_path(p) {
+                    Some((id, "annotations")) => {
+                        self.handle_put_shot_annotations(conn, id).await
+                    }
+                    _ => Self::send_bad_request(conn, "Invalid shot path").await,
+                }
+            }
+
             // Schedule CRUD
             (Method::Post, "/schedules") => self.handle_post_schedule(conn).await,
             (Method::Put, p) if p.starts_with("/schedules/") => {
@@ -1225,6 +1592,13 @@ impl Handler for HttpHandler {
                 }
             }
             (Method::Post, "/command/cancel-routine") => self.handle_cancel_routine(conn).await,
+            (Method::Post, p) if p.starts_with("/command/tag-dose-from-scale/") => {
+                if let Some(group) = Self::parse_path_u8_index(p, "/command/tag-dose-from-scale/") {
+                    self.handle_tag_dose_from_scale(conn, group).await
+                } else {
+                    Self::send_bad_request(conn, "Invalid group index").await
+                }
+            }
             (Method::Post, p) if p.starts_with("/command/tare-group-scale/") => {
                 if let Some(index) = Self::parse_path_u8_index(p, "/command/tare-group-scale/") {
                     self.handle_tare_group_scale(conn, index).await

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ScheduleBuilder } from './components/ScheduleBuilder';
 import { BluetoothPanel } from './components/BluetoothPanel';
+import { ShotLogPanel } from './components/ShotLogPanel';
 import { RoutineBuilder } from './components/routine/RoutineBuilder';
 import { StatusDisplay } from './components/StatusDisplay';
 import { ConfigurationPanel } from './components/ConfigurationPanel';
@@ -172,6 +173,18 @@ export function App() {
                 )
               )
             }
+          />
+        </section>
+
+        {/* Shot log */}
+        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+          <ShotLogPanel
+            pending={(status as Status).pending_shot_annotations}
+            sdCardPresent={(status as Status).sd_card_present}
+            // The groups the machine actually has, rather than a hardcoded `[0]`: the
+            // dose buttons address a group scale by index, and a two-group machine needs
+            // two buttons.
+            groupIndices={Array.from((status as Status).group_statuses.keys())}
           />
         </section>
 

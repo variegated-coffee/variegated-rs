@@ -17,5 +17,9 @@
     "blocked": false,
     "reports_dropped": 0,
     "discovered": []
-  }
+  },
+  "pending_shot_annotations": {
+    "entries": []
+  },
+  "sd_card_present": null
 }
