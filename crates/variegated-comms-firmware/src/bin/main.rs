@@ -27,7 +27,7 @@ use esp_hal::{
     ram,
     rng::Rng,
     rtc_cntl::Rtc,
-    timer::timg::TimerGroup,
+    timer::timg::{MwdtStage, TimerGroup},
 };
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
@@ -51,6 +51,7 @@ use variegated_comms_firmware::{
     mk_static,
     instrumentation,
     time::sntp_task,
+    watchdog,
     websocket_server_task,
     wifi::{connection_task, net_task},
 };
@@ -218,7 +219,7 @@ pub extern "Rust" fn _esp_println_timestamp() -> u64 {
 #[embassy_executor::task]
 async fn status_listener_task(status_channel: &'static ApplicationStatusChannel) {
     let mut subscriber = status_channel.subscriber().unwrap();
-    log_info!("Status listener task started");
+    log_info!("Status listener task is started");
     loop {
         let status = subscriber.next_message_pure().await;
 //        info!("Status: {:?}", status);
@@ -457,6 +458,11 @@ async fn main(spawner: Spawner) -> ! {
     // the `subscriber()` call above, without which it would not be emitted at all.
     debug::bus::emit_event(DebugEvent::Boot);
 
+    // Immediately after `Boot`, because it qualifies it: `Boot` says the firmware
+    // restarted, this says whether that was a power cycle, a flash, or the watchdog
+    // below deciding the executor had stopped.
+    watchdog::log_reset_reason();
+
     // Initialize RTC for time synchronization
     let rtc = Rtc::new(peripherals.LPWR);
 
@@ -590,6 +596,26 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
+
+    // Armed here, immediately after the executor exists, and not one line earlier:
+    // everything above is straight-line init -- heap, USB-Serial-JTAG, UART1, eFuse --
+    // that cannot block on anything a watchdog could rescue it from, and arming before
+    // the executor runs would mean a window with no feeder in it. Everything *below* is
+    // `await`-based (BLE bring-up, the five-second settle, Wi-Fi association), so the
+    // feeder runs throughout it.
+    //
+    // `TimerGroup::new` rather than the bare `Wdt::<TIMG1>::new()` constructor: it
+    // enables and resets TIMG1's peripheral clock, and it consumes `peripherals.TIMG1`
+    // so the claim is visible to anything that later wants the group's timers.
+    let mut wdt = TimerGroup::new(peripherals.TIMG1).wdt;
+    wdt.set_timeout(MwdtStage::Stage0, watchdog::TIMEOUT);
+    wdt.enable();
+    spawn_or_report!(spawner, "watchdog", watchdog::watchdog_task(wdt));
+    log_info!(
+        "Watchdog armed: {} ms timeout, fed every {} ms",
+        watchdog::TIMEOUT.as_millis(),
+        watchdog::FEED_INTERVAL.as_millis()
+    );
 
     log_info!("Initializing radio");
 

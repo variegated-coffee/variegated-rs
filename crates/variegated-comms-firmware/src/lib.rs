@@ -15,6 +15,7 @@ pub mod http;
 pub mod instrumentation;
 pub mod time;
 pub mod utils;
+pub mod watchdog;
 pub mod websocket;
 pub mod wifi;
 

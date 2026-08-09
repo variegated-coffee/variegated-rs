@@ -35,9 +35,11 @@
 //! is not there" are different things: with nothing attached, the IN endpoint fills
 //! and never drains, and an unbounded spin would sit there rather than reaching the
 //! halt loop. The observable difference is small -- a halted processor either way --
-//! but a bounded loop is the one you can reason about, and it leaves the RTC watchdog
-//! free to reset the chip on schedule rather than at whatever moment USB happens to
-//! unblock.
+//! but a bounded loop is the one you can reason about, and it leaves the watchdog
+//! ([`crate::watchdog`], TIMG1) free to reset the chip on schedule rather than at
+//! whatever moment USB happens to unblock. Interrupts are off by the time this runs, so
+//! the feeder task is not going to run again; the reset follows within
+//! [`crate::watchdog::TIMEOUT`].
 //!
 //! # The delimiters
 //!
