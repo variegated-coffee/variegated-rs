@@ -255,6 +255,10 @@
       }
     }
   },
+  "comms_status_age": {
+    "secs": 1,
+    "nanos": 250000000
+  },
   "peripheral_status": {
     "peripherals": {
       "57344": {

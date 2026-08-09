@@ -710,6 +710,7 @@ export const StatusSchema = struct({
   mode: MachineModeSchema,
   routine_execution: option(RoutineExecutionStatusSchema),
   comms_status: option(CommsStatusSchema),
+  comms_status_age: option(DurationSchema),
   peripheral_status: PeripheralStatusSchema,
   current_local_time: option(string()),
   bluetooth: BluetoothScanStatusSchema

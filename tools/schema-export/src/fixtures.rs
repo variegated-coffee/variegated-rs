@@ -237,6 +237,9 @@ fn status_maximal() -> Status {
             wifi_rssi: Some(-55),
             peripheral_connection_status,
         }),
+        // Subsecond, so the `nanos` half of `Duration` is exercised rather than left at
+        // zero -- postcard encodes the two varints separately.
+        comms_status_age: Some(core::time::Duration::new(1, 250_000_000)),
         peripheral_status: PeripheralStatus { peripherals },
         // No subsecond component: chrono's formatting is value-dependent.
         current_local_time: Some(
@@ -290,6 +293,7 @@ fn status_minimal() -> Status {
         mode: MachineMode::On,
         routine_execution: None,
         comms_status: None,
+        comms_status_age: None,
         peripheral_status: PeripheralStatus { peripherals: FnvIndexMap::new() },
         current_local_time: None,
         bluetooth: BluetoothScanStatus::default(),
