@@ -13,6 +13,7 @@ use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_sync::watch;
+use embassy_rp::watchdog::Watchdog;
 use embassy_time::{Instant, Timer};
 use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
@@ -238,6 +239,9 @@ pub struct SingleBoilerSingleGroupController<
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
+    /// `Option` because the caller decides whether this board's WATCHDOG peripheral is
+    /// available to claim, not this controller -- same shape as the dual-boiler one.
+    watchdog: Option<Watchdog>,
 
     // Bluetooth peripheral associations. See the equivalent block in
     // `dual_boiler_single_group` for why these get a store of their own rather than a
@@ -290,6 +294,11 @@ impl<
         // milliseconds. `None` on a machine whose comms processor is not wired for it, in
         // which case scan requests are refused rather than silently dropped.
         bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
+        // Already `start`ed by the caller, with `crate::WATCHDOG_TIMEOUT` -- the same
+        // constant `task()` feeds it with. embassy-rp 0.10's `feed` sets the new timeout
+        // rather than merely refreshing the old one, so the two values have to agree --
+        // and a mismatch would compile cleanly while silently changing the window.
+        watchdog: Option<Watchdog>,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -323,6 +332,7 @@ impl<
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
+            watchdog,
             bluetooth_store,
             bluetooth_associations: BluetoothAssociations::default(),
             bluetooth_associations_loaded: false,
@@ -455,6 +465,11 @@ impl<
             let pump_pid_out = self.update_pump(actual_pump_control_target, delta_t).await;
 
             self.send_status(boiler_pid_out, pump_pid_out).await;
+
+            // Feed the watchdog to prevent system reset
+            if let Some(ref mut watchdog) = self.watchdog {
+                watchdog.feed(crate::WATCHDOG_TIMEOUT);
+            }
 
             Timer::after_millis(100).await;
         }
@@ -700,21 +715,25 @@ impl<
         };
 
         // Calculate current timestamp if we have comms_status
-        let comms_status = if let (Some(status), Some(received_instant)) =
+        let (comms_status, comms_status_age) = if let (Some(status), Some(received_instant)) =
             (&self.comms_status, self.comms_status_received_instant) {
 
             // Calculate elapsed time since reception
             let elapsed = Instant::now().saturating_duration_since(received_instant);
             let current_timestamp = status.timestamp.map(|ts| ts + elapsed.as_secs());
 
-            Some(CommsStatus {
+            (Some(CommsStatus {
                 timestamp: current_timestamp,
                 wifi_connected: status.wifi_connected,
                 wifi_rssi: status.wifi_rssi,
                 peripheral_connection_status: FnvIndexMap::default(),
-            })
+            }),
+            // Published alongside, because everything above is extrapolated: the
+            // timestamp keeps advancing whether or not the comms processor is alive, so
+            // the age is the only thing in `Status` that can say it is not.
+            Some(core::time::Duration::from_millis(elapsed.as_millis())))
         } else {
-            self.comms_status.clone()
+            (self.comms_status.clone(), None)
         };
 
         let routine_execution = self.current_routine.as_ref().map(|rxc| {
@@ -753,6 +772,7 @@ impl<
             mode: Default::default(),
             routine_execution,
             comms_status,
+            comms_status_age,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
             bluetooth: self.bluetooth_status.clone(),

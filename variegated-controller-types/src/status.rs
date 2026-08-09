@@ -3,6 +3,14 @@ use chrono::NaiveDateTime;
 use core::time::Duration;
 use heapless::index_map::FnvIndexMap;
 
+/// The point past which [`Status::comms_status_age`] means the comms processor has gone
+/// quiet and the latched `CommsStatus` should no longer be presented as current.
+///
+/// The comms processor emits at 1 Hz, so this is three missed reports -- loose enough
+/// that a single dropped frame or a busy scheduler does not trip it, tight enough that a
+/// reboot of that processor is visible before it finishes booting again.
+pub const COMMS_STATUS_STALE_AFTER: Duration = Duration::from_secs(3);
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +70,14 @@ pub struct Status {
     pub mode: MachineMode,
     pub routine_execution: Option<RoutineExecutionStatus>,
     pub comms_status: Option<CommsStatus>,
+    /// How old the most recent `CommsStatus` was when this `Status` was built.
+    ///
+    /// `None` means none has ever arrived. This field exists because `comms_status` is a
+    /// latch: the controller republishes the last value it received forever, with the
+    /// timestamp extrapolated forward, so without an age a dead comms processor is
+    /// indistinguishable from a healthy one. Compare against
+    /// [`COMMS_STATUS_STALE_AFTER`] rather than inventing a second threshold.
+    pub comms_status_age: Option<Duration>,
     pub peripheral_status: PeripheralStatus,
     pub current_local_time: Option<NaiveDateTime>,
     /// Bluetooth discovery state.
@@ -86,6 +102,7 @@ impl Status {
             mode: MachineMode::Off,
             routine_execution: None,
             comms_status: None,
+            comms_status_age: None,
             peripheral_status: PeripheralStatus::default(),
             current_local_time: None,
             bluetooth: BluetoothScanStatus::default(),
@@ -242,6 +259,11 @@ impl defmt::Format for Status {
             defmt::write!(f, ", wifi:{}", comms.wifi_connected);
             if let Some(timestamp) = comms.timestamp {
                 defmt::write!(f, " ts:{}", timestamp);
+            }
+            // The age, not the timestamp, is what says whether any of the above is
+            // current -- `comms_status` is republished unchanged when the link is dead.
+            if let Some(age) = self.comms_status_age {
+                defmt::write!(f, " age:{}ms", age.as_millis() as u32);
             }
         }
 

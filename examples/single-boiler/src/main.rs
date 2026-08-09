@@ -21,7 +21,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
-use embassy_rp::{dma, i2c, pio, pwm, spi, uart, usb, Peri};
+use embassy_rp::{dma, i2c, pio, pwm, spi, uart, usb, watchdog, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::LlffHeap as Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -178,6 +178,11 @@ struct InternalSpiBusPeripherals {
 #[variegated_board_cfg::board_cfg("settings_flash_peripherals")]
 struct SettingsFlashPeripherals {
     pin_cs: Peri<'static, ()>,
+}
+
+#[variegated_board_cfg::board_cfg("watchdog_peripherals")]
+struct WatchdogPeripherals {
+    watchdog: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("rotary_encoder_peripherals")]
@@ -730,6 +735,19 @@ async fn main_task(spawner: Spawner) -> ! {
 
     info!("Machine definition created: {:?}", machine_definition);
 
+    // Started here rather than next to `embassy_rp::init`, deliberately: everything
+    // between the two -- the settings flash load, the ADC bring-up, the display reset --
+    // runs before the controller's task exists to feed this, and a window that has to
+    // cover all of it would have to be longer than the one that guards steady state.
+    // Starting it last means the timeout is sized for the loop it actually protects.
+    let watchdog_p = watchdog_peripherals!(p);
+    let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
+    watchdog.start(variegated_controller_lib::WATCHDOG_TIMEOUT);
+    info!(
+        "Watchdog initialized with {} ms timeout",
+        variegated_controller_lib::WATCHDOG_TIMEOUT.as_millis()
+    );
+
     let mut controller = SingleBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
@@ -746,6 +764,7 @@ async fn main_task(spawner: Spawner) -> ! {
         &peripheral_registry,
         bluetooth_store,
         Some(bluetooth_scan_channel.sender()),
+        Some(watchdog),
     );
 
     // Controller will publish configuration automatically in its task loop
@@ -953,9 +972,9 @@ fn publish_snapshot(psram_heap: bool) {
         frames_suppressed: stats.suppressed,
         frames_rate_limited: stats.rate_limited,
         source_state: SourceState::Application(ApplicationState {
-            // This board has no watchdog wired at all, so there is nothing to
-            // report. `None` renders as "unknown" rather than a plausible-looking
-            // "fed 0 ms ago".
+            // Not plumbed: the watchdog is fed inside variegated-controller-lib's run
+            // loop, which has no route back to here. `None` renders as "unknown" rather
+            // than a plausible-looking "fed 0 ms ago".
             watchdog_fed_ms_ago: None,
             psram_heap,
             // Not determined: reading it would mean locking the routine repository

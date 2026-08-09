@@ -1288,21 +1288,25 @@ impl<
         };
 
         // Calculate current timestamp if we have comms_status
-        let comms_status = if let (Some(status), Some(received_instant)) =
+        let (comms_status, comms_status_age) = if let (Some(status), Some(received_instant)) =
             (&self.comms_status, self.comms_status_received_instant) {
 
             // Calculate elapsed time since reception
             let elapsed = Instant::now().saturating_duration_since(received_instant);
             let current_timestamp = status.timestamp.map(|ts| ts + elapsed.as_secs());
 
-            Some(CommsStatus {
+            (Some(CommsStatus {
                 timestamp: current_timestamp,
                 wifi_connected: status.wifi_connected,
                 wifi_rssi: status.wifi_rssi,
                 peripheral_connection_status: status.peripheral_connection_status.clone(),
-            })
+            }),
+            // Published alongside, because everything above is extrapolated: the
+            // timestamp keeps advancing whether or not the comms processor is alive, so
+            // the age is the only thing in `Status` that can say it is not.
+            Some(core::time::Duration::from_millis(elapsed.as_millis())))
         } else {
-            self.comms_status.clone()
+            (self.comms_status.clone(), None)
         };
 
         let routine_execution = self.current_routine.as_ref().map(|rxc| {
@@ -1354,6 +1358,7 @@ impl<
             mode: self.configuration.ephemeral.mode,
             routine_execution,
             comms_status,
+            comms_status_age,
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
             bluetooth: self.bluetooth_status.clone(),

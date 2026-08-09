@@ -24,7 +24,7 @@ use u8g2_fonts::{
     types::{FontColor, HorizontalAlignment, VerticalPosition}
 };
 
-use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState};
+use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState, COMMS_STATUS_STALE_AFTER};
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
 #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
@@ -255,11 +255,30 @@ impl GraphicalDisplayState {
         let mut y = EFFECTIVE_Y + 3;
 
         // WiFi status (W)
+        //
+        // Three states, not two. Green and red both assert something about the Wi-Fi
+        // link, and neither is worth anything if the comms processor has stopped
+        // reporting -- `comms_status` is a latch, so a dead processor leaves whatever it
+        // last said on screen indefinitely. Purple says "this is not current" and takes
+        // precedence over both.
+        //
+        // `unwrap_or(true)`: no report has ever arrived is a stronger form of no report
+        // recently, not a weaker one. The cost is a purple W for the first second of
+        // every boot, until the 1 Hz report lands, which is accurate while it lasts.
+        let comms_stale = self.shared_state.status.comms_status_age
+            .map(|age| age >= COMMS_STATUS_STALE_AFTER)
+            .unwrap_or(true);
         let wifi_connected = self.shared_state.status.comms_status
             .as_ref()
             .map(|cs| cs.wifi_connected)
             .unwrap_or(false);
-        let wifi_color = if wifi_connected { Rgb565::GREEN } else { Rgb565::RED };
+        let wifi_color = if comms_stale {
+            Rgb565::CSS_MEDIUM_PURPLE
+        } else if wifi_connected {
+            Rgb565::GREEN
+        } else {
+            Rgb565::RED
+        };
         small_font.render_aligned(
             format_args!("W"),
             Point::new(x, y),

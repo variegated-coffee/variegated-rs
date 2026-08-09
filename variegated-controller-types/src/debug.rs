@@ -60,10 +60,25 @@ use crate::Status;
 ///   `Configuration` gained `bluetooth_peripherals`, and `MachineCommand` gained four
 ///   variants. All three reach this wire: the first two through `DebugPayload::Status`
 ///   and the configuration relay, the third through `DebugCommand::Machine`.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x83;
+/// * `0x84` -- `Status` gained `comms_status_age`, immediately after `comms_status`.
+/// * `0x85` -- [`MAX_SAMPLES`] 16 -> 24. Not a change of *shape*: a `heapless::Vec`
+///   encodes as a length varint plus elements, and the capacity is a type parameter that
+///   never reaches the wire, so a 14-counter frame is byte-identical before and after.
+///   It is a change of *range*, and that is what needs the bump -- a host built at 16
+///   deserializing a 17-element frame fails on capacity, and the version byte turns that
+///   into "your host is too old" instead of a decode error pointing at nothing.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x85;
 
 /// Maximum number of counters or indicators carried in one sample frame.
-pub const MAX_SAMPLES: usize = 16;
+///
+/// Raised 16 -> 24 to fit the BLE connect-path metrics next to the network ones that were
+/// already using 14 of the 16. Both firmwares share this bound, so the application
+/// processor gets the same headroom whether or not it wants it.
+///
+/// Bounded by [`crate::debug`]'s frame budget rather than by anything here: 24 u64s
+/// varint-encode to at most 240 bytes, against the codec's `MAX_FRAME` of 2048, so there
+/// is room to raise this again if a subsystem needs it.
+pub const MAX_SAMPLES: usize = 24;
 /// Capacity of the ad-hoc text escape hatch.
 pub const TEXT_LEN: usize = 96;
 /// Capacity of a metric or firmware name.
