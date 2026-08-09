@@ -122,6 +122,38 @@ pub enum MachineCommand {
     /// the controller is this channel, and the controller is what assembles `Status` --
     /// the same reasoning that puts [`Self::UpdateCommsStatus`] in this enum.
     UpdateBluetoothScan(crate::bluetooth::BluetoothScanUpdate),
+
+    /// Replace the annotations on a shot already stored on the card.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`crate::CommsProcessorToApplicationProcessorMessage::DebugCommand`]; the same
+    /// discriminant rule governs this enum.
+    ///
+    /// A whole block rather than a single key, because the on-card record is rewritten
+    /// entirely for any edit: a per-key command would cost one whole-file rewrite per
+    /// field, and a user correcting three fields would pay three.
+    SetShotAnnotations(crate::shot_log::ShotLogId, crate::shot_log::ShotAnnotations),
+
+    /// Replace the annotations that will be stamped onto the next shot.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// Separate from [`Self::SetShotAnnotations`] rather than an `Option<ShotLogId>` on
+    /// it: the two touch different things -- one rewrites a file on the card, the other
+    /// writes a field in RAM -- and they fail in different ways. Sharing a variant would
+    /// let a client that meant "next shot" address a stored one by supplying an id it
+    /// thought was ignored.
+    SetPendingShotAnnotations(crate::shot_log::ShotAnnotations),
+
+    /// Read a scale's current weight and record it as the dose for the next shot.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// Takes a [`ScaleSelector`] because a machine can carry several scales and "the
+    /// scale" is not well defined. Refused rather than guessed if that scale has no
+    /// weight to report: a dose silently recorded from the wrong place is worse than no
+    /// dose at all, because nothing downstream can tell it was wrong.
+    TagDoseFromScale(ScaleSelector),
 }
 
 #[cfg(feature = "defmt")]
@@ -172,6 +204,13 @@ impl defmt::Format for MachineCommand {
             MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => defmt::write!(f, "SetBluetoothPeripheralEnabled(0x{:04X}, {})", id, enabled),
             MachineCommand::ScanForBluetoothPeripherals => defmt::write!(f, "ScanForBluetoothPeripherals"),
             MachineCommand::UpdateBluetoothScan(update) => defmt::write!(f, "UpdateBluetoothScan({:?})", update),
+            // The annotation values are not printed. They are user text of up to 48
+            // bytes per entry, eight entries deep, and this formats on every accepted
+            // command -- the count is what tells you the command arrived and roughly
+            // what it carried.
+            MachineCommand::SetShotAnnotations(id, annotations) => defmt::write!(f, "SetShotAnnotations({:?}, {} entries)", id, annotations.len()),
+            MachineCommand::SetPendingShotAnnotations(annotations) => defmt::write!(f, "SetPendingShotAnnotations({} entries)", annotations.len()),
+            MachineCommand::TagDoseFromScale(scale) => defmt::write!(f, "TagDoseFromScale({:?})", scale),
         }
     }
 }

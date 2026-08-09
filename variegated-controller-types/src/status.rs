@@ -87,7 +87,39 @@ pub struct Status {
     /// accumulates across a scan and persists after one ends -- the user has to be able
     /// to read the list in order to pick from it -- and it carries `blocked`, which is a
     /// decision *this* processor makes and the comms processor never sees.
-    pub bluetooth: BluetoothScanStatus
+    pub bluetooth: BluetoothScanStatus,
+    /// Annotations that will be stamped onto the next shot.
+    ///
+    /// Here rather than in `Configuration` because it is state, not settings: it is set
+    /// before a shot, consumed by that shot, and cleared afterwards. Publishing it makes
+    /// the next-shot strip in the UI a view of what the machine actually holds -- without
+    /// it, two clients editing beans would each show their own last input and neither
+    /// would know which one the shot got.
+    ///
+    /// Lives in RAM only. A reboot loses it, which is the right trade: the alternative is
+    /// a flash region and a wear budget for a value whose useful life is one shot.
+    pub pending_shot_annotations: ShotAnnotations,
+    /// Whether an SD card is inserted, if this machine has anywhere to put one.
+    ///
+    /// Three states, not two:
+    ///
+    /// | Value | Meaning |
+    /// |---|---|
+    /// | `None` | This build has no SD storage. The question does not apply |
+    /// | `Some(false)` | Storage is present, no card inserted |
+    /// | `Some(true)` | A card is inserted |
+    ///
+    /// Collapsing the first two into `false` would make a machine that *cannot* log
+    /// shots look identical to one that merely has an empty slot. The first is a build
+    /// decision a user can do nothing about; the second is "insert a card". A consumer
+    /// writing `!status.sd_card_present` -- or its TypeScript equivalent, where this
+    /// arrives as `boolean | null` and `null` is falsy -- conflates exactly those two.
+    ///
+    /// This reports what the card-detect line says, not whether the card is *usable*.
+    /// "Inserted", "mounts", and "is exFAT rather than FAT32" are three different
+    /// questions, and answering them all here would make a FAT32 card indistinguishable
+    /// from an empty slot -- a distinction the SD self-test exists to preserve.
+    pub sd_card_present: Option<bool>,
 //    pub environmental_temperature_sensors: FnvIndexMap<EnvironmentalSensorId, TemperatureType, MAX_ENVIRONMENTAL_TEMPERATURE_SENSORS>, // Up to 8 external sensors
 }
 
@@ -106,6 +138,8 @@ impl Status {
             peripheral_status: PeripheralStatus::default(),
             current_local_time: None,
             bluetooth: BluetoothScanStatus::default(),
+            pending_shot_annotations: ShotAnnotations::new(),
+            sd_card_present: None,
 //            environmental_temperature_sensors: FnvIndexMap::new(),
         }
     }
@@ -281,6 +315,20 @@ impl defmt::Format for Status {
                 self.bluetooth.discovered.len(),
                 self.bluetooth.reports_dropped
             );
+        }
+
+        // Shot annotations and card presence. Both are printed only when they have
+        // something to say, for the same reason as the Bluetooth line above: this
+        // formats once per published status, and neither changes between shots.
+        if !self.pending_shot_annotations.is_empty() {
+            defmt::write!(
+                f,
+                ", pending_annotations:{}",
+                self.pending_shot_annotations.len()
+            );
+        }
+        if let Some(present) = self.sd_card_present {
+            defmt::write!(f, ", sd_card:{}", present);
         }
 
         defmt::write!(f, " }}");

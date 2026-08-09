@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 use core::cell::RefCell;
 use chrono::{DateTime, Utc};
 use defmt::{error, info};
-use embassy_futures::join::{join, join3, join5};
+use embassy_futures::join::{join, join4, join5};
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::blocking_mutex::Mutex;
@@ -30,6 +30,7 @@ use variegated_debug::bus;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver, Sender};
 use postcard::accumulator::{CobsAccumulator, FeedResult};
 use variegated_controller_lib::routine::RoutineRepository;
+use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_timekeeping::TimeKeeper;
 
@@ -39,6 +40,47 @@ use variegated_timekeeping::TimeKeeper;
 /// Anything below this is the comms processor's RTC counting up from zero
 /// before SNTP has synced, not an actual date.
 const MIN_PLAUSIBLE_UNIX_TIME: u64 = 1_577_836_800;
+
+/// Hand a shot-log request to the storage task, or refuse it in a way the far side can
+/// act on.
+///
+/// Every failure path here answers rather than returning: the comms processor waits on a
+/// timeout with no correlation id, so a request that produces nothing is
+/// indistinguishable from a dead link, and the user is told "the machine is not
+/// responding" about a machine that is merely busy or has no card.
+///
+/// **`try_send`, not `await`.** This runs on the UART reader, which is also carrying
+/// status and configuration; a bulk path must never be able to stall telemetry behind it.
+/// The queue is depth 1, so a full queue means a request is already in flight -- and with
+/// the far side serialising behind a lock that should not happen, which is why it is
+/// reported rather than silently retried.
+fn forward_shot_log_query<M: embassy_sync::blocking_mutex::raw::RawMutex, SM: embassy_sync::blocking_mutex::raw::RawMutex>(
+    sender: Option<&Sender<'static, SM, ShotLogQuery, 1>>,
+    query: ShotLogQuery,
+    tx_sender: &Sender<'_, M, Vec<u8>, 10>,
+) {
+    let refusal = match sender {
+        Some(sender) => match sender.try_send(query) {
+            Ok(()) => return,
+            Err(_) => {
+                info!("Shot log request refused: one is already in flight");
+                variegated_controller_types::ShotLogStorageError::BusUnavailable
+            }
+        },
+        None => {
+            info!("Shot log request refused: this machine has no shot-log storage");
+            variegated_controller_types::ShotLogStorageError::CardNotPresent
+        }
+    };
+
+    let response = ApplicationProcessorToCommsProcessorMessage::ShotLogError(refusal);
+    if let Ok(output) = to_allocvec_cobs(&response) {
+        // `try_send` on the outbound queue too: this is the error path, and blocking the
+        // UART reader to report that something could not be queued would be the same
+        // mistake one level up.
+        let _ = tx_sender.try_send(output);
+    }
+}
 
 /// Generic ESP32-C6 transceiver task that handles bidirectional communication
 ///
@@ -84,6 +126,13 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // a machine whose controller was not given the matching sender, in which case the
     // controller refuses scan requests rather than this arm dropping them.
     bluetooth_scan_receiver: Option<ChannelReceiver<'static, SM, u16, 2>>,
+    // The two halves of the shot-log request path, to and from the storage task on the
+    // other core. `None` on a machine without shot-log storage, in which case both arms
+    // park forever and a request from the comms processor is answered with
+    // `ShotLogError(CardNotPresent)` rather than being silently dropped -- a request that
+    // gets no answer at all is indistinguishable from a dead link.
+    shot_log_query_sender: Option<Sender<'static, SM, ShotLogQuery, 1>>,
+    shot_log_reply_receiver: Option<ChannelReceiver<'static, SM, ShotLogReply, 1>>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -365,6 +414,21 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         info!("Failed to serialize routines");
                                     }
                                 }
+                                CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit } => {
+                                    info!("Shot log list requested by ESP32 (limit {})", limit);
+                                    forward_shot_log_query(
+                                        shot_log_query_sender.as_ref(),
+                                        ShotLogQuery::List { limit },
+                                        &tx_sender,
+                                    );
+                                }
+                                CommsProcessorToApplicationProcessorMessage::RequestShotLogChunk { id, offset } => {
+                                    forward_shot_log_query(
+                                        shot_log_query_sender.as_ref(),
+                                        ShotLogQuery::Chunk { id, offset },
+                                        &tx_sender,
+                                    );
+                                }
                                 CommsProcessorToApplicationProcessorMessage::ExternalPeripheralSensorReading(reading) => {
                                     //info!("External peripheral sensor reading: {:?}", reading);
                                     if let Some(dispatcher) = external_sensor_dispatcher {
@@ -519,8 +583,60 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
         //
         // `tx_sender` is `Copy`, so the four futures above are unaffected by these
         // two taking handles of their own.
-        join3(
+        join4(
             debug_relay::relay(tx_sender, link_baud),
+            async {
+                // Answers from the storage task on the other core, put on the wire.
+                //
+                // A separate arm rather than an inline reply in the reader above,
+                // because the card is not reachable from here: the reader can only ask,
+                // and the answer arrives whenever the storage task gets to it -- which
+                // may be after a shot has finished storing.
+                let Some(receiver) = shot_log_reply_receiver else {
+                    core::future::pending::<()>().await;
+                    return;
+                };
+
+                loop {
+                    let reply = receiver.receive().await;
+                    let response = match reply {
+                        ShotLogReply::List(list) => {
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogList(list)
+                        }
+                        ShotLogReply::Chunk { id, offset, total, last, bytes } => {
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogChunk {
+                                id,
+                                offset,
+                                total,
+                                last,
+                                bytes,
+                            }
+                        }
+                        ShotLogReply::Annotations { id, annotations } => {
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogAnnotations {
+                                id,
+                                annotations,
+                            }
+                        }
+                        ShotLogReply::Error(e) => {
+                            info!("Shot log request failed: {:?}", e);
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogError(e)
+                        }
+                    };
+
+                    // `send().await`, matching the scale-command arm below rather than
+                    // `debug_relay`'s reserved-capacity dance. A shot-log reply is
+                    // solicited traffic that arrives at most once per request, so it
+                    // cannot flood the queue the way high-rate debug frames can -- and
+                    // dropping it would leave the far side waiting out a timeout for an
+                    // answer this processor had already produced.
+                    if let Ok(output) = to_allocvec_cobs(&response) {
+                        let _ = tx_sender.send(output).await;
+                    } else {
+                        info!("Failed to serialize shot log reply");
+                    }
+                }
+            },
             async {
                 // Scale commands bound for a scale the comms processor owns.
                 //

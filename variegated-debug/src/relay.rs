@@ -51,6 +51,7 @@ mod tests {
     use heapless::Vec;
     use variegated_controller_types::debug::{
         name, text, DebugEvent, DebugFrame, DebugPayload, DebugSource, MetricKind, Severity,
+        MAX_SAMPLES,
     };
     use variegated_controller_types::Status;
 
@@ -69,7 +70,11 @@ mod tests {
 
     /// Everything the application processor puts on the bus, one of each.
     fn every_other_payload() -> std::vec::Vec<DebugPayload> {
-        let mut samples: Vec<u64, 16> = Vec::new();
+        // Capacity named rather than spelled: these are `DebugPayload`'s own sample
+        // vectors, so the literal has to track `MAX_SAMPLES`. It did not -- the 16 -> 24
+        // bump that became debug wire 0x85 left these two at 16, and this suite has not
+        // compiled since.
+        let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
         for i in 0..4u64 {
             let _ = samples.push(i * 1_000_000);
         }
@@ -156,7 +161,11 @@ mod tests {
             postcard::to_allocvec_cobs(&msg).expect("encodes").len()
         }
 
-        let mut samples: Vec<u64, 16> = Vec::new();
+        // Capacity named rather than spelled: these are `DebugPayload`'s own sample
+        // vectors, so the literal has to track `MAX_SAMPLES`. It did not -- the 16 -> 24
+        // bump that became debug wire 0x85 left these two at 16, and this suite has not
+        // compiled since.
+        let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
         // Four counters and four indicators in dual-boiler, at values large enough
         // that postcard's varints are not artificially short.
         for _ in 0..4 {

@@ -86,8 +86,6 @@ postcard = { workspace = true, features = ["alloc"] }
 
 futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 
-embedded-sdmmc = { version = "0.9", default-features = false, optional = true, features = ["defmt-log"] }
-embedded-hal-bus = { version = "0.2", features = ["defmt-03"], optional = true }
 
 [features]
 default = ["rp235xb"]
@@ -106,7 +104,10 @@ belka = []
 bluetooth-group-1-scale = []
 gear-pump = []
 pwm-steam-valve = ["variegated-controller-lib/pwm-steam-valve"]
-sd-card-storage = ["variegated-controller-lib/sd-card-storage", "dep:embedded-sdmmc", "dep:embedded-hal-bus"]
+# The SD stack itself is not a direct dependency of the examples: the whole
+# `SpiBus -> sdio -> exfat-slim` tower is named once by `variegated_controller_lib`'s
+# `SdShotLogStorage` alias, so an example only spells out its own SPI and pin types.
+sd-card-storage = ["variegated-controller-lib/sd-card-storage"]
 
 [profile.dev]
 debug = true              # Enable debug info

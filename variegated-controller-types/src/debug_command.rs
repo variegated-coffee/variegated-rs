@@ -38,6 +38,34 @@ pub enum AppDebugOp {
     /// subscription protocol.
     SetSampleIntervalMs(u32),
     Ping,
+    /// Mount the SD card, write a scratch file, read it back, list and delete it,
+    /// reporting each step.
+    ///
+    /// Appended, not inserted -- see the note on the enum above. It writes only to
+    /// `SHOTS/SELFTEST.BIN`, a name no shot can have, so running it on a machine with
+    /// real logs on the card cannot disturb them.
+    ///
+    /// The scratch file is **512 KiB**, deliberately several exFAT clusters, and the run
+    /// takes a second or two during which the display's SPI bus is held. It used to be
+    /// 4 KiB, which fits inside one cluster -- which is how a write path that filled the
+    /// first cluster and then wrote nothing at all passed this test cleanly while
+    /// truncating every shot over 32 KiB.
+    SdCardSelfTest,
+    /// List the shots on the card, newest first, and log each one with its id, size and
+    /// annotations.
+    ///
+    /// Appended, not inserted -- see the note on the enum above.
+    ///
+    /// Read-only, and separate from `SdCardSelfTest` on purpose: the self-test proves the
+    /// *card* works by writing a scratch file, and answers nothing about the shots on it.
+    /// This one reads what is actually there, which is the only way to check the listing
+    /// and the annotation prefix decode against real records rather than a synthetic
+    /// pattern.
+    ///
+    /// It is also the only trigger for the shot-log query path that does not require a
+    /// working comms processor, so it is what the application-processor half is verified
+    /// with before any HTTP route exists.
+    SdListShots,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -86,6 +114,8 @@ impl DebugCommand {
             DebugCommand::App(AppDebugOp::ForceSnapshot) => "force_snapshot",
             DebugCommand::App(AppDebugOp::SetSampleIntervalMs(_)) => "set_sample_interval",
             DebugCommand::App(AppDebugOp::Ping) => "app_ping",
+            DebugCommand::App(AppDebugOp::SdCardSelfTest) => "sd_self_test",
+            DebugCommand::App(AppDebugOp::SdListShots) => "sd_list_shots",
             DebugCommand::Comms(CommsDebugOp::ReconnectWifi) => "reconnect_wifi",
             DebugCommand::Comms(CommsDebugOp::ResyncSntp) => "resync_sntp",
             DebugCommand::Comms(CommsDebugOp::RescanBle) => "rescan_ble",

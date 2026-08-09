@@ -24,7 +24,7 @@ use defmt::info;
 #[cfg(feature = "tft-display")]
 use display_interface_spi::SPIInterface;
 #[cfg(feature = "tft-display")]
-use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 #[cfg(feature = "tft-display")]
 use embassy_rp::gpio::{Level, Output};
 #[cfg(feature = "tft-display")]
@@ -167,6 +167,16 @@ pub async fn lcd_display_task(
 pub async fn graphical_display_task(
     spi_bus: &'static crate::DisplayBus,
     disp_cs: Output<'static>,
+    // The display's own bus settings, re-applied on every transaction.
+    //
+    // This must not be defaulted or reconstructed here: it is the *same* config the
+    // caller built the bus with, and it is passed rather than duplicated so the two
+    // cannot drift. It matters because the SD card shares this bus and reprograms the
+    // clock down to 400 kHz for card identification. Before this was a
+    // `SpiDeviceWithConfig`, the display simply inherited whatever rate the last user
+    // left behind -- so a card insertion left the panel running 25x slow, with no
+    // error anywhere.
+    spi_config: embassy_rp::spi::Config,
     dc: Output<'static>,
     mut reset: Output<'static>,
     mut status_receiver: StatusSubscriber
@@ -186,7 +196,7 @@ pub async fn graphical_display_task(
 
     // Create SPI device for display using pre-initialized CS pin. The bus itself
     // is built by the caller, because the SD card shares it.
-    let spi_dev = SpiDevice::new(spi_bus, disp_cs);
+    let spi_dev = SpiDeviceWithConfig::new(spi_bus, disp_cs, spi_config);
 
     // Create display interface
     let di = SPIInterface::new(spi_dev, dc);

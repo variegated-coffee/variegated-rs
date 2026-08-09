@@ -229,6 +229,23 @@ pub struct SingleBoilerSingleGroupController<
     shot_logger: crate::shot_log::ShotLogger,
     previous_routine_step: Option<usize>,
     shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
+    /// Annotations waiting to be stamped onto the next shot. See the equivalent field in
+    /// `dual_boiler_single_group` for why this is RAM-only and cleared in full.
+    pending_annotations: variegated_controller_types::ShotAnnotations,
+    /// Where a request that has to touch the card goes -- `None` on every single-boiler
+    /// build today, since none has shot-log storage. Carried anyway so the two
+    /// controllers interpret a `MachineCommand` the same way; see the equivalent field in
+    /// `dual_boiler_single_group`.
+    shot_log_query_sender:
+        Option<Sender<'a, ChannelM, crate::shot_log_query::ShotLogQuery, 1>>,
+    /// Whether an SD card is inserted, or `None` when this build has no SD storage --
+    /// which is every single-boiler build today. See the equivalent field in
+    /// `dual_boiler_single_group` for why this is an atomic.
+    ///
+    /// Carried even though no caller supplies it, so the two controllers assemble
+    /// `Status` the same way. A field present in one and absent from the other is how
+    /// they drift into needing separate handling for the same wire type.
+    sd_card_present: Option<&'a core::sync::atomic::AtomicBool>,
     previous_status: Option<Status>,
     temperature_movavg: MovAvg<f32, f32, 10>,
     brew_start_time: Option<Instant>,
@@ -301,6 +318,13 @@ impl<
         // and a mismatch would compile cleanly while silently changing the window.
         watchdog: Option<Watchdog>,
         shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
+        // `None` on any build without SD storage, which is what makes
+        // `Status::sd_card_present` report "not supported" rather than "no card".
+        sd_card_present: Option<&'a core::sync::atomic::AtomicBool>,
+        // `None` on every build today -- no single-boiler machine has shot-log storage.
+        shot_log_query_sender: Option<
+            Sender<'a, ChannelM, crate::shot_log_query::ShotLogQuery, 1>,
+        >,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -324,6 +348,9 @@ impl<
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
             shot_log_sender,
+            pending_annotations: variegated_controller_types::ShotAnnotations::new(),
+            shot_log_query_sender,
+            sd_card_present,
             previous_status: None,
             temperature_movavg: MovAvg::default(),
             brew_start_time: None,
@@ -779,6 +806,10 @@ impl<
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
             bluetooth: self.bluetooth_status.clone(),
+            pending_shot_annotations: self.pending_annotations.clone(),
+            sd_card_present: self
+                .sd_card_present
+                .map(|flag| flag.load(core::sync::atomic::Ordering::Relaxed)),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());
@@ -1283,6 +1314,40 @@ impl<
                         self.bluetooth_status.reports_dropped.saturating_add(reports_dropped);
                 }
             },
+            MachineCommand::SetPendingShotAnnotations(annotations) => {
+                self.pending_annotations = annotations;
+                log_debug!(
+                    "Pending shot annotations set ({} entries)",
+                    self.pending_annotations.len()
+                );
+            }
+            MachineCommand::TagDoseFromScale(scale) => {
+                self.tag_dose_from_scale(scale);
+            }
+            MachineCommand::SetShotAnnotations(id, annotations) => {
+                // Identical to the dual-boiler arm, and identical for a reason: the
+                // sender is `None` on every build today, so this always refuses -- but a
+                // single-boiler machine that gained a card reader should not also need
+                // this command re-implemented. See that arm for why `try_send`.
+                match self.shot_log_query_sender {
+                    Some(ref sender) => {
+                        let query = crate::shot_log_query::ShotLogQuery::SetAnnotations {
+                            id,
+                            annotations,
+                        };
+                        if sender.try_send(query).is_err() {
+                            log_warn!(
+                                "SetShotAnnotations({:?}) refused: a shot-log request is already in flight",
+                                id
+                            );
+                        }
+                    }
+                    None => log_warn!(
+                        "SetShotAnnotations({:?}) ignored: this machine has no shot-log storage",
+                        id
+                    ),
+                }
+            }
             _ => {}
         }
     }
@@ -1381,6 +1446,9 @@ impl<
             // Start shot logging
             use variegated_controller_types::{ShotLogMetadata, ShotType, ShotStatus, RoutineExecutionMetadata};
             let metadata = ShotLogMetadata {
+                // Copied, not moved, and the user's annotations only -- see the
+                // equivalent block in `dual_boiler_single_group`.
+                annotations: self.pending_annotations.clone(),
                 shot_type: ShotType::Routine,
                 group_index: SingleGroup.as_index(),
                 routine_metadata: Some(RoutineExecutionMetadata {
@@ -1449,9 +1517,51 @@ impl<
                 }
             }
 
+            // Cleared in full, including beans and grind. Carrying any of them forward
+            // would label the next shot with this one's coffee whether or not the user
+            // changed it -- and an annotation nobody entered is indistinguishable from
+            // one they did.
+            self.pending_annotations.clear();
+
             self.previous_routine_step = None;
         } else {
             log_warn!("No routine to exit");
+        }
+    }
+
+    /// Record what a scale currently reads as the dose for the next shot.
+    ///
+    /// See the equivalent method in `dual_boiler_single_group` for why this refuses
+    /// rather than substituting a zero, and why it does not tare.
+    fn tag_dose_from_scale(&mut self, scale: variegated_controller_types::ScaleSelector) {
+        use variegated_controller_types::{
+            ScaleSelector, ShotAnnotationKey, ShotAnnotationValue,
+        };
+
+        let weight = match scale {
+            ScaleSelector::GroupScale(index) if index == SingleGroup.as_index() => {
+                self.group.get_output_weight()
+            }
+            ScaleSelector::GroupScale(index) => {
+                log_warn!("TagDoseFromScale: no group {} on this machine", index);
+                return;
+            }
+        };
+
+        let Some(grams) = weight else {
+            log_warn!("TagDoseFromScale: {:?} has no reading to take", scale);
+            return;
+        };
+
+        match self.pending_annotations.set(
+            ShotAnnotationKey::DoseWeight,
+            ShotAnnotationValue::Number(grams),
+        ) {
+            Ok(()) => log_info!("Dose tagged from {:?}: {} g", scale, grams),
+            Err(_) => log_warn!(
+                "TagDoseFromScale: the annotation block is full ({} entries)",
+                self.pending_annotations.len()
+            ),
         }
     }
 }

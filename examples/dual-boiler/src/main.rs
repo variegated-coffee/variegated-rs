@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::pin::Pin;
 use chrono::{FixedOffset, NaiveDateTime};
 use defmt::unwrap;
-use variegated_log::{log_error, log_info};
+use variegated_log::{log_error, log_info, log_warn};
 use heapless::index_map::FnvIndexMap;
 
 #[cfg(feature = "tft-display")]
@@ -35,6 +35,7 @@ use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::join::{join, join3, join4, join5, join_array};
 use embassy_futures::select::Either::{First, Second};
 use embassy_futures::select::select;
+use embassy_futures::select::{select4, Either4};
 use embassy_rp::adc::{Adc, Channel as AdcChannel};
 use embassy_rp::pwm::InputMode;
 use embassy_rp::uart::Uart;
@@ -65,7 +66,7 @@ use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
 
 use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, ShotLogEntryDataPoint, WeightType, SteamWandDefinition, ShotLog};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, WeightType, SteamWandDefinition, ShotLog};
 use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
@@ -80,9 +81,16 @@ use hd44780_controller::command::function_set::{DataLength, NumberOfLines, Chara
 use w25q32jv::W25q32jv;
 
 #[cfg(feature = "sd-card-storage")]
-use embedded_sdmmc::{SdCard, VolumeManager};
+use variegated_controller_lib::sd_card::{
+    new_sd_card_device, probe_volume_start, reacquire_sd_card, PartitionOffset,
+    SdCardBlockDevice, SharedSpiBus,
+};
 #[cfg(feature = "sd-card-storage")]
-use variegated_controller_lib::{YieldingBlockDevice, BlockingSpiDevice, SdCardShotLogStorage, VariegatedTimeSource, ShotLogStorage};
+use variegated_controller_lib::{SdShotLogStorage, ShotLogStorage};
+#[cfg(feature = "sd-card-storage")]
+use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
+#[cfg(feature = "sd-card-storage")]
+use variegated_controller_lib::shot_log_storage::{ShotLogStorageError, SHOT_LOG_CHUNK_LEN};
 use embassy_sync::channel::Sender;
 
 mod display_state;
@@ -252,7 +260,20 @@ async fn esp_transceiver_task(
     );
     let (uart_tx, uart_rx) = uart.split();
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver).await;
+    // Taken from the statics rather than passed in, so this task's signature does not
+    // have to gain two parameters that would need `cfg`ing in and out of an
+    // `#[embassy_executor::task]` declaration. `None` on a build without storage means
+    // the transceiver refuses shot-log requests with `CardNotPresent` instead of leaving
+    // the comms processor to time out.
+    #[cfg(feature = "sd-card-storage")]
+    let (shot_log_query_sender, shot_log_reply_receiver) = (
+        Some(SHOT_LOG_QUERY_CHANNEL.sender()),
+        Some(SHOT_LOG_REPLY_CHANNEL.receiver()),
+    );
+    #[cfg(not(feature = "sd-card-storage"))]
+    let (shot_log_query_sender, shot_log_reply_receiver) = (None, None);
+
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver).await;
 }
 
 
@@ -394,8 +415,6 @@ struct MainTaskPeripherals {
     pump_p: PumpPeripherals,
     rotary_p: RotaryPumpPeripherals,
     mechanism_p: MechanismPeripherals,
-    #[cfg(not(feature = "sd-card-storage"))]
-    sd_card_p: SdCardPeripherals,
     internal_i2c_p: InternalI2cBusPeripherals,
     qwiic_i2c_p: QwiicI2cBusPeripherals,
     button_mux_p: ButtonMuxPeripherals,
@@ -457,12 +476,68 @@ type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
 type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
 type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
-const SHOT_LOG_DATAPOINT_RECEIVERS: usize = 6;
-type ShotLogDataPointChannel = PubSubChannel<SyncSendRawMutex, ShotLogEntryDataPoint, 1, SHOT_LOG_DATAPOINT_RECEIVERS, 1>;
-
-const CORE1_STACK_LENGTH: usize = 32*1024;
+/// Core 1's stack.
+///
+/// Raised from 32 kB while chasing an SD bring-up that stopped dead on entering
+/// `sdio::sd::Card::acquire` -- the last trace before the function's own first
+/// statement, with the MCU otherwise healthy and only that task wedged. That is the
+/// signature of a stack overflow on a Cortex-M with no MPU guard: it does not fault, it
+/// overwrites whatever lies below and the task never comes back.
+///
+/// It was, measurably: with the stack painted and read back from core 0, the SD path
+/// takes the high-water mark to **40,744 bytes**, against the 32,768 that used to be
+/// here. `Card::acquire` is a large generic async fn and the firmware builds at
+/// `opt-level = 1` -- the root workspace profile, since cargo ignores the `opt-level = 3`
+/// in `examples/Cargo.toml` for a non-root package -- which inflates poll frames
+/// considerably.
+///
+/// 96 kB rather than a snug 48 kB: the measured peak is one card, one filesystem layout
+/// and one code path, and the write path had not been exercised when it was taken.
+/// `core1_stack_high_water()` is left in place so the real figure can be checked rather
+/// than assumed -- see the `SdCardSelfTest` handler, which reports it.
+const CORE1_STACK_LENGTH: usize = 96*1024;
 
 static mut CORE1_STACK: Stack<CORE1_STACK_LENGTH> = Stack::new();
+
+/// Byte written across core 1's stack before it starts, so depth can be measured.
+///
+/// Not 0x00: `Stack::new()` already zeroes the array, so zero cannot distinguish
+/// "never touched" from "written and happens to be zero" -- and zeroed words are
+/// exactly what a freshly-pushed frame is full of.
+const CORE1_STACK_PAINT: u8 = 0xC5;
+
+/// Fill core 1's stack with [`CORE1_STACK_PAINT`]. Must run before `spawn_core1`.
+fn paint_core1_stack() {
+    // SAFETY: called once, before core 1 exists, so nothing else can be touching this.
+    unsafe {
+        let mem = core::ptr::addr_of_mut!((*core::ptr::addr_of_mut!(CORE1_STACK)).mem);
+        core::ptr::write_bytes(mem as *mut u8, CORE1_STACK_PAINT, CORE1_STACK_LENGTH);
+    }
+}
+
+/// Deepest point core 1's stack has ever reached, in bytes.
+///
+/// The stack grows *down* from the top of the array, so untouched paint survives at
+/// low indices; the high-water mark is the distance from the first disturbed byte to
+/// the top. Readable from core 0, which is the point -- it answers "did core 1 run out
+/// of stack" even when core 1 is wedged and can no longer report anything itself.
+///
+/// A returned value at or near `CORE1_STACK_LENGTH` means the paint was consumed
+/// entirely and the true requirement is unknown and at least this large.
+fn core1_stack_high_water() -> usize {
+    // SAFETY: reads only; a torn read of a byte being pushed concurrently can move the
+    // answer by a frame, which does not matter for a high-water estimate.
+    unsafe {
+        let base = core::ptr::addr_of!((*core::ptr::addr_of!(CORE1_STACK)).mem) as *const u8;
+        let mut untouched = 0usize;
+        while untouched < CORE1_STACK_LENGTH
+            && core::ptr::read_volatile(base.add(untouched)) == CORE1_STACK_PAINT
+        {
+            untouched += 1;
+        }
+        CORE1_STACK_LENGTH - untouched
+    }
+}
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
@@ -568,6 +643,7 @@ fn main() -> ! {
             reset_pin,
         } = disp_p;
 
+        paint_core1_stack();
         spawn_core1(
             p.CORE1,
             unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
@@ -589,7 +665,11 @@ fn main() -> ! {
                         disp_dma_tx,
                         disp_dma_rx,
                         Irqs,
-                        spi_config,
+                        // Cloned, because this same config is handed to the display's
+                        // `SpiDeviceWithConfig` and to the SD lease's `SetHz` so that
+                        // both restore the board's phase/polarity along with their own
+                        // clock. One definition, three users.
+                        spi_config.clone(),
                     );
 
                     let spi_bus: &'static DisplayBus = DISPLAY_SPI_BUS.init(Mutex::new(spi));
@@ -603,6 +683,7 @@ fn main() -> ! {
                     spawner.spawn(unwrap!(graphical_display_task(
                         spi_bus,
                         disp_cs,
+                        spi_config.clone(),
                         dc,
                         reset,
                         status_channel.subscriber().expect("Failed to get TFT status subscriber")
@@ -611,34 +692,34 @@ fn main() -> ! {
                     log_info!("Spawning backlight task on core 1");
                     spawner.spawn(unwrap!(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
 
-                    // Spawn SD card storage task on core 1 (uses display SPI bus)
+                    // Spawn SD card storage task on core 1 (shares the display SPI bus)
                     #[cfg(feature = "sd-card-storage")]
                     {
-                        log_info!("Initializing SD card storage on core 1");
-
-                        // Create SD card SPI device using display bus
-                        let sd_spi_dev = SpiDevice::new(spi_bus, Output::new(sd_card_p.pin_cs, High));
-                        let blocking_spi_dev = BlockingSpiDevice::new(sd_spi_dev);
-
-                        // Initialize SD card
-                        let sd_card = SdCard::new(blocking_spi_dev, Delay);
-                        let yielding_sd = YieldingBlockDevice::new(sd_card);
-
-                        // Create volume manager
-                        let volume_manager = VolumeManager::new(yielding_sd, VariegatedTimeSource);
-                        let mut storage = SdCardShotLogStorage::new(volume_manager);
-
-                        let res = storage.list_shots();
-                        if let Err(ref e) = res {
-                            log_error!("Failed to list shots: {:?}", e);
-                        } else {
-                            log_info!("List shots successfully");
-                        }
-
-                        drop(res);
+                        // The card is brought up inside the task rather than here,
+                        // because identification is async and this closure is not --
+                        // it runs before `executor1.run` starts polling anything. The
+                        // old code got away with a synchronous probe at exactly this
+                        // point only because no task had been scheduled yet, so the bus
+                        // mutex was necessarily free; the same call from a running task
+                        // deadlocked. Doing it in the task also lets card-detect drive
+                        // re-initialisation on a swap.
+                        //
+                        // Leaked rather than held in a `StaticCell` because
+                        // `SharedSpiBus` holds a `MutexGuard` borrowed from `spi_bus`,
+                        // so it is not `Sync` and cannot live in a `static`. Core 1
+                        // already allocates its display buffers this way.
+                        let shared_bus: &'static SharedSpiBus<'static, NoopRawMutex, _> =
+                            alloc::boxed::Box::leak(alloc::boxed::Box::new(
+                                SharedSpiBus::new(spi_bus, spi_config.clone()),
+                            ));
 
                         log_info!("Spawning shot log storage task on core 1");
-                        spawner.spawn(unwrap!(shot_log_storage_task(shot_log_receiver, storage)));
+                        spawner.spawn(unwrap!(shot_log_storage_task(
+                            shot_log_receiver,
+                            shared_bus,
+                            Output::new(sd_card_p.pin_cs, High),
+                            Input::new(sd_card_p.pin_det, Pull::Up),
+                        )));
                     }
                 });
             },
@@ -652,8 +733,6 @@ fn main() -> ! {
     let pump_p = gear_pump_peripherals!(p);
     let rotary_p = rotary_pump_peripherals!(p);
     let mechanism_p = mechanism_peripherals!(p);
-    #[cfg(not(feature = "sd-card-storage"))]
-    let sd_card_p = sd_card_peripherals!(p);
     let internal_i2c_p = internal_i2c_bus_peripherals!(p);
     let qwiic_i2c_p = qwiic_i2c_bus_peripherals!(p);
     let button_mux_p = button_mux_peripherals!(p);
@@ -673,8 +752,6 @@ fn main() -> ! {
         pump_p,
         rotary_p,
         mechanism_p,
-        #[cfg(not(feature = "sd-card-storage"))]
-        sd_card_p,
         internal_i2c_p,
         qwiic_i2c_p,
         button_mux_p,
@@ -789,7 +866,6 @@ static DEBUG_USB: StaticCell<DebugUsbResources> = StaticCell::new();
 // here), so this channel must match rather than use `SyncSendRawMutex`.
 static DEBUG_COMMANDS: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand, 4>> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
-static SHOT_LOG_DATA_POINT_CHANNEL: StaticCell<ShotLogEntryDataPoint> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
 static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
 static SETTINGS_STORAGE: StaticCell<SettingsStorageMutex> = StaticCell::new();
@@ -812,6 +888,59 @@ static PERIPHERAL_REGISTRY: StaticCell<PeripheralRegistry> = StaticCell::new();
 type ShotLogChannel = Channel<SyncSendRawMutex, ShotLog, 2>;
 #[cfg(feature = "sd-card-storage")]
 static SHOT_LOG_CHANNEL: StaticCell<ShotLogChannel> = StaticCell::new();
+
+/// Asks the storage task to run its self-test.
+///
+/// A `Signal` rather than a channel because the request carries nothing and coalescing
+/// is the behaviour we want: hammering the debug command should run the test again when
+/// the current one finishes, not queue up ten runs. Cross-core (issued on core 0 by
+/// `debug_command_task`, serviced on core 1 where the card lives), hence
+/// `SyncSendRawMutex` rather than the `NoopRawMutex` the display bus uses.
+#[cfg(feature = "sd-card-storage")]
+static SD_SELF_TEST_REQUEST: embassy_sync::signal::Signal<SyncSendRawMutex, ()> =
+    embassy_sync::signal::Signal::new();
+
+/// Whether a card is currently seated, for `Status::sd_card_present`.
+///
+/// Written by the storage task on core 1, read by the controller on core 0 while it
+/// builds `Status`. An atomic rather than a channel or a `Watch`: one writer, one reader,
+/// one bool, read on a path that cannot await -- and a lost update corrects itself on the
+/// next publish a few milliseconds later, so `Relaxed` is sufficient and nothing is
+/// ordered against it.
+///
+/// A plain `static` rather than a `StaticCell`, because `AtomicBool::new` is `const` and
+/// there is nothing to initialise at runtime.
+#[cfg(feature = "sd-card-storage")]
+static SD_CARD_PRESENT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Requests for the storage task, and its answers.
+///
+/// **Depth 1, both directions.** The comms processor serialises shot-log requests behind
+/// a lock, so there is at most one in flight; a deeper queue would only make it possible
+/// for two answers to be in the pipe at once on a protocol that has no correlation id to
+/// tell them apart.
+///
+/// Cross-core -- queries are raised on core 0 (by the comms transceiver or by
+/// `debug_command_task`) and serviced on core 1, where the card lives -- hence
+/// `SyncSendRawMutex` rather than the `NoopRawMutex` the display bus uses.
+///
+/// Plain `static`s rather than `StaticCell`s, for the same reason as
+/// `SD_SELF_TEST_REQUEST` above: `Channel::new()` is `const`, and this way
+/// `debug_command_task` can reach the query channel without a parameter that would have
+/// to be `cfg`'d in and out of an `#[embassy_executor::task]` signature.
+#[cfg(feature = "sd-card-storage")]
+static SHOT_LOG_QUERY_CHANNEL: Channel<SyncSendRawMutex, ShotLogQuery, 1> = Channel::new();
+#[cfg(feature = "sd-card-storage")]
+static SHOT_LOG_REPLY_CHANNEL: Channel<SyncSendRawMutex, ShotLogReply, 1> = Channel::new();
+
+/// How many shots `AppDebugOp::SdListShots` asks for.
+///
+/// Enough to be a real exercise of the listing -- it walks day directories and
+/// prefix-decodes every file it returns -- while staying inside what is readable in a
+/// probe log. The listing reports `truncated` if the card holds more.
+#[cfg(feature = "sd-card-storage")]
+const SD_LIST_SHOTS_LIMIT: u16 = 16;
 
 // Type aliases for cross-core storage references
 // These use CriticalSectionRawMutex which is safe for cross-core access
@@ -837,39 +966,392 @@ async fn coordinated_heating_element_task(
 /// Background task for storing shot logs to SD card
 /// Receives completed shot logs via channel and persists them to FAT32-formatted SD card
 /// Runs on core 1 with the display SPI bus
+/// Operating clock for the card once identification is done.
+///
+/// Identification itself happens at `sdio`'s own 400 kHz `INIT_FREQ` and is not affected
+/// by this.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+const SD_OPERATING_HZ: u32 = 10_000_000;
+
+/// How long a bring-up may hold the display's bus before being abandoned.
+///
+/// Identification against an empty slot reads 0xFF indefinitely, and it runs with the
+/// bus leased -- so this bound is what keeps a missing card from freezing the panel
+/// rather than merely failing.
+///
+/// Two seconds because the ACMD41 poll inside identification is itself allowed a full
+/// second by the SD physical layer spec, and a slow card can use most of it. This was
+/// briefly 500 ms as a diagnostic -- short enough that the failure landed inside a probe
+/// capture -- which is too tight to ship: it would abandon a card that was merely slow
+/// to power up and report it as absent.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+const SD_INIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Settling time after a card-detect edge.
+///
+/// The switch is mechanical, so seating or withdrawing a card produces a burst of edges
+/// rather than one. Waiting before reading the level means a swap is classified once,
+/// from a settled line, instead of once per bounce.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+const SD_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Bring the card up if it is not already, returning whether it is usable.
+///
+/// Called before each request rather than only on a card-detect edge, so that a card
+/// seated late, or slow to power up, still comes up on the next use. Attempts are
+/// naturally rate-limited by being demand-driven -- a machine with no card retries once
+/// per shot, not in a spin.
+///
+/// DET decides whether an attempt is worth making, and nothing more. Skipping the
+/// attempt when it reports no card avoids holding the display's bus for the full
+/// `SD_INIT_TIMEOUT` against an empty slot, but a mis-read line must never be able to
+/// disable storage outright -- so the refusal is logged rather than silent, which is the
+/// diagnostic that was missing when exactly that happened before.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+async fn ensure_card_ready(
+    shared_bus: &'static SharedSpiBus<
+        'static,
+        NoopRawMutex,
+        Spi<'static, DisplayPeripheralsSpi, spi::Async>,
+    >,
+    storage: &mut Option<SdStorage>,
+    parked: &mut Option<SdDevice>,
+    det: &mut Input<'static>,
+) -> bool {
+    if storage.is_some() {
+        return true;
+    }
+    if !det.is_low() {
+        log_warn!("SD: card-detect reports no card; skipping bring-up");
+        return false;
+    }
+    let Some(mut device) = parked.take() else {
+        return false;
+    };
+
+    log_info!("SD: identifying card");
+    if let Err(e) =
+        reacquire_sd_card(shared_bus, &mut device, SD_OPERATING_HZ, SD_INIT_TIMEOUT).await
+    {
+        log_warn!("SD: identification failed: {:?}", defmt::Debug2Format(&e));
+        // Retryable: the device survived, so put it back for the next request.
+        *parked = Some(device);
+        return false;
+    }
+    log_info!("SD: card ready");
+
+    // A card that identified is unambiguously seated, whatever DET thinks -- so a
+    // successful bring-up corrects the flag. It never clears it: identification also
+    // fails for a card that is present but unhappy, and reporting that as "no card"
+    // would send the user looking for a card that is already in the slot.
+    SD_CARD_PRESENT.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    // Find where the volume actually starts before handing the card to the filesystem.
+    // Held under one lease for the whole probe, same as any other card operation.
+    shared_bus.lease().await;
+    let start = probe_volume_start(&mut device).await;
+    shared_bus.release();
+
+    let first_lba = match start {
+        Ok(lba) => lba,
+        Err(e) => {
+            log_warn!(
+                "SD: could not read the partition table: {:?}",
+                defmt::Debug2Format(&e)
+            );
+            *parked = Some(device);
+            return false;
+        }
+    };
+
+    *storage = Some(SdShotLogStorage::new(
+        PartitionOffset::new(device, first_lba),
+        Some(shared_bus),
+    ));
+    true
+}
+
+/// Drop the filesystem and hand the block device back for re-identification.
+///
+/// A separate fn only because it needs to move out of the `Option` -- see
+/// `SdShotLogStorage::into_device` for why a suspect mount must not be reused.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+fn storage_take(storage: &mut Option<SdStorage>) -> Option<SdDevice> {
+    // Unwrapped back to the bare card: the partition offset is re-probed on the next
+    // bring-up rather than carried over, since a swapped card need not be partitioned
+    // the same way -- and reusing the old offset would read a valid card at the wrong
+    // place instead of failing.
+    storage.take().map(|s| s.into_device().into_inner())
+}
+
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+type SdDevice = SdCardBlockDevice<
+    'static,
+    NoopRawMutex,
+    Spi<'static, DisplayPeripheralsSpi, spi::Async>,
+    Output<'static>,
+>;
+
+/// The card as the filesystem sees it: shifted to the start of its partition.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+type SdVolume = PartitionOffset<SdDevice>;
+
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+type SdStorage = SdShotLogStorage<
+    'static,
+    SdVolume,
+    NoopRawMutex,
+    Spi<'static, DisplayPeripheralsSpi, spi::Async>,
+>;
+
 #[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
 #[embassy_executor::task]
 async fn shot_log_storage_task(
     shot_log_receiver: embassy_sync::channel::Receiver<'static, SyncSendRawMutex, ShotLog, 2>,
-    mut storage: SdCardShotLogStorage<
-        YieldingBlockDevice<SdCard<BlockingSpiDevice<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>>, Delay>>,
-        VariegatedTimeSource,
-        4,  // MAX_DIRS (VolumeManager default)
-        4,  // MAX_FILES (VolumeManager default)
-        1,  // MAX_VOLUMES (VolumeManager default)
+    shared_bus: &'static SharedSpiBus<
+        'static,
+        NoopRawMutex,
+        Spi<'static, DisplayPeripheralsSpi, spi::Async>,
     >,
+    cs: Output<'static>,
+    mut det: Input<'static>,
 ) {
-    use defmt::{info, warn, debug};
+    log_info!("Shot log storage task started");
 
-    info!("Shot log storage task started");
+    // Card-detect is active low on this board: the switch closes to ground when a card
+    // is seated.
+    //
+    // It informs rather than gates. Removal is acted on immediately -- that is what DET
+    // is genuinely good for, since nothing else can notice a card leaving until an
+    // operation fails against it -- but a request is never *refused* on the strength of
+    // DET alone. Bring-up is still attempted on demand and DET only decides whether to
+    // bother, so a disconnected or mis-read line costs a wasted attempt rather than
+    // silently disabling storage. That distinction matters: gating hard on DET is
+    // exactly what previously left the card uninitialised with every request answering
+    // "no card present", and it took a long time to see because a wrong DET and an
+    // absent card are indistinguishable from the log.
+    log_info!(
+        "SD: card-detect reads {} at startup",
+        if det.is_low() { "low (card present)" } else { "high (no card)" }
+    );
+    // Publish the initial reading before waiting on anything. Without this, `Status`
+    // would report "no card" until the first DET edge -- which on a machine that is
+    // switched on with a card already in it never comes.
+    SD_CARD_PRESENT.store(det.is_low(), core::sync::atomic::Ordering::Relaxed);
+
+    // The CS pin is consumed exactly once, here, and `new_sd_card_device` performs no
+    // I/O -- so every bring-up below is a retry rather than a one-shot, and a card that
+    // is seated late or slow to power up still comes up on the next request.
+    let mut storage: Option<SdStorage> = None;
+    let mut parked: Option<SdDevice> = Some(new_sd_card_device(shared_bus, cs));
 
     loop {
-        let shot_log = shot_log_receiver.receive().await;
-        debug!("Received shot log for storage");
+        // Store first, deliberately. `select` polls in declaration order, so a completed
+        // shot beats a query whenever both are ready -- which is what keeps a bulk
+        // download from delaying the one operation that cannot be retried. Each query
+        // below is a single bracketed filesystem operation, so the loop returns here
+        // between chunks and a download can hold a store up by at most one chunk.
+        match select4(
+            shot_log_receiver.receive(),
+            SHOT_LOG_QUERY_CHANNEL.receive(),
+            SD_SELF_TEST_REQUEST.wait(),
+            det.wait_for_any_edge(),
+        )
+        .await
+        {
+            Either4::First(shot_log) => {
+                if !ensure_card_ready(shared_bus, &mut storage, &mut parked, &mut det).await {
+                    log_warn!("SD: card unavailable, dropping a completed shot log");
+                    continue;
+                }
+                let card = storage.as_mut().expect("ensured above");
+                match card.store_shot(&shot_log).await {
+                    Ok(id) => log_info!(
+                        "SD: stored shot {}/{}",
+                        id.dir_name().as_str(),
+                        id.file_name().as_str()
+                    ),
+                    Err(e) => {
+                        log_warn!("SD: failed to store shot: {:?}", e);
+                        // A failed store means the mount is suspect -- most likely the
+                        // card was pulled. Park the device so the next request
+                        // re-identifies rather than retrying through stale geometry.
+                        parked = storage_take(&mut storage);
+                    }
+                }
+            }
+            Either4::Second(query) => {
+                // Drop any answer nobody collected before producing a new one.
+                //
+                // This protocol has no correlation id: a request that timed out on the
+                // far side leaves its reply sitting in the depth-1 channel, and the next
+                // requester would read it as its own answer. `Chunk` and `Annotations`
+                // echo their id so a receiver can catch that, but `List` carries nothing
+                // to check against -- so the stale reply is cleared here, at the one
+                // point that knows a new question is being asked.
+                let _ = SHOT_LOG_REPLY_CHANNEL.try_receive();
 
-        // Try to store with timeout (5 seconds max)
-        match embassy_time::with_timeout(
-            Duration::from_secs(5),
-            async { storage.store_shot(&shot_log) }
-        ).await {
-            Ok(Ok(filename)) => {
-                info!("Shot log saved: {}", filename.as_str());
+                let reply = if ensure_card_ready(shared_bus, &mut storage, &mut parked, &mut det).await
+                {
+                    let card = storage.as_mut().expect("ensured above");
+                    let reply = handle_shot_log_query(card, query).await;
+                    // Any failure makes the mount suspect, exactly as a failed store
+                    // does -- most likely the card was pulled mid-operation. `NotFound`
+                    // is excluded: it means the filesystem answered correctly about a
+                    // shot that is not there, which is a fact about the request rather
+                    // than about the card.
+                    if matches!(reply, ShotLogReply::Error(e) if e != ShotLogStorageError::NotFound)
+                    {
+                        parked = storage_take(&mut storage);
+                    }
+                    reply
+                } else {
+                    // Answered immediately rather than after a bus-lease timeout: the
+                    // card is known to be absent, and making the caller wait out a
+                    // timeout to learn that turns "no card" into "the machine is not
+                    // responding".
+                    ShotLogReply::Error(ShotLogStorageError::CardNotPresent)
+                };
+
+                // `try_send` on a channel just drained above, so this can only fail if a
+                // reply raced in between -- which would mean two requests in flight, the
+                // thing the depth-1 channels and the far-side lock exist to prevent.
+                if SHOT_LOG_REPLY_CHANNEL.try_send(reply).is_err() {
+                    log_warn!("SD: dropped a shot-log reply; the reply channel was full");
+                }
             }
-            Ok(Err(e)) => {
-                warn!("Failed to save shot log: {:?}", defmt::Debug2Format(&e));
+            Either4::Third(()) => {
+                if !ensure_card_ready(shared_bus, &mut storage, &mut parked, &mut det).await {
+                    log_error!("SD self-test: card could not be brought up");
+                    continue;
+                }
+                let card = storage.as_mut().expect("ensured above");
+                let report = card.self_test().await;
+                // The whole report at info, so the result is readable in a probe log
+                // without a host tool -- this is what gets pasted back after a flash.
+                log_info!("SD self-test: {:?}", report);
+                if report.passed() {
+                    log_info!(
+                        "SD self-test: PASS ({} entries in SHOTS/)",
+                        report.listed_entries
+                    );
+                } else {
+                    log_error!("SD self-test: FAIL");
+                    parked = storage_take(&mut storage);
+                }
             }
-            Err(_) => {
-                warn!("Shot log storage timed out");
+            Either4::Fourth(()) => {
+                // Mechanical switch: a swap produces a burst of edges.
+                Timer::after(SD_DEBOUNCE).await;
+
+                // Read once, after debouncing, and publish it. Both branches below use
+                // the same reading, so the log and `Status` cannot disagree about what
+                // DET said.
+                SD_CARD_PRESENT.store(det.is_low(), core::sync::atomic::Ordering::Relaxed);
+
+                if det.is_low() {
+                    // Insertion. Nothing to do here -- bring-up happens on the next
+                    // request, so a card inserted and never used costs nothing, and one
+                    // inserted mid-shot is ready by the time the log arrives.
+                    log_info!("SD: card inserted");
+                } else if storage.is_some() {
+                    // Removal, and this is the case DET earns its keep on: without it
+                    // the stale mount survives until an operation fails against a card
+                    // that is no longer there. Drop the filesystem, keep the device --
+                    // see `into_device` for why the filesystem cannot outlive a swap.
+                    log_warn!("SD: card removed");
+                    parked = storage_take(&mut storage);
+                }
+            }
+        }
+    }
+}
+
+/// Answer one [`ShotLogQuery`] against a card that is already up.
+///
+/// Split out of the task loop so the borrow of `storage` ends before the caller decides
+/// whether to park the device -- and because the loop is already long enough that a
+/// fourth arm of inline matching would bury the store path it exists to protect.
+///
+/// Every arm returns a `ShotLogReply` rather than propagating: the requester is on the
+/// other side of a channel and has no way to observe a `Result`, so an error has to
+/// travel as an answer or not at all.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+async fn handle_shot_log_query(card: &mut SdStorage, query: ShotLogQuery) -> ShotLogReply {
+    use variegated_controller_lib::shot_log_storage::ShotLogStorage;
+
+    match query {
+        ShotLogQuery::List { limit } => match card.list_shots(limit as usize).await {
+            Ok(list) => {
+                // Logged here rather than at the requester, because the two requesters
+                // want the same thing and only one of them can take the reply off the
+                // channel. `AppDebugOp::SdListShots` *is* this log line -- it has no
+                // other output -- and a list driven from HTTP is rare enough (the comms
+                // processor holds no cache and a UI asks on an explicit refresh) that
+                // logging it too costs nothing and is worth having when a download
+                // misbehaves.
+                log_info!(
+                    "SD: {} shot(s), truncated: {}",
+                    list.entries.len(),
+                    list.truncated
+                );
+                for entry in list.entries.iter() {
+                    log_info!(
+                        "SD:   {}/{}  {} bytes  {} annotation(s)",
+                        entry.id.dir_name().as_str(),
+                        entry.id.file_name().as_str(),
+                        entry.size_bytes,
+                        entry.annotations.len()
+                    );
+                    // The annotations themselves, one line each. This is the only place
+                    // the prefix decode is observable without a host tool, and "eight
+                    // annotations" is not evidence that they decoded to anything sensible.
+                    for annotation in entry.annotations.iter() {
+                        log_info!(
+                            "SD:     {:?} = {:?}",
+                            annotation.key,
+                            annotation.value
+                        );
+                    }
+                }
+                ShotLogReply::List(list)
+            }
+            Err(e) => ShotLogReply::Error(e),
+        },
+        ShotLogQuery::Chunk { id, offset } => {
+            // One chunk's worth, sized by the wire bound both processors share. The
+            // buffer is a stack array rather than a heap allocation because it is
+            // 1 kB and lives for one iteration; `heapless::Vec::from_slice` then
+            // copies only the bytes actually read.
+            let mut buf = [0u8; SHOT_LOG_CHUNK_LEN];
+            match card.read_chunk(id, offset, &mut buf).await {
+                Ok(chunk) => match heapless::Vec::from_slice(&buf[..chunk.len]) {
+                    Ok(bytes) => ShotLogReply::Chunk {
+                        id,
+                        offset,
+                        total: chunk.total,
+                        last: chunk.last,
+                        bytes,
+                    },
+                    // Unreachable: `read_chunk` cannot return more than `buf.len()`,
+                    // which is the vector's capacity. Reported rather than
+                    // `unwrap`ped, because a panic here takes the machine down over a
+                    // download.
+                    Err(_) => ShotLogReply::Error(ShotLogStorageError::ReadError),
+                },
+                Err(e) => ShotLogReply::Error(e),
+            }
+        }
+        ShotLogQuery::SetAnnotations { id, annotations } => {
+            match card.set_annotations(id, annotations).await {
+                // Read back rather than echoing what was sent. The two differ if the
+                // rewrite dropped anything, and the version on the card is the one the
+                // client needs to see.
+                Ok(()) => match card.read_annotations(id).await {
+                    Ok(annotations) => ShotLogReply::Annotations { id, annotations },
+                    Err(e) => ShotLogReply::Error(e),
+                },
+                Err(e) => ShotLogReply::Error(e),
             }
         }
     }
@@ -1169,6 +1651,49 @@ async fn debug_command_task(
                 bus::emit_event(DebugEvent::CountersReset);
             }
             DebugCommand::App(AppDebugOp::Ping) => {}
+            #[cfg(feature = "sd-card-storage")]
+            DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
+                // Reported from core 0 on purpose. This is the one measurement that
+                // still works when core 1 has wedged -- run the self-test, watch it
+                // stop, then run it again and read the mark here. If the SD path is
+                // overflowing the stack, the second reading is at or near the full
+                // length; if it is nowhere near, the stack is exonerated by measurement
+                // rather than by argument.
+                log_info!(
+                    "core1 stack high-water: {} of {} bytes",
+                    core1_stack_high_water(),
+                    CORE1_STACK_LENGTH
+                );
+                // Handed to the storage task rather than run here: the card is on
+                // core 1 behind the display's bus, and this task is on core 0.
+                SD_SELF_TEST_REQUEST.signal(());
+            }
+            #[cfg(not(feature = "sd-card-storage"))]
+            DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
+                log_warn!("SD self-test requested, but this build has no SD storage");
+            }
+            #[cfg(feature = "sd-card-storage")]
+            DebugCommand::App(AppDebugOp::SdListShots) => {
+                // Goes down the same query channel the comms processor uses, rather than
+                // a signal of its own. That is the point of the command: it exercises the
+                // real request path end to end, so a bug in the channel or in the storage
+                // task's query arm shows up here rather than waiting for the HTTP route
+                // that does not exist yet.
+                //
+                // `try_send`: a full depth-1 channel means a request is already in
+                // flight, and the honest response to a debug command in that case is to
+                // say so rather than to queue behind it.
+                let query = ShotLogQuery::List {
+                    limit: SD_LIST_SHOTS_LIMIT,
+                };
+                if SHOT_LOG_QUERY_CHANNEL.try_send(query).is_err() {
+                    log_warn!("SD list requested, but a shot-log request is already in flight");
+                }
+            }
+            #[cfg(not(feature = "sd-card-storage"))]
+            DebugCommand::App(AppDebugOp::SdListShots) => {
+                log_warn!("SD list requested, but this build has no SD storage");
+            }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
         }
@@ -1192,8 +1717,6 @@ async fn main_task(
         pump_p,
         rotary_p,
         mechanism_p,
-        #[cfg(not(feature = "sd-card-storage"))]
-        sd_card_p,
         internal_i2c_p,
         qwiic_i2c_p,
         button_mux_p,
@@ -1241,10 +1764,6 @@ async fn main_task(
     log_info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
 
     let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
-
-    // Create SD detect pin output for toggling (only when SD card storage is not enabled)
-    #[cfg(not(feature = "sd-card-storage"))]
-    let sd_det_pin = Output::new(sd_card_p.pin_det, Low);
 
     // Create pump and solenoids for dual boiler mechanism
     #[cfg(not(feature = "gear-pump"))]
@@ -2071,6 +2590,24 @@ async fn main_task(
     #[cfg(not(feature = "sd-card-storage"))]
     let shot_log_sender: Option<Sender<'static, SyncSendRawMutex, ShotLog, 2>> = None;
 
+    // `None` is what makes `Status::sd_card_present` say "this build has no SD storage"
+    // rather than "no card inserted" -- two things a user can do very different amounts
+    // about.
+    #[cfg(feature = "sd-card-storage")]
+    let sd_card_present: Option<&'static core::sync::atomic::AtomicBool> = Some(&SD_CARD_PRESENT);
+    #[cfg(not(feature = "sd-card-storage"))]
+    let sd_card_present: Option<&'static core::sync::atomic::AtomicBool> = None;
+
+    // Where the controller sends `SetShotAnnotations`. Same `None`-means-unsupported
+    // shape as `sd_card_present` above: without storage there is nothing to rewrite, and
+    // the controller refuses rather than accepting the command into a void.
+    #[cfg(feature = "sd-card-storage")]
+    let shot_log_query_sender = Some(SHOT_LOG_QUERY_CHANNEL.sender());
+    #[cfg(not(feature = "sd-card-storage"))]
+    let shot_log_query_sender: Option<
+        Sender<'static, SyncSendRawMutex, variegated_controller_lib::shot_log_query::ShotLogQuery, 1>,
+    > = None;
+
     let mut controller = DualBoilerSingleGroupController::new(
         command_channel.receiver(),
         status_channel.publisher().expect("Failed to get status channel publisher"),
@@ -2094,6 +2631,8 @@ async fn main_task(
         interlock_enabled_signal,
         contention_strategy_signal,
         shot_log_sender,
+        sd_card_present,
+        shot_log_query_sender,
     );
 
     // Create status subscriber for LCD display and spawn the task
@@ -2161,9 +2700,6 @@ async fn main_task(
     let debug_status_receiver = status_channel.subscriber().expect("Failed to get debug status subscriber");
     spawner.spawn(unwrap!(debug_snapshot_task(psram_heap, debug_status_receiver)));
     spawner.spawn(unwrap!(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap)));
-
-    // Spawn the SD detect pin toggle task
-    //spawner.spawn(unwrap!(sd_det_toggle_task(sd_det_pin)));
 
     log_info!("Creating huge future join task");
 

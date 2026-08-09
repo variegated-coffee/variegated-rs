@@ -1,0 +1,31 @@
+[package]
+name = "variegated-exfat-format"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+
+[lib]
+# `test = true`, unlike `variegated-controller-lib` next door, and that is the reason this
+# is a crate of its own rather than a module in it. The formatter is pure logic over a
+# block device, but controller-lib pulls in `embassy-rp`, which cannot build for a host
+# target -- so a test there could never run. Here the geometry can be checked against
+# volumes a real implementation produced, which is the only thing that makes writing a
+# filesystem from scratch defensible.
+bench = false
+
+[dependencies]
+aligned.workspace = true
+exfat-slim.workspace = true
+defmt = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Driving the async `format` from a synchronous test.
+futures-lite = "2"
+
+[features]
+default = []
+# `defmt` is opt-in, not hardcoded. defmt declares `links = "defmt"` and emits
+# `extern "Rust"` references to `_defmt_acquire` and friends with no provider, so a host
+# test binary that monomorphizes any `Format` impl fails to link -- the same trap
+# documented on `variegated-controller-types`.
+defmt = ["dep:defmt"]

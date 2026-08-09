@@ -67,7 +67,30 @@ use crate::Status;
 ///   It is a change of *range*, and that is what needs the bump -- a host built at 16
 ///   deserializing a 17-element frame fails on capacity, and the version byte turns that
 ///   into "your host is too old" instead of a decode error pointing at nothing.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x85;
+/// * `0x86` -- `AppDebugOp` gained `SdCardSelfTest`, appended. Device-inbound, so the
+///   hazard runs the other way from the ones above: an *older* device decoding a
+///   newer host's frame cannot see the new discriminant, and a newer device decoding
+///   an older host's frame is unaffected. The bump exists so the mismatch is reported
+///   as a version mismatch rather than as a command the operator did not type -- which
+///   is the failure mode `debug_command.rs` warns about, on a machine that heats water.
+/// * `0x87` -- shot annotations. `Status` gained `pending_shot_annotations` and
+///   `sd_card_present`, and `MachineCommand` gained three variants. Both reach this wire:
+///   the first through `DebugPayload::Status`, the second through `DebugCommand::Machine`.
+///   One bump covers both, rather than one per field -- they land in the same change, and
+///   a host that can decode either can decode both.
+/// * `0x88` -- `AppDebugOp` gained `SdListShots`, appended, and
+///   `ApplicationProcessorToCommsProcessorMessage` gained `ShotLogError`. Device-inbound
+///   and device-outbound respectively, so the two hazards run in opposite directions --
+///   which is precisely why one version byte covers both: a host and a device that agree
+///   on it agree on the whole envelope, in both directions, rather than on one half of it.
+/// * `0x89` -- shot-log format v2. `ShotAnnotationKey` and `ShotAnnotationValue` each
+///   lost their trailing `Routine` variant, which is now carried only by
+///   `ShotLogMetadata::routine_metadata`; `ShotLogStorageError` gained
+///   `UnsupportedVersion`. Both reach this wire through `Status::pending_shot_annotations`.
+///   Removing a *trailing* variant renumbers nothing, so an old host decoding a new
+///   device still reads every annotation it is sent -- but a host that sends a `Routine`
+///   annotation would now decode as garbage, and that is what the bump exists to catch.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x89;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

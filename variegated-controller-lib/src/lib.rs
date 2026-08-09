@@ -8,19 +8,31 @@ pub mod dual_boiler_single_group;
 pub mod schedule;
 pub mod external_sensor_dispatcher;
 mod shot_log;
+// Ungated, unlike `shot_log_storage` below, because the controllers name these types in
+// their signatures and the controllers compile in every configuration. See the module's
+// own docs.
+pub mod shot_log_query;
 
 pub use shot_log::{ShotLogger, ShotLoggerConfig};
+pub use shot_log_query::{ShotLogQuery, ShotLogReply};
 
 #[cfg(feature = "sd-card-storage")]
 pub mod sd_card;
 #[cfg(feature = "sd-card-storage")]
 pub mod shot_log_storage;
+// The exFAT formatter lives in `variegated-exfat-format`, not here. It is pure logic over
+// a block device, and this crate depends on `embassy-rp`, which cannot build for a host
+// target -- so a test alongside it could never run. Writing a filesystem from scratch
+// without being able to check it against a real implementation is not something worth
+// doing, hence the separate crate.
+#[cfg(feature = "sd-card-storage")]
+pub use variegated_exfat_format as exfat_format;
 
 #[cfg(feature = "sd-card-storage")]
-pub use sd_card::{YieldingBlockDevice, BlockingSpiDevice};
+pub use sd_card::{SharedSpiBus, SpiBusLease, SpiLeaseError};
 #[cfg(feature = "sd-card-storage")]
 pub use shot_log_storage::{
-    SdCardShotLogStorage, ShotLogFileInfo, ShotLogStorage, ShotLogStorageError, VariegatedTimeSource,
+    ChunkRead, SdShotLogStorage, ShotLogStorage, ShotLogStorageError,
 };
 
 extern crate alloc;

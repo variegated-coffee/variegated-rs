@@ -33,6 +33,13 @@ sequential-storage = { workspace = true, optional = true, features = ["defmt"] }
 postcard = { workspace = true, optional = true, features = ["alloc", "use-crc"] }
 crc = { workspace = true, optional = true }
 
+[dev-dependencies]
+# Not the same dependency as the optional `postcard` above, which is enabled only by
+# `sequential-storage`. The prefix-decode contract in `shot_log.rs` is a statement about
+# the *encoding* of `ShotLog`, so it has to encode one -- and it must hold regardless of
+# which optional features a firmware build happens to turn on.
+postcard = { workspace = true, features = ["alloc"] }
+
 [features]
 # `serde/alloc` is required, not optional: the derives in this crate cover types
 # containing `alloc::vec::Vec` and `alloc::string::String`, whose serde impls live

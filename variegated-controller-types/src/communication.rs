@@ -64,8 +64,23 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     RequestConfiguration,
     RequestRoutines,
     ExternalPeripheralSensorReading(ExternalPeripheralSensorReading),
-    RequestShotLogList,
-    RequestShotLogEntry(u32),
+    /// Ask for the most recent stored shots, newest first.
+    ///
+    /// **Repurposed in place**, not appended. This position previously held a
+    /// `RequestShotLogList` with no payload, against a shot-log design the SD card
+    /// replaced. Nothing has ever sent it -- both processors are flashed from the same
+    /// tree, and the old variant had no producer on either side -- so reusing the
+    /// discriminant costs nothing, where appending would leave a permanent hole. The
+    /// same applies to the two below and to the three replies.
+    RequestShotLogList { limit: u16 },
+    /// Ask for `SHOT_LOG_CHUNK_LEN` bytes of a stored shot, starting at `offset`.
+    ///
+    /// The download is a sequence of these rather than one message: a stored shot runs
+    /// to tens of kilobytes and the link's accumulator is 4096 bytes on both ends.
+    RequestShotLogChunk {
+        id: crate::shot_log::ShotLogId,
+        offset: u32,
+    },
     /// Debug command injected from a host via the comms processor.
     ///
     /// Appended, not inserted: postcard encodes an enum as its *declaration-order*
@@ -113,9 +128,40 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     MachineDefinition(MachineDefinition),
     Configuration(Configuration),
     Routines(RoutineList),
+    /// The most recent stored shots, newest first, with their annotations.
+    ///
+    /// **Repurposed in place** -- see
+    /// [`CommsProcessorToApplicationProcessorMessage::RequestShotLogList`]. The payload
+    /// type kept its name but not its shape.
     ShotLogList(ShotLogList),
-    ShotLogEntry(ShotLogEntry),
-    ShotLogEntryDataPoint(ShotLogEntryDataPoint),
+    /// One slice of a stored shot, as it sits on the card.
+    ///
+    /// **Repurposed in place**, replacing `ShotLogEntry`.
+    ///
+    /// `total` and `last` both travel because they answer different questions: `total`
+    /// lets a receiver show progress from the first chunk, and `last` terminates the
+    /// loop without arithmetic on a value it would otherwise have to trust. `id` and
+    /// `offset` are echoed because this protocol has no correlation id -- they are the
+    /// only way a reply can be matched to the request that asked for it.
+    ShotLogChunk {
+        id: crate::shot_log::ShotLogId,
+        offset: u32,
+        total: u32,
+        last: bool,
+        bytes: heapless::Vec<u8, { crate::shot_log::SHOT_LOG_CHUNK_LEN }>,
+    },
+    /// The annotations on one stored shot.
+    ///
+    /// **Repurposed in place**, replacing `ShotLogEntryDataPoint`.
+    ///
+    /// Separate from the listing so that editing a shot's annotations can be confirmed
+    /// without re-reading every other shot on the card. It echoes the block *as stored*
+    /// rather than acknowledging the request, so a client sees any entry the machine
+    /// refused for want of room -- which a bare ack would hide.
+    ShotLogAnnotations {
+        id: crate::shot_log::ShotLogId,
+        annotations: crate::shot_log::ShotAnnotations,
+    },
     /// Structured debug frames relayed to the comms processor for TCP fan-out.
     ///
     /// Appended, not inserted -- see the note on
@@ -165,6 +211,24 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// occupies a radio shared with Wi-Fi and with the live links to the scales
     /// themselves, and *this* is the processor that knows whether coffee is being made.
     StartBluetoothScan { duration_ms: u16 },
+    /// A shot-log request could not be answered.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`]. It is appended
+    /// rather than slotted beside the three repurposed shot-log replies above because
+    /// those occupy fixed historical positions; only the end of the enum is safe.
+    ///
+    /// It exists so a failure is distinguishable from silence. The shot-log protocol has
+    /// no correlation id and the comms processor waits on a timeout, so without an
+    /// explicit refusal a request against an empty card slot would block for the full
+    /// timeout and then be indistinguishable from a dead application processor -- and the
+    /// user would be told "the machine is not responding" about a machine that is fine and
+    /// simply has no card in it.
+    ///
+    /// No `id` field: the errors worth reporting (`CardNotPresent`, `NotExfat`,
+    /// `BusUnavailable`) are properties of the card rather than of the shot asked for, and
+    /// with one request in flight at a time there is nothing to disambiguate against.
+    ShotLogError(crate::shot_log::ShotLogStorageError),
 }
 
 /// An operation on a scale, as carried by

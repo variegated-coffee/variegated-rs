@@ -1,58 +1,10 @@
-use alloc::collections::{BTreeMap, VecDeque};
-use alloc::vec::Vec;
-use embassy_sync::blocking_mutex::raw::RawMutex;
-use embassy_sync::pubsub::Publisher;
+use alloc::collections::VecDeque;
 use embassy_time::Instant;
 use variegated_controller_types::{
-    ShotLogEntry, ShotLogEntryDataPoint,
     ShotLog, ShotLogMetadata, ShotLogSample, RoutineEvent,
     BoilerSample, GroupSample, WaterTapSample,
     Status, ShotStatus,
 };
-
-// ============================================================================
-// Legacy in-memory shot log (for external API)
-// ============================================================================
-
-pub struct InMemoryShotLog<M: RawMutex + 'static, const NUM_RECEIVERS: usize> {
-    sender: Publisher<'static, M, ShotLogEntryDataPoint, 1, NUM_RECEIVERS, 1>,
-    entries: BTreeMap<u32, ShotLogEntry>,
-    data_points: BTreeMap<u32, Vec<ShotLogEntryDataPoint>>
-}
-
-impl<M: RawMutex, const NUM_RECEIVERS: usize> InMemoryShotLog<M, NUM_RECEIVERS> {
-    pub fn new(sender: Publisher<'static, M, ShotLogEntryDataPoint, 1, NUM_RECEIVERS, 1>) -> Self {
-        Self {
-            sender,
-            entries: BTreeMap::new(),
-            data_points: BTreeMap::new(),
-        }
-    }
-
-    pub fn add_entry(&mut self, entry: ShotLogEntry) {
-        self.entries.insert(entry.id, entry);
-    }
-
-    pub fn add_data_point(&mut self, data_point: ShotLogEntryDataPoint) {
-        self.data_points.entry(data_point.shot_log_entry_id)
-            .or_insert_with(Vec::new)
-            .push(data_point.clone());
-
-        self.sender.publish_immediate(data_point);
-    }
-
-    pub fn get_entry(&self, id: u32) -> Option<&ShotLogEntry> {
-        self.entries.get(&id)
-    }
-
-    pub fn get_data_points(&self, shot_log_entry_id: u32) -> Option<&Vec<ShotLogEntryDataPoint>> {
-        self.data_points.get(&shot_log_entry_id)
-    }
-
-    pub fn all_entries(&self) -> impl Iterator<Item = &ShotLogEntry> {
-        self.entries.values()
-    }
-}
 
 // ============================================================================
 // Runtime shot logger
@@ -107,18 +59,23 @@ impl ShotLogger {
         }
     }
 
-    /// Start logging a new shot
+    /// Start logging a new shot.
+    ///
+    /// The caller's `metadata` already carries the annotations, copied out of the
+    /// controller's pending block at this moment rather than read back when the shot
+    /// finishes. That is the difference between "the beans this shot was pulled with" and
+    /// "the beans set at the time it ended" -- a user who changes the hopper mid-shot must
+    /// not retroactively relabel the shot in progress.
+    ///
+    /// `ShotLog::new` rather than a struct literal, so the format version is stamped in
+    /// the one place that owns it.
     pub fn start_shot(&mut self, metadata: ShotLogMetadata) {
         // If there's already a log in progress, finish it first
         if self.current_log.is_some() {
             self.finish_shot(ShotStatus::Aborted);
         }
 
-        self.current_log = Some(ShotLog {
-            metadata,
-            samples: Vec::new(),
-            routine_events: Vec::new(),
-        });
+        self.current_log = Some(ShotLog::new(metadata));
         self.shot_start_time = Some(Instant::now());
         self.sample_counter = 0;
     }

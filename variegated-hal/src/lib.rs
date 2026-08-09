@@ -571,7 +571,7 @@ impl<'a> PeripheralRegistry<'a> {
 
     pub fn get_peripheral_status(&self) -> PeripheralStatus {
         let mut status = PeripheralStatus::default();
-        
+
         for (id, provider) in &self.providers {
             let _ = status.peripherals.insert(
                 *id,
@@ -581,7 +581,7 @@ impl<'a> PeripheralRegistry<'a> {
                 },
             );
         }
-        
+
         status
     }
 }

@@ -34,10 +34,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aligned"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee4508988c62edf04abd8d92897fca0c2995d907ce1dfeaf369dac3716a40685"
+dependencies = [
+ "as-slice",
+]
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
+
+[[package]]
+name = "as-slice"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "516b6b4f0e40d50dcda9365d53964ec74560ad4284da2e7fc97122cd83174516"
+dependencies = [
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "ascii-canvas"
@@ -88,6 +106,21 @@ checksum = "5deb64efa5bd81e31fcd1938615a6d98c82eafcbcd787162b6f63b91d6bac5b3"
 dependencies = [
  "rustc_version 0.2.3",
 ]
+
+[[package]]
+name = "bisync"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5020822f6d6f23196ccaf55e228db36f9de1cf788052b37992e17cbc96ec41a7"
+dependencies = [
+ "bisync_macros",
+]
+
+[[package]]
+name = "bisync_macros"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d21f40d350a700f6aa107e45fb26448cf489d34794b2ba4522181dc9f1173af6"
 
 [[package]]
 name = "bit-set"
@@ -167,6 +200,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "block-device-driver"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44c051592f59fe68053524b4c4935249b806f72c1f544cfb7abe4f57c3be258e"
+dependencies = [
+ "aligned",
 ]
 
 [[package]]
@@ -766,9 +808,6 @@ name = "embedded-hal"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
-dependencies = [
- "defmt 0.3.100",
-]
 
 [[package]]
 name = "embedded-hal"
@@ -781,7 +820,6 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c4c685bbef7fe13c3c6dd4da26841ed3980ef33e841cddfa15ce8a8fb3f1884"
 dependencies = [
- "defmt 0.3.100",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -791,19 +829,6 @@ version = "1.0.0"
 source = "git+https://github.com/rust-embedded/embedded-hal?branch=master#41f29f6bfced1cae0cbe712ba96ee32c075b3125"
 dependencies = [
  "embedded-hal 1.0.0 (git+https://github.com/rust-embedded/embedded-hal?branch=master)",
-]
-
-[[package]]
-name = "embedded-hal-bus"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d3980bf28e8577db59fe2bdb3df868a419469d2cecb363644eea2b6f7797669"
-dependencies = [
- "critical-section",
- "defmt 0.3.100",
- "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "portable-atomic",
 ]
 
 [[package]]
@@ -850,19 +875,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2564b9f813c544241430e147d8bc454815ef9ac998878d30cc3055449f7fd4c0"
 dependencies = [
  "embedded-io 0.7.1",
-]
-
-[[package]]
-name = "embedded-sdmmc"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3c7f9ea039eeafc4a49597b7bd5ae3a1c8e51b2803a381cb0f29ce90fe1ec6"
-dependencies = [
- "byteorder",
- "defmt 0.3.100",
- "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-io 0.6.1",
- "heapless 0.8.0",
 ]
 
 [[package]]
@@ -924,8 +936,6 @@ dependencies = [
  "embedded-graphics-core",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-hal-bus",
- "embedded-sdmmc",
  "futures",
  "hd44780-controller",
  "heapless 0.9.3",
@@ -958,6 +968,26 @@ dependencies = [
  "variegated-tlc59108",
  "w25q32jv",
 ]
+
+[[package]]
+name = "exfat-slim"
+version = "0.6.0"
+dependencies = [
+ "aligned",
+ "bisync",
+ "bitflags 2.13.1",
+ "block-device-driver",
+ "byteorder",
+ "defmt 1.1.1",
+ "heapless 0.9.3",
+ "thiserror",
+]
+
+[[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "find-msvc-tools"
@@ -1039,6 +1069,19 @@ name = "futures-io"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a"
+
+[[package]]
+name = "futures-lite"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f78e10609fe0e0b3f4157ffab1876319b5b0db102a2c60dc4626306dc46b44ad"
+dependencies = [
+ "fastrand",
+ "futures-core",
+ "futures-io",
+ "parking",
+ "pin-project-lite",
+]
 
 [[package]]
 name = "futures-sink"
@@ -1470,6 +1513,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1827,6 +1876,17 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sdio"
+version = "0.5.0"
+dependencies = [
+ "aligned",
+ "block-device-driver",
+ "defmt 1.1.1",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "semver"
@@ -2456,7 +2516,9 @@ dependencies = [
 name = "variegated-controller-lib"
 version = "0.1.0"
 dependencies = [
+ "aligned",
  "async-trait",
+ "block-device-driver",
  "cfg-if",
  "chrono",
  "crc",
@@ -2468,17 +2530,19 @@ dependencies = [
  "embassy-time",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-sdmmc",
  "embedded-storage-async",
+ "exfat-slim",
  "heapless 0.9.3",
  "log",
  "movavg",
  "num-traits",
  "postcard",
+ "sdio",
  "sequential-storage",
  "serde",
  "variegated-control-algorithm",
  "variegated-controller-types",
+ "variegated-exfat-format",
  "variegated-hal",
  "variegated-log",
  "variegated-timekeeping",
@@ -2557,6 +2621,16 @@ dependencies = [
  "pio-core",
  "pio-proc",
  "variegated-log",
+]
+
+[[package]]
+name = "variegated-exfat-format"
+version = "0.1.0"
+dependencies = [
+ "aligned",
+ "defmt 1.1.1",
+ "exfat-slim",
+ "futures-lite",
 ]
 
 [[package]]

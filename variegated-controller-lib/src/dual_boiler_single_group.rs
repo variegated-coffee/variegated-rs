@@ -475,6 +475,38 @@ pub struct DualBoilerSingleGroupController<
     shot_logger: crate::shot_log::ShotLogger,
     previous_routine_step: Option<usize>,
     shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
+    /// Annotations waiting to be stamped onto the next shot.
+    ///
+    /// RAM only, and cleared in full when a shot ends. Beans and grind carry over to the
+    /// next shot no more than the dose does: leaving any of them set would silently label
+    /// tomorrow's shots with today's coffee, and a wrong label is worse than none.
+    pending_annotations: variegated_controller_types::ShotAnnotations,
+    /// Where a request that has to touch the card goes.
+    ///
+    /// `None` on a machine without shot-log storage, in which case such commands are
+    /// refused rather than dropped. The storage layer lives on core 1 behind a task --
+    /// the card shares the display's SPI bus -- so the controller cannot service these
+    /// itself and must hand them across.
+    ///
+    /// Routed through the controller rather than intercepted in the comms transceiver so
+    /// that a `MachineCommand` has exactly one interpreter. Intercepting at the
+    /// transceiver would give the same command two different paths depending on whether
+    /// it arrived over HTTP or over the debug channel, and the debug one would go on
+    /// being refused.
+    shot_log_query_sender:
+        Option<Sender<'a, ChannelM, crate::shot_log_query::ShotLogQuery, 1>>,
+    /// Whether an SD card is inserted, or `None` when this build has no SD storage.
+    ///
+    /// An atomic rather than a channel: presence is known by the storage task on core 1,
+    /// `Status` is built here on core 0, and this is read on the publish path, which
+    /// cannot await. One writer, one reader, one bool -- and a lost update corrects
+    /// itself on the next publish a few milliseconds later, so `Relaxed` is enough;
+    /// nothing else is ordered against it.
+    ///
+    /// The `Option` is the same `Option` that reaches `Status`, mapped straight through
+    /// rather than translated, so there is only one place that decides what "no SD
+    /// storage" means.
+    sd_card_present: Option<&'a core::sync::atomic::AtomicBool>,
 
     // Schedule store
     schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
@@ -579,6 +611,18 @@ impl<
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
         contention_strategy_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>,
         shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
+        // `None` on any build without SD storage, which is what makes
+        // `Status::sd_card_present` report "not supported" rather than "no card". The
+        // controller itself stays feature-agnostic: `variegated-controller-lib` has no
+        // `sd-card-storage` feature on the status-building path, and giving it one would
+        // put a `cfg` in the middle of `Status` assembly for a fact the example already
+        // knows.
+        sd_card_present: Option<&'a core::sync::atomic::AtomicBool>,
+        // Where `SetShotAnnotations` goes. `None` on a machine without shot-log storage,
+        // which refuses the command rather than accepting it into a void.
+        shot_log_query_sender: Option<
+            Sender<'a, ChannelM, crate::shot_log_query::ShotLogQuery, 1>,
+        >,
     ) -> Self {
         // Create configuration objects from persistent config defaults
         // These will be overridden when the persistent config is loaded from flash
@@ -644,6 +688,9 @@ impl<
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
             shot_log_sender,
+            pending_annotations: variegated_controller_types::ShotAnnotations::new(),
+            shot_log_query_sender,
+            sd_card_present,
             previous_status: None,
             brew_temperature_movavg: MovAvg::default(),
             steam_temperature_movavg: MovAvg::default(),
@@ -667,6 +714,55 @@ impl<
             saturation_start_time: None,
             last_shot_state_sample_time: None,
             input_volume_at_first_drop: None,
+        }
+    }
+
+    /// Record what a scale currently reads as the dose for the next shot.
+    ///
+    /// Refuses rather than guesses when the named scale has nothing to say. A scale that
+    /// has never reported and a scale that is disconnected both come back `None` here,
+    /// and both mean the same thing to the user: press the button again once the scale
+    /// is talking. Writing a `0.0` dose instead would be indistinguishable, in the stored
+    /// record, from a shot genuinely pulled with an empty basket.
+    ///
+    /// Not async, and it does not tare. The weight is whatever the scale reads at the
+    /// moment the button is pressed, which is what "put the basket on and tag it" means;
+    /// a tare here would zero the scale the user just balanced.
+    fn tag_dose_from_scale(&mut self, scale: variegated_controller_types::ScaleSelector) {
+        use variegated_controller_types::{
+            ScaleSelector, ShotAnnotationKey, ShotAnnotationValue,
+        };
+
+        let weight = match scale {
+            ScaleSelector::GroupScale(index) if index == SingleGroup.as_index() => {
+                self.group.get_output_weight()
+            }
+            // A single-group machine has exactly one group scale. An index for any other
+            // group is a client bug, not a missing peripheral, so it is logged as such
+            // rather than folded into "the scale is not reporting".
+            ScaleSelector::GroupScale(index) => {
+                log_warn!("TagDoseFromScale: no group {} on this machine", index);
+                return;
+            }
+        };
+
+        let Some(grams) = weight else {
+            log_warn!("TagDoseFromScale: {:?} has no reading to take", scale);
+            return;
+        };
+
+        match self.pending_annotations.set(
+            ShotAnnotationKey::DoseWeight,
+            ShotAnnotationValue::Number(grams),
+        ) {
+            Ok(()) => log_info!("Dose tagged from {:?}: {} g", scale, grams),
+            // Only reachable with eight custom annotations already set and no dose among
+            // them. Reported, because the alternative is a dose the user asked for and
+            // did not get.
+            Err(_) => log_warn!(
+                "TagDoseFromScale: the annotation block is full ({} entries)",
+                self.pending_annotations.len()
+            ),
         }
     }
 
@@ -1365,6 +1461,10 @@ impl<
             peripheral_status: self.peripheral_registry.get_peripheral_status(),
             current_local_time: TimeKeeper::now_local().map(|t| t.naive_local()),
             bluetooth: self.bluetooth_status.clone(),
+            pending_shot_annotations: self.pending_annotations.clone(),
+            sd_card_present: self
+                .sd_card_present
+                .map(|flag| flag.load(core::sync::atomic::Ordering::Relaxed)),
         };
 
         self.status_channel_sender.publish_immediate(status.clone());
@@ -2025,7 +2125,7 @@ impl<
                     || self.water_tap_dispensing
                     || self.current_routine.is_some();
                 #[cfg(feature = "pwm-steam-valve")]
-                let busy = busy || self.steam_wand.is_steaming();
+                let busy = busy || self.steam_wand.get_steaming_state();
 
                 if busy {
                     log_warn!("Refusing Bluetooth scan: machine is busy");
@@ -2107,6 +2207,43 @@ impl<
                         self.bluetooth_status.reports_dropped.saturating_add(reports_dropped);
                 }
             },
+            MachineCommand::SetPendingShotAnnotations(annotations) => {
+                self.pending_annotations = annotations;
+                log_debug!(
+                    "Pending shot annotations set ({} entries)",
+                    self.pending_annotations.len()
+                );
+            }
+            MachineCommand::TagDoseFromScale(scale) => {
+                self.tag_dose_from_scale(scale);
+            }
+            MachineCommand::SetShotAnnotations(id, annotations) => {
+                // Editing a *stored* shot is a whole-file rewrite on the card, which
+                // happens on core 1. Handed across rather than performed here.
+                match self.shot_log_query_sender {
+                    // `try_send`, not `await`. This runs on the command-handling path of
+                    // the control loop, which must not block on a storage task that may
+                    // be mid-write; a depth-1 channel that is already full means a
+                    // request is in flight, and the right answer is to refuse this one
+                    // rather than to stall the machine behind it.
+                    Some(ref sender) => {
+                        let query = crate::shot_log_query::ShotLogQuery::SetAnnotations {
+                            id,
+                            annotations,
+                        };
+                        if sender.try_send(query).is_err() {
+                            log_warn!(
+                                "SetShotAnnotations({:?}) refused: a shot-log request is already in flight",
+                                id
+                            );
+                        }
+                    }
+                    None => log_warn!(
+                        "SetShotAnnotations({:?}) ignored: this machine has no shot-log storage",
+                        id
+                    ),
+                }
+            }
             #[cfg(not(feature = "pwm-steam-valve"))]
             MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
                 log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
@@ -2356,7 +2493,17 @@ impl<
 
             // Start shot logging
             use variegated_controller_types::{ShotLogMetadata, ShotType, ShotStatus, RoutineExecutionMetadata};
+
             let metadata = ShotLogMetadata {
+                // Copied, not moved: the pending block is only cleared when the shot
+                // ends, so that a shot aborted before it produces a log does not silently
+                // lose the beans and grind the user had already entered.
+                //
+                // Only the user's own annotations. The routine is recorded by
+                // `routine_metadata` just below, in the same block -- duplicating it here
+                // would put a machine-derived fact somewhere a `SetShotAnnotations` could
+                // delete it.
+                annotations: self.pending_annotations.clone(),
                 shot_type: ShotType::Routine,
                 group_index: SingleGroup.as_index(),
                 routine_metadata: Some(RoutineExecutionMetadata {
@@ -2432,6 +2579,12 @@ impl<
                     }
                 }
             }
+
+            // Cleared in full, including beans and grind. Carrying any of them forward
+            // would label the next shot with this one's coffee whether or not the user
+            // changed it -- and an annotation nobody entered is indistinguishable from
+            // one they did.
+            self.pending_annotations.clear();
 
             self.previous_routine_step = None;
         } else {

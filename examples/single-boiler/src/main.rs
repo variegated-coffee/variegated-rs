@@ -149,7 +149,10 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // channel is a different matter: this machine has a comms processor like any other,
     // so it can carry a Belka Portal or a scale associated later, and `SM` is now fixed
     // by that receiver rather than being a free choice.
-    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver)).await;
+    // The two trailing `None`s are the shot-log query and reply halves: this board has no
+    // card reader, so the transceiver refuses shot-log requests outright rather than
+    // forwarding them to a storage task that does not exist.
+    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -768,6 +771,14 @@ async fn main_task(spawner: Spawner) -> ! {
         // shot_log_sender: this board has no SD card -- `single-boiler` does not enable
         // `sd-card-storage`, so there is no storage task to send completed logs to.
         None,
+        // sd_card_present: `None`, for the same reason. This is what makes
+        // `Status::sd_card_present` report "this build has no SD storage" rather than
+        // "no card inserted" -- the second would tell a user to go find a card for a
+        // slot this machine does not have.
+        None,
+        // shot_log_query_sender: `None`. With nowhere to store a shot there is nothing
+        // to re-annotate, so `SetShotAnnotations` is refused rather than queued.
+        None,
     );
 
     // Controller will publish configuration automatically in its task loop
@@ -1014,6 +1025,15 @@ async fn debug_command_task(
                 bus::emit_event(DebugEvent::CountersReset);
             }
             DebugCommand::App(AppDebugOp::Ping) => {}
+            // This board has no card reader: `single-boiler` does not enable
+            // `sd-card-storage`. Answered rather than ignored, so an operator who runs
+            // the self-test against the wrong machine gets told why nothing happened.
+            DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
+                warn!("SD self-test requested, but this board has no SD card");
+            }
+            DebugCommand::App(AppDebugOp::SdListShots) => {
+                warn!("SD listing requested, but this board has no SD card");
+            }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
         }
