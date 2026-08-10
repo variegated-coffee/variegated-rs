@@ -26,7 +26,7 @@ mkdir -p "$OUT"
 LOG="$OUT/comms-firmware.log"
 (
     cd "$COMMS" || exit 1
-    env SSID=x PASSWORD=y VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 cargo build --release
+    env VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 cargo build --release
 ) >"$LOG" 2>&1
 RC=$?
 
