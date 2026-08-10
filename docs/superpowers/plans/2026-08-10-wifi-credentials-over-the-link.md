@@ -1,5 +1,23 @@
 # Wi-Fi credentials over the inter-processor link Implementation Plan
 
+> **Status: COMPLETE and hardware-verified, 2026-08-11.**
+>
+> Task 5 was skipped at the time and later satisfied for real: setting a Wi-Fi password over
+> the debug link works end to end. The credential reaches the application processor, is
+> stored (`storage_write settings[1]`), is pushed over the link, and after a reboot the comms
+> processor joins the network. The three runtime failure modes listed below as unverified —
+> the received-flag trap, the `Watch` receiver counts, and the reordered `join` nesting — are
+> all now exercised in normal operation.
+>
+> Two pre-existing bugs surfaced during that verification and are fixed: a core 0 stack
+> overflow caused by `opt-level = 1` being in force, and a defmt encoder data race from
+> `esp-println` lacking `critical-section`. Neither was caused by this plan. See
+> `variegated-comms-rs/docs/superpowers/2026-08-11-improv-progress.md`.
+>
+> The original status note, written before any of that, follows.
+>
+> ---
+>
 > **Status: Tasks 1–4 complete, 2026-08-10. Task 5 (hardware) NOT DONE — see below.**
 >
 > `variegated-rs` `3af55a2`, `c40d232`; `variegated-comms-rs` `17f8ded`;
