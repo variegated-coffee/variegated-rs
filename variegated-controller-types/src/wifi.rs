@@ -55,6 +55,35 @@ impl defmt::Format for WifiCredentials {
     }
 }
 
+/// Build a [`WifiCredentials`], truncating either field to fit.
+///
+/// Mirrors [`crate::bluetooth::bluetooth_name`], and exists for the same reason: the
+/// obvious `&s[..WIFI_SSID_LEN]` **panics** the moment a multi-byte character lands on the
+/// boundary, and both of these strings come from outside -- an SSID chosen by whoever runs
+/// the access point, a password typed by a user. Walking back to a character boundary takes
+/// the whole class of input out of play.
+///
+/// Truncating rather than rejecting is the right call for an SSID, which is a label. It is
+/// more debatable for a password, where a silently shortened value produces an association
+/// failure with no clue as to why -- but a 64-byte limit is the WPA maximum plus room for a
+/// hex PSK, so anything longer was not going to authenticate either way. Callers that can
+/// report a length error to a human should check before calling.
+pub fn wifi_credentials(ssid: &str, password: &str) -> WifiCredentials {
+    WifiCredentials {
+        ssid: truncate(ssid),
+        password: truncate(password),
+    }
+}
+
+fn truncate<const N: usize>(s: &str) -> heapless::String<N> {
+    let mut end = s.len().min(N);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Infallible by construction: `end <= N` and sits on a boundary.
+    heapless::String::try_from(&s[..end]).unwrap_or_default()
+}
+
 /// The stored value: credentials, or none configured.
 ///
 /// A newtype so it can carry the `Value<'a>` impl, exactly as `BluetoothAssociations` does
@@ -193,5 +222,31 @@ mod tests {
     #[test]
     fn improv_state_defaults_to_stopped() {
         assert_eq!(ImprovState::default(), ImprovState::Stopped);
+    }
+
+    /// The truncation must land on a character boundary. A naive `&s[..N]` panics here,
+    /// and both of these strings come from outside the firmware.
+    #[test]
+    fn over_long_fields_truncate_on_a_character_boundary() {
+        // 'é' is two bytes, so a 32-byte SSID limit falls mid-character when the string is
+        // 16 of them followed by more.
+        let ssid = "é".repeat(20);
+        let password = "ü".repeat(40);
+        let built = wifi_credentials(&ssid, &password);
+
+        assert!(built.ssid.len() <= WIFI_SSID_LEN);
+        assert!(built.password.len() <= WIFI_PASSWORD_LEN);
+        // Truncated, not emptied: an off-by-one in the boundary walk would land on 0.
+        assert_eq!(built.ssid.len(), WIFI_SSID_LEN);
+        assert_eq!(built.password.len(), WIFI_PASSWORD_LEN);
+        // And still valid UTF-8 with whole characters.
+        assert!(built.ssid.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn fields_that_fit_are_left_alone() {
+        let built = wifi_credentials("MyNet", "hunter2");
+        assert_eq!(built.ssid.as_str(), "MyNet");
+        assert_eq!(built.password.as_str(), "hunter2");
     }
 }
