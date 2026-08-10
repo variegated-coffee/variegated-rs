@@ -1,5 +1,20 @@
 # Credentials from the link Implementation Plan
 
+> **Status: complete, 2026-08-10.** `variegated-comms-rs` `fb48dab`; `variegated-rs`
+> `6d86d83`. The firmware builds with no `SSID`/`PASSWORD` anywhere in the environment, the
+> gated build is 0 errors with no `cargo::warning` lines, all four examples build, and all
+> ten host suites pass. **Not run on hardware** — see plan 3's header for the three runtime
+> failure modes that survive every automated check.
+>
+> Removing the two `[env]` lines restored `.cargo/config.toml` to its committed state
+> exactly: the credentials were the only local modification to that file.
+>
+> **The verification step in this plan originally leaked the thing it was checking for.** It
+> grepped for the literal password, which meant writing a live credential into a committed
+> document — and that document was then the only remaining copy in the tree. It now greps for
+> the *shape* (`env!("SSID")`, `SSID =`) instead. Worth remembering: a check for a secret is
+> a place a secret can hide.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `wifi::connection_task` takes its SSID and password from the application processor over the link instead of from `env!`, and the compiled-in pair is deleted from the tree.
@@ -52,7 +67,7 @@ delivered, anything else means it did.
 - Produces: no new public API. `connection_task` keeps its signature; the receiver is taken
   from the static inside the task, as `ble::devices` does with `BT_ASSOCIATIONS`.
 
-- [ ] **Step 1: Replace the compiled-in configuration**
+- [x] **Step 1: Replace the compiled-in configuration**
 
 `wifi.rs` currently does this once, before the loop:
 
@@ -116,7 +131,7 @@ fn apply(controller: &mut WifiController<'static>, credentials: &WifiCredentials
 (unicast silently not arriving because the station slept through it) and is worth more than
 the code it sits above.
 
-- [ ] **Step 2: React to a credential change**
+- [x] **Step 2: React to a credential change**
 
 The task's outer loop currently branches on `controller.is_connected()`. Add a third arm to
 the inner `select3` and a check in the disconnected branch so new credentials take effect
@@ -160,7 +175,7 @@ becomes a `select4` whose fourth arm is `credentials_rx.changed()`:
 
 `embassy_futures::select` has `select4`, so this needs no nesting.
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 Run from `variegated-comms-rs`:
 `env SSID=x PASSWORD=y VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 cargo build --release`
@@ -168,7 +183,7 @@ Run from `variegated-comms-rs`:
 Expected: 0 errors. The `env` vars are still set here because `config.rs` still declares
 them at this step; Task 2 removes both.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ---
 
@@ -180,7 +195,7 @@ them at this step; Task 2 removes both.
 - Modify: `crates/variegated-comms-firmware/build.rs` (any `rerun-if-env-changed` for them)
 - Modify: `variegated-rs/scripts/build-comms-firmware.sh` (the `SSID=x PASSWORD=y` export)
 
-- [ ] **Step 1: Remove the constants**
+- [x] **Step 1: Remove the constants**
 
 Delete from `config.rs`:
 
@@ -200,7 +215,7 @@ Leave a note in their place, because the absence is the interesting part:
 // until it is provisioned over Improv; see `wifi::connection_task`.
 ```
 
-- [ ] **Step 2: Remove them from the build environment**
+- [x] **Step 2: Remove them from the build environment**
 
 Delete the `SSID` and `PASSWORD` lines from `[env]` in `.cargo/config.toml`, and **nothing
 else from that file** — the rest is the user's working state, some of it uncommitted.
@@ -208,13 +223,13 @@ else from that file** — the rest is the user's working state, some of it uncom
 Check `build.rs` for `cargo::rerun-if-env-changed=SSID` / `PASSWORD` and delete those too;
 a rerun trigger on a variable nothing reads is a build that rebuilds for no reason.
 
-- [ ] **Step 3: Remove them from the build script**
+- [x] **Step 3: Remove them from the build script**
 
 In `variegated-rs/scripts/build-comms-firmware.sh`, drop `SSID=x PASSWORD=y` from the `env`
 invocation, keeping `VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1`. **That script is in the other
 repository** and needs its own commit.
 
-- [ ] **Step 4: Build, without the environment variables**
+- [x] **Step 4: Build, without the environment variables**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -231,7 +246,7 @@ Then the gated build, and read the log rather than the summary:
 grep -n "cargo::warning" /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs/target/comms-firmware-logs/comms-firmware.log
 ```
 
-- [ ] **Step 5: Confirm nothing in the tree still carries a network password**
+- [x] **Step 5: Confirm nothing in the tree still carries a network password**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -245,7 +260,7 @@ would mean writing a live Wi-Fi password into this document — which is the exa
 change exists to stop, and it is easy to do without noticing. If you want to check for a
 specific known-leaked value, do it from your shell history, not from a committed file.
 
-- [ ] **Step 6: Commit, both repositories**
+- [x] **Step 6: Commit, both repositories**
 
 ---
 
