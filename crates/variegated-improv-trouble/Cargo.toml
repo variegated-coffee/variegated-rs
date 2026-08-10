@@ -7,10 +7,11 @@ rust-version.workspace = true
 # Improv Wi-Fi provisioning: <https://www.improv-wifi.com/ble/>
 #
 # The wire codec has no BLE dependency and does not want one. Keeping `trouble-host`
-# out of this manifest is what lets the test suite run on the host without an
+# off the default path is what lets the test suite run on the host without an
 # `embassy-time` driver, a `critical-section` implementation or a feature dance --
 # trouble-host's own tests need all three (see its Cargo.toml dev-dependencies).
-# The GATT service added later goes behind an optional `ble` feature so that stays true.
+# The GATT service goes behind the optional `ble` feature so that stays true, and
+# `codec` and `handler` must never reach for anything behind it.
 
 # Deliberately NOT `harness = false`, unlike the sibling trouble crates. That setting
 # makes cargo expect the lib to provide its own `main`, and the unit tests below would
@@ -22,6 +23,35 @@ bench = false
 heapless.workspace = true
 defmt = { workspace = true, optional = true }
 
+# All optional, all `ble`. The note at the top of this file is the reason.
+trouble-host = { workspace = true, optional = true, features = ["gatt", "derive", "peripheral", "default-packet-pool"] }
+# **NOT `workspace = true`, and this is load bearing.**
+#
+# The workspace pins embassy-sync 0.8, because that is what esp-hal and esp-radio need.
+# trouble-host 0.6.0 depends on 0.7. Three versions already coexist in this workspace --
+# see the note on `trouble-host` in the workspace manifest, which says to keep channels
+# from crossing the boundary.
+#
+# `#[gatt_service]` and `#[gatt_server]` make that boundary sharper than a channel would.
+# Both expand to code containing literal `embassy_sync::blocking_mutex::raw::RawMutex`
+# paths, resolved in whichever crate invokes the macro. `AttributeTable`'s bound is
+# trouble-host's `RawMutex`, i.e. 0.7's. So the invoking crate's `embassy_sync` has to be
+# 0.7, and with 0.8 in scope the generated bound is a *different trait of the same name*
+# and the error says so twice.
+#
+# That is why both macros are invoked here rather than in the firmware, whose
+# `embassy_sync` is and must remain 0.8.
+embassy-sync = { version = "0.7", optional = true }
+embassy-time = { workspace = true, optional = true }
+# Named by path in the macro output: each characteristic wider than 8 bytes gets a
+# `static_cell::StaticCell` for its value storage.
+static_cell = { workspace = true, optional = true }
+# For the `ControllerCmdSync<Le…>` bounds `Peripheral::advertise` requires.
+bt-hci = { workspace = true, optional = true }
+
 [features]
 default = ["defmt"]
 defmt = ["dep:defmt", "heapless/defmt"]
+# The GATT service, the advertisement and the run loop. Off by default so `cargo test`
+# on the host stays a codec test.
+ble = ["dep:trouble-host", "dep:embassy-sync", "dep:embassy-time", "dep:static_cell", "dep:bt-hci"]

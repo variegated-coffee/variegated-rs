@@ -16,3 +16,12 @@
 //! log a user pastes into an issue.
 
 pub mod codec;
+pub mod handler;
+
+/// The BLE half: the GATT service, the advertisement and the loop that serves both.
+///
+/// Behind `ble` so the host test suite -- which has no `embassy-time` driver and no
+/// `critical-section` implementation -- keeps building. See the manifest, which also explains
+/// why the `#[gatt_*]` macros are invoked in this crate rather than in the firmware.
+#[cfg(feature = "ble")]
+pub mod service;

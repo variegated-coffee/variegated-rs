@@ -26,7 +26,15 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 variegated-schema-export = { path = "../../tools/schema-export" }
 
 [dependencies]
-trouble-host = { workspace = true, features = ["gatt", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
+# `derive` is what `#[gatt_service]`/`#[gatt_server]` live behind. Those macros are
+# invoked in `variegated-improv-trouble`, not here -- see that crate's manifest for the
+# embassy-sync version reason -- and cargo would unify the feature in from there anyway.
+# It is named here because this is the binary that needs it and a feature list that omits
+# it reads as "this firmware has no GATT server", which stopped being true.
+trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
+# Improv Wi-Fi provisioning. `ble` brings in the GATT service and the run loop; without it
+# this crate is just the packet codec, which is how its host tests stay runnable.
+variegated-improv-trouble = { path = "../variegated-improv-trouble", features = ["ble"] }
 variegated-comms-api-types = { path = "../variegated-comms-api-types" }
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
