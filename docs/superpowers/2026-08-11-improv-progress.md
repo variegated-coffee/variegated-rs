@@ -21,7 +21,7 @@ reboot the comms processor joins the network. Neither processor crashes.
 | 2 | `variegated-improv-trouble` codec crate, 19 host tests | done |
 | 3 | Wire types, credential store at key 1, link plumbing | done, hardware-verified |
 | 4 | `connection_task` takes credentials from the link; `env!` deleted | done, hardware-verified |
-| 5 | GATT service, advertising, `CONNS` 5→6, capabilities | **not started** |
+| 5 | GATT service, advertising, `CONNS` 5→6, capabilities | code complete, **not yet on hardware** |
 | 6 | Button hold, display symbol, single-boiler menu entry | **not started** |
 
 ## What exists now that plan 5 must build on
@@ -72,19 +72,35 @@ bytes; use this rather than `try_from`.
 **`SetWifiCredentials` is in the CLI palette** (`variegated-cli`), which is how a machine
 gets provisioned until plan 5 lands. `OpenWifiProvisioningWindow` is there too.
 
-## Still outstanding for plan 5
+## Plan 5, as built
 
-- Add `derive` to the workspace `trouble-host` features — `#[gatt_service]` lives behind it
-  and the firmware's current feature list has `gatt` but not `derive`.
-- `HostResources<DefaultPacketPool, 5, 2, 1>` → `<_, 6, 2, 1>`, and **rewrite the comment
-  block at `bin/main.rs:666-700`**, which states "This firmware never advertises -- there is
-  no `Peripheral`". That becomes false.
-- Destructure `peripheral` out of `Host` (currently `Host { central, runner, .. }`).
-- `connection_task` owns the `WifiController`; the candidate-credential and Wi-Fi-scan paths
-  must be arms of *that* task, reached by signal. Plan 4 deliberately built only the
-  credentials arm.
-- ATT MTU: a maximal `WIFI_SETTINGS` packet is ~99 bytes. The characteristic's backing buffer
-  must be `MAX_COMMAND_LEN`, not the 23-byte default MTU.
+Every item that was outstanding here is done; see
+[the plan](plans/2026-08-11-improv-gatt-service.md) and the four commits from
+`Improv GATT service, advertisement and RPC loop` onward. **Only the hardware pass
+(the plan's Task 4) remains.**
+
+Three things the plan did not predict, found while building it:
+
+- **Both `#[gatt_*]` macros had to move into `variegated-improv-trouble`.** They expand to
+  literal `embassy_sync::` paths resolved in the invoking crate; trouble-host 0.6.0 wants
+  embassy-sync 0.7 and the firmware's is 0.8, so a `#[gatt_server]` in the firmware generates
+  an `M: RawMutex` bound naming a different trait of the same name. The crate therefore owns
+  the server and the whole advertise/accept/serve loop, and pins `embassy-sync = "0.7"`
+  explicitly — *not* `workspace = true`. The firmware supplies a `Peripheral` and an
+  `ImprovHandler` and names no trouble-host generics.
+- **`run()` is not generic over `PacketPool`.** `#[gatt_server]` defaults `packet_type` to the
+  concrete `DefaultPacketPool`, so the parameter had exactly one inhabitant.
+- **Long writes do not reassemble in trouble-host 0.6.0.** `PrepareWrite` is classified as
+  `GattEvent::Other`, and `handle_prepare_write` passes offset 0 for every chunk regardless of
+  the offset sent. Provisioning therefore depends on MTU negotiation, which every real client
+  does (Chrome 517, iOS 185, against a ~99-byte maximal packet). A truncated packet fails the
+  codec's length check and surfaces as `InvalidRpc` — the first thing to suspect if
+  provisioning works from a laptop and not from a phone.
+
+Measured cost of the whole service: `.bss` 249016 → 253040, `.stack` 94232 → 90144. Only 512
+bytes of that is the sixth connection slot; the rest is the 20-entry attribute table and the
+two characteristic `StaticCell`s. On this chip `.stack` is the SRAM remainder, so a second
+GATT service would cost the same way.
 
 ## Two latent bugs found and fixed on the way — read these before debugging anything
 
