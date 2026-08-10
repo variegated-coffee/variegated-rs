@@ -427,7 +427,14 @@ pub struct ShotLogList {
 ///   had to know which of two places to look. Version 1 files are **not readable** by this
 ///   code and cannot be detected either -- an unversioned file's first byte is an
 ///   annotation count, which is indistinguishable from a version number.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 2;
+/// * `3` -- [`GroupSample`] gained `output_temperature`, `output_electrical_conductivity`
+///   and `extraction_rate`, which [`crate::GroupStatus`] had carried all along without them
+///   ever reaching the card. They sit after `temperature`, in the middle of the sample
+///   stream rather than at its end, so version 2 files decode as nonsense rather than
+///   failing: a version 3 decoder would read three values past the end of each version 2
+///   `GroupSample` and stay desynchronized for the rest of the file. Unlike version 1, that
+///   is *detected* -- a version 2 file says so in its first byte and is refused.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 3;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -596,6 +603,9 @@ pub struct GroupSample {
     pub output_weight: Option<WeightType>,
     pub pressure: Option<PressureType>,
     pub temperature: Option<TemperatureType>,
+    pub output_temperature: Option<TemperatureType>,
+    pub output_electrical_conductivity: Option<ECType>,
+    pub extraction_rate: Option<ExtractionRateType>,
     pub pump_output: Output,
     pub shot_state: Option<ShotState>,
     pub extracted_solids: Option<ExtractedSolidsType>,
@@ -799,6 +809,187 @@ mod shot_annotation_tests {
             .set(ShotAnnotationKey::DoseWeight, ShotAnnotationValue::Number(18.3))
             .unwrap();
         assert_eq!(annotations.dose_weight(), Some(18.3));
+    }
+}
+
+/// That [`GroupSample`] carries what it claims to, and that the bytes it carries it in have
+/// not moved since this format version was minted.
+///
+/// Requires `serde`, since both are statements about the encoding rather than about the
+/// types.
+#[cfg(all(test, feature = "serde"))]
+mod shot_log_sample_tests {
+    use super::*;
+    use crate::control::group::ShotState;
+
+    /// One fully-populated shot, shared by both tests below so they describe the same
+    /// record -- the golden array is only meaningful as the encoding of a fixture that
+    /// cannot drift away from it.
+    ///
+    /// Every field is `Some` and every value distinct, so a pair swapped between two
+    /// same-typed neighbours (`temperature` and `output_temperature`, say) shows up rather
+    /// than comparing equal by luck. Every value is exactly representable in binary
+    /// floating point, so the assertions are equality on exact round trips, not on rounded
+    /// ones.
+    ///
+    /// Two samples, and a water-tap map after the group map, so that anything encoded
+    /// *after* a `GroupSample` exists to be checked -- a sample that consumed one field too
+    /// many or too few corrupts its successors, not itself.
+    fn canonical_shot() -> ShotLog {
+        let mut group_samples = FnvIndexMap::<GroupIndex, GroupSample, MAX_GROUPS>::new();
+        group_samples
+            .insert(
+                1,
+                GroupSample {
+                    is_brewing: true,
+                    brew_time: Some(Duration::from_millis(25_500)),
+                    brew_input_volume: Some(41.5),
+                    input_flow_rate: Some(2.25),
+                    input_volume: Some(43.0),
+                    output_flow_rate: Some(1.75),
+                    output_weight: Some(36.25),
+                    pressure: Some(8.5),
+                    temperature: Some(93.5),
+                    output_temperature: Some(87.25),
+                    output_electrical_conductivity: Some(0.625),
+                    extraction_rate: Some(1.125),
+                    pump_output: Output::FixedDutyCycle(72),
+                    shot_state: Some(ShotState::PostFirstDrop),
+                    extracted_solids: Some(7.75),
+                    output_volume: Some(38.5),
+                },
+            )
+            .unwrap();
+
+        let mut water_tap_samples =
+            FnvIndexMap::<WaterTapIndex, WaterTapSample, MAX_WATER_TAPS>::new();
+        water_tap_samples
+            .insert(2, WaterTapSample { is_dispensing: true })
+            .unwrap();
+
+        let mut shot = ShotLog::new(ShotLogMetadata {
+            annotations: ShotAnnotations::new(),
+            shot_type: ShotType::Manual,
+            group_index: 1,
+            routine_metadata: None,
+            start_time_millis: 5_000,
+            end_time_millis: Some(25_500),
+            final_status: ShotStatus::Completed,
+        });
+        shot.samples.push(ShotLogSample {
+            timestamp_millis: 1_500,
+            boiler_samples: Default::default(),
+            group_samples,
+            water_tap_samples,
+        });
+        // A second sample, so a desync inside the first one has somewhere to show up.
+        shot.samples.push(ShotLogSample {
+            timestamp_millis: 1_600,
+            boiler_samples: Default::default(),
+            group_samples: Default::default(),
+            water_tap_samples: Default::default(),
+        });
+        shot
+    }
+
+    /// Every field of a populated [`GroupSample`] survives an encode/decode round trip.
+    ///
+    /// Narrower than it looks, and worth being clear about: encoder and decoder share one
+    /// struct definition here, so this cannot catch a *change* of shape -- postcard is
+    /// symmetric, and a reordered or extended `GroupSample` round trips against itself
+    /// perfectly. What it does catch is asymmetry: a `#[serde(skip)]` or a renamed field
+    /// that silently drops a value on the way out and yields `Default` on the way back,
+    /// which is exactly how a field gets added to the struct and quietly never written.
+    /// The guard against shape changes is `the_encoding_has_not_moved_under_this_version`
+    /// below.
+    #[test]
+    fn a_populated_group_sample_round_trips() {
+        let shot = canonical_shot();
+        let encoded = postcard::to_allocvec(&shot).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(&encoded).unwrap();
+
+        assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
+        assert_eq!(decoded.samples.len(), 2);
+
+        let group = decoded.samples[0].group_samples.get(&1).expect("group 1");
+        assert_eq!(group.is_brewing, true);
+        assert_eq!(group.brew_time, Some(Duration::from_millis(25_500)));
+        assert_eq!(group.brew_input_volume, Some(41.5));
+        assert_eq!(group.input_flow_rate, Some(2.25));
+        assert_eq!(group.input_volume, Some(43.0));
+        assert_eq!(group.output_flow_rate, Some(1.75));
+        assert_eq!(group.output_weight, Some(36.25));
+        assert_eq!(group.pressure, Some(8.5));
+        assert_eq!(group.temperature, Some(93.5));
+        assert_eq!(group.output_temperature, Some(87.25));
+        assert_eq!(group.output_electrical_conductivity, Some(0.625));
+        assert_eq!(group.extraction_rate, Some(1.125));
+        assert_eq!(group.pump_output, Output::FixedDutyCycle(72));
+        assert_eq!(group.shot_state, Some(ShotState::PostFirstDrop));
+        assert_eq!(group.extracted_solids, Some(7.75));
+        assert_eq!(group.output_volume, Some(38.5));
+
+        // Encoded after the group map, so these only survive if the group sample consumed
+        // exactly its own bytes and not one field more or less.
+        assert_eq!(
+            decoded.samples[0].water_tap_samples.get(&2).map(|t| t.is_dispensing),
+            Some(true)
+        );
+        assert_eq!(decoded.samples[1].timestamp_millis, 1_600);
+    }
+
+    /// The bytes version 3 produces for [`canonical_shot`], captured once when version 3
+    /// was minted.
+    ///
+    /// Not decoration: these bytes are the only thing in the tree that a round-trip test
+    /// cannot replace. Encoder and decoder always agree with each other, so shape changes
+    /// are invisible to every symmetric test -- but they are *not* invisible to a stored
+    /// shot written by an earlier build, which is what this array stands in for.
+    const GOLDEN_V3: &[u8] = &[
+        0x03, 0x00, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01, 0x9c, 0xc7, 0x01, 0x01,
+        0x02, 0xdc, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5,
+        0xee, 0x01, 0x01, 0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40,
+        0x01, 0x00, 0x00, 0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00,
+        0x00, 0x11, 0x42, 0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb,
+        0x42, 0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01,
+        0x00, 0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8,
+        0x40, 0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x02, 0x01, 0xc0, 0x0c, 0x00,
+        0x00, 0x00, 0x00,
+    ];
+
+    /// A shot stored by this version still decodes, byte for byte, to what it meant.
+    ///
+    /// This is the test that fires when someone adds, removes, reorders or retypes a field
+    /// anywhere reachable from [`ShotLog`] without bumping [`SHOT_LOG_FORMAT_VERSION`] --
+    /// including in a type this module does not own, such as [`Output`] or [`ShotState`],
+    /// where nothing else would connect the change to the shot log at all.
+    ///
+    /// **If this fails, the fix is almost never to regenerate the array.** A failure means
+    /// the bytes moved, and every shot already on a card was written in the old layout. The
+    /// two legitimate responses are to bump `SHOT_LOG_FORMAT_VERSION` and capture a fresh
+    /// golden array beside this one, or to revert the change. Quietly pasting in new bytes
+    /// converts a caught format break into a silent one, which is the entire failure this
+    /// exists to prevent.
+    #[test]
+    fn the_encoding_has_not_moved_under_this_version() {
+        let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
+        assert_eq!(
+            encoded.as_slice(),
+            GOLDEN_V3,
+            "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
+             see this test's doc comment before touching the golden array"
+        );
+
+        // Decoding the frozen bytes as well as comparing them: the assertion above proves
+        // the writer has not moved, this proves the reader still understands what an
+        // earlier build wrote.
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V3).unwrap();
+        assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
+        let group = decoded.samples[0].group_samples.get(&1).expect("group 1");
+        assert_eq!(group.temperature, Some(93.5));
+        assert_eq!(group.output_temperature, Some(87.25));
+        assert_eq!(group.output_electrical_conductivity, Some(0.625));
+        assert_eq!(group.extraction_rate, Some(1.125));
     }
 }
 
