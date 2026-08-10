@@ -1,5 +1,22 @@
 # Improv codec crate Implementation Plan
 
+> **Status: complete, 2026-08-10.** 19 tests pass via `scripts/test-host.sh`; the crate
+> builds for `riscv32imac-unknown-none-elf` and the full comms firmware still builds with 0
+> errors.
+>
+> **The suite earned its keep.** `refuses_a_string_longer_than_a_length_byte_can_describe`
+> failed on the first run: `build_response` checked buffer capacity before representability,
+> so a string too long for the format's length byte -- which no buffer can hold -- reported
+> as `BufferTooSmall` and would have sent a caller off to enlarge something that was never
+> at fault. Investigating that surfaced a second, worse bug the plan had not thought to
+> test: only *individual* strings were length-checked, so four individually legal 100-byte
+> strings would truncate `out[1]` from 404 to 148 and emit a frame claiming a length it did
+> not have, silently. Both are fixed; `BuildError::PayloadTooLong` and
+> `refuses_a_payload_whose_total_will_not_fit_the_length_byte` are the additions.
+>
+> `heapless::String::try_from(&str)` exists in 0.9.3 — the fallback named in Task 3 Step 4
+> was not needed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Create `variegated-improv-trouble` containing the Improv wire codec — packet parse, response build, checksum, and the protocol's state/error/command enums — with a host-run test suite.
@@ -55,7 +72,7 @@ and a comment saying why the other name is absent.
 - Consumes: nothing.
 - Produces: the crate `variegated_improv_trouble`, `no_std`, with `pub mod codec;`.
 
-- [ ] **Step 1: Write the manifest**
+- [x] **Step 1: Write the manifest**
 
 `crates/variegated-improv-trouble/Cargo.toml`:
 
@@ -89,7 +106,7 @@ default = ["defmt"]
 defmt = ["dep:defmt", "heapless/defmt"]
 ```
 
-- [ ] **Step 2: Write the crate root**
+- [x] **Step 2: Write the crate root**
 
 `crates/variegated-improv-trouble/src/lib.rs`:
 
@@ -114,7 +131,7 @@ defmt = ["dep:defmt", "heapless/defmt"]
 pub mod codec;
 ```
 
-- [ ] **Step 3: Add a placeholder codec module so the crate compiles**
+- [x] **Step 3: Add a placeholder codec module so the crate compiles**
 
 `crates/variegated-improv-trouble/src/codec.rs`:
 
@@ -122,7 +139,7 @@ pub mod codec;
 //! Improv packet codec.
 ```
 
-- [ ] **Step 4: Register the crate in the workspace**
+- [x] **Step 4: Register the crate in the workspace**
 
 In `variegated-comms-rs/Cargo.toml`, add to `members` after
 `"crates/variegated-scale-trouble-driver",`:
@@ -131,14 +148,14 @@ In `variegated-comms-rs/Cargo.toml`, add to `members` after
     "crates/variegated-improv-trouble",
 ```
 
-- [ ] **Step 5: Verify it builds for the firmware target**
+- [x] **Step 5: Verify it builds for the firmware target**
 
 Run: `cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs && cargo build -p variegated-improv-trouble`
 
 Expected: `Finished`, 0 errors. (No `--target`; the workspace config defaults to
 `riscv32imac-unknown-none-elf`.)
 
-- [ ] **Step 6: Verify the host test command works**
+- [x] **Step 6: Verify the host test command works**
 
 Run:
 ```bash
@@ -152,7 +169,7 @@ which has no host target here.
 **If this prints nothing about running tests, check `harness` in the manifest** — that is the
 failure mode this task's Global Constraint exists to prevent.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -186,7 +203,7 @@ would silently never run."
   - `pub const CAPABILITY_IDENTIFY: u8 = 0x01;` `CAPABILITY_DEVICE_INFO: u8 = 0x02;` `CAPABILITY_SCAN_WIFI: u8 = 0x04;`
   - `pub fn service_data(state: State, capabilities: u8) -> [u8; 6]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `codec.rs`:
 
@@ -229,7 +246,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 Run:
 ```bash
@@ -238,7 +255,7 @@ cargo test -p variegated-improv-trouble --target aarch64-apple-darwin -Z build-s
 ```
 Expected: compile failure — `cannot find type State in this scope` and similar.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert above the `#[cfg(test)]` block in `codec.rs`:
 
@@ -330,12 +347,12 @@ pub fn service_data(state: State, capabilities: u8) -> [u8; 6] {
 }
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run the same command as Step 2.
 Expected: `test result: ok. 3 passed`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -369,7 +386,7 @@ to send one, and refusing surfaces as UnknownRpc instead of silence."
   - `impl ParseError { pub fn error_state(&self) -> ErrorState }`
   - `pub fn parse_command(packet: &[u8]) -> Result<Request, ParseError>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add these to the existing `mod tests`:
 
@@ -477,11 +494,11 @@ Add these to the existing `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 Run the host test command. Expected: compile failure, `cannot find function parse_command`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert above the `#[cfg(test)]` block:
 
@@ -639,7 +656,7 @@ fn to_string<const N: usize>(bytes: &[u8]) -> Result<heapless::String<N>, ParseE
 }
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run the host test command.
 Expected: `test result: ok. 12 passed`.
@@ -648,7 +665,7 @@ If `heapless::String::try_from(&str)` does not resolve, use
 `heapless::String::from_str(text)` with `use core::str::FromStr;` instead — heapless 0.9
 provides one of the two and the plan is written against `try_from`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -678,7 +695,7 @@ the debug bus and the TCP debug server."
   - `pub enum BuildError { BufferTooSmall, StringTooLong }`
   - `pub fn build_response(command: Command, strings: &[&str], out: &mut [u8]) -> Result<usize, BuildError>`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `mod tests`:
 
@@ -754,11 +771,11 @@ Add to `mod tests`:
     }
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 Run the host test command. Expected: `cannot find function build_response`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Insert above the `#[cfg(test)]` block:
 
@@ -827,19 +844,19 @@ pub fn build_response(
 }
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 Run the host test command.
 Expected: `test result: ok. 18 passed`.
 
-- [ ] **Step 5: Confirm the crate still builds for the firmware target**
+- [x] **Step 5: Confirm the crate still builds for the firmware target**
 
 Run: `cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs && cargo build -p variegated-improv-trouble`
 
 Expected: 0 errors. This is the check that the `defmt` feature path — which the host test
 run disables — still compiles.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -871,7 +888,7 @@ incantation is not something anyone will retype correctly, and a suite nobody ru
 that rots. `variegated-rs/scripts/test-host.sh` exists for exactly this reason and says so in
 its header.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 `variegated-comms-rs/scripts/test-host.sh`:
 
@@ -909,7 +926,7 @@ run "variegated-improv-trouble" -p variegated-improv-trouble --no-default-featur
 exit $RC
 ```
 
-- [ ] **Step 2: Make it executable and run it**
+- [x] **Step 2: Make it executable and run it**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -921,7 +938,7 @@ Expected: `test result: ok. 18 passed` and exit 0. Confirm the exit status with
 `echo $?` — `variegated-rs`'s version of this script had a bug where a failing
 build still exited 0, and the `RC` accumulator above is the fix that was needed there.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
@@ -944,7 +961,7 @@ on a failing build."
 | Plan | Build-order steps | Scope | Repo | Status |
 |---|---|---|---|---|
 | 1 | 1–2 | Settings keyspace, Bluetooth associations moved | `variegated-rs` | **done**, hardware-verified |
-| 2 (this) | 3 | Improv codec crate + host tests | `variegated-comms-rs` | this plan |
+| 2 (this) | 3 | Improv codec crate + host tests | `variegated-comms-rs` | **done** |
 | 3 | 4–6 | Wire types, `DEBUG_PROTOCOL_VERSION` bump, credential store at key 1, `variegated-comms` plumbing, `connection_task` restructured, `env!` deleted | both | |
 | 4 | 7–8 | GATT service, advertising, `CONNS` 5→6, Identify / Device Info / Scan | `variegated-comms-rs` | |
 | 5 | 9 | Button hold, display symbol, single-boiler menu entry, CLI palette | `variegated-rs` | |
