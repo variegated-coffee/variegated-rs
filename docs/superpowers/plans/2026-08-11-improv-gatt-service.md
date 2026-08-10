@@ -958,13 +958,14 @@ git -C variegated-comms-rs commit -m "Improv GATT service, advertisement and RPC
 
 **Files:**
 - Modify: `crates/variegated-comms-firmware/src/channels.rs`
+- Modify: `crates/variegated-comms-firmware/src/application_processor/mod.rs:476-494`
 - Create: `crates/variegated-comms-firmware/src/improv.rs`
 - Modify: `crates/variegated-comms-firmware/src/lib.rs`
 - Modify: `crates/variegated-comms-firmware/src/bin/main.rs:294-304, 671-709, 759, 770-781`
 
 **Interfaces:**
-- Consumes: everything Tasks 1 and 2 produced; `channels::{WIFI_PROVISIONING_WINDOW, WIFI_IPV4, NO_IPV4, MACHINE_DEFINITION, MachineCommandSender}`
-- Produces: `channels::{IMPROV_STATE, improv_state}`; `improv::improv_task`
+- Consumes: everything Tasks 1 and 2 produced; `channels::{WIFI_PROVISIONING_WINDOW, WIFI_IPV4, NO_IPV4, MACHINE_DEFINITION}`
+- Produces: `channels::{IMPROV_STATE, improv_state, ImprovReport, IMPROV_REPORT_CHANNEL}`; `improv::improv_task`
 
 - [ ] **Step 1: Mirror the state for `CommsStatus`**
 
@@ -996,7 +997,96 @@ pub fn improv_state() -> variegated_controller_types::wifi::ImprovState {
 
 Add `AtomicU8` to the `portable_atomic` import at the top of the file.
 
-- [ ] **Step 2: Write `improv.rs` — the handler**
+- [ ] **Step 2: Add the channel Improv reports upstream on**
+
+Still in `channels.rs`, beside `IMPROV_STATE`:
+
+```rust
+/// What the Improv service has to tell the application processor.
+///
+/// **Not `MachineCommand`, and the distinction is load-bearing.** `MachineCommand` is the
+/// *inbound* vocabulary -- what a client asks the machine to do -- and it reaches this
+/// processor from HTTP, the WebSocket, ESPHome and the TCP debug port. These two are the
+/// comms processor *reporting* something its own radio established. The application
+/// processor stores a provisioned credential without validating it, and the only thing that
+/// makes that correct is that it arrived by this route: see the comment on the
+/// `SetWifiCredentials` arm in `dual_boiler_single_group.rs`, which says so in as many words.
+/// Folding these into `MachineCommand` would make a credential anybody put on the command
+/// channel indistinguishable from one a radio proved.
+#[derive(Clone, Debug)]
+pub enum ImprovReport {
+    /// These associated. Persist them.
+    Provisioned(variegated_controller_types::wifi::WifiCredentials),
+    /// A client asked the machine to identify itself.
+    Identify,
+}
+
+/// A `Channel`, not a `Signal`, and depth 2.
+///
+/// `Signal` is latest-wins, and the one message here whose loss is expensive is
+/// [`ImprovReport::Provisioned`] -- an `Identify` arriving behind it would silently discard
+/// the credential, leaving a machine that joined a network and never remembered it while the
+/// phone said it worked. Two slots is one of each; the producer uses `try_send` and never
+/// awaits, because it runs on a BLE connection's event loop.
+pub static IMPROV_REPORT_CHANNEL: Channel<CriticalSectionRawMutex, ImprovReport, 2> =
+    Channel::new();
+```
+
+- [ ] **Step 3: Forward it up the link**
+
+In `application_processor/mod.rs`, the sender task's `select4`. The report joins the
+`command_receiver` arm rather than nesting under the timer: both carry traffic bound for the
+controller, and a provisioning report is the one thing on this link that a user is watching in
+real time. It polls first because it is rare — at most a couple per window — so it cannot
+starve the commands beside it.
+
+```rust
+            match select4(
+                COMMS_STATUS_SIGNAL.wait(),
+                select(IMPROV_REPORT_CHANNEL.receive(), command_receiver.receive()),
+                sensor_reading_receiver.receive(),
+                select(
+```
+
+`Either4::Second(machine_command)` becomes `Either4::Second(Either::Second(machine_command))`,
+body unchanged. Add:
+
+```rust
+                // The Improv service reporting what its radio established. Distinct from a
+                // `MachineCommand` on purpose -- see the note on `ImprovReport`.
+                Either4::Second(Either::First(report)) => {
+                    let message = match report {
+                        ImprovReport::Provisioned(credentials) => {
+                            // Not logged, not even as an SSID. This is the one line in this
+                            // task that holds a live password.
+                            log_info!("Reporting provisioned Wi-Fi credentials");
+                            CommsProcessorToApplicationProcessorMessage::WifiCredentialsProvisioned(
+                                credentials,
+                            )
+                        }
+                        ImprovReport::Identify => {
+                            CommsProcessorToApplicationProcessorMessage::WifiProvisioningIdentify
+                        }
+                    };
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if tx.write_async(&serialized_message).await.is_err() {
+                                log_error!("Failed to write Improv report to UART");
+                            }
+                        }
+                        // Not `.expect(..)`: the SSID and password inside came off a radio
+                        // from whoever is in range, and taking the machine down over a
+                        // malformed one would hand anyone with a BLE radio a way to do it.
+                        Err(_) => log_error!("Failed to serialize Improv report"),
+                    }
+                }
+```
+
+Both wire variants and both application-processor arms already exist, from plan 3
+(`variegated-comms/src/lib.rs:559-581`). This is the producer they have been waiting for; no
+protocol change and no version bump.
+
+- [ ] **Step 4: Write `improv.rs` — the handler**
 
 ```rust
 //! Improv Wi-Fi provisioning over BLE.
@@ -1009,15 +1099,15 @@ Add `AtomicU8` to the `portable_atomic` import at the top of the file.
 //! # The password never reaches a log from here
 //!
 //! [`MachineHandler::provision`] is handed one. It goes into a `WifiCredentials`, which
-//! elides it in both `Debug` and `Format`, and into `MACHINE_COMMAND_CHANNEL`, whose sender
-//! logs only a byte count. Nothing between those two points formats the argument.
+//! elides it in both `Debug` and `Format`, and then into [`ImprovReport::Provisioned`], whose
+//! forwarding arm logs no field of it at all. Nothing between those two points formats the
+//! argument.
 
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use portable_atomic::Ordering;
 use trouble_host::prelude::*;
 use variegated_controller_types::wifi::wifi_credentials;
-use variegated_controller_types::MachineCommand;
 use variegated_improv_trouble::codec::State;
 use variegated_improv_trouble::handler::{
     DeviceInfo, ImprovHandler, Network, NetworkList, ProvisionError, Url,
@@ -1026,9 +1116,9 @@ use variegated_improv_trouble::service::{run, ImprovServer};
 use variegated_log::{log_error, log_info, log_warn};
 
 use crate::channels::{
-    MachineCommandSender, IMPROV_STATE, MACHINE_DEFINITION, NO_IPV4, WIFI_CANDIDATE,
-    WIFI_CANDIDATE_RESULT, WIFI_IPV4, WIFI_PROVISIONING_WINDOW, WIFI_SCAN_REQUEST,
-    WIFI_SCAN_RESULT,
+    ImprovReport, IMPROV_REPORT_CHANNEL, IMPROV_STATE, MACHINE_DEFINITION, NO_IPV4,
+    WIFI_CANDIDATE, WIFI_CANDIDATE_RESULT, WIFI_IPV4, WIFI_PROVISIONING_WINDOW,
+    WIFI_SCAN_REQUEST, WIFI_SCAN_RESULT,
 };
 
 /// How long to wait for `connection_task` to report on a candidate.
@@ -1049,7 +1139,6 @@ const ADDRESS_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_NAME_LEN: usize = 29;
 
 struct MachineHandler {
-    command_sender: MachineCommandSender,
     device_name: heapless::String<MAX_NAME_LEN>,
 }
 
@@ -1074,23 +1163,19 @@ impl ImprovHandler for MachineHandler {
             return Err(ProvisionError::UnableToConnect);
         }
 
-        // Persisted by the application processor, which is the only side with flash. Sent as
-        // a `MachineCommand` rather than as `WifiCredentialsProvisioned`, which is the wire
-        // variant the design named: this channel already exists, is already drained, and
-        // already sits on the second-highest-priority arm of the sender's `select`, whereas a
-        // dedicated variant would need a sixth arm nested four levels deep and would land
-        // *below* discovery-scan results. Both routes converge on the same
-        // `MachineCommand::SetWifiCredentials` inside `variegated_comms`.
+        // Persisted by the application processor, which is the only side with flash. Reported
+        // rather than commanded: `WifiCredentialsProvisioned` is what tells that processor
+        // these came off a radio that associated with them, which is what makes storing them
+        // unvalidated correct. See the note on `ImprovReport`.
         //
-        // `try_send`, because this runs on a BLE connection's event loop. A drop here means
-        // the network is joined but not remembered, so it is logged at error -- the phone
-        // will have said it worked.
-        if self
-            .command_sender
-            .try_send(MachineCommand::SetWifiCredentials(candidate))
+        // `try_send`, because this runs on a BLE connection's event loop and must not block.
+        // A drop here means the network is joined but never remembered, so it is logged at
+        // error -- the phone will already have said it worked.
+        if IMPROV_REPORT_CHANNEL
+            .try_send(ImprovReport::Provisioned(candidate))
             .is_err()
         {
-            log_error!("Provisioned Wi-Fi credentials dropped: command channel full");
+            log_error!("Provisioned Wi-Fi credentials dropped: report channel full");
         }
 
         Ok(local_url().await)
@@ -1117,8 +1202,8 @@ impl ImprovHandler for MachineHandler {
 
     fn identify(&mut self) {
         log_info!("Improv identify requested");
-        if self.command_sender.try_send(MachineCommand::IdentifyMachine).is_err() {
-            log_warn!("Dropped an identify request: command channel full");
+        if IMPROV_REPORT_CHANNEL.try_send(ImprovReport::Identify).is_err() {
+            log_warn!("Dropped an identify request: report channel full");
         }
     }
 
@@ -1187,7 +1272,7 @@ async fn device_name() -> heapless::String<MAX_NAME_LEN> {
 `Url::new()` and `write_fmt` need `heapless::String`'s `core::fmt::Write` impl, which
 heapless 0.9 provides.
 
-- [ ] **Step 3: Write `improv.rs` — the task**
+- [ ] **Step 5: Write `improv.rs` — the task**
 
 ```rust
 /// Advertise the Improv service for as long as the application processor says to.
@@ -1203,7 +1288,6 @@ pub async fn improv_task(
         ExternalController<esp_radio::ble::controller::BleConnector<'static>, 20>,
         DefaultPacketPool,
     >,
-    command_sender: MachineCommandSender,
 ) {
     log_info!("Improv provisioning task started, window closed");
 
@@ -1236,10 +1320,7 @@ pub async fn improv_task(
             }
         };
 
-        let mut handler = MachineHandler {
-            command_sender,
-            device_name: name.clone(),
-        };
+        let mut handler = MachineHandler { device_name: name.clone() };
 
         match select3(
             Timer::after(Duration::from_millis(duration_ms as u64)),
@@ -1270,7 +1351,7 @@ pub async fn improv_task(
 The `select3` arms are ordered so the timer and the close request both outrank `run`; `run`
 never completes normally, so the order only matters for the two that do.
 
-- [ ] **Step 4: Register the module**
+- [ ] **Step 6: Register the module**
 
 In `lib.rs`, alphabetically between `http` and `instrumentation`:
 
@@ -1278,7 +1359,7 @@ In `lib.rs`, alphabetically between `http` and `instrumentation`:
 pub mod improv;
 ```
 
-- [ ] **Step 5: Make room for a peripheral connection**
+- [ ] **Step 7: Make room for a peripheral connection**
 
 In `main.rs`, at the `HostResources` block. `CONNS` 5 → 6, and the `ADV_SETS` bullet is now
 false and must be rewritten rather than left:
@@ -1311,7 +1392,7 @@ and replace the `ADV_SETS` bullet:
     //   landed; the count was already right, the reason was not.)
 ```
 
-- [ ] **Step 6: Destructure the peripheral and spawn the task**
+- [ ] **Step 8: Destructure the peripheral and spawn the task**
 
 ```rust
     // Build BLE host
@@ -1322,9 +1403,9 @@ and after the `ble_slot_task` loop, before `log_info!("BLE tasks spawned")`:
 
 ```rust
     // Idle until the application processor opens a window, which it will not do until
-    // someone has held a button on the machine. `command_channel` is how a provisioned
-    // credential gets back to the processor that can store it.
-    spawn_or_report!(spawner, "improv", improv::improv_task(peripheral, command_channel.sender()));
+    // someone has held a button on the machine. It reports what it learns on
+    // `IMPROV_REPORT_CHANNEL`, which is a static, so it needs nothing but the radio.
+    spawn_or_report!(spawner, "improv", improv::improv_task(peripheral));
 ```
 
 Add `improv::improv_task` to the existing `use variegated_comms_firmware::{ … }` block at
@@ -1335,7 +1416,7 @@ Add `improv::improv_task` to the existing `use variegated_comms_firmware::{ … 
 constant is `0x001e`. It is already in scope in `main.rs`; `improv.rs` gets it from its own
 `use trouble_host::prelude::*;`.
 
-- [ ] **Step 7: Report the real state**
+- [ ] **Step 9: Report the real state**
 
 In `comms_status_signaller_task`, replace the hardcoded field and its comment:
 
@@ -1345,7 +1426,7 @@ In `comms_status_signaller_task`, replace the hardcoded field and its comment:
             improv: channels::improv_state(),
 ```
 
-- [ ] **Step 8: Build**
+- [ ] **Step 10: Build**
 
 ```bash
 scripts/build-comms-firmware.sh
@@ -1355,7 +1436,7 @@ Expected: PASS. Check the reported `.bss`/`.stack` against the previous build �
 bump should cost roughly 576 bytes of stack and no more; anything much larger means the GATT
 server's attribute table landed somewhere unintended.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git -C variegated-comms-rs add crates/variegated-comms-firmware
@@ -1458,7 +1539,7 @@ git -C variegated-comms-rs commit -m "Record plan 5's outcome"
 
 ## Where this departs from the design
 
-The design was written before any of the code existed. Four things it says are wrong or
+The design was written before any of the code existed. Three things it says are wrong or
 under-specified, and this plan overrides it on each.
 
 1. **Steps 7 and 8 of the build order are one plan here.** The design lands
@@ -1468,23 +1549,13 @@ under-specified, and this plan overrides it on each.
    buttons that do nothing. Splitting it properly would mean shipping `0x01`, then changing
    it — churn for an intermediate state nobody wants. All three capabilities land together.
 
-2. **A provisioned credential travels as `MachineCommand::SetWifiCredentials`, not as
-   `CommsProcessorToApplicationProcessorMessage::WifiCredentialsProvisioned`.** Same for
-   `IdentifyMachine` in place of `WifiProvisioningIdentify`. `variegated_comms` maps the
-   dedicated variants onto exactly those two commands (`lib.rs:559-581`), so the two routes
-   converge — but the command channel already exists, is already drained, and sits on the
-   second-highest-priority arm of the sender's `select`, while a dedicated variant would need
-   a sixth source nested four levels deep and would land *below* discovery-scan results, which
-   the code there explicitly calls the most droppable thing on the link. The AP-side arms stay
-   as they are; they cost nothing and they are the documented alternative.
-
-3. **`ImprovHandler::provision` returns `Option<Url>`, not a `UrlList`.** Improv's result
+2. **`ImprovHandler::provision` returns `Option<Url>`, not a `UrlList`.** Improv's result
    frame carries a list, but a client uses at most one entry and this machine has one address.
    And `scan` is infallible rather than `Result<_, ScanError>`: "no networks", "the scan
    failed" and "the radio was busy" all produce the same bare terminator frame, so the error
    would be constructed and then discarded.
 
-4. **`Command::GetCurrentState` does not exist**, so "WIFI_SETTINGS and GET_CURRENT_STATE
+3. **`Command::GetCurrentState` does not exist**, so "WIFI_SETTINGS and GET_CURRENT_STATE
    only" describes an RPC that cannot be sent. `improv.h` gives `0x02` two names; over BLE the
    current state is a characteristic, so an RPC of `0x02` can only be Identify. The codec
    already records this at length.
@@ -1509,9 +1580,12 @@ under-specified, and this plan overrides it on each.
    central side never needs more than five at once. If a scale reconnect storm coincides with
    an open window, a connection will be refused, and it will be refused at connect time rather
    than at compile time.
-5. **`MACHINE_COMMAND_CHANNEL` holds 8.** A provisioned credential is `try_send`. If the
-   channel is full at that instant the network is joined but never persisted, and the phone
-   will already have said it worked. Logged at error; not otherwise recoverable from here.
+5. **`IMPROV_REPORT_CHANNEL` holds 2 and the send is non-blocking.** If both slots are full
+   at that instant the network is joined but never persisted, and the phone will already have
+   said it worked. Two is sized for one of each variant, which is all a single connection can
+   produce before the sender task drains it; a deeper queue would not help, because a full
+   queue here means the UART sender is wedged and nothing behind it is moving either. Logged
+   at error; not otherwise recoverable from here.
 6. **The device name is user-supplied.** It reaches an advertising payload and a
    `GET_DEVICE_INFO` result. Both paths bound it — 29 bytes for the scan response,
    `build_response`'s length checks for the RPC — and `respond` returns rather than panicking
