@@ -236,6 +236,43 @@ pub static WIFI_CREDENTIALS_RECEIVED: AtomicBool = AtomicBool::new(false);
 /// knows a shot is in progress -- so anything signalled here has been vetted.
 pub static WIFI_PROVISIONING_WINDOW: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 
+/// A candidate credential Improv wants tried, and the verdict.
+///
+/// Two signals rather than a channel, because there is exactly one requester (the Improv
+/// task) and exactly one responder (`wifi::connection_task`), and neither should queue: a
+/// second candidate arriving while the first is being tried means the user pressed send
+/// again, and latest-wins is the right reading of that. The single-waiter property is what
+/// `Signal` requires -- see the block above [`WIFI_RECONNECT_REQUEST`].
+///
+/// **The result is a bare `bool` on purpose.** The connection task knows only whether the
+/// association succeeded. It does not know whether DHCP completed and must not wait to find
+/// out, because blocking the owner of the radio on a lease would stall reconnection for every
+/// other reason. The address the Improv client wants is the Improv task's problem.
+pub static WIFI_CANDIDATE: Signal<
+    CriticalSectionRawMutex,
+    variegated_controller_types::wifi::WifiCredentials,
+> = Signal::new();
+pub static WIFI_CANDIDATE_RESULT: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+
+/// A Wi-Fi scan Improv wants run.
+pub static WIFI_SCAN_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// What the scan found.
+///
+/// **On the heap, not inline.** A `Signal` stores its payload inline, so a
+/// `heapless::Vec<Network, 16>` here would spend ~600 bytes of permanent `.bss` carrying data
+/// that exists for a second or two -- and on this chip `.stack` is the SRAM left over after
+/// `.data` and `.bss`, so every byte of static costs a byte of stack, one for one. This is
+/// the same call [`ShotLogReply`] documents at length, for the same reason.
+///
+/// An empty vector means "none found", "the scan failed" and "the radio was busy" alike. The
+/// distinction does not survive to the Improv client either way: all three reach it as a bare
+/// terminating result frame.
+pub static WIFI_SCAN_RESULT: Signal<
+    CriticalSectionRawMutex,
+    alloc::vec::Vec<variegated_improv_trouble::handler::Network>,
+> = Signal::new();
+
 // Comms Status Command - internal commands to update CommsStatus
 pub enum CommsStatusCommand {
     TimeUpdate(u64), // Unix epoch offset in seconds

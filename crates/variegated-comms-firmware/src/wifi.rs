@@ -2,20 +2,24 @@
 
 use variegated_log::{log_error, log_info};
 use embassy_net::Runner as NetRunner;
-use embassy_time::{Duration, Timer};
-use embassy_futures::select::{select4, Either4};
-use esp_radio::wifi::{Config as WifiConfig, Interface, WifiController, sta::StationConfig};
+use embassy_time::{with_timeout, Duration, Timer};
+use embassy_futures::select::{select, select4, Either, Either4};
+use esp_radio::wifi::{
+    AuthenticationMethod, Config as WifiConfig, Interface, WifiController, scan::ScanConfig,
+    sta::StationConfig,
+};
 
 use portable_atomic::Ordering;
 
 use variegated_controller_types::debug::DebugEvent;
 
 use crate::channels::{
-    NO_RSSI, WIFI_CONNECTED, WIFI_CREDENTIALS, WIFI_RECONNECT_REQUEST, WIFI_RSSI_DBM,
-    WIFI_RSSI_SIGNAL,
+    NO_RSSI, WIFI_CANDIDATE, WIFI_CANDIDATE_RESULT, WIFI_CONNECTED, WIFI_CREDENTIALS,
+    WIFI_RECONNECT_REQUEST, WIFI_RSSI_DBM, WIFI_RSSI_SIGNAL, WIFI_SCAN_REQUEST, WIFI_SCAN_RESULT,
 };
 use crate::debug::bus;
 use variegated_controller_types::wifi::WifiCredentials;
+use variegated_improv_trouble::handler::{self, Network};
 
 /// Set the Wi-Fi connection flag, emitting a typed event only when it actually
 /// changes.
@@ -103,9 +107,120 @@ fn apply_configuration(controller: &mut WifiController<'static>, credentials: &W
     }
 }
 
+/// How long a candidate credential gets to associate before it is called a failure.
+///
+/// Thirty seconds is a long time to hold a phone, and it is chosen against the alternative
+/// rather than against the user's patience: a WPA handshake behind a busy access point can
+/// take ten, and reporting `UnableToConnect` for a password that was in fact correct sends
+/// someone off to retype something that was never wrong.
+const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Something Improv wants the radio for.
+enum RadioRequest {
+    Candidate(WifiCredentials),
+    Scan,
+}
+
+/// Resolve when Improv raises either request.
+///
+/// One future so it can be dropped as a unit by each `select` below. Dropping a pending
+/// `Signal::wait` is safe: it leaves a stale waker that the next `signal()` fires harmlessly,
+/// and it is this same task's waker either way.
+async fn radio_request() -> RadioRequest {
+    match select(WIFI_CANDIDATE.wait(), WIFI_SCAN_REQUEST.wait()).await {
+        Either::First(candidate) => RadioRequest::Candidate(candidate),
+        Either::Second(()) => RadioRequest::Scan,
+    }
+}
+
+/// Try a candidate credential, and put the radio back where it was if it fails.
+///
+/// Returns the credential to treat as current from here on -- the candidate if it associated,
+/// the previous one otherwise. **The caller has to adopt it.** The application processor
+/// pushes these same credentials back down the link once it has persisted them, and a
+/// `current` still holding the old value would read that push as a change and tear down the
+/// association the user is at that moment being told succeeded.
+async fn try_candidate(
+    controller: &mut WifiController<'static>,
+    candidate: WifiCredentials,
+    previous: &WifiCredentials,
+) -> WifiCredentials {
+    // Nothing on this path logs the credential, not even the SSID. `WifiCredentials`' `Format`
+    // elides the password, but the SSID alone is enough to make a log line worth not writing
+    // on a path that runs while someone is provisioning and may be sharing a screen.
+    log_info!("Trying candidate Wi-Fi credentials");
+
+    if controller.disconnect_async().await.is_err() {
+        log_error!("Disconnect before trying a candidate failed");
+    }
+    set_wifi_connected(false);
+    WIFI_RSSI_SIGNAL.signal(None);
+    WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+
+    apply_configuration(controller, &candidate);
+
+    let associated = matches!(
+        with_timeout(CANDIDATE_TIMEOUT, controller.connect_async()).await,
+        Ok(Ok(_))
+    );
+
+    if associated {
+        set_wifi_connected(true);
+        WIFI_CANDIDATE_RESULT.signal(true);
+        log_info!("Candidate Wi-Fi credentials associated");
+        candidate
+    } else {
+        // The working network goes back before the answer goes out. Answering first would
+        // race the Improv task into reporting a credential that is about to be discarded --
+        // and more to the point, a failed provisioning attempt must not cost a machine the
+        // network it already had.
+        log_error!("Candidate Wi-Fi credentials failed to associate");
+        let _ = controller.disconnect_async().await;
+        apply_configuration(controller, previous);
+        WIFI_CANDIDATE_RESULT.signal(false);
+        previous.clone()
+    }
+}
+
+/// Run a scan and publish what it found.
+///
+/// **No disconnect first, deliberately.** A scan briefly leaves the home channel and the
+/// association usually survives it; dropping a working network in order to enumerate the
+/// networks beside it would be the worse trade. The only caller asks during a provisioning
+/// window, with a user standing at the machine.
+async fn run_scan(controller: &mut WifiController<'static>) {
+    let config = ScanConfig::default().with_max(handler::MAX_SCAN_RESULTS);
+    let networks = match controller.scan_async(&config).await {
+        Ok(found) => found
+            .into_iter()
+            .map(|ap| Network {
+                // `Ssid::as_str` truncates at the first invalid byte rather than failing, and
+                // `try_from` cannot overflow here -- both sides are 32.
+                ssid: heapless::String::try_from(ap.ssid.as_str()).unwrap_or_default(),
+                rssi: ap.signal_strength,
+                // `None` means the beacon did not say. Treated as "needs a password", which
+                // is the safe way to be wrong: an unnecessary prompt is a nuisance, a missing
+                // one is an attempt that cannot succeed and says nothing about why.
+                requires_password: !matches!(ap.auth_method, Some(AuthenticationMethod::None)),
+            })
+            .collect(),
+        Err(_) => {
+            log_error!("Wi-Fi scan failed");
+            alloc::vec::Vec::new()
+        }
+    };
+    log_info!("Wi-Fi scan found {} networks", networks.len());
+    WIFI_SCAN_RESULT.signal(networks);
+}
+
 /// WiFi connection management task
 ///
 /// Maintains WiFi connection, reconnecting when disconnected.
+///
+/// **This task is the only owner of the `WifiController`, and Improv borrows it by signal
+/// rather than being handed one.** That is what makes esp-radio's warning about scanning and
+/// connecting at the same time structurally unreachable instead of a thing to remember: the
+/// two operations are arms of the same `select` and cannot overlap.
 ///
 /// esp-radio 0.18 reshaped this quite a bit. The controller is now configured
 /// and started at construction (see `bin/main.rs`), so there is no
@@ -151,7 +266,11 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                 match select4(
                     controller.wait_for_disconnect_async(),
                     Timer::after(Duration::from_secs(1)),
-                    WIFI_RECONNECT_REQUEST.wait(),
+                    // The reconnect request and Improv's radio requests share an arm: both
+                    // are things somebody asked for, and both are the least urgent thing here
+                    // next to an actual link loss. Reconnect polls first because it is the
+                    // one that can be raised while the machine is otherwise idle.
+                    select(WIFI_RECONNECT_REQUEST.wait(), radio_request()),
                     credentials_rx.changed(),
                 ).await {
                     Either4::First(_) => {
@@ -189,7 +308,7 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // value, and a request raised while the link is already down is
                     // drained in the `else` branch below by the reconnect that is
                     // already in progress.
-                    Either4::Third(()) => {
+                    Either4::Third(Either::First(())) => {
                         bus::emit_event(DebugEvent::WifiReconnectRequested);
                         // Explicit rather than relying on the AP to drop us: this is
                         // what makes the request do something on a link that is
@@ -206,6 +325,20 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                         WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
                         break;
                     }
+                    // Improv wants the radio.
+                    Either4::Third(Either::Second(request)) => match request {
+                        RadioRequest::Candidate(candidate) => {
+                            current = try_candidate(&mut controller, candidate, &current).await;
+                            // Out to the outer loop either way. On success the association is
+                            // fresh and the `is_connected()` check re-enters this loop
+                            // immediately; on failure the restored configuration needs the
+                            // reconnect the outer loop is about to do.
+                            break;
+                        }
+                        // Serviced in place: a scan puts the controller back the way it found
+                        // it, so there is nothing for the outer loop to re-establish.
+                        RadioRequest::Scan => run_scan(&mut controller).await,
+                    },
                     // New credentials from the application processor.
                     //
                     // Disconnected and reconfigured immediately rather than left to fail on
@@ -214,6 +347,19 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // provisioned a different network is watching.
                     Either4::Fourth(credentials) => {
                         match credentials {
+                            // The application processor echoing back what we just proved.
+                            //
+                            // A successful Improv provision reports the credential up the
+                            // link; that processor persists it and pushes the new value down
+                            // unprompted, which arrives here. Without this check the push
+                            // reads as a credential change and disconnects the association
+                            // the user is at that moment being told succeeded.
+                            Some(credentials) if credentials == current => {
+                                log_info!(
+                                    "Wi-Fi credentials confirmed by the application processor"
+                                );
+                                continue;
+                            }
                             Some(credentials) => {
                                 log_info!("Wi-Fi credentials changed; reconnecting");
                                 current = credentials;
@@ -268,8 +414,12 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
         // Guarding it to fire only on the first attempt after a loss would not help
         // either: that instant is already reported by `WifiLost` above.
         log_info!("Connecting to WiFi...");
-        match controller.connect_async().await {
-            Ok(_) => {
+        // Raced against Improv's requests rather than awaited bare. An association attempt
+        // blocks for as long as it takes, and the common case for a candidate is a machine
+        // that has *no* network yet -- so a candidate raised here would otherwise not be seen
+        // until an attempt against a network the user is trying to replace had timed out.
+        match select(controller.connect_async(), radio_request()).await {
+            Either::First(Ok(_)) => {
                 // Edge triggered: `connect_async` waits for the association rather
                 // than polling, so failed attempts fall to the `Err` arm and emit
                 // nothing. The helper's `swap` closes the window between this
@@ -277,10 +427,18 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                 // loop.
                 set_wifi_connected(true);
             }
-            Err(_e) => {
+            Either::First(Err(_e)) => {
                 log_error!("Failed to connect to WiFi");
                 Timer::after(Duration::from_millis(5000)).await
             }
+            // Dropping `connect_async` mid-attempt is safe. The association may still
+            // complete inside the driver, but `try_candidate` disconnects before it
+            // configures anything, so the two cannot overlap -- and `set_wifi_connected`'s
+            // `swap` is what keeps the event stream paired if it does complete late.
+            Either::Second(RadioRequest::Candidate(candidate)) => {
+                current = try_candidate(&mut controller, candidate, &current).await;
+            }
+            Either::Second(RadioRequest::Scan) => run_scan(&mut controller).await,
         }
     }
 }
