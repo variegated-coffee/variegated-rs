@@ -1,5 +1,12 @@
 # Settings keyspace Implementation Plan
 
+> **Status: complete, 2026-08-10.** Commits `825ae7c` (store key) and `fda0259`
+> (associations moved). All four example configurations build with 0 errors and unchanged
+> warning counts. **Task 3 passed on hardware**: configuration loaded non-default, a changed
+> boiler target survived a power cycle, a re-paired scale connected, and both survived an
+> `OptimizeConfigurationStorage` — which on the old `remove_all_items` would have erased the
+> associations at key 2. `key::WIFI_CREDENTIALS` is now available for plan 3.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Turn `SequentialStorageSettingsStorage` into a store that owns *one key* in a shared flash range instead of assuming it owns the whole range, and move the Bluetooth association list onto that keyspace.
@@ -50,7 +57,7 @@ sections "Why not append to `PersistentConfiguration`" and "Storage layer".
   - `SequentialStorageSettingsStorage::new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self`
     unchanged in signature, now delegating with `key::CONFIGURATION`.
 
-- [ ] **Step 1: Add the key module**
+- [x] **Step 1: Add the key module**
 
 At the top of `settings.rs`, after the `use` block and before `pub trait SettingsStorage`:
 
@@ -78,7 +85,7 @@ pub mod key {
 }
 ```
 
-- [ ] **Step 2: Add the field and the constructor**
+- [x] **Step 2: Add the field and the constructor**
 
 Replace the struct and its `impl` block (`settings.rs:21-39`) with:
 
@@ -118,7 +125,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Def
 }
 ```
 
-- [ ] **Step 3: Use the key when loading**
+- [x] **Step 3: Use the key when loading**
 
 In `load_settings`, change the `fetch_item` call (`settings.rs:57-59`) from `&0` to
 `&self.key`:
@@ -129,7 +136,7 @@ In `load_settings`, change the `fetch_item` call (`settings.rs:57-59`) from `&0`
             .await;
 ```
 
-- [ ] **Step 4: Use the key when saving, and report it**
+- [x] **Step 4: Use the key when saving, and report it**
 
 In `save_settings`, change the `store_item` call (`settings.rs:130-134`) and the debug event
 (`settings.rs:139`):
@@ -152,7 +159,7 @@ In `save_settings`, change the `store_item` call (`settings.rs:130-134`) and the
 
 `index` is `u16` (`variegated-controller-types/src/debug.rs:275`), hence the `as u16`.
 
-- [ ] **Step 5: Scope the optimize to this key**
+- [x] **Step 5: Scope the optimize to this key**
 
 This is the load-bearing change. Replace the removal block in `optimize_storage`
 (`settings.rs:157-170`) with:
@@ -184,7 +191,7 @@ This is the load-bearing change. Replace the removal block in `optimize_storage`
 
 `remove_item` needs `S: MultiwriteNorFlash`, which this `impl` already bounds.
 
-- [ ] **Step 6: (skip — see note)**
+- [x] **Step 6: (skip — see note)**
 
 `cargo check -p variegated-controller-lib` does **not** work in this workspace, and not
 because of anything in this task: building that crate alone selects no chip feature for
@@ -192,7 +199,7 @@ because of anything in this task: building that crate alone selects no chip feat
 Cargo features". Only the examples set the feature. Go straight to Step 7, which compiles
 this file as part of four real binaries.
 
-- [ ] **Step 7: Check nothing else broke**
+- [x] **Step 7: Check nothing else broke**
 
 Run: `cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs && scripts/build-examples.sh`
 
@@ -200,7 +207,7 @@ Expected: four lines, every one `errors=0`. Warning counts near the baselines in
 Constraints. Every existing call site still uses `new()`, so this task should change no
 behaviour at all for a range holding one key.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
@@ -242,7 +249,7 @@ once. That is deliberate and was agreed — re-pairing is a scan and a tap, and 
 reader for one release is not worth writing. The failure mode is an empty list, which is
 self-explanatory.
 
-- [ ] **Step 1: Move the dual-boiler store**
+- [x] **Step 1: Move the dual-boiler store**
 
 Replace `examples/dual-boiler/src/main.rs:2202-2212` (the comment block and the
 `bluetooth_store` binding) with:
@@ -268,7 +275,7 @@ Replace `examples/dual-boiler/src/main.rs:2202-2212` (the comment block and the
     );
 ```
 
-- [ ] **Step 2: Correct the dual-boiler type alias comment**
+- [x] **Step 2: Correct the dual-boiler type alias comment**
 
 `examples/dual-boiler/src/main.rs:478-481` says "Only the payload type and the flash range
 differ", which stops being true. Replace those three comment lines with:
@@ -280,7 +287,7 @@ differ", which stops being true. Replace those three comment lines with:
 /// live in the same flash range.
 ```
 
-- [ ] **Step 3: Move the single-boiler store**
+- [x] **Step 3: Move the single-boiler store**
 
 Replace `examples/single-boiler/src/main.rs:510-514` with:
 
@@ -300,7 +307,7 @@ Replace `examples/single-boiler/src/main.rs:510-514` with:
     );
 ```
 
-- [ ] **Step 4: Build both examples**
+- [x] **Step 4: Build both examples**
 
 Run: `cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs && scripts/build-examples.sh`
 
@@ -312,7 +319,7 @@ imports `variegated_controller_lib::settings::{SequentialStorageSettingsStorage,
 so adding `key` to that `use` and writing `key::BLUETOOTH_ASSOCIATIONS` is tidier than the
 fully-qualified path. Do that in both examples if the import exists.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
@@ -343,28 +350,28 @@ and destructively — a setting that reverts on the next boot, with nothing logg
 unit test available (see Global Constraints), so this check is not optional and it is not a
 formality.
 
-- [ ] **Step 1: Flash a machine**
+- [x] **Step 1: Flash a machine**
 
 Flash `dual_boiler` onto the bench machine by whatever route this branch normally uses
 (`cargo run` with the configured probe runner, from `examples/`).
 
-- [ ] **Step 2: Confirm settings still load**
+- [x] **Step 2: Confirm settings still load**
 
 Bring the machine up and confirm it comes up with the boiler temperatures and PID values it
 had before the flash — **not** defaults. If it shows defaults, Task 1 broke `load_settings`'s
 key and the configuration is being read from the wrong place. Stop and fix before continuing.
 
-- [ ] **Step 3: Change a setting and power-cycle**
+- [x] **Step 3: Change a setting and power-cycle**
 
 Change the brew boiler temperature target, power the machine off and on, and confirm the new
 value survived. This proves `save_settings` writes to the key `load_settings` reads.
 
-- [ ] **Step 4: Re-pair a scale**
+- [x] **Step 4: Re-pair a scale**
 
 Confirm the Bluetooth panel comes up **empty** — expected, the pairings were dropped — then
 scan, associate a scale, and confirm it connects.
 
-- [ ] **Step 5: Force an optimize and confirm both survive**
+- [x] **Step 5: Force an optimize and confirm both survive**
 
 Send `MachineCommand::OptimizeConfigurationStorage` from `variegated-debug-tui`'s command
 palette (`variegated-cli/src/command_form.rs:1425`). The controller forwards it as
@@ -376,7 +383,7 @@ Then power-cycle and confirm **both** the changed boiler temperature **and** the
 scale are still there. This is the exact regression the keyed removal exists to prevent: on
 the old code the optimize would have erased the associations at key 2.
 
-- [ ] **Step 6: Record the result**
+- [x] **Step 6: Record the result**
 
 Note the outcome in the branch's status document
 (`/Users/magnus/Developer/open-lcc/variegated-umbrella/JULY-UPGRADE-STATUS.md`, or wherever
