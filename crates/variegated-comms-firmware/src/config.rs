@@ -1,8 +1,11 @@
 //! Configuration constants for the comms firmware
 
-// WiFi configuration
-pub const SSID: &str = env!("SSID");
-pub const PASSWORD: &str = env!("PASSWORD");
+// Wi-Fi credentials used to live here as `env!("SSID")` / `env!("PASSWORD")`, which meant
+// changing network meant reflashing and every checkout carried a working password. They are
+// now held by the application processor and pushed over the inter-processor link, exactly as
+// the Bluetooth peripheral addresses further down this file were. A machine with none stored
+// joins no network until it is provisioned over Improv; see `wifi::connection_task`, which
+// waits on `channels::WIFI_CREDENTIALS` rather than configuring anything at boot.
 
 /// TCP command injection is unauthenticated and unencrypted, so it is compiled in
 /// only when this is set at build time. When unset the inbound half of the TCP

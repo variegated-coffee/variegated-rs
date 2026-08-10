@@ -3,16 +3,19 @@
 use variegated_log::{log_error, log_info};
 use embassy_net::Runner as NetRunner;
 use embassy_time::{Duration, Timer};
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select4, Either4};
 use esp_radio::wifi::{Config as WifiConfig, Interface, WifiController, sta::StationConfig};
 
 use portable_atomic::Ordering;
 
 use variegated_controller_types::debug::DebugEvent;
 
-use crate::channels::{NO_RSSI, WIFI_CONNECTED, WIFI_RECONNECT_REQUEST, WIFI_RSSI_DBM, WIFI_RSSI_SIGNAL};
-use crate::config::{PASSWORD, SSID};
+use crate::channels::{
+    NO_RSSI, WIFI_CONNECTED, WIFI_CREDENTIALS, WIFI_RECONNECT_REQUEST, WIFI_RSSI_DBM,
+    WIFI_RSSI_SIGNAL,
+};
 use crate::debug::bus;
+use variegated_controller_types::wifi::WifiCredentials;
 
 /// Set the Wi-Fi connection flag, emitting a typed event only when it actually
 /// changes.
@@ -50,32 +53,31 @@ fn set_wifi_connected(connected: bool) {
     }
 }
 
-/// WiFi connection management task
+/// Point the station at a network, and re-assert the power-saving setting.
 ///
-/// Maintains WiFi connection, reconnecting when disconnected.
+/// Called once when credentials first arrive and again whenever they change. Both halves
+/// have to happen together and **in this order** -- see the note on the power-saving call.
 ///
-/// esp-radio 0.18 reshaped this quite a bit. The controller is now configured
-/// and started at construction (see `bin/main.rs`), so there is no
-/// `start_async`/`is_started` to drive here -- `set_config` starts it and
-/// dropping it stops it. `sta_state()`/`WifiStaState` are gone in favour of
-/// `is_connected()`, which is now a plain `bool`, and the generic
-/// `wait_for_event(WifiEvent::StaDisconnected)` became
-/// `wait_for_disconnect_async()`.
-#[embassy_executor::task]
-pub async fn connection_task(mut controller: WifiController<'static>) {
-    log_info!("Starting WiFi connection task");
-
-    // 0.18 removed `start_async`/`is_started`: `set_config` configures *and*
-    // starts the controller, and dropping it stops it. So this happens once,
-    // up front, instead of being re-checked every iteration.
-    //
-    // `Ssid` now implements `From<&str>`, so SSID no longer needs `.into()`.
+/// esp-radio 0.18 removed `start_async`/`is_started`: `set_config` configures *and* starts
+/// the controller, and dropping it stops it. Calling it again on a running station
+/// reconfigures without restarting, which is what makes a credential change cheap.
+///
+/// `Ssid` implements `From<&str>`, so the SSID needs no conversion; the password does.
+fn apply_configuration(controller: &mut WifiController<'static>, credentials: &WifiCredentials) {
     let station_config = WifiConfig::Station(
         StationConfig::default()
-            .with_ssid(SSID)
-            .with_password(PASSWORD.into()),
+            .with_ssid(credentials.ssid.as_str())
+            .with_password(credentials.password.as_str().into()),
     );
-    controller.set_config(&station_config).unwrap();
+    // Not `.unwrap()`, unlike the compiled-in configuration this replaced. That one could
+    // only fail on a programming error; this one carries a string that arrived over a wire
+    // from another processor, and panicking the processor that owns Wi-Fi, BLE and the
+    // ESPHome server over a malformed credential would turn a bad provisioning attempt into
+    // a reboot loop.
+    if let Err(e) = controller.set_config(&station_config) {
+        log_error!("Failed to apply Wi-Fi configuration: {:?}", e);
+        return;
+    }
 
     // Re-apply after the station is started, because applying it before does nothing.
     //
@@ -99,6 +101,45 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
     if let Err(e) = controller.set_power_saving(esp_radio::wifi::PowerSaveMode::None) {
         log_error!("failed to disable Wi-Fi power saving: {:?}", e);
     }
+}
+
+/// WiFi connection management task
+///
+/// Maintains WiFi connection, reconnecting when disconnected.
+///
+/// esp-radio 0.18 reshaped this quite a bit. The controller is now configured
+/// and started at construction (see `bin/main.rs`), so there is no
+/// `start_async`/`is_started` to drive here -- `set_config` starts it and
+/// dropping it stops it. `sta_state()`/`WifiStaState` are gone in favour of
+/// `is_connected()`, which is now a plain `bool`, and the generic
+/// `wait_for_event(WifiEvent::StaDisconnected)` became
+/// `wait_for_disconnect_async()`.
+#[embassy_executor::task]
+pub async fn connection_task(mut controller: WifiController<'static>) {
+    log_info!("Starting WiFi connection task");
+
+    // Nothing is configured until the application processor says so.
+    //
+    // That processor asks for credentials at boot and repeats every ten seconds until
+    // answered, so on a healthy link this resolves within a second or two. On a broken one
+    // it blocks forever, which is the correct and *visible* failure: the alternative --
+    // retrying an empty configuration -- would fill the log with association failures that
+    // say nothing about the actual fault, which is that the link never delivered.
+    let mut credentials_rx = WIFI_CREDENTIALS
+        .receiver()
+        .expect("the credential watch is sized for this receiver");
+
+    log_info!("Waiting for Wi-Fi credentials from the application processor");
+    let mut current = loop {
+        match credentials_rx.changed().await {
+            Some(credentials) => break credentials,
+            // A machine with no network configured. Reported at info, not warn: this is the
+            // normal state of an unprovisioned machine, not a fault.
+            None => log_info!("No Wi-Fi network configured; waiting to be provisioned"),
+        }
+    };
+
+    apply_configuration(&mut controller, &current);
 
     loop {
         if controller.is_connected() {
@@ -107,12 +148,13 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                 // The reconnect request is the last arm, so it can never displace an
                 // actual disconnect notification or an RSSI sample that was ready at
                 // the same instant.
-                match select3(
+                match select4(
                     controller.wait_for_disconnect_async(),
                     Timer::after(Duration::from_secs(1)),
                     WIFI_RECONNECT_REQUEST.wait(),
+                    credentials_rx.changed(),
                 ).await {
-                    Either3::First(_) => {
+                    Either4::First(_) => {
                         // Disconnected - clear RSSI and break to reconnect.
                         //
                         // Edge triggered: `wait_for_disconnect_async()` resolving is
@@ -126,7 +168,7 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                         Timer::after(Duration::from_millis(5000)).await;
                         break;
                     }
-                    Either3::Second(_) => {
+                    Either4::Second(_) => {
                         // Timer fired - update RSSI (convert i32 to i8)
                         let rssi = controller.rssi().ok().map(|r| r as i8);
                         WIFI_RSSI_SIGNAL.signal(rssi);
@@ -147,7 +189,7 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // value, and a request raised while the link is already down is
                     // drained in the `else` branch below by the reconnect that is
                     // already in progress.
-                    Either3::Third(()) => {
+                    Either4::Third(()) => {
                         bus::emit_event(DebugEvent::WifiReconnectRequested);
                         // Explicit rather than relying on the AP to drop us: this is
                         // what makes the request do something on a link that is
@@ -158,6 +200,36 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                         // controller will show up.
                         if controller.disconnect_async().await.is_err() {
                             log_error!("Requested WiFi disconnect failed");
+                        }
+                        set_wifi_connected(false);
+                        WIFI_RSSI_SIGNAL.signal(None);
+                        WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+                        break;
+                    }
+                    // New credentials from the application processor.
+                    //
+                    // Disconnected and reconfigured immediately rather than left to fail on
+                    // its own: the old network may still be perfectly connectable, so
+                    // nothing would ever prompt a change, and a user who has just
+                    // provisioned a different network is watching.
+                    Either4::Fourth(credentials) => {
+                        match credentials {
+                            Some(credentials) => {
+                                log_info!("Wi-Fi credentials changed; reconnecting");
+                                current = credentials;
+                                if controller.disconnect_async().await.is_err() {
+                                    log_error!("Disconnect before reconfiguration failed");
+                                }
+                                apply_configuration(&mut controller, &current);
+                            }
+                            // Credentials cleared. Disconnect and let the loop fall through
+                            // to `connect_async`, which will fail against a station with no
+                            // SSID -- honest, and rare enough not to be worth a second
+                            // parking state. Nothing clears credentials today.
+                            None => {
+                                log_info!("Wi-Fi credentials cleared; disconnecting");
+                                let _ = controller.disconnect_async().await;
+                            }
                         }
                         set_wifi_connected(false);
                         WIFI_RSSI_SIGNAL.signal(None);

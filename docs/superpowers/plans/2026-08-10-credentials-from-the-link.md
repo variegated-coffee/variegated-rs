@@ -235,10 +235,15 @@ grep -n "cargo::warning" /Users/magnus/Developer/open-lcc/variegated-umbrella/va
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-comms-rs
-git grep -nI "poseur-runs-envoi-kentucky\|IoT Transform" || echo "clean"
+git grep -nI -e 'SSID *=' -e 'PASSWORD *=' -e 'env!("SSID")' -e 'env!("PASSWORD")' || echo "clean"
 ```
 
 Expected: `clean`. This is the point of the whole change and it is worth one command.
+
+**Grep for the *shape*, not for the password itself.** Searching for the literal string
+would mean writing a live Wi-Fi password into this document — which is the exact thing the
+change exists to stop, and it is easy to do without noticing. If you want to check for a
+specific known-leaked value, do it from your shell history, not from a committed file.
 
 - [ ] **Step 6: Commit, both repositories**
 
