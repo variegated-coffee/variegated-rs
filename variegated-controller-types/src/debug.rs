@@ -90,7 +90,11 @@ use crate::Status;
 ///   Removing a *trailing* variant renumbers nothing, so an old host decoding a new
 ///   device still reads every annotation it is sent -- but a host that sends a `Routine`
 ///   annotation would now decode as garbage, and that is what the bump exists to catch.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x89;
+/// * `0x8A` -- `AppDebugOp` gained `SdFormatCard`, appended. Device-inbound, and the one
+///   command in this enum that destroys data, so a version mismatch here is worth
+///   reporting as such rather than letting a host's older frame be read as something
+///   adjacent. The command carries its own magic-value guard for the same reason.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8A;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

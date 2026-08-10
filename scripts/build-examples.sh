@@ -44,5 +44,11 @@ run() {
 run dual_boiler --bin dual_boiler --features=dual-boiler
 run dual_boiler_pwm_steam_valve --bin dual_boiler --features=dual-boiler,pwm-steam-valve
 run single_boiler --bin single_boiler --features=single-boiler
+# Neither `character-display` nor `pwm-leds` is part of the `dual-boiler` bundle, so
+# without this line the HD44780 driver, its renderer and the LED breathing controller
+# would not be compiled by any gate build -- and an optional feature nothing builds is one
+# that rots. They share a build rather than getting one each because the point is compile
+# coverage of the optional peripherals, not any particular combination of them.
+run dual_boiler_optional_peripherals --bin dual_boiler --features=dual-boiler,character-display,pwm-leds
 
 exit $RC

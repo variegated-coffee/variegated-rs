@@ -32,23 +32,11 @@ impl<E> From<variegated_mcp23017::Error<E>> for HD44780Error<E> {
     }
 }
 
-/// HD44780 control pin definitions for MCP23017
-mod pins {
-    // Control pins on Port A (bits in the port register)
-    pub const RS_BIT: u8 = 0;       // GPA0 - Register Select
-    pub const RW_BIT: u8 = 1;       // GPA1 - Read/Write
-    pub const EN_BIT: u8 = 2;       // GPA2 - Enable
-    pub const BACKLIGHT_BIT: u8 = 3; // GPA3 - Backlight
-
-    // Port A bit masks for efficient operations
-    pub const RS_MASK: u8 = 1 << RS_BIT;
-    pub const RW_MASK: u8 = 1 << RW_BIT;
-    pub const EN_MASK: u8 = 1 << EN_BIT;
-    pub const BACKLIGHT_MASK: u8 = 1 << BACKLIGHT_BIT;
-
-    // All control pins mask
-    pub const CONTROL_MASK: u8 = RS_MASK | RW_MASK | EN_MASK | BACKLIGHT_MASK;
-}
+/// HD44780 control pin definitions for MCP23017.
+///
+/// Defined in [`crate::lcd_pins`], which is compiled whether or not this module is:
+/// builds without `character-display` still need the map, to park the same twelve pins.
+use crate::lcd_pins::pins;
 
 /// HD44780 LCD device using MCP23017 I2C GPIO expander
 ///
@@ -84,12 +72,12 @@ where
     /// Initialize the MCP23017 pins for HD44780 use (8-bit mode)
     pub async fn init_pins(&mut self) -> Result<(), HD44780Error<I2C::Error>> {
         // Configure all control pins on Port A as outputs
-        for pin in 0..4 {
+        for pin in 0..pins::CONTROL_PIN_COUNT {
             self.mcp23017.set_pin_direction(pin, PinDirection::Output).await?;
         }
 
         // Configure all data pins on Port B (8-bit mode: GPB0-7) as outputs
-        for pin in 8..16 {
+        for pin in pins::DATA_PINS {
             self.mcp23017.set_pin_direction(pin, PinDirection::Output).await?;
         }
 

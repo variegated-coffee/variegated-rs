@@ -66,7 +66,32 @@ pub enum AppDebugOp {
     /// working comms processor, so it is what the application-processor half is verified
     /// with before any HTTP route exists.
     SdListShots,
+    /// **Erase the card and write a fresh exFAT volume on it.**
+    ///
+    /// Appended, not inserted -- see the note on the enum above.
+    ///
+    /// Exists because cards ship FAT32, which this firmware cannot read, so a new card is
+    /// unusable until something reformats it. Doing that on the machine means never
+    /// needing a card reader.
+    ///
+    /// `confirm` must equal [`SD_FORMAT_CONFIRM`] or the command is refused. That is not
+    /// belt-and-braces over the host's own confirmation prompt, which is a different
+    /// defence against a different failure: the prompt guards against a person meaning
+    /// something else, and this guards against *the bytes arriving wrong*. This variant
+    /// sits one discriminant away from `SdListShots`, a read-only command someone runs
+    /// routinely, on a wire that -- as the SD work established -- does corrupt bytes. A
+    /// single flipped bit in the discriminant of a command that carries no payload would
+    /// otherwise erase the card. With the guard, the corrupted command decodes with a
+    /// `confirm` that is not the constant, and is refused.
+    SdFormatCard { confirm: u32 },
 }
+
+/// The value [`AppDebugOp::SdFormatCard`] requires.
+///
+/// Arbitrary, and that is the point -- it only has to be a value no plausible corruption
+/// or uninitialised field lands on. `0` and `0xFFFF_FFFF` are exactly what a truncated or
+/// all-ones frame decodes to, so it is neither.
+pub const SD_FORMAT_CONFIRM: u32 = 0x464D_5421; // "FMT!"
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
@@ -116,6 +141,7 @@ impl DebugCommand {
             DebugCommand::App(AppDebugOp::Ping) => "app_ping",
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => "sd_self_test",
             DebugCommand::App(AppDebugOp::SdListShots) => "sd_list_shots",
+            DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => "sd_format_card",
             DebugCommand::Comms(CommsDebugOp::ReconnectWifi) => "reconnect_wifi",
             DebugCommand::Comms(CommsDebugOp::ResyncSntp) => "resync_sntp",
             DebugCommand::Comms(CommsDebugOp::RescanBle) => "rescan_ble",

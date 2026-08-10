@@ -75,7 +75,7 @@ display-interface.workspace = true
 display-interface-spi = { workspace = true, optional = true }
 oled_async = { version = "0.2.1", optional = true }
 u8g2-fonts = { version = "0.8.0", optional = true }
-hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"] }
+hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"], optional = true }
 heapless.workspace = true
 
 chrono = { workspace = true, features = ["alloc"] }
@@ -95,6 +95,21 @@ rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
 dual-boiler = ["tft-display", "gear-pump", "belka", "bluetooth-group-1-scale", "sd-card-storage"]
 single-boiler = ["dep:oled_async", "dep:display-interface-spi", "gravity"]
 tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
+# The 2x16 HD44780 character LCD on the LCD MCP23017 (I2C 0x21).
+#
+# Deliberately *not* part of the `dual-boiler` bundle: not every machine has the LCD
+# fitted, and the panel is optional hardware in a way the TFT is not. Without it the
+# expander is still brought up, and its twelve LCD lines are driven low rather than left
+# as the floating inputs `Mcp23017::init` leaves behind -- see `lcd_pins::park_low`.
+character-display = ["dep:hd44780-controller"]
+# The breathing front-panel LEDs on the TLC59108 (I2C 0x40).
+#
+# Off by default, like `character-display`, and for the same kind of reason: the driver is
+# on the board regardless, but whether anything should be lit by it is a per-machine
+# decision. Without the feature the TLC59108 is still configured and then told to drive
+# all eight channels off, so the LEDs are dark rather than left in whatever state the
+# chip powered up in.
+pwm-leds = []
 gravity = ["dep:variegated-gravity-driver"]
 belka = []
 # A Bluetooth scale under group 1, reached through the comms processor rather than

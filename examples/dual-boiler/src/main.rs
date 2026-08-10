@@ -76,8 +76,6 @@ use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
 use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
 use variegated_hal::gpio::coordinated_dual_heating_element::{CoordinatedDualHeatingElementControl, CoordinatedDualHeatingElementDevice};
 use variegated_mcp23017::{Mcp23017, Mcp23017Config};
-use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
-use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
 use w25q32jv::W25q32jv;
 
 #[cfg(feature = "sd-card-storage")]
@@ -90,22 +88,32 @@ use variegated_controller_lib::{SdShotLogStorage, ShotLogStorage};
 #[cfg(feature = "sd-card-storage")]
 use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
 #[cfg(feature = "sd-card-storage")]
-use variegated_controller_lib::shot_log_storage::{ShotLogStorageError, SHOT_LOG_CHUNK_LEN};
+use variegated_controller_lib::shot_log_storage::{
+    ShotLogStorageError, BUS_LEASE_TIMEOUT, SHOT_LOG_CHUNK_LEN,
+};
+#[cfg(feature = "sd-card-storage")]
+use variegated_controller_lib::exfat_format;
 use embassy_sync::channel::Sender;
 
 mod display_state;
+mod lcd_pins;
+#[cfg(feature = "character-display")]
 mod mcp23017_hd44780;
 mod display;
 mod buttons;
+#[cfg(feature = "pwm-leds")]
 mod led_controller;
 mod backlight_controller;
 mod ads_measurement_coordinator;
 
+#[cfg(feature = "character-display")]
 use mcp23017_hd44780::Mcp23017HD44780Device;
+#[cfg(feature = "character-display")]
 use display::lcd_display_task;
 #[cfg(feature = "tft-display")]
 use display::graphical_display_task;
 use buttons::button_controller_task;
+#[cfg(feature = "pwm-leds")]
 use led_controller::led_controller_task;
 #[cfg(feature = "tft-display")]
 use backlight_controller::{backlight_task, BacklightPeripherals};
@@ -129,7 +137,11 @@ use variegated_hal::external_sensor::belka::{BelkaDevice, BelkaUpdate, BelkaStat
 use variegated_hal::scale::bluetooth::{
     BluetoothScale, BluetoothScaleController, BluetoothScaleStatusProvider, BluetoothScaleUpdate,
 };
-use variegated_tlc59108::{GroupMode, IrefConfig, LedState, Tlc59108Config};
+use variegated_tlc59108::{GroupMode, IrefConfig, Tlc59108Config};
+// Only the build that parks the LEDs names a state for them; the animated build sets
+// them from `led_controller`.
+#[cfg(not(feature = "pwm-leds"))]
+use variegated_tlc59108::LedState;
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_controller_lib::schedule::{run_schedule, InMemoryScheduleStore, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
@@ -690,7 +702,7 @@ fn main() -> ! {
                     )));
 
                     log_info!("Spawning backlight task on core 1");
-                    spawner.spawn(unwrap!(backlight_task(backlight_p, status_channel.subscriber().expect("Failed to get backlight status subscriber"))));
+                    spawner.spawn(unwrap!(backlight_task(backlight_p)));
 
                     // Spawn SD card storage task on core 1 (shares the display SPI bus)
                     #[cfg(feature = "sd-card-storage")]
@@ -897,8 +909,23 @@ static SHOT_LOG_CHANNEL: StaticCell<ShotLogChannel> = StaticCell::new();
 /// `debug_command_task`, serviced on core 1 where the card lives), hence
 /// `SyncSendRawMutex` rather than the `NoopRawMutex` the display bus uses.
 #[cfg(feature = "sd-card-storage")]
-static SD_SELF_TEST_REQUEST: embassy_sync::signal::Signal<SyncSendRawMutex, ()> =
+static SD_SELF_TEST_REQUEST: embassy_sync::signal::Signal<SyncSendRawMutex, SdMaintenance> =
     embassy_sync::signal::Signal::new();
+
+/// A one-off operation on the card, asked for from a host.
+///
+/// Carried by the signal rather than given an arm each, because `select4` is
+/// embassy-futures' maximum and the storage task already uses all four. Coalescing is the
+/// right behaviour anyway: two maintenance requests in flight at once means the second
+/// replaces the first, and running a self-test that was superseded by a format request
+/// would be work nobody asked for.
+#[cfg(feature = "sd-card-storage")]
+#[derive(Clone, Copy, PartialEq, Eq, defmt::Format)]
+enum SdMaintenance {
+    SelfTest,
+    /// Erase the card and write a fresh exFAT volume.
+    Format,
+}
 
 /// Whether a card is currently seated, for `Status::sd_card_present`.
 ///
@@ -1220,24 +1247,83 @@ async fn shot_log_storage_task(
                     log_warn!("SD: dropped a shot-log reply; the reply channel was full");
                 }
             }
-            Either4::Third(()) => {
+            Either4::Third(request) => {
                 if !ensure_card_ready(shared_bus, &mut storage, &mut parked, &mut det).await {
-                    log_error!("SD self-test: card could not be brought up");
+                    log_error!("SD maintenance: card could not be brought up");
                     continue;
                 }
-                let card = storage.as_mut().expect("ensured above");
-                let report = card.self_test().await;
-                // The whole report at info, so the result is readable in a probe log
-                // without a host tool -- this is what gets pasted back after a flash.
-                log_info!("SD self-test: {:?}", report);
-                if report.passed() {
-                    log_info!(
-                        "SD self-test: PASS ({} entries in SHOTS/)",
-                        report.listed_entries
-                    );
-                } else {
-                    log_error!("SD self-test: FAIL");
-                    parked = storage_take(&mut storage);
+
+                match request {
+                    SdMaintenance::SelfTest => {
+                        let card = storage.as_mut().expect("ensured above");
+                        let report = card.self_test().await;
+                        // The whole report at info, so the result is readable in a probe
+                        // log without a host tool -- this is what gets pasted back after a
+                        // flash.
+                        log_info!("SD self-test: {:?}", report);
+                        if report.passed() {
+                            log_info!(
+                                "SD self-test: PASS ({} entries in SHOTS/)",
+                                report.listed_entries
+                            );
+                        } else {
+                            log_error!("SD self-test: FAIL");
+                            parked = storage_take(&mut storage);
+                        }
+                    }
+                    SdMaintenance::Format => {
+                        // The filesystem has to go before the card can be reformatted: it
+                        // caches the boot sector, the up-case table and the allocation
+                        // bitmap, all of which are about to stop being true. Taking the
+                        // storage apart yields the *bare* card -- `storage_take` unwraps
+                        // the partition offset too, which is what lets the format write at
+                        // absolute LBA 0.
+                        let Some(mut device) = storage_take(&mut storage) else {
+                            log_error!("SD format: no card to format");
+                            continue;
+                        };
+
+                        // A volume serial, which only has to be arbitrary. The clock is
+                        // preferred over uptime because two cards formatted at the same
+                        // point in two boots would otherwise get the same serial.
+                        let serial = match variegated_timekeeping::TimeKeeper::now_utc() {
+                            Some(now) => now.timestamp() as u32,
+                            None => embassy_time::Instant::now().as_ticks() as u32,
+                        };
+
+                        log_warn!("SD format: erasing the card and writing a new exFAT volume");
+
+                        // One lease for the whole format. It writes the FAT a sector at a
+                        // time -- several megabytes on a large card -- so this holds the
+                        // display's bus for a few seconds and the panel does not update
+                        // during it. Acceptable for a command someone typed; it would not
+                        // be for anything automatic.
+                        if !shared_bus.lease_within(BUS_LEASE_TIMEOUT).await {
+                            log_error!("SD format: could not take the SPI bus");
+                            parked = Some(device);
+                            continue;
+                        }
+                        let result = exfat_format::format(&mut device, "VARIEGATED", serial).await;
+                        shared_bus.release();
+
+                        match result {
+                            Ok(geo) => log_info!(
+                                "SD format: done -- {} clusters of {} bytes, root at {}",
+                                geo.cluster_count,
+                                geo.bytes_per_cluster(),
+                                geo.first_cluster_of_root
+                            ),
+                            Err(e) => log_error!("SD format: failed: {:?}", e),
+                        }
+
+                        // Parked rather than remounted here, either way. The next request
+                        // re-probes the volume start, which after a successful format
+                        // finds the boot record at LBA 0 instead of wherever the old
+                        // partition table pointed -- and after a failed one finds nothing
+                        // and reports it, which is the correct outcome for a card that is
+                        // now genuinely unformatted.
+                        parked = Some(device);
+                    }
                 }
             }
             Either4::Fourth(()) => {
@@ -1666,7 +1752,7 @@ async fn debug_command_task(
                 );
                 // Handed to the storage task rather than run here: the card is on
                 // core 1 behind the display's bus, and this task is on core 0.
-                SD_SELF_TEST_REQUEST.signal(());
+                SD_SELF_TEST_REQUEST.signal(SdMaintenance::SelfTest);
             }
             #[cfg(not(feature = "sd-card-storage"))]
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
@@ -1693,6 +1779,30 @@ async fn debug_command_task(
             #[cfg(not(feature = "sd-card-storage"))]
             DebugCommand::App(AppDebugOp::SdListShots) => {
                 log_warn!("SD list requested, but this build has no SD storage");
+            }
+            #[cfg(feature = "sd-card-storage")]
+            DebugCommand::App(AppDebugOp::SdFormatCard { confirm }) => {
+                // The guard, checked here rather than in the storage task so a refused
+                // command never reaches the code that can erase anything.
+                //
+                // It exists because this variant is one discriminant away from
+                // `SdListShots`, which is read-only and run routinely, on a link the SD
+                // work established does corrupt bytes. A flipped bit in the discriminant
+                // of a payload-less command would otherwise wipe the card; with the
+                // guard it arrives with a `confirm` that is not the constant.
+                if confirm == variegated_controller_types::debug_command::SD_FORMAT_CONFIRM {
+                    log_warn!("SD format requested; the card's contents will be lost");
+                    SD_SELF_TEST_REQUEST.signal(SdMaintenance::Format);
+                } else {
+                    log_error!(
+                        "SD format refused: confirmation {:#010x} is not the required value",
+                        confirm
+                    );
+                }
+            }
+            #[cfg(not(feature = "sd-card-storage"))]
+            DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
+                log_warn!("SD format requested, but this build has no SD storage");
             }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
@@ -1982,6 +2092,18 @@ async fn main_task(
     let mut tlc = variegated_tlc59108::Tlc59108::new(tlc_dev, Delay, tlc_config);
     tlc.init().await.unwrap();
 
+    // No LED animation in this build, so drive every channel off rather than leaving the
+    // outputs wherever `init` and the chip's power-on state left them.
+    //
+    // Both halves matter: the brightness registers go to zero *and* the output state goes
+    // to `Off`, which disconnects the channel from PWM entirely. Setting brightness alone
+    // would leave the outputs live at zero duty, so a later glitch or a partial re-init
+    // could light them.
+    #[cfg(not(feature = "pwm-leds"))]
+    tlc.set_all_leds(&[0u8; 8], &[LedState::Off; 8])
+        .await
+        .unwrap();
+
     // Initialize MCP23017 for LCD control
     let mut mcp23017_dev = I2cDevice::new(internal_i2c_bus);
     let lcd_mcp23017_config = Mcp23017Config {
@@ -1993,8 +2115,22 @@ async fn main_task(
     };
     let mut lcd_mcp23017 = Mcp23017::new(mcp23017_dev, Delay, lcd_mcp23017_config);
     lcd_mcp23017.init().await.unwrap();
-    let mut lcd_device = Mcp23017HD44780Device::new(lcd_mcp23017);
-    lcd_device.init_pins().await.unwrap();
+
+    // The expander is brought up either way -- it is on the board whether or not an LCD
+    // is plugged into it, and `init` leaves all sixteen pins as inputs. What differs is
+    // what happens to the twelve the display would use.
+    #[cfg(feature = "character-display")]
+    let mut lcd_device = {
+        let mut device = Mcp23017HD44780Device::new(lcd_mcp23017);
+        device.init_pins().await.unwrap();
+        device
+    };
+
+    // No display in this build, so park its lines instead of leaving them floating.
+    // Unwrapped like every other bring-up here: a failure is the I2C bus not answering,
+    // which is not something this can carry on around.
+    #[cfg(not(feature = "character-display"))]
+    lcd_pins::park_low(&mut lcd_mcp23017).await.unwrap();
 
     let flash_spi_dev = SpiDevice::new(spi_bus, Output::new(flash_p.pin_cs, High));
 
@@ -2635,11 +2771,22 @@ async fn main_task(
         shot_log_query_sender,
     );
 
-    // Create status subscriber for LCD display and spawn the task
-    let display_status_receiver = status_channel.subscriber().expect("Failed to get display status subscriber");
-
-    // Spawn the LCD display task
-    spawner.spawn(unwrap!(lcd_display_task(lcd_device, display_status_receiver, routine_repository_ref)));
+    // Create status subscriber for LCD display and spawn the task.
+    //
+    // Both gated: the subscriber is only worth taking if something reads it, and the
+    // channel has a fixed subscriber count, so a build without the LCD leaves that slot
+    // free rather than holding one open for a task that does not exist.
+    #[cfg(feature = "character-display")]
+    {
+        let display_status_receiver = status_channel
+            .subscriber()
+            .expect("Failed to get display status subscriber");
+        spawner.spawn(unwrap!(lcd_display_task(
+            lcd_device,
+            display_status_receiver,
+            routine_repository_ref
+        )));
+    }
 
     // Create status subscriber for button controller and spawn the task
     let button_status_receiver = status_channel.subscriber().expect("Failed to get button status subscriber");
@@ -2648,11 +2795,18 @@ async fn main_task(
     // Spawn the button controller task
     spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver)));
 
-    // Create status subscriber for LED controller and spawn the task
-    let led_status_receiver = status_channel.subscriber().expect("Failed to get LED status subscriber");
-
-    // Spawn the LED breathing controller task
-    spawner.spawn(unwrap!(led_controller_task(tlc, led_status_receiver)));
+    // Create status subscriber for LED controller and spawn the task.
+    //
+    // Both gated, as with the character display: the channel has a fixed subscriber count,
+    // and holding a slot open for a task that does not exist would be a slot no one else
+    // can take.
+    #[cfg(feature = "pwm-leds")]
+    {
+        let led_status_receiver = status_channel
+            .subscriber()
+            .expect("Failed to get LED status subscriber");
+        spawner.spawn(unwrap!(led_controller_task(tlc, led_status_receiver)));
+    }
 
     // Create status and configuration subscribers for ESP transceiver and spawn the task
     let esp_status_receiver = status_channel.subscriber().expect("Failed to get ESP status subscriber");

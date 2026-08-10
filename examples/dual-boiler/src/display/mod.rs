@@ -1,20 +1,31 @@
 //! Unified display module for dual boiler espresso machines
 //!
 //! This module provides a unified display system that can drive both:
-//! - A 2x16 character LCD display (always available)
+//! - A 2x16 character LCD display (optional, behind the `character-display` feature)
 //! - A 168x428 graphical TFT display (optional, behind `tft-display` feature)
 //!
 //! Both displays show the same information but with different levels of detail.
 //! The LCD shows condensed essential information while the TFT shows detailed
 //! graphical representations.
+//!
+//! Neither is required: a build with neither feature still runs the machine, and the
+//! character LCD's expander pins are parked low by [`crate::lcd_pins::park_low`].
 
 use defmt;
+#[cfg(feature = "character-display")]
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
+#[cfg(feature = "character-display")]
 use embassy_rp::i2c::{Async, I2c};
+#[cfg(feature = "character-display")]
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+// Both display tasks pace themselves with these.
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
 use embassy_time::{Duration, Timer};
+#[cfg(feature = "character-display")]
 use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
+#[cfg(feature = "character-display")]
 use hd44780_controller::command::function_set::{DataLength, NumberOfLines, CharacterFont};
+#[cfg(feature = "character-display")]
 use embassy_time::Delay;
 
 #[cfg(feature = "tft-display")]
@@ -38,23 +49,33 @@ use variegated_instrumentation::instrumented_section;
 #[cfg(feature = "tft-display")]
 use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
 
+#[cfg(feature = "character-display")]
 pub mod lcd_renderer;
 
 #[cfg(feature = "tft-display")]
 pub mod graphical_renderer;
 
-use crate::{StatusSubscriber, mcp23017_hd44780::Mcp23017HD44780Device};
+// Both display tasks take a status subscriber and read the routine repository through
+// the trait; only the character LCD needs the expander-backed HD44780 device.
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
+use crate::StatusSubscriber;
+#[cfg(feature = "character-display")]
+use crate::mcp23017_hd44780::Mcp23017HD44780Device;
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
 use variegated_controller_lib::routine::RoutineRepository;
 #[cfg(feature = "tft-display")]
 use variegated_controller_lib::schedule::ScheduleStore;
+#[cfg(feature = "character-display")]
 use variegated_controller_types::RoutineIndex;
 
+#[cfg(feature = "character-display")]
 pub use lcd_renderer::LcdDisplayState;
 
 #[cfg(feature = "tft-display")]
 pub use graphical_renderer::GraphicalDisplayState;
 
 /// Embassy task for running the LCD display controller
+#[cfg(feature = "character-display")]
 #[embassy_executor::task]
 pub async fn lcd_display_task(
     lcd_device: Mcp23017HD44780Device<I2cDevice<'static, NoopRawMutex, I2c<'static, embassy_rp::peripherals::I2C1, Async>>, Delay>,

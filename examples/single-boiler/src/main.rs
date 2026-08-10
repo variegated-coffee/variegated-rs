@@ -1034,6 +1034,9 @@ async fn debug_command_task(
             DebugCommand::App(AppDebugOp::SdListShots) => {
                 warn!("SD listing requested, but this board has no SD card");
             }
+            DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
+                warn!("SD format requested, but this board has no SD card");
+            }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
         }
