@@ -24,6 +24,7 @@ use crate::channels::{
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
+    ImprovReport, IMPROV_REPORT_CHANNEL,
     WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
     ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
 };
@@ -475,7 +476,12 @@ pub async fn start(
             // signal.
             match select4(
                 COMMS_STATUS_SIGNAL.wait(),
-                command_receiver.receive(),
+                // An Improv report shares this arm with the command queue rather than
+                // nesting under the timer: both carry controller-bound traffic, and a
+                // provisioning report is the one thing on this link a user is watching in
+                // real time. It polls first because it is rare -- at most a couple per
+                // window -- so it cannot starve the commands beside it.
+                select(IMPROV_REPORT_CHANNEL.receive(), command_receiver.receive()),
                 sensor_reading_receiver.receive(),
                 select(
                     Timer::after(timeout),
@@ -503,7 +509,36 @@ pub async fn start(
 
                     log_info!("Sent CommsStatus");
                 }
-                Either4::Second(machine_command) => {
+                // The Improv service reporting what its radio established. A distinct message
+                // from a `MachineCommand` on purpose -- see the note on `ImprovReport`.
+                Either4::Second(Either::First(report)) => {
+                    let message = match report {
+                        ImprovReport::Provisioned(credentials) => {
+                            // Not logged, not even as an SSID. This is the one line in this
+                            // task that holds a live password.
+                            log_info!("Reporting provisioned Wi-Fi credentials");
+                            CommsProcessorToApplicationProcessorMessage::WifiCredentialsProvisioned(
+                                credentials,
+                            )
+                        }
+                        ImprovReport::Identify => {
+                            CommsProcessorToApplicationProcessorMessage::WifiProvisioningIdentify
+                        }
+                    };
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if tx.write_async(&serialized_message).await.is_err() {
+                                log_error!("Failed to write Improv report to UART");
+                            }
+                        }
+                        // Not `.expect(..)`, unlike the machine's own traffic below: the SSID
+                        // and password inside came off a radio from whoever is in range, and
+                        // taking the machine down over a malformed one would hand anyone with
+                        // a BLE radio a way to do it.
+                        Err(_) => log_error!("Failed to serialize Improv report"),
+                    }
+                }
+                Either4::Second(Either::Second(machine_command)) => {
                     // Check if this command requires a delayed refresh
                     let needs_delayed_request = match &machine_command {
                         MachineCommand::AddScheduleItem(_) |

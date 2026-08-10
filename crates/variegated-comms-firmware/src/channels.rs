@@ -4,7 +4,7 @@ use embassy_sync::signal::Signal;
 use embassy_sync::channel::{Channel, Sender, Receiver};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
-use portable_atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU64, Ordering};
+use portable_atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineList, ScaleOp, Status};
@@ -331,6 +331,62 @@ pub static LAST_SNTP_SYNC_MS: AtomicU64 = AtomicU64::new(0);
 // state is only reachable through the `WifiController`, which connection_task
 // owns. Mirror it here the same way the Belka status is mirrored.
 pub static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// The Improv provisioning state, mirrored for the 1 Hz `CommsStatus`.
+///
+/// An atomic, like every other mirror here and for the same reason: the status task must be
+/// able to read it without consuming anything and without awaiting.
+///
+/// The stored byte is `codec::State`'s discriminant, and [`improv_state`] is the one place
+/// the two enums are mapped onto each other. They are a wire contract with a half in each
+/// repository -- `variegated_controller_types::wifi::ImprovState` says as much -- so the
+/// mapping lives in exactly one function rather than at each use.
+pub static IMPROV_STATE: AtomicU8 = AtomicU8::new(0);
+
+pub fn improv_state() -> variegated_controller_types::wifi::ImprovState {
+    use variegated_controller_types::wifi::ImprovState;
+    match IMPROV_STATE.load(Ordering::Relaxed) {
+        1 => ImprovState::AwaitingAuthorization,
+        2 => ImprovState::Authorized,
+        3 => ImprovState::Provisioning,
+        4 => ImprovState::Provisioned,
+        // Including anything unrecognised. `Stopped` is the safe way to be wrong: the machine
+        // UI's indicator goes dark rather than claiming a window is open that is not.
+        _ => ImprovState::Stopped,
+    }
+}
+
+/// What the Improv service has to tell the application processor.
+///
+/// **Not `MachineCommand`, and the distinction is load bearing.** `MachineCommand` is the
+/// *inbound* vocabulary -- what a client asks the machine to do -- and it reaches this
+/// processor from HTTP, the WebSocket, ESPHome and the TCP debug port. These two are the
+/// comms processor *reporting* something its own radio established.
+///
+/// The application processor stores a provisioned credential without validating it, and the
+/// only thing that makes that correct is that it arrived by this route: see the comment on
+/// the `SetWifiCredentials` arm in `dual_boiler_single_group.rs`, which says so in as many
+/// words. Folding these into `MachineCommand` would make a credential anybody put on the
+/// command channel indistinguishable from one a radio proved.
+#[derive(Clone, Debug)]
+pub enum ImprovReport {
+    /// These associated. Persist them.
+    Provisioned(variegated_controller_types::wifi::WifiCredentials),
+    /// A client asked the machine to identify itself.
+    Identify,
+}
+
+/// A `Channel`, not a `Signal`, and depth 2.
+///
+/// `Signal` is latest-wins, and the one message here whose loss is expensive is
+/// [`ImprovReport::Provisioned`] -- an `Identify` arriving behind it would silently discard
+/// the credential, leaving a machine that joined a network and never remembered it while the
+/// phone said it worked. Two slots is one of each.
+///
+/// The producer uses `try_send` and never awaits, because it runs on a BLE connection's event
+/// loop.
+pub static IMPROV_REPORT_CHANNEL: Channel<CriticalSectionRawMutex, ImprovReport, 2> =
+    Channel::new();
 
 // Network identity mirrors, for `CommsState`'s `wifi_mac`, `bt_address` and `wifi_ip`.
 //

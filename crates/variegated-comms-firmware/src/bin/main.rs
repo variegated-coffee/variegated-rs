@@ -48,6 +48,7 @@ use variegated_comms_firmware::{
     debug,
     esphome::esphome_server_task,
     http::{http_server_task, cache_update_task},
+    improv,
     mk_static,
     instrumentation,
     time::sntp_task,
@@ -295,11 +296,10 @@ async fn comms_status_signaller_task(
             wifi_connected,
             timestamp,
             wifi_rssi,
-            // Hardcoded until the Improv service exists. Reported as `Stopped` rather than
-            // left out because that is the truth on this firmware: nothing advertises, so
-            // there is no window open. The machine UI's indicator reads this and will stay
-            // dark, which is correct.
-            improv: variegated_controller_types::wifi::ImprovState::Stopped,
+            // Mirrored from `improv::improv_task` through an atomic, exactly as
+            // `wifi_connected` above is mirrored from the task that owns the radio.
+            // `Stopped` whenever no provisioning window is open, which is nearly always.
+            improv: variegated_comms_firmware::channels::improv_state(),
             peripheral_connection_status,
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);
@@ -676,8 +676,12 @@ async fn main(spawner: Spawner) -> ! {
     // remainder, so every unused slot here is stack the deepest postcard recursion
     // does not get. The three were worth 2752 bytes together.
     //
-    // - `CONNS = 5`. This is a central, and the set of peripherals it connects to is no
-    //   longer a build-time fact: associations arrive from the application processor at
+    // - `CONNS = 6`. Five for the central side, plus one for the Improv peripheral
+    //   connection -- a `ConnectionStorage` slot like any other, held for as long as a
+    //   provisioning window is open.
+    //
+    //   The central five: this is a central, and the set of peripherals it connects to is
+    //   no longer a build-time fact: associations arrive from the application processor at
     //   runtime, up to `MAX_BLUETOOTH_PERIPHERALS` of them. Four, plus one of margin for
     //   a reconnect that overlaps a not-yet-reaped stale connection.
     //
@@ -689,22 +693,33 @@ async fn main(spawner: Spawner) -> ! {
     //
     //   Measured, not estimated: 3 -> 5 moved `.bss` 217560 -> 218712 and `.stack`
     //   129464 -> 128312, i.e. 1152 bytes, ~576 per connection slot, taken out of the
-    //   stack exactly as the paragraph above says. 125 kB of stack remains.
+    //   stack exactly as the paragraph above says. Re-measured at the Improv change,
+    //   5 -> 6 costs 512 bytes, so the per-slot figure has held.
+    //
+    //   The Improv service as a whole cost rather more than its slot: `.bss` 249016 ->
+    //   253040 and `.stack` 94232 -> 90144, i.e. 4024 bytes, of which only 512 is this
+    //   line. The rest is `ImprovServer` -- a 20-entry `AttributeTable` plus its CCCD
+    //   table -- which lives in the improv task's storage, and the two characteristic
+    //   value buffers, which are `StaticCell`s the `#[gatt_service]` macro emits. Worth
+    //   knowing before adding a second service: the table, not the connection, is what
+    //   a GATT server costs here.
     // - `CHANNELS = 2`. `ChannelStorage` is *dynamic L2CAP connection-oriented*
     //   channels only -- GATT does not use it, it rides the fixed ATT CID through
     //   `ConnectionStorage::gatt_client`. Nothing here opens a CoC channel: both
     //   drivers are plain GATT clients. This could be 0; 2 is left as headroom
     //   because each slot embeds a `PacketChannel<_, L2CAP_RX_QUEUE_SIZE>` and
     //   discovering the need for one at runtime is worse than paying for two.
-    // - `ADV_SETS = 1`. This firmware never advertises -- there is no `Peripheral`,
-    //   no `advertise()` call, in the firmware or in either driver. `AdvHandleState`
-    //   is small, so 16 -> 1 is the least of the three; it is corrected because a
-    //   count of 16 advertising sets actively misdescribes what this radio does.
+    // - `ADV_SETS = 1`. This firmware advertises exactly one set, and only while a Wi-Fi
+    //   provisioning window is open -- see `improv::improv_task`. One legacy advertisement
+    //   is all Improv needs, and `ConnectableScannableUndirected` carries both its
+    //   payloads within that one set. (This bullet read "never advertises -- there is no
+    //   `Peripheral`" until the Improv service landed. The count was already right; the
+    //   reason was not.)
     //
     // If any of those three claims stops being true, this line is the thing that
     // fails, and it fails at connect/advertise time rather than at compile time.
     let ble_resources = mk_static!(
-        HostResources<DefaultPacketPool, 5, 2, 1>,
+        HostResources<DefaultPacketPool, 6, 2, 1>,
         HostResources::new()
     );
 
@@ -756,7 +771,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // Build BLE host
-    let Host { central, runner, .. } = stack.build();
+    let Host { central, peripheral, runner, .. } = stack.build();
 
     // Create connection manager
     let connection_manager = mk_static!(
@@ -778,6 +793,10 @@ async fn main(spawner: Spawner) -> ! {
     for slot in 0..MAX_BLUETOOTH_PERIPHERALS {
         spawn_or_report!(spawner, "ble_slot", ble_slot_task(slot, connection_manager, stack, sensor_reading_sender));
     }
+    // Idle until the application processor opens a window, which it will not do until
+    // someone has held a button on the machine. It reports what it learns on
+    // `IMPROV_REPORT_CHANNEL`, which is a static, so it needs nothing here but the radio.
+    spawn_or_report!(spawner, "improv", improv::improv_task(peripheral));
     log_info!("BLE tasks spawned");
 
     Timer::after_secs(5).await;

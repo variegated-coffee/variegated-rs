@@ -3747,6 +3747,7 @@ dependencies = [
  "variegated-controller-types",
  "variegated-debug",
  "variegated-debug-codec",
+ "variegated-improv-trouble",
  "variegated-instrumentation",
  "variegated-log",
  "variegated-scale-trouble-driver",
@@ -3805,8 +3806,13 @@ dependencies = [
 name = "variegated-improv-trouble"
 version = "0.1.0"
 dependencies = [
+ "bt-hci",
  "defmt 1.1.1",
+ "embassy-sync 0.7.2",
+ "embassy-time",
  "heapless 0.9.3",
+ "static_cell",
+ "trouble-host",
 ]
 
 [[package]]
