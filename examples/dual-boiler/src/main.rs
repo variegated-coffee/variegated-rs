@@ -68,6 +68,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use serde::Serialize;
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, WeightType, SteamWandDefinition, ShotLog};
 use variegated_controller_types::bluetooth::BluetoothAssociations;
+use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
@@ -482,11 +483,15 @@ type SettingsStorageType = SequentialStorageSettingsStorage<'static, SyncSendRaw
 /// than getting one of its own. Only the payload type and the map key differ; both
 /// live in the same flash range.
 type BluetoothStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, BluetoothAssociations>;
+/// Wi-Fi credentials, in the same settings range under a key of their own. Same reasoning
+/// as the Bluetooth store above; only the payload type and the key differ.
+type WifiStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, StoredWifiCredentials>;
 
 type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
 type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
 type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
 type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
+type WifiStoreMutex = Mutex<SyncSendRawMutex, WifiStoreType>;
 type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
 /// Core 1's stack.
@@ -891,6 +896,15 @@ static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
 /// press queued rather than dropped, and depth beyond that would only let stale requests
 /// pile up behind a scan already running.
 static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u16, 2>> = StaticCell::new();
+static WIFI_STORE: StaticCell<WifiStoreMutex> = StaticCell::new();
+/// Accepted provisioning-window requests, carrying the duration in milliseconds; zero
+/// means close. Crosses cores like the scan channel above, hence `SyncSendRawMutex`.
+///
+/// One channel for open and close rather than two, because the two are mutually exclusive
+/// and their ordering matters: on separate channels a close could be delivered ahead of
+/// the open it was meant to cancel, leaving the radio advertising with nothing left to
+/// stop it.
+static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u32, 2>> = StaticCell::new();
 static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -2221,6 +2235,16 @@ async fn main_task(
     let bluetooth_store_ref = BLUETOOTH_STORE.init(Mutex::new(bluetooth_store));
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
 
+    // Wi-Fi credentials, at a third key in the same range. See the note on the Bluetooth
+    // store above for why a key rather than a field on the settings blob.
+    let wifi_store: WifiStoreType = SequentialStorageSettingsStorage::<_, _, StoredWifiCredentials>::new_with_key(
+        flash,
+        0x0000_0000..0x0008_0000,
+        key::WIFI_CREDENTIALS,
+    );
+    let wifi_store_ref = WIFI_STORE.init(Mutex::new(wifi_store));
+    let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
+
     log_info!("Configuration loaded");
 
     // Create storage command channel for async storage operations
@@ -2770,6 +2794,8 @@ async fn main_task(
         schedule_store_ref,
         bluetooth_store_ref,
         Some(bluetooth_scan_channel.sender()),
+        wifi_store_ref,
+        Some(wifi_provisioning_channel.sender()),
         peripheral_registry,
         Some(watchdog),
         interlock_enabled_signal,

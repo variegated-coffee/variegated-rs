@@ -26,7 +26,15 @@ pub struct CommsStatus {
     pub timestamp: Option<u64>, // Unix timestamp in seconds
     pub wifi_connected: bool,
     pub wifi_rssi: Option<i8>, // RSSI in dBm, None when disconnected
-    pub peripheral_connection_status: FnvIndexMap<PeripheralId, WirelessConnectionStatus, 8>
+    pub peripheral_connection_status: FnvIndexMap<PeripheralId, WirelessConnectionStatus, 8>,
+    /// Improv provisioning state.
+    ///
+    /// Reported by the processor that owns the radio rather than inferred from the command
+    /// that opened the window, so the machine's display shows what is actually being
+    /// advertised. A window the comms processor never opened -- because it reset -- reads
+    /// as `Stopped` here, which is what the application processor's fallback deadline is
+    /// for.
+    pub improv: crate::wifi::ImprovState,
 }
 
 #[cfg(feature = "defmt")]
@@ -34,10 +42,11 @@ impl defmt::Format for CommsStatus {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(
             f,
-            "CommsStatus {{ timestamp: {:?}, wifi_connected: {}, wifi_rssi: {:?}, peripherals: {} }}",
+            "CommsStatus {{ timestamp: {:?}, wifi_connected: {}, wifi_rssi: {:?}, improv: {:?}, peripherals: {} }}",
             self.timestamp,
             self.wifi_connected,
             self.wifi_rssi,
+            self.improv,
             Debug2Format(&self.peripheral_connection_status),
         )
     }
@@ -117,6 +126,28 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     /// dropped silently so that a scan which found nothing is distinguishable from one
     /// that found too much.
     BluetoothScanFinished { reports_dropped: u16 },
+    /// Ask for the stored Wi-Fi credentials.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Sent at boot and repeated until answered, for the same reason
+    /// [`Self::RequestBluetoothPeripherals`] is: this processor has no persistent storage,
+    /// so until it is told it has no network at all. **`None` is a complete answer**, so
+    /// the retry must stop on receipt rather than on credentials being present.
+    RequestWifiCredentials,
+    /// Credentials that have been *proven* -- the radio associated with them.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Only sent after a successful association, which is why the application processor can
+    /// persist it without validating anything: a typo never gets this far. Improv requires
+    /// the device to verify before it reports `Provisioned`, so the check has to happen on
+    /// this side regardless.
+    WifiCredentialsProvisioned(crate::wifi::WifiCredentials),
+    /// A client sent the Improv Identify RPC.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    WifiProvisioningIdentify,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -229,6 +260,35 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// `BusUnavailable`) are properties of the card rather than of the shot asked for, and
     /// with one request in flight at a time there is nothing to disambiguate against.
     ShotLogError(crate::shot_log::ShotLogStorageError),
+    /// The stored Wi-Fi credentials, or `None` if none are configured.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// Sent in answer to [`CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials`]
+    /// and unprompted whenever they change, so a machine provisioned over Improv joins its
+    /// new network without waiting to be asked again.
+    ///
+    /// Deliberately *not* carried inside `Configuration`, unlike the Bluetooth association
+    /// list: `Configuration` is what the browser receives, and a password has no business
+    /// on that path.
+    WifiCredentials(Option<crate::wifi::WifiCredentials>),
+    /// Advertise the Improv service for `duration_ms`, accepting credentials while it lasts.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// **The window is the authorization.** Nothing advertises until a human held a button
+    /// on the machine, so a client that can see the service is one a person deliberately
+    /// exposed. The comms processor times the window out itself, because it owns the radio;
+    /// the application processor keeps its own deadline only as a fallback for a comms
+    /// processor that resets mid-window.
+    OpenWifiProvisioningWindow { duration_ms: u32 },
+    /// Stop advertising now.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    CloseWifiProvisioningWindow,
 }
 
 /// An operation on a scale, as carried by

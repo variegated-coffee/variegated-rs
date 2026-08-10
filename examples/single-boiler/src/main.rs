@@ -82,6 +82,7 @@ use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId};
 use variegated_controller_types::bluetooth::BluetoothAssociations;
+use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_controller_types::debug::{ApplicationState, DebugEvent, DebugPayload, DebugStateSnapshot, SourceState};
 use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
 use variegated_debug::bus;
@@ -325,6 +326,9 @@ static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = 
 /// controller sends and the transceiver drains; both live on this board's single
 /// executor, so `NoopRawMutex` matches `COMMAND_CHANNEL` above.
 static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<NoopRawMutex, u16, 2>> = StaticCell::new();
+/// Accepted provisioning-window requests, carrying the duration in milliseconds; zero
+/// means close. One channel for both, so a close cannot overtake the open it cancels.
+static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<NoopRawMutex, u32, 2>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
@@ -521,6 +525,15 @@ async fn main_task(spawner: Spawner) -> ! {
         key::BLUETOOTH_ASSOCIATIONS,
     );
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
+
+    // Wi-Fi credentials, at a third key in the same range. See the note on the Bluetooth
+    // store above for why a key rather than a field on the settings blob.
+    let wifi_store = SequentialStorageSettingsStorage::<_, _, StoredWifiCredentials>::new_with_key(
+        flash,
+        0x0000_0000..0x0008_0000,
+        key::WIFI_CREDENTIALS,
+    );
+    let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
 
     info!("Configuration loaded");
     
@@ -775,6 +788,8 @@ async fn main_task(spawner: Spawner) -> ! {
         &peripheral_registry,
         bluetooth_store,
         Some(bluetooth_scan_channel.sender()),
+        wifi_store,
+        Some(wifi_provisioning_channel.sender()),
         Some(watchdog),
         // shot_log_sender: this board has no SD card -- `single-boiler` does not enable
         // `sd-card-storage`, so there is no storage task to send completed logs to.

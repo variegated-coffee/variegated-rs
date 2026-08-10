@@ -1992,6 +1992,7 @@ mod tests {
             timestamp: Some(u64::MAX),
             wifi_connected: true,
             wifi_rssi: Some(-70),
+            improv: variegated_controller_types::wifi::ImprovState::Provisioning,
             peripheral_connection_status,
         });
 

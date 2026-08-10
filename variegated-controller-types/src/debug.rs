@@ -94,7 +94,13 @@ use crate::Status;
 ///   command in this enum that destroys data, so a version mismatch here is worth
 ///   reporting as such rather than letting a host's older frame be read as something
 ///   adjacent. The command carries its own magic-value guard for the same reason.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8A;
+/// * `0x8B` -- `CommsStatus` gained `improv`, and `MachineCommand` gained four Wi-Fi
+///   provisioning variants. `CommsStatus` is a *struct*, so unlike every entry above this
+///   is not an appended enum variant an older peer would merely fail to recognise: every
+///   byte after `wifi_rssi` shifts, and a host built before this reads the peripheral
+///   connection map as garbage. That is exactly the failure this version exists to catch,
+///   and it is the same shape as the drift that motivated the schema fixtures.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8B;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

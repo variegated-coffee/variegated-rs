@@ -37,6 +37,7 @@ use crate::{BLUETOOTH_SCAN_DURATION_MS, BLUETOOTH_SCAN_SLACK_MS};
 use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
 };
+use variegated_controller_types::wifi::StoredWifiCredentials;
 
 /// Persistent configuration for dual-boiler single-group machine
 /// Uses nested leaf types from variegated-controller-types for clean structure
@@ -422,6 +423,7 @@ pub struct DualBoilerSingleGroupController<
     RoutineRepoT: RoutineRepository + 'static,
     ScheduleStoreT: ScheduleStore + 'static,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations> + 'static,
+    WifiStoreT: SettingsStorage<StoredWifiCredentials> + 'static,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
@@ -532,6 +534,23 @@ pub struct DualBoilerSingleGroupController<
     // the UI's scan button disabled until the next reboot.
     bluetooth_scan_deadline: Option<Instant>,
 
+    // Wi-Fi credentials, at their own key in the settings flash range.
+    //
+    // A key rather than a field on the persistent configuration, for the reason given on
+    // `bluetooth_store` above -- appending to that blob is a factory reset.
+    wifi_store: &'static Mutex<StorageM, WifiStoreT>,
+    // Kept in RAM for the same reason the association list is: this is the only reader and
+    // writer, so re-reading the store could only ever return what is already in hand.
+    wifi_credentials: StoredWifiCredentials,
+    // Unlike the association list, credentials do *not* ride on the `Configuration`
+    // publish -- `Configuration` is what the browser receives and a password has no
+    // business on that path -- so a change here has to announce itself.
+    wifi_publish_pending: bool,
+    // Where an accepted provisioning-window request goes, carrying the duration in
+    // milliseconds; zero means close. `None` on a machine whose comms processor is not
+    // wired for it, in which case requests are refused rather than silently dropped.
+    wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+
     // Status tracking
     previous_status: Option<Status>,
     brew_temperature_movavg: MovAvg<f32, f32, 10>,
@@ -573,11 +592,12 @@ impl<
     RoutineRepoT: RoutineRepository,
     ScheduleStoreT: ScheduleStore,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
+    WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
 /*    fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -606,6 +626,11 @@ impl<
         // milliseconds. `None` on a machine whose comms processor is not wired for it, in
         // which case scan requests are refused rather than silently dropped.
         bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
+        wifi_store: &'static Mutex<StorageM, WifiStoreT>,
+        // Where an accepted `OpenWifiProvisioningWindow` goes, carrying the duration in
+        // milliseconds; zero means close. `None` on a machine whose comms processor is not
+        // wired for it, in which case requests are refused rather than silently dropped.
+        wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
@@ -684,6 +709,10 @@ impl<
             bluetooth_status: BluetoothScanStatus::default(),
             bluetooth_publish_pending: false,
             bluetooth_scan_deadline: None,
+            wifi_store,
+            wifi_credentials: StoredWifiCredentials::default(),
+            wifi_publish_pending: false,
+            wifi_provisioning_sender,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
@@ -824,6 +853,28 @@ impl<
         self.bluetooth_publish_pending = true;
     }
 
+    /// Persist the Wi-Fi credentials, and tell the comms processor they changed.
+    ///
+    /// The push is not a nicety: the comms processor holds no configuration of its own, so
+    /// until it is told, credentials the user just provisioned do not exist as far as the
+    /// radio is concerned.
+    ///
+    /// Unlike the association list this deliberately does **not** ride on the
+    /// `Configuration` publish. That path ends at the browser, and a password has no
+    /// business on it -- so this needs a flag of its own rather than reusing
+    /// `bluetooth_publish_pending`'s trick of dirtying the configuration.
+    async fn save_wifi_credentials(&mut self) {
+        match with_timeout(Duration::from_millis(100), self.wifi_store.lock()).await {
+            Ok(mut store) => {
+                if store.save_settings(&self.wifi_credentials).await.is_err() {
+                    log_warn!("Failed to save Wi-Fi credentials");
+                }
+            }
+            Err(_) => log_warn!("Failed to acquire wifi_store lock for save (timeout)"),
+        }
+        self.wifi_publish_pending = true;
+    }
+
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
         let mut last_published_configuration = self.configuration.clone();
@@ -844,6 +895,23 @@ impl<
         // The comms processor asks for these itself at boot, but it has no way to know
         // whether this processor was simply slow to answer, so publish once regardless.
         self.bluetooth_publish_pending = true;
+
+        // Once, before the loop, for the same reason as the association list above.
+        self.wifi_credentials = match self.wifi_store.lock().await.load_settings().await {
+            Ok(credentials) => credentials,
+            Err(_) => {
+                log_warn!("Failed to load Wi-Fi credentials; starting with none");
+                StoredWifiCredentials::default()
+            }
+        };
+        // Logged as configured-or-not, never as a value. The SSID alone would be harmless,
+        // but a log line that prints half a credential is one edit away from printing all
+        // of it.
+        log_info!(
+            "Wi-Fi credentials: {}",
+            if self.wifi_credentials.0.is_some() { "configured" } else { "none stored" }
+        );
+        self.wifi_publish_pending = true;
 
         loop {
             // A scan the comms processor never reported the end of -- because it reset,
@@ -1398,6 +1466,12 @@ impl<
                 timestamp: current_timestamp,
                 wifi_connected: status.wifi_connected,
                 wifi_rssi: status.wifi_rssi,
+                // Carried through unextrapolated, unlike the timestamp above. Provisioning
+                // state is a fact about the other processor's radio at the moment it last
+                // reported, and there is no way to advance it here -- a window this side
+                // guessed had expired would clear the display's indicator while the radio
+                // was still advertising.
+                improv: status.improv,
                 peripheral_connection_status: status.peripheral_connection_status.clone(),
             }),
             // Published alongside, because everything above is extrapolated: the
@@ -2216,6 +2290,58 @@ impl<
             }
             MachineCommand::TagDoseFromScale(scale) => {
                 self.tag_dose_from_scale(scale);
+            }
+            MachineCommand::SetWifiCredentials(credentials) => {
+                // Persisted without validation, and that is correct rather than lax: these
+                // arrive only from `WifiCredentialsProvisioned`, which the comms processor
+                // sends *after* its radio has associated using them. This processor has no
+                // radio and could not check anything anyway.
+                let stored = StoredWifiCredentials(Some(credentials));
+                if self.wifi_credentials != stored {
+                    self.wifi_credentials = stored;
+                    self.save_wifi_credentials().await;
+                    log_info!("Stored new Wi-Fi credentials");
+                }
+            }
+            MachineCommand::OpenWifiProvisioningWindow { duration_ms } => {
+                // Refused while the machine is busy, on the same grounds as a discovery
+                // scan and using the same predicate. Minutes of connectable advertising
+                // share one antenna with Wi-Fi and with the live links to the scales, and
+                // the ACAIA drops its connection if its heartbeat misses by a couple of
+                // seconds. This is the only processor that knows coffee is being made.
+                let busy = self.group_brewing
+                    || self.water_tap_dispensing
+                    || self.current_routine.is_some();
+                #[cfg(feature = "pwm-steam-valve")]
+                let busy = busy || self.steam_wand.get_steaming_state();
+
+                if busy {
+                    log_warn!("Refusing to open the Wi-Fi provisioning window: machine is busy");
+                } else if let Some(sender) = self.wifi_provisioning_sender.as_ref() {
+                    if sender.try_send(duration_ms).is_err() {
+                        log_warn!("Failed to forward the provisioning window request: channel full");
+                    }
+                } else {
+                    // Refused out loud rather than dropped, so a machine that is not wired
+                    // for this says so instead of appearing to accept and then advertising
+                    // nothing.
+                    log_warn!("This machine has no Wi-Fi provisioning path");
+                }
+            }
+            MachineCommand::CloseWifiProvisioningWindow => {
+                if let Some(sender) = self.wifi_provisioning_sender.as_ref() {
+                    // Zero means close. One channel rather than two because the two
+                    // requests are mutually exclusive and ordering between them matters:
+                    // separate channels could deliver a close before the open it was meant
+                    // to cancel.
+                    let _ = sender.try_send(0);
+                }
+            }
+            MachineCommand::IdentifyMachine => {
+                // Nothing to do on this machine yet -- the display hook lands with the
+                // machine UI. Logged rather than ignored so the round trip is visible while
+                // the far end is being brought up.
+                log_info!("Identify requested");
             }
             MachineCommand::SetShotAnnotations(id, annotations) => {
                 // Editing a *stored* shot is a whole-file rewrite on the card, which

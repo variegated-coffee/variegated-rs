@@ -34,6 +34,13 @@ run() {
     cargo test --target "$HOST" "$@" || RC=1
 }
 
+# `--no-default-features` is not optional here, and the manifest says why: the default set
+# pulls defmt, whose `links = "defmt"` linker script a host test binary cannot satisfy, and
+# which fails as "Too many sections!" rather than as anything mentioning defmt.
+# `sequential-storage` is on because the credential and association `Value` impls are
+# behind it, and those are the tests worth running -- a broken one fails *silently*, since
+# `load_settings` maps a deserialization error to `Default`.
+run "variegated-controller-types" -p variegated-controller-types --no-default-features --features serde,std,sequential-storage "$@"
 run "variegated-debug-codec" -p variegated-debug-codec "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"

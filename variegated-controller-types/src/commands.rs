@@ -154,6 +154,39 @@ pub enum MachineCommand {
     /// weight to report: a dose silently recorded from the wrong place is worse than no
     /// dose at all, because nothing downstream can tell it was wrong.
     TagDoseFromScale(ScaleSelector),
+
+    /// Open the Improv provisioning window for `duration_ms`.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// Refused while the machine is busy, on the same grounds as a discovery scan: minutes
+    /// of connectable advertising share one antenna with Wi-Fi and with the live links to
+    /// the scales. This is the only processor that knows coffee is being made.
+    OpenWifiProvisioningWindow { duration_ms: u32 },
+
+    /// Close the Improv provisioning window.
+    ///
+    /// Appended, not inserted.
+    CloseWifiProvisioningWindow,
+
+    /// Persist credentials the comms processor has already proven work.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// Not a user command despite sitting here, like [`Self::UpdateCommsStatus`]: it
+    /// arrives from the comms processor, whose only route into the controller is the
+    /// command channel. It carries no validation burden because the sender has already
+    /// associated with these credentials -- Improv requires the device to verify before
+    /// reporting success, so a typo never reaches this point.
+    SetWifiCredentials(crate::wifi::WifiCredentials),
+
+    /// Make the machine identify itself -- Improv's Identify RPC.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// What identifying means is the machine's to decide: flash the display, blink an LED,
+    /// or on a machine with neither, nothing at all.
+    IdentifyMachine,
 }
 
 #[cfg(feature = "defmt")]
@@ -211,6 +244,13 @@ impl defmt::Format for MachineCommand {
             MachineCommand::SetShotAnnotations(id, annotations) => defmt::write!(f, "SetShotAnnotations({:?}, {} entries)", id, annotations.len()),
             MachineCommand::SetPendingShotAnnotations(annotations) => defmt::write!(f, "SetPendingShotAnnotations({} entries)", annotations.len()),
             MachineCommand::TagDoseFromScale(scale) => defmt::write!(f, "TagDoseFromScale({:?})", scale),
+            MachineCommand::OpenWifiProvisioningWindow { duration_ms } => defmt::write!(f, "OpenWifiProvisioningWindow({})", duration_ms),
+            MachineCommand::CloseWifiProvisioningWindow => defmt::write!(f, "CloseWifiProvisioningWindow"),
+            // `{}` on the credentials, not their fields: the type's own `Format` elides the
+            // password, and formatting the fields here would bypass that. This command
+            // reaches the debug wire and the TCP debug server.
+            MachineCommand::SetWifiCredentials(c) => defmt::write!(f, "SetWifiCredentials({})", c),
+            MachineCommand::IdentifyMachine => defmt::write!(f, "IdentifyMachine"),
         }
     }
 }
