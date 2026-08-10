@@ -24,9 +24,11 @@ sections "Why not append to `PersistentConfiguration`" and "Storage layer".
   `[lib] test = false` and it depends on `embassy-rp`, which does not build for the host.
   Verification here is compile + example builds + an on-hardware check. Do not invent a
   `#[test]` in this crate; it will not run.
-- `scripts/build-examples.sh` is the gate. Recorded warning baselines: dual_boiler 83,
-  dual_boiler+pwm-steam-valve 81, single_boiler 71, **0 errors**. Warning counts may drift;
-  the error count may not.
+- `scripts/build-examples.sh` is the gate, and the **only** compile check that works — see
+  Task 1 Step 6. The baselines in the script's header (dual_boiler 83, +pwm-steam-valve 81,
+  single_boiler 71) are stale: this branch measures 194 / 192 / 189, plus 198 for
+  dual_boiler_optional_peripherals. **0 errors** is the part that matters; warning counts
+  drift, and these were unchanged across both tasks here.
 - Both `dual_boiler` and `single_boiler` must build (`variegated-rs/CLAUDE.md`).
 - Commit messages end with the two trailers this repo uses; copy them from `git log -1`.
 - Do **not** reuse or erase the abandoned range `0x0010_0000..0x0012_0000` in this plan. It
@@ -182,13 +184,13 @@ This is the load-bearing change. Replace the removal block in `optimize_storage`
 
 `remove_item` needs `S: MultiwriteNorFlash`, which this `impl` already bounds.
 
-- [ ] **Step 6: Check it compiles**
+- [ ] **Step 6: (skip — see note)**
 
-Run: `cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs && cargo check -p variegated-controller-lib`
-
-Expected: finishes with warnings only, 0 errors. If `remove_item` is reported as not found,
-confirm the `sequential-storage` version resolved in `Cargo.lock` is 8.0.1 — the method is at
-`map.rs:590` there.
+`cargo check -p variegated-controller-lib` does **not** work in this workspace, and not
+because of anything in this task: building that crate alone selects no chip feature for
+`embassy-rp`, so `rp-pac` fails with "You must enable either the `rp2040` or the `rp235x`
+Cargo features". Only the examples set the feature. Go straight to Step 7, which compiles
+this file as part of four real binaries.
 
 - [ ] **Step 7: Check nothing else broke**
 
@@ -364,10 +366,11 @@ scan, associate a scale, and confirm it connects.
 
 - [ ] **Step 5: Force an optimize and confirm both survive**
 
-Trigger `optimize_storage` on the configuration store by whatever path this branch exposes
-(the storage task at `examples/dual-boiler/src/main.rs:1467-1485`; if there is no runtime
-trigger, a temporary `AppDebugOp` or a one-off call at boot is acceptable for this check and
-must not be committed).
+Send `MachineCommand::OptimizeConfigurationStorage` from `variegated-debug-tui`'s command
+palette (`variegated-cli/src/command_form.rs:1425`). The controller forwards it as
+`StorageCommand::OptimizeConfiguration` (`dual_boiler_single_group.rs:1940-1944`) to the
+storage task (`examples/dual-boiler/src/main.rs:1480-1486`), which logs
+"Configuration storage optimization complete". No temporary code is needed.
 
 Then power-cycle and confirm **both** the changed boiler temperature **and** the associated
 scale are still there. This is the exact regression the keyed removal exists to prevent: on
