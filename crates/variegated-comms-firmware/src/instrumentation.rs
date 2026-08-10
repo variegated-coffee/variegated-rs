@@ -143,6 +143,18 @@ define_counters! {
         /// attempt starts the same two-second cooldown a failure does, a device can be
         /// starved indefinitely without ever recording a timeout.
         BleConnectAbandoned = 18,
+
+        /// Times the BLE host runner returned an error and had to be restarted.
+        ///
+        /// The runner is what drains HCI, so this is not one peripheral misbehaving --
+        /// it is the whole BLE stack stopping. A single count is a blip the ten-second
+        /// restart absorbs; a count that climbs steadily is the stack failing to come
+        /// back, which is the shape of the fault that needs a power cycle.
+        ///
+        /// Read it against `BleRunnerGapMaxMs`. A failure preceded by a large gap points
+        /// at executor starvation letting the controller's event buffer overflow; a
+        /// failure with a small gap points at the controller or the radio.
+        BleRunnerFailures = 19,
     }
 }
 
@@ -286,6 +298,22 @@ pub fn note_ble_runner_poll() {
         return;
     }
     MAX_BLE_GAP_US.fetch_max(now.wrapping_sub(last), Ordering::Relaxed);
+}
+
+/// Record that the BLE host runner returned an error.
+pub fn note_ble_runner_failure() {
+    COUNTERS.handle(CounterId::BleRunnerFailures).increment();
+}
+
+/// The worst BLE runner gap so far this sample period, in milliseconds.
+///
+/// A peek, not a read-and-clear: the sampler owns clearing this, and a diagnostic that
+/// consumed the value would silently blank the published indicator for whichever period
+/// it fired in. So the number is "the worst gap since the last sample" -- bounded by the
+/// sample interval, not by how long ago the failure was -- which is the right scale for
+/// asking whether the runner was being starved when it died.
+pub fn ble_runner_gap_max_ms() -> u32 {
+    MAX_BLE_GAP_US.load(Ordering::Relaxed) / 1000
 }
 
 /// Record how long it has been since embassy-net last drained the driver.
