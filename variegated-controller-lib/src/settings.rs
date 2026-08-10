@@ -12,6 +12,28 @@ use sequential_storage::cache::Cache;
 use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError, Value};
 use crate::flash::BorrowedFlash;
 
+/// Keys within a shared settings flash range.
+///
+/// [`SequentialStorageSettingsStorage`] stores one value under one key in a
+/// `sequential_storage` map, and several stores may share a range. That only works if the
+/// allocation is recorded in one place: two stores that pick the same number silently
+/// overwrite each other, and the symptom is a setting that reverts rather than anything
+/// that looks like a collision.
+///
+/// Append here; never renumber. A key is baked into the flash of every machine already
+/// running this firmware, so changing one is a silent factory reset of that value.
+pub mod key {
+    /// The machine's persistent configuration -- the value already stored on every
+    /// machine, so this one is not merely a convention but a fact about existing flash.
+    pub const CONFIGURATION: u8 = 0;
+    /// Wi-Fi credentials, provisioned over Improv.
+    pub const WIFI_CREDENTIALS: u8 = 1;
+    /// Bluetooth peripheral associations. Formerly at a flash range of their own
+    /// (`0x0010_0000..0x0012_0000`); machines upgraded across that move lose their
+    /// pairings once and re-pair.
+    pub const BLUETOOTH_ASSOCIATIONS: u8 = 2;
+}
+
 pub trait SettingsStorage<SettingsT: Default> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
     async fn save_settings(&mut self, data: &SettingsT) -> Result<(), &'static str>;
@@ -22,16 +44,30 @@ pub struct SequentialStorageSettingsStorage<'a, M: RawMutex, T: MultiwriteNorFla
     _phantom: core::marker::PhantomData<SettingsT>,
     flash: &'a Mutex<M, T>,
     range: Range<u32>,
+    /// Which key in `range` this store owns.
+    ///
+    /// Load, save and optimize all act on this key alone, which is what lets several
+    /// stores share one flash range. See [`key`] for the allocation.
+    key: u8,
     deserialization_buffer: [u8; 2048],
     cached_value: Option<SettingsT>,
 }
 
 impl <'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Default + Clone + PartialEq> SequentialStorageSettingsStorage<'a, M, T, SettingsT> {
+    /// A store owning [`key::CONFIGURATION`] in `range`.
     pub fn new(flash: &'a Mutex<M, T>, range: Range<u32>) -> Self {
+        Self::new_with_key(flash, range, key::CONFIGURATION)
+    }
+
+    /// A store owning `key` in `range`.
+    ///
+    /// Several stores may share a range provided they take different keys from [`key`].
+    pub fn new_with_key(flash: &'a Mutex<M, T>, range: Range<u32>, key: u8) -> Self {
         Self {
             _phantom: core::marker::PhantomData,
             flash,
             range,
+            key,
             deserialization_buffer: [0u8; 2048],
             cached_value: None,
         }
@@ -55,7 +91,7 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
         );
 
         let item = storage
-            .fetch_item::<SettingsT>(&mut self.deserialization_buffer, &0)
+            .fetch_item::<SettingsT>(&mut self.deserialization_buffer, &self.key)
             .await;
 
         if let Ok(Some(data)) = item {
@@ -129,14 +165,17 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 
         storage.store_item(
             &mut data_buffer,
-            &0u8,
+            &self.key,
             settings
         ).await.expect("Failed to store item");
 
         // Update the cache with the new settings
         self.cached_value = Some(settings.clone());
 
-        variegated_log::emit_event(DebugEvent::StorageWrite { store: name("settings"), index: 0 });
+        // `index` carries the key, not a constant 0. Stores sharing a range are otherwise
+        // indistinguishable in the debug stream, and "which of three settings blobs just
+        // wrote" is the entire question a reader of this event has.
+        variegated_log::emit_event(DebugEvent::StorageWrite { store: name("settings"), index: self.key as u16 });
 
         Ok(())
     }
@@ -154,7 +193,15 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
             .ok_or("Failed to load settings for optimization")?
             .clone();
 
-        // Remove everything
+        // Remove this store's item only.
+        //
+        // **Not `remove_all_items`**, which is what this used to call. That marks *every*
+        // key in the range deleted, and this method then writes back only its own -- so on
+        // a range shared by several stores, optimizing one silently destroyed the others,
+        // with the loss invisible until the next boot re-read them as absent. Nothing
+        // depended on the wider erase: the point of this method is to compact the log for
+        // the value it owns, and `remove_item` walks the same `remove_item_inner` path with
+        // a key filter.
         {
             let mut flash = self.flash.lock().await;
             let mut storage = MapStorage::<u8, _, _>::new(
@@ -164,9 +211,9 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
             );
 
             storage
-                .remove_all_items(&mut self.deserialization_buffer)
+                .remove_item(&mut self.deserialization_buffer, &self.key)
                 .await
-                .map_err(|_| "Failed to remove all")?;
+                .map_err(|_| "Failed to remove item")?;
         }
 
         // Write the current settings back
