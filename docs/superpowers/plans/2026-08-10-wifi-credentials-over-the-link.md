@@ -1,5 +1,31 @@
 # Wi-Fi credentials over the inter-processor link Implementation Plan
 
+> **Status: Tasks 1–4 complete, 2026-08-10. Task 5 (hardware) NOT DONE — see below.**
+>
+> `variegated-rs` `3af55a2`, `c40d232`; `variegated-comms-rs` `17f8ded`;
+> `variegated-cli` `1e23ed8`.
+>
+> Verified automatically: 25 `variegated-controller-types` tests including the credential
+> round trip; all ten `variegated-rs` host suites; 93 `variegated-cli` tests including its
+> exhaustive palette coverage check; all four example configurations and the comms firmware
+> at 0 errors; `schemas.ts` regenerated and the frontend bundle rebuilt, which means `tsc`
+> type-checked the decoder against the new schema; no `cargo::warning` lines in the firmware
+> log; and an audit of every added log line touching credentials, all of which are constant
+> strings.
+>
+> **Not verified: any of it running.** The credential round trip over the UART has never
+> been observed. In particular these are untested: whether the comms processor actually
+> stops re-requesting after a `None` answer (the received-flag trap), whether the `Watch`
+> receiver counts are right at runtime, and whether the reordered `join` nesting in
+> `esp_transceiver_main` still polls every arm. All three compile and all three could be
+> wrong.
+>
+> **Two plan errors execution found**, both now fixed in place: Task 3 as written set
+> `wifi_publish_pending` but gave the controller nothing to publish *to* — a
+> `wifi_credentials_publisher` had to be added to both controllers and both examples; and
+> the `0x8B` changelog entry described the wrong breakage (the field is appended, so nothing
+> inside `CommsStatus` shifts — the damage is one level up in `Status`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wi-Fi credentials are persisted on the application processor at `key::WIFI_CREDENTIALS` and travel over the UART link in both directions, with the comms processor still using its compiled-in pair.
@@ -78,7 +104,7 @@ things in four places that will not all announce themselves:
   - `pub struct StoredWifiCredentials(pub Option<WifiCredentials>)`, `Default`, `Clone`, `PartialEq`, and `Value<'a>` under `feature = "sequential-storage"`
   - `pub enum ImprovState { Stopped, AwaitingAuthorization, Authorized, Provisioning, Provisioned }`, `Default` = `Stopped`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `wifi.rs` containing only this:
 
@@ -166,7 +192,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
@@ -176,7 +202,7 @@ cargo test -p variegated-controller-types --target aarch64-apple-darwin \
 Expected: `cannot find type WifiCredentials`. (The module is not declared yet either; that
 comes in Step 4.)
 
-- [ ] **Step 3: Write the types**
+- [x] **Step 3: Write the types**
 
 Insert above the `#[cfg(test)]` block in `wifi.rs`:
 
@@ -301,18 +327,18 @@ The `debug_shows_the_ssid_and_hides_the_password` test uses `alloc::format!`; ad
 `use alloc::format;` inside `mod tests` if the crate root's `extern crate alloc` does not
 already bring it into scope there.
 
-- [ ] **Step 4: Declare and re-export the module**
+- [x] **Step 4: Declare and re-export the module**
 
 In `lib.rs`, add `pub mod wifi;` to the module list (alphabetical, after `pub mod status;`)
 and `pub use wifi::*;` to the re-export list.
 
-- [ ] **Step 5: Run the tests and watch them pass**
+- [x] **Step 5: Run the tests and watch them pass**
 
 Run the Step 2 command.
 Expected: `test result: ok. 25 passed` (20 existing plus 5 new; the 6th is
 `sequential-storage`-gated and included in that count when the feature is on).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
@@ -348,7 +374,7 @@ derive here would put a live Wi-Fi password in all of them."
   - `MachineCommand::{OpenWifiProvisioningWindow { duration_ms: u32 }, CloseWifiProvisioningWindow, SetWifiCredentials(WifiCredentials), IdentifyMachine}`
   - `DEBUG_PROTOCOL_VERSION == 0x8B`
 
-- [ ] **Step 1: Add the `CommsStatus` field**
+- [x] **Step 1: Add the `CommsStatus` field**
 
 `communication.rs:25-30` becomes:
 
@@ -371,7 +397,7 @@ pub struct CommsStatus {
 
 Add the `improv` field to its `defmt::Format` impl at `communication.rs:33-44` as well.
 
-- [ ] **Step 2: Append the message variants**
+- [x] **Step 2: Append the message variants**
 
 At the **end** of `CommsProcessorToApplicationProcessorMessage`:
 
@@ -434,7 +460,7 @@ At the **end** of `ApplicationProcessorToCommsProcessorMessage`:
     CloseWifiProvisioningWindow,
 ```
 
-- [ ] **Step 3: Append the machine commands**
+- [x] **Step 3: Append the machine commands**
 
 At the **end** of `MachineCommand` in `commands.rs`:
 
@@ -467,7 +493,7 @@ the type's own `Format`:
             MachineCommand::IdentifyMachine => defmt::write!(f, "IdentifyMachine"),
 ```
 
-- [ ] **Step 4: Bump the debug protocol version**
+- [x] **Step 4: Bump the debug protocol version**
 
 `debug.rs:97` becomes `pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8B;`, with a changelog entry
 above it in the existing style:
@@ -480,7 +506,7 @@ above it in the existing style:
 ///   version exists to catch.
 ```
 
-- [ ] **Step 5: Fix the fixtures**
+- [x] **Step 5: Fix the fixtures**
 
 `variegated-comms-rs/tools/schema-export/src/fixtures.rs`:
 
@@ -492,7 +518,7 @@ above it in the existing style:
   below it. Give `SetWifiCredentials` a real SSID and password so the fixture exercises the
   string encoding.
 
-- [ ] **Step 6: Build the three repositories**
+- [x] **Step 6: Build the three repositories**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
@@ -506,7 +532,7 @@ that is expected at this step and is the point of the exhaustive matches. Fix on
 *mechanically* forced here (the `CommsStatus` literal in the comms firmware's
 `bin/main.rs:291-298` needs `improv`); leave the command handling for Task 3.
 
-- [ ] **Step 7: Build the CLI**
+- [x] **Step 7: Build the CLI**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-cli
@@ -521,7 +547,7 @@ entry — it is a message the comms processor sends after proving credentials, n
 human injects — but `OpenWifiProvisioningWindow` is, and it is the debug-wire trigger the
 spec asked for.
 
-- [ ] **Step 8: Commit, one repo at a time**
+- [x] **Step 8: Commit, one repo at a time**
 
 Three commits. `variegated-rs` first, since the other two depend on it by path.
 
@@ -545,7 +571,7 @@ loaded once before the loop, saved on change, and pushed to the comms processor.
 `dual_boiler_single_group.rs:521, 526, 604, 681-682, 804-825, 836-846, 2090-2115` and change
 the noun.
 
-- [ ] **Step 1: Add the store and the state**
+- [x] **Step 1: Add the store and the state**
 
 Add to the controller struct, beside `bluetooth_store`/`bluetooth_associations`:
 
@@ -558,7 +584,7 @@ Add to the controller struct, beside `bluetooth_store`/`bluetooth_associations`:
 with the matching generic bound `WifiStoreT: SettingsStorage<StoredWifiCredentials>` and a
 constructor parameter. Initialise `wifi_credentials` to `StoredWifiCredentials::default()`.
 
-- [ ] **Step 2: Load once before the loop**
+- [x] **Step 2: Load once before the loop**
 
 Beside the association load at `dual_boiler_single_group.rs:836-846`:
 
@@ -580,7 +606,7 @@ Beside the association load at `dual_boiler_single_group.rs:836-846`:
         self.wifi_publish_pending = true;
 ```
 
-- [ ] **Step 3: Add the save helper**
+- [x] **Step 3: Add the save helper**
 
 Beside `save_bluetooth_associations`:
 
@@ -605,7 +631,7 @@ Beside `save_bluetooth_associations`:
     }
 ```
 
-- [ ] **Step 4: Handle the four commands**
+- [x] **Step 4: Handle the four commands**
 
 In `handle_command`, beside the Bluetooth arms:
 
@@ -662,7 +688,7 @@ In `handle_command`, beside the Bluetooth arms:
 parameter, shaped exactly like `bluetooth_scan_sender` (`dual_boiler_single_group.rs:608`)
 and `None` on a machine without a comms processor.
 
-- [ ] **Step 5: Construct the store in both examples**
+- [x] **Step 5: Construct the store in both examples**
 
 Beside the Bluetooth store:
 
@@ -681,14 +707,14 @@ Beside the Bluetooth store:
 with `WifiStoreType`, `WifiStoreMutex`, and the `StaticCell`s declared beside their Bluetooth
 equivalents (`examples/dual-boiler/src/main.rs:479-484, 883-884`).
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs && scripts/build-examples.sh
 ```
 Expected: four lines, every one `errors=0`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ---
 
@@ -704,7 +730,7 @@ Expected: four lines, every one `errors=0`.
 - Produces: `WIFI_CREDENTIALS: Watch<CriticalSectionRawMutex, Option<WifiCredentials>, 2>` and
   `WIFI_CREDENTIALS_RECEIVED: AtomicBool` in the comms firmware's `channels.rs`.
 
-- [ ] **Step 1: Extend `esp_transceiver_main`**
+- [x] **Step 1: Extend `esp_transceiver_main`**
 
 Two new parameters, modelled on `bluetooth_scan_receiver` (`variegated-comms/src/lib.rs:128`):
 
@@ -719,7 +745,7 @@ Two new parameters, modelled on `bluetooth_scan_receiver` (`variegated-comms/src
     wifi_provisioning_receiver: Option<ChannelReceiver<'static, SM, u32, 2>>,
 ```
 
-- [ ] **Step 2: Answer the request**
+- [x] **Step 2: Answer the request**
 
 A new arm in the reader's match, beside `RequestBluetoothPeripherals`
 (`variegated-comms/src/lib.rs:438-471`):
@@ -766,7 +792,7 @@ A new arm in the reader's match, beside `RequestBluetoothPeripherals`
                                 }
 ```
 
-- [ ] **Step 3: Push on change, and forward window requests**
+- [x] **Step 3: Push on change, and forward window requests**
 
 Two more futures inside the existing `join4` nest (`variegated-comms/src/lib.rs:586`), shaped
 like the `bluetooth_scan_receiver` arm. On a credential change, send
@@ -774,7 +800,7 @@ like the `bluetooth_scan_receiver` arm. On a credential change, send
 `OpenWifiProvisioningWindow { duration_ms }`, or `CloseWifiProvisioningWindow` when the
 duration is zero.
 
-- [ ] **Step 4: Ask for credentials at boot, and stop on receipt**
+- [x] **Step 4: Ask for credentials at boot, and stop on receipt**
 
 In the comms firmware's `application_processor/mod.rs`, mirror
 `RequestBluetoothPeripherals` exactly: a `WIFI_CREDENTIALS_RECEIVED: AtomicBool`, an initial
@@ -786,7 +812,7 @@ configured has `None` as its complete and correct answer; testing for `Some` wou
 machine re-ask every ten seconds for as long as it runs. This is the trap the comment at
 `application_processor/mod.rs:649-656` was written about.
 
-- [ ] **Step 5: Build everything**
+- [x] **Step 5: Build everything**
 
 ```bash
 cd /Users/magnus/Developer/open-lcc/variegated-umbrella/variegated-rs
@@ -803,16 +829,22 @@ grep -n "cargo::warning\|warning: unused" target/comms-firmware-logs/comms-firmw
 A `cargo::warning` about npm means the embedded frontend bundle was not rebuilt and no longer
 matches the wire types. That is a real failure wearing a warning's clothes.
 
-- [ ] **Step 6: Commit the regenerated frontend**
+- [x] **Step 6: Commit the regenerated frontend**
 
 `frontend/src/schemas/schemas.ts` and `frontend/dist/` are written by the build. `git status`
 in `variegated-comms-rs` will show them; they belong in this commit, not left dirty.
 
 ---
 
-### Task 5: Hardware checkpoint
+### Task 5: Hardware checkpoint — NOT DONE
 
 **Files:** none.
+
+> **Skipped at the user's direction, 2026-08-10.** The steps below are unrun. They remain
+> the cheapest way to catch the three failure modes listed in the header, and the
+> received-flag one in particular is invisible to every check that was run: a machine that
+> re-requests credentials forever compiles, passes every test, and simply floods the link.
+> The boxes are left unticked deliberately.
 
 This is the spec's first checkpoint. Nothing about radio behaviour has changed — the comms
 processor still joins the network from `env!` — so what is being proven is only that
