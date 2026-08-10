@@ -167,7 +167,24 @@ trybuild = "1.0"
 
 [profile.dev]
 debug = true              # Enable debug info
-opt-level = 1           # Light optimization for better debugging
+# `opt-level = 3`, raised from 1 on 2026-08-10, and this is a *correctness* setting on this
+# firmware rather than a performance one.
+#
+# Cargo only honours the profile in the workspace **root** manifest. `examples/Cargo.toml`
+# has said `opt-level = 3` for a long time and it has been silently ignored, so everything
+# built at 1 -- which does not coalesce async state-machine locals and inflates poll frames
+# enormously. `CORE1_STACK_LENGTH` in `examples/dual-boiler` already documents that effect
+# as the reason core 1 needs 96 kB.
+#
+# The cost of the gap: core 0's stack (192,452 bytes) was being exhausted by a single
+# `Join5::poll` in `esp_transceiver_main`, silently overwriting `.bss` -- the executor's
+# task arena and the embassy timer queue live there -- and the machine then died in
+# `Queue::next_expiration` chasing a pointer that had been overwritten with painted stack.
+# It took a stack guard and a fault-register dump to find, because nothing traps by default.
+#
+# Set here, at the root, so it actually applies. If debugging ever needs opt-level 1 back,
+# expect the stack margin to vanish with it, and check `core0_stack_high_water()` first.
+opt-level = 3
 lto = true              # Disable link-time optimization
 
 [profile.release]

@@ -585,9 +585,181 @@ define_indicators! {
 static COUNTERS: PerformanceCounters<4> = PerformanceCounters::new();
 static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
 
+/// Report *why* a HardFault happened, instead of parking silently.
+///
+/// TEMPORARY (2026-08-10). `cortex-m-rt`'s default handler just loops, which is why every
+/// crash this session showed one useless frame and an unwinder complaining it had no stack
+/// pointer. The Cortex-M33 records the reason in `CFSR`/`HFSR` and, for a precise fault,
+/// the offending address in `BFAR`/`MMFAR`; the exception frame carries the `PC` that did
+/// it. That is the difference between "HardFault somewhere" and a named instruction and
+/// address.
+///
+/// SCB registers are read through raw pointers rather than the `cortex-m` crate, which is
+/// not a direct dependency here. Addresses are from the ARMv8-M architecture reference.
+///
+/// The decoded bits worth knowing:
+/// * `PRECISERR` (bit 9) with `BFARVALID` (15) -- a real data bus error, and `BFAR` is the
+///   address. This is what a failed exclusive to PSRAM would look like.
+/// * `IMPRECISERR` (10) -- a bus error whose address is lost to write buffering; `BFAR` is
+///   meaningless and the reported `PC` may be past the culprit.
+/// * `STKOF` (20) -- stack overflow caught by `MSPLIM`. Note core 0 never calls
+///   `install_core0_stack_guard()`, so its limit is 0 and this bit **cannot** fire here; an
+///   overflow on core 0 runs silently into `.bss` instead. Its absence proves nothing.
+/// * `UNALIGNED` (24), `UNDEFINSTR` (16), `INVSTATE` (17) -- corrupted control flow or a
+///   bad pointer dereferenced as code.
+/// Deepest point core 0's stack has ever reached, in bytes.
+///
+/// The counterpart to [`core1_stack_high_water`], and it needs no painting of its own:
+/// `cortex-m-rt`'s `paint-stack` feature (enabled in `examples/Cargo.toml`) fills
+/// everything between `__sheap` and `_stack_start` with `0xCCCC_CCCC` before `main` runs.
+/// Core 0's stack grows *down* from `_stack_start`, so untouched paint survives at the
+/// bottom and the high-water mark is the distance from the last painted word to the top.
+///
+/// Worth having permanently rather than as a one-off measurement. Core 0 overflowed this
+/// stack silently for an unknown length of time -- there is no guard unless
+/// `install_core0_stack_guard()` is called, and until 2026-08-10 it was not -- and the
+/// failure surfaced as a HardFault in the timer queue, nowhere near the cause. A number in
+/// the debug snapshot is what makes "we are close to the edge" visible before it is fatal.
+///
+/// A value at or near the full span means the paint was consumed entirely and the true
+/// requirement is unknown and at least this large.
+/// Total bytes available to core 0's stack: `_stack_start - __sheap`.
+///
+/// A function rather than a constant because both bounds are linker symbols, resolved at
+/// link time. This is also the value `install_core0_stack_guard()` programs into `MSPLIM`,
+/// so a high-water reading approaching it means the guard is about to fire.
+fn core0_stack_span() -> usize {
+    unsafe extern "C" {
+        static mut __sheap: u32;
+        static mut _stack_start: u32;
+    }
+    unsafe { ((&raw const _stack_start) as usize) - ((&raw const __sheap) as usize) }
+}
+
+fn core0_stack_high_water() -> usize {
+    unsafe extern "C" {
+        static mut __sheap: u32;
+        static mut _stack_start: u32;
+    }
+
+    const PAINT: u32 = 0xCCCC_CCCC;
+
+    // SAFETY: reads only, and only of the region cortex-m-rt painted. A torn read against a
+    // word being pushed concurrently moves the answer by one frame, which does not matter
+    // for a high-water estimate.
+    unsafe {
+        let bottom = (&raw const __sheap) as usize;
+        let top = (&raw const _stack_start) as usize;
+        let span = top - bottom;
+
+        let mut untouched = 0usize;
+        while untouched < span {
+            let word = core::ptr::read_volatile((bottom + untouched) as *const u32);
+            if word != PAINT {
+                break;
+            }
+            untouched += 4;
+        }
+        span - untouched
+    }
+}
+
+/// Fault registers, written before any lock is taken. See the handler.
+///
+/// Order: `cfsr, hfsr, bfar, mmfar, pc, lr`.
+static mut FAULT_LOG: [u32; 6] = [0; 6];
+
+#[cortex_m_rt::exception]
+unsafe fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
+    const CFSR: *const u32 = 0xE000_ED28 as *const u32;
+    const HFSR: *const u32 = 0xE000_ED2C as *const u32;
+    const MMFAR: *const u32 = 0xE000_ED34 as *const u32;
+    const BFAR: *const u32 = 0xE000_ED38 as *const u32;
+
+    let cfsr = unsafe { core::ptr::read_volatile(CFSR) };
+    let hfsr = unsafe { core::ptr::read_volatile(HFSR) };
+    let mmfar = unsafe { core::ptr::read_volatile(MMFAR) };
+    let bfar = unsafe { core::ptr::read_volatile(BFAR) };
+
+    // Recorded to plain memory *before* anything is logged, and that ordering is the whole
+    // point. `defmt-rtt` takes a critical section to write, and on this chip that is a
+    // spinlock shared with core 1 -- which every crash trace this session shows spinning in
+    // `critical_section::acquire`. If core 0 faulted while holding it, the `defmt::error!`
+    // below deadlocks and prints nothing. These stores cannot: they are four word writes
+    // to `.bss` with no lock and no allocation.
+    //
+    // Read them out with `probe-rs read b32 <&FAULT_LOG> 6` if the log stays silent.
+    // Order: cfsr, hfsr, bfar, mmfar, pc, lr.
+    // `write_volatile`, not plain stores. Nothing in the firmware ever reads `FAULT_LOG` --
+    // the debugger does -- so LLVM is entitled to delete non-volatile writes to it, and it
+    // did: the symbol vanished from the binary entirely on the first attempt.
+    unsafe {
+        let log = (&raw mut FAULT_LOG) as *mut u32;
+        core::ptr::write_volatile(log.add(0), cfsr);
+        core::ptr::write_volatile(log.add(1), hfsr);
+        core::ptr::write_volatile(log.add(2), bfar);
+        core::ptr::write_volatile(log.add(3), mmfar);
+        core::ptr::write_volatile(log.add(4), ef.pc());
+        core::ptr::write_volatile(log.add(5), ef.lr());
+    }
+
+    defmt::error!(
+        "HARDFAULT pc={=u32:#010x} lr={=u32:#010x} cfsr={=u32:#010x} hfsr={=u32:#010x} bfar={=u32:#010x} mmfar={=u32:#010x}",
+        ef.pc(),
+        ef.lr(),
+        cfsr,
+        hfsr,
+        bfar,
+        mmfar
+    );
+    defmt::error!(
+        "  bus: precise={=bool} imprecise={=bool} bfar_valid={=bool} stkerr={=bool} | usage: undefinstr={=bool} invstate={=bool} unaligned={=bool} stkof={=bool} | mem: daccviol={=bool} mmar_valid={=bool}",
+        cfsr & (1 << 9) != 0,
+        cfsr & (1 << 10) != 0,
+        cfsr & (1 << 15) != 0,
+        cfsr & (1 << 12) != 0,
+        cfsr & (1 << 16) != 0,
+        cfsr & (1 << 17) != 0,
+        cfsr & (1 << 24) != 0,
+        cfsr & (1 << 20) != 0,
+        cfsr & (1 << 1) != 0,
+        cfsr & (1 << 7) != 0
+    );
+
+    // Spin rather than `udf`: the defmt frames above have to drain over RTT before the
+    // debugger stops the core, and a breakpoint here would race that.
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let p = embassy_rp::init(Default::default());
+
+    // Trap core 0 stack overflow instead of letting it corrupt statics.
+    //
+    // On the RP2350 this writes `MSPLIM`, so the core takes a *precise* UsageFault with
+    // `STKOF` set the moment SP would drop below `_stack_end` -- caught at the frame that
+    // overflowed, by the handler above.
+    //
+    // Without it there is no guard at all, and that is not a theoretical gap. Core 0's
+    // stack grows down from `_stack_start` toward `__sheap`, and immediately below that
+    // sit `.uninit` and `.bss` -- which is where the executor's task arena and the
+    // embassy timer queue live. An overflow silently overwrites them, and the machine
+    // dies later somewhere unrelated: this was found chasing a HardFault whose faulting
+    // address was `0xCCCCCC00`, i.e. a pointer in the timer queue's intrusive list that
+    // had been overwritten with painted stack content. `QueueItem`s live in task headers
+    // in the arena and are never on the stack, so that value could only have got there by
+    // corruption.
+    //
+    // Core 1 already had this: `spawn_core1` installs a guard for it via `core1_setup`.
+    // Only core 0 was unprotected.
+    if embassy_rp::install_core0_stack_guard().is_err() {
+        // Only fails if the MPU was already configured, which on this chip would mean
+        // something else claimed it first. Worth knowing rather than silently unguarded.
+        defmt::error!("could not install the core 0 stack guard; overflow will NOT be caught");
+    }
 
     // Install the `log` -> debug bus bridge before anything else logs. The
     // `log_*!` macros throughout the firmware and its libraries emit to both
@@ -1665,8 +1837,26 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
     // the State tab would blink empty.
     let mut latest: Option<Status> = None;
 
+    // Edge-triggered, so a healthy machine says this once and then goes quiet.
+    //
+    // Level-triggered at 1 Hz would be a line a second forever about a number that only
+    // moves when it gets worse -- and the only thing worth hearing about is that it got
+    // worse. Reported from here rather than from a task of its own because this loop
+    // already ticks on core 0 at the right cadence and costs nothing to extend.
+    let mut worst_stack = 0usize;
+
     loop {
         publish_snapshot(psram_heap);
+
+        let high_water = core0_stack_high_water();
+        if high_water > worst_stack {
+            worst_stack = high_water;
+            log_info!(
+                "core0 stack high-water: {} of {} bytes",
+                high_water,
+                core0_stack_span()
+            );
+        }
 
         // Drain rather than await. `try_next_message_pure` is what every other
         // consumer on this channel uses, and it matters more here: the snapshot task
