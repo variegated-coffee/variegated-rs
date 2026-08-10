@@ -146,6 +146,14 @@ export const HeatingElementContentionStrategySchema = enumType('HeatingElementCo
   Proportional: unitVariant('Proportional')
 });
 
+export const ImprovStateSchema = enumType('ImprovState', {
+  Stopped: unitVariant('Stopped'),
+  AwaitingAuthorization: unitVariant('AwaitingAuthorization'),
+  Authorized: unitVariant('Authorized'),
+  Provisioning: unitVariant('Provisioning'),
+  Provisioned: unitVariant('Provisioned')
+});
+
 export const KalmanParametersSchema = struct({
   process_noise: f32(),
   measurement_noise: f32(),
@@ -318,6 +326,11 @@ export const WaterTapStatusSchema = struct({
   is_dispensing: bool()
 });
 
+export const WifiCredentialsSchema = struct({
+  ssid: string(),
+  password: string()
+});
+
 export const WirelessConnectionStatusSchema = struct({
   connected: bool(),
   rssi: option(i8())
@@ -358,7 +371,8 @@ export const CommsStatusSchema = struct({
   timestamp: option(u64()),
   wifi_connected: bool(),
   wifi_rssi: option(i8()),
-  peripheral_connection_status: map(u16(), WirelessConnectionStatusSchema)
+  peripheral_connection_status: map(u16(), WirelessConnectionStatusSchema),
+  improv: ImprovStateSchema
 });
 
 export const DerivedParameterSchema = struct({
@@ -815,7 +829,13 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   UpdateBluetoothScan: newtypeVariant('UpdateBluetoothScan', BluetoothScanUpdateSchema),
   SetShotAnnotations: tupleVariant('SetShotAnnotations', ShotLogIdSchema, ShotAnnotationsSchema),
   SetPendingShotAnnotations: newtypeVariant('SetPendingShotAnnotations', ShotAnnotationsSchema),
-  TagDoseFromScale: newtypeVariant('TagDoseFromScale', ScaleSelectorSchema)
+  TagDoseFromScale: newtypeVariant('TagDoseFromScale', ScaleSelectorSchema),
+  OpenWifiProvisioningWindow: structVariant('OpenWifiProvisioningWindow', {
+    duration_ms: u32()
+  }),
+  CloseWifiProvisioningWindow: unitVariant('CloseWifiProvisioningWindow'),
+  SetWifiCredentials: newtypeVariant('SetWifiCredentials', WifiCredentialsSchema),
+  IdentifyMachine: unitVariant('IdentifyMachine')
 });
 
 export const RoutineStorageSchema = struct({
@@ -885,6 +905,7 @@ export type GroupConfiguration = InferType<typeof GroupConfigurationSchema>;
 export type GroupDefinition = InferType<typeof GroupDefinitionSchema>;
 export type GroupStatus = InferType<typeof GroupStatusSchema>;
 export type HeatingElementContentionStrategy = InferType<typeof HeatingElementContentionStrategySchema>;
+export type ImprovState = InferType<typeof ImprovStateSchema>;
 export type KalmanParameters = InferType<typeof KalmanParametersSchema>;
 export type Limits = InferType<typeof LimitsSchema>;
 export type MachineConfiguration = InferType<typeof MachineConfigurationSchema>;
@@ -935,6 +956,7 @@ export type WaterDispersalPumpStrategy = InferType<typeof WaterDispersalPumpStra
 export type WaterTapConfiguration = InferType<typeof WaterTapConfigurationSchema>;
 export type WaterTapDefinition = InferType<typeof WaterTapDefinitionSchema>;
 export type WaterTapStatus = InferType<typeof WaterTapStatusSchema>;
+export type WifiCredentials = InferType<typeof WifiCredentialsSchema>;
 export type WirelessConnectionStatus = InferType<typeof WirelessConnectionStatusSchema>;
 
 // Appended verbatim to the end of the generated schemas.ts. Hand-maintained.

@@ -3801,6 +3801,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-improv-trouble"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+ "heapless 0.9.3",
+]
+
+[[package]]
 name = "variegated-instrumentation"
 version = "0.1.0"
 dependencies = [

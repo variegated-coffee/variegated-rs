@@ -254,7 +254,8 @@
           "connected": true,
           "rssi": -70
         }
-      }
+      },
+      "improv": "Provisioning"
     },
     "comms_status_age": {
       "secs": 1,

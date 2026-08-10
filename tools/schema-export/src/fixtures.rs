@@ -235,6 +235,12 @@ fn status_maximal() -> Status {
             timestamp: Some(1_700_000_000),
             wifi_connected: true,
             wifi_rssi: Some(-55),
+            // Deliberately not `Stopped`, which is the `Default`. A discriminant of zero
+            // encodes to a byte that a decoder reading the wrong field would produce by
+            // accident, so a fixture pinned to the default would pass whether or not the
+            // schema knew this field existed -- which is the exact drift the note at the
+            // top of this function is about.
+            improv: ImprovState::Provisioning,
             peripheral_connection_status,
         }),
         // Subsecond, so the `nanos` half of `Duration` is exercised rather than left at
@@ -448,6 +454,10 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetShotAnnotations(..) => {}
             SetPendingShotAnnotations(_) => {}
             TagDoseFromScale(_) => {}
+            OpenWifiProvisioningWindow { .. } => {}
+            CloseWifiProvisioningWindow => {}
+            SetWifiCredentials(_) => {}
+            IdentifyMachine => {}
         }
     }
 
@@ -522,6 +532,9 @@ fn machine_commands() -> Vec<MachineCommand> {
             timestamp: Some(1_700_000_001),
             wifi_connected: true,
             wifi_rssi: Some(-60),
+            // A different non-default state from the one in `status_maximal`, so the two
+            // fixtures cannot both pass on a decoder that hardcodes one value.
+            improv: ImprovState::Authorized,
             peripheral_connection_status: comms_peripherals,
         }),
         AddScheduleItem(schedule_item()),
@@ -576,6 +589,17 @@ fn machine_commands() -> Vec<MachineCommand> {
         ),
         SetPendingShotAnnotations(ShotAnnotations::new()),
         TagDoseFromScale(ScaleSelector::GroupScale(0)),
+        OpenWifiProvisioningWindow { duration_ms: 300_000 },
+        CloseWifiProvisioningWindow,
+        // A password with a non-ASCII character in it, and one long enough to need a
+        // multi-byte length prefix nowhere near the SSID's. A decoder that read the two
+        // heapless strings back in the wrong order, or that assumed ASCII, round-trips a
+        // short matched pair straight past.
+        SetWifiCredentials(WifiCredentials {
+            ssid: heapless::String::try_from("Café Réseau").unwrap(),
+            password: heapless::String::try_from("correct horse battery staple \u{00e9}").unwrap(),
+        }),
+        IdentifyMachine,
     ]
 }
 

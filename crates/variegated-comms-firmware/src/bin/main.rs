@@ -295,6 +295,11 @@ async fn comms_status_signaller_task(
             wifi_connected,
             timestamp,
             wifi_rssi,
+            // Hardcoded until the Improv service exists. Reported as `Stopped` rather than
+            // left out because that is the truth on this firmware: nothing advertises, so
+            // there is no window open. The machine UI's indicator reads this and will stay
+            // dark, which is correct.
+            improv: variegated_controller_types::wifi::ImprovState::Stopped,
             peripheral_connection_status,
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);

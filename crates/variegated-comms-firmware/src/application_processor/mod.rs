@@ -24,6 +24,7 @@ use crate::channels::{
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
+    WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
     ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
 };
 use crate::ble::scanner::{ScanReport, SCAN_RESULT_CAPACITY};
@@ -335,6 +336,36 @@ pub async fn start(
                                 // note on the flag itself.
                                 BT_PERIPHERALS_RECEIVED.store(true, Ordering::Relaxed);
                             }
+                            ApplicationProcessorToCommsProcessorMessage::WifiCredentials(credentials) => {
+                                // Logged as configured-or-not. Printing the SSID would be
+                                // harmless in itself, but a log line that renders half a
+                                // credential is one edit away from rendering all of it, and
+                                // this one goes to the TCP debug server.
+                                log_info!(
+                                    "Received Wi-Fi credentials ({})",
+                                    if credentials.is_some() { "configured" } else { "none" }
+                                );
+                                WIFI_CREDENTIALS.sender().send(credentials);
+
+                                // On receipt, not on the value being `Some`. See the note on
+                                // the flag itself -- a machine with no network configured
+                                // would otherwise re-ask forever.
+                                WIFI_CREDENTIALS_RECEIVED.store(true, Ordering::Relaxed);
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::OpenWifiProvisioningWindow { duration_ms } => {
+                                // Already vetted: the application processor refuses to open
+                                // a window while a shot is running, because it is the only
+                                // side that knows. Nothing to check here.
+                                //
+                                // `signal`, never `send().await` -- see the `ScaleCommand`
+                                // arm above for why this task must not block.
+                                log_info!("Wi-Fi provisioning window requested for {} ms", duration_ms);
+                                WIFI_PROVISIONING_WINDOW.signal(duration_ms);
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::CloseWifiProvisioningWindow => {
+                                log_info!("Wi-Fi provisioning window close requested");
+                                WIFI_PROVISIONING_WINDOW.signal(0);
+                            }
                             ApplicationProcessorToCommsProcessorMessage::StartBluetoothScan { duration_ms } => {
                                 // Already vetted: the application processor refuses a scan
                                 // while a shot is running, because it is the only side
@@ -389,6 +420,14 @@ pub async fn start(
         tx.write_async(&serialized_message).await
             .expect("Failed to write RequestBluetoothPeripherals");
         log_warn!("Sent initial RequestBluetoothPeripherals command on startup");
+
+        // Send initial RequestWifiCredentials command on startup
+        let request_wifi_message = CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials;
+        let serialized_message = postcard::to_allocvec_cobs(&request_wifi_message)
+            .expect("Failed to serialize RequestWifiCredentials");
+        tx.write_async(&serialized_message).await
+            .expect("Failed to write RequestWifiCredentials");
+        log_warn!("Sent initial RequestWifiCredentials command on startup");
 
         // Track last request times for periodic operations
         let mut last_routine_request = Instant::now();
@@ -660,6 +699,21 @@ pub async fn start(
                             tx.write_async(&serialized_message).await
                                 .expect("Failed to write RequestBluetoothPeripherals");
                             log_warn!("Sent periodic RequestBluetoothPeripherals command (still waiting for response)");
+                        }
+
+                        // Only send RequestWifiCredentials if we have not been answered yet.
+                        //
+                        // The flag is set on *receipt*, never on credentials being present.
+                        // A machine with no network configured has `None` as its complete
+                        // and correct answer, and testing for `Some` instead would make that
+                        // machine re-ask every ten seconds for as long as it runs.
+                        if !WIFI_CREDENTIALS_RECEIVED.load(Ordering::Relaxed) {
+                            let request_wifi_message = CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials;
+                            let serialized_message = postcard::to_allocvec_cobs(&request_wifi_message)
+                                .expect("Failed to serialize RequestWifiCredentials");
+                            tx.write_async(&serialized_message).await
+                                .expect("Failed to write RequestWifiCredentials");
+                            log_warn!("Sent periodic RequestWifiCredentials command (still waiting for response)");
                         }
 
                         last_config_retry = Instant::now();

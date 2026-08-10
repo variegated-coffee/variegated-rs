@@ -201,6 +201,41 @@ pub const BT_ASSOCIATION_RECEIVERS: usize = 1;
 /// would make such a machine re-ask every ten seconds forever.
 pub static BT_PERIPHERALS_RECEIVED: AtomicBool = AtomicBool::new(false);
 
+/// The Wi-Fi credentials the application processor last sent, or `None` if it says none
+/// are configured.
+///
+/// Written from the UART reader with `send`, which never awaits and never fails -- the same
+/// no-back-pressure requirement [`BT_ASSOCIATIONS`] has.
+///
+/// Nothing reads this yet. `wifi::connection_task` still configures the station from the
+/// compiled-in `config::SSID`/`PASSWORD`; making it read from here is the next step, and is
+/// deliberately separate because it is the change that can leave a machine with no network.
+pub static WIFI_CREDENTIALS: Watch<
+    CriticalSectionRawMutex,
+    Option<variegated_controller_types::wifi::WifiCredentials>,
+    WIFI_CREDENTIAL_RECEIVERS,
+> = Watch::new();
+
+/// Receiver slots on [`WIFI_CREDENTIALS`]. One, for the connection task that will read it.
+pub const WIFI_CREDENTIAL_RECEIVERS: usize = 1;
+
+/// Whether the application processor has answered [`RequestWifiCredentials`] at all.
+///
+/// Set on **receipt**, never on credentials being present. A machine with no network
+/// configured answers `None`, and that is a complete answer -- testing for `Some` would
+/// make such a machine re-ask every ten seconds for as long as it runs. This is the same
+/// trap [`BT_PERIPHERALS_RECEIVED`] documents, and it is easier to fall into here because
+/// the payload is literally an `Option`.
+///
+/// [`RequestWifiCredentials`]: variegated_controller_types::CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials
+pub static WIFI_CREDENTIALS_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// An open provisioning window, in milliseconds, or zero to close one.
+///
+/// The application processor decides whether a window may open -- it is the only side that
+/// knows a shot is in progress -- so anything signalled here has been vetted.
+pub static WIFI_PROVISIONING_WINDOW: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+
 // Comms Status Command - internal commands to update CommsStatus
 pub enum CommsStatusCommand {
     TimeUpdate(u64), // Unix epoch offset in seconds

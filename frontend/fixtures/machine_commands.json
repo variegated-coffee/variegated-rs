@@ -171,7 +171,8 @@
           "connected": true,
           "rssi": -61
         }
-      }
+      },
+      "improv": "Authorized"
     }
   },
   {
@@ -516,5 +517,18 @@
     "TagDoseFromScale": {
       "GroupScale": 0
     }
-  }
+  },
+  {
+    "OpenWifiProvisioningWindow": {
+      "duration_ms": 300000
+    }
+  },
+  "CloseWifiProvisioningWindow",
+  {
+    "SetWifiCredentials": {
+      "ssid": "Café Réseau",
+      "password": "correct horse battery staple é"
+    }
+  },
+  "IdentifyMachine"
 ]
