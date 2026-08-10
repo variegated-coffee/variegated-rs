@@ -16,6 +16,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use postcard::{from_bytes_cobs, to_allocvec_cobs};
 use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::debug_command::DebugCommand;
+use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage,
     CommsProcessorToApplicationProcessorMessage,
@@ -133,6 +134,15 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // gets no answer at all is indistinguishable from a dead link.
     shot_log_query_sender: Option<Sender<'static, SM, ShotLogQuery, 1>>,
     shot_log_reply_receiver: Option<ChannelReceiver<'static, SM, ShotLogReply, 1>>,
+    // The stored Wi-Fi credentials, published by the controller whenever they change.
+    // `None` on a machine with no credential store, in which case `RequestWifiCredentials`
+    // goes unanswered and the comms processor keeps asking -- which is the honest outcome,
+    // since there is nothing to tell it. Answering `None` would instead say "no network
+    // configured" and stop the retry forever.
+    wifi_credentials_receiver: Option<embassy_sync::watch::Receiver<'static, SM, StoredWifiCredentials, 2>>,
+    // Accepted provisioning-window requests, carrying the duration in milliseconds; zero
+    // means close. `None` on a machine whose controller was not given the matching sender.
+    wifi_provisioning_receiver: Option<ChannelReceiver<'static, SM, u32, 2>>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -142,6 +152,17 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
     // Use shared state for last sent configuration (heap-allocated to save stack space)
     let last_sent_config: Mutex<M, RefCell<Option<Box<Configuration>>>> = Mutex::new(RefCell::new(None));
+
+    // The last credentials the controller published, cached so `RequestWifiCredentials`
+    // can be answered from this task.
+    //
+    // `Option<StoredWifiCredentials>` rather than a bare `StoredWifiCredentials`, and the
+    // outer layer is load-bearing: `None` here means *nothing has been published yet* and
+    // the request goes unanswered, while `Some(StoredWifiCredentials(None))` means the
+    // controller has told us there is genuinely no network configured. Collapsing the two
+    // would answer "no network" before the controller had said anything, and the comms
+    // processor stops asking on receipt -- so it would never be corrected.
+    let cached_wifi: Mutex<M, RefCell<Option<StoredWifiCredentials>>> = Mutex::new(RefCell::new(None));
 
     // Box the machine definition to save stack space
     let machine_definition = Box::new(machine_definition);
@@ -503,6 +524,61 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         info!("Dropped the Bluetooth scan-finished message: command channel full");
                                     }
                                 }
+                                CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials => {
+                                    info!("Wi-Fi credentials requested by ESP32");
+
+                                    // Answered from the cached copy the controller
+                                    // publishes, not from a store: this task holds no store
+                                    // handle, and taking a flash lock on the UART reader
+                                    // would put every message on the link behind a flash
+                                    // read.
+                                    //
+                                    // Nothing published yet is *not* answered with `None`.
+                                    // The comms processor stops asking on receipt, so a
+                                    // premature `None` would tell it there is no network and
+                                    // never correct itself -- the same trap the Bluetooth
+                                    // arm above documents.
+                                    let output = cached_wifi.lock(|cell| {
+                                        cell.borrow().as_ref().map(|credentials| {
+                                            let response = ApplicationProcessorToCommsProcessorMessage::WifiCredentials(
+                                                credentials.0.clone(),
+                                            );
+                                            to_allocvec_cobs(&response).ok()
+                                        })
+                                    });
+
+                                    match output {
+                                        Some(Some(output)) => {
+                                            let _ = tx_sender.send(output).await;
+                                            info!("Sent Wi-Fi credentials to ESP32");
+                                        }
+                                        Some(None) => info!("Failed to serialize Wi-Fi credentials"),
+                                        None => info!("No Wi-Fi credentials published yet; not answering"),
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::WifiCredentialsProvisioned(credentials) => {
+                                    // Straight to the controller as a command, the same
+                                    // route scan results take: this is the only channel from
+                                    // this task into the controller.
+                                    //
+                                    // `try_send`, because this is the UART reader and it
+                                    // must not block -- but a drop here is worth more than
+                                    // the `info!` a dropped scan result gets. The user has
+                                    // just provisioned a network and losing this means it is
+                                    // never persisted, so the machine rejoins nothing after
+                                    // a power cycle while the phone said it succeeded.
+                                    if command_sender
+                                        .try_send(MachineCommand::SetWifiCredentials(credentials))
+                                        .is_err()
+                                    {
+                                        info!("Dropped provisioned Wi-Fi credentials: command channel full");
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::WifiProvisioningIdentify => {
+                                    if command_sender.try_send(MachineCommand::IdentifyMachine).is_err() {
+                                        info!("Dropped an identify request: command channel full");
+                                    }
+                                }
                                 _ => {
                                     info!("Received unknown message type");
                                 }
@@ -671,6 +747,11 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                     }
                 }
             },
+            // `join4` is embassy-futures' maximum arity, so the fourth slot carries three
+            // futures nested rather than one. Nesting is free -- a `join` polls both arms
+            // on every wake exactly as a hypothetical `join6` would -- and it keeps the
+            // three arms above textually where they were.
+            join(
             async {
                 // Bluetooth scan requests the controller has already accepted.
                 //
@@ -698,6 +779,79 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                     }
                 }
             },
+            join(
+                async {
+                    // Credentials, pushed whenever the controller changes them.
+                    //
+                    // Unprompted, like the Bluetooth association list, and for the same
+                    // reason: the comms processor holds no configuration of its own, so a
+                    // network the user just provisioned does not exist to the radio until a
+                    // message says so. Unlike that list this cannot ride on the
+                    // `Configuration` publish -- that path ends at the browser.
+                    let Some(mut receiver) = wifi_credentials_receiver else {
+                        core::future::pending::<()>().await;
+                        return;
+                    };
+
+                    loop {
+                        let credentials = receiver.changed().await;
+
+                        // Cached before sending, not after. The request arm answers from
+                        // this, and a `RequestWifiCredentials` that arrives while the send
+                        // below is queued should be answered with the new value rather than
+                        // the old one.
+                        cached_wifi.lock(|cell| {
+                            cell.replace(Some(credentials.clone()));
+                        });
+
+                        let response = ApplicationProcessorToCommsProcessorMessage::WifiCredentials(
+                            credentials.0.clone(),
+                        );
+                        if let Ok(output) = to_allocvec_cobs(&response) {
+                            let _ = tx_sender.send(output).await;
+                            // Logged as configured-or-not. The SSID alone would be harmless
+                            // here, but a log line that prints half a credential is one edit
+                            // away from printing all of it.
+                            info!(
+                                "Sent Wi-Fi credentials to ESP32 ({})",
+                                if credentials.0.is_some() { "configured" } else { "none" }
+                            );
+                        } else {
+                            info!("Failed to serialize Wi-Fi credentials");
+                        }
+                    }
+                },
+                async {
+                    // Provisioning-window requests the controller has already accepted --
+                    // it is the only processor that knows a shot is in progress, so
+                    // anything arriving here has been vetted and is simply put on the wire.
+                    let Some(receiver) = wifi_provisioning_receiver else {
+                        core::future::pending::<()>().await;
+                        return;
+                    };
+
+                    loop {
+                        let duration_ms = receiver.receive().await;
+
+                        // Zero means close. One channel carries both so that a close cannot
+                        // overtake the open it was meant to cancel, which two channels
+                        // polled by a `select` could do.
+                        let response = if duration_ms == 0 {
+                            ApplicationProcessorToCommsProcessorMessage::CloseWifiProvisioningWindow
+                        } else {
+                            ApplicationProcessorToCommsProcessorMessage::OpenWifiProvisioningWindow { duration_ms }
+                        };
+
+                        if let Ok(output) = to_allocvec_cobs(&response) {
+                            let _ = tx_sender.send(output).await;
+                            info!("Sent Wi-Fi provisioning window request to ESP32 ({} ms)", duration_ms);
+                        } else {
+                            info!("Failed to serialize the provisioning window request");
+                        }
+                    }
+                },
+            ),
+            ),
         ),
     ).await;
 }

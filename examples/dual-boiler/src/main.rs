@@ -252,6 +252,8 @@ async fn esp_transceiver_task(
     debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
     scale_command_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::ScaleOp), 4>>,
     bluetooth_scan_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u16, 2>>,
+    wifi_credentials_receiver: Option<embassy_sync::watch::Receiver<'static, SyncSendRawMutex, StoredWifiCredentials, 2>>,
+    wifi_provisioning_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u32, 2>>,
 ) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart: the budget is a fraction of the link, and a stale figure
@@ -286,7 +288,7 @@ async fn esp_transceiver_task(
     #[cfg(not(feature = "sd-card-storage"))]
     let (shot_log_query_sender, shot_log_reply_receiver) = (None, None);
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver).await;
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, wifi_credentials_receiver, wifi_provisioning_receiver).await;
 }
 
 
@@ -905,6 +907,13 @@ static WIFI_STORE: StaticCell<WifiStoreMutex> = StaticCell::new();
 /// the open it was meant to cancel, leaving the radio advertising with nothing left to
 /// stop it.
 static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u32, 2>> = StaticCell::new();
+/// The credentials the controller last loaded or stored, for the transceiver to put on the
+/// link.
+///
+/// A `Watch` rather than a channel: only the latest value matters, and a receiver that
+/// missed an intermediate one has missed nothing. Sized for one receiver -- the
+/// transceiver -- plus the sender's own slot.
+static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<SyncSendRawMutex, StoredWifiCredentials, 2>> = StaticCell::new();
 static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -2244,6 +2253,7 @@ async fn main_task(
     );
     let wifi_store_ref = WIFI_STORE.init(Mutex::new(wifi_store));
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
+    let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());
 
     log_info!("Configuration loaded");
 
@@ -2796,6 +2806,7 @@ async fn main_task(
         Some(bluetooth_scan_channel.sender()),
         wifi_store_ref,
         Some(wifi_provisioning_channel.sender()),
+        Some(wifi_credentials_watch.sender()),
         peripheral_registry,
         Some(watchdog),
         interlock_enabled_signal,
@@ -2863,7 +2874,7 @@ async fn main_task(
     #[cfg(not(feature = "bluetooth-group-1-scale"))]
     let scale_command_receiver = None;
 
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()))));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()))));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]

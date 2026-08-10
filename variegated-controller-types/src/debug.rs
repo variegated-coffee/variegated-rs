@@ -94,12 +94,15 @@ use crate::Status;
 ///   command in this enum that destroys data, so a version mismatch here is worth
 ///   reporting as such rather than letting a host's older frame be read as something
 ///   adjacent. The command carries its own magic-value guard for the same reason.
-/// * `0x8B` -- `CommsStatus` gained `improv`, and `MachineCommand` gained four Wi-Fi
-///   provisioning variants. `CommsStatus` is a *struct*, so unlike every entry above this
-///   is not an appended enum variant an older peer would merely fail to recognise: every
-///   byte after `wifi_rssi` shifts, and a host built before this reads the peripheral
-///   connection map as garbage. That is exactly the failure this version exists to catch,
-///   and it is the same shape as the drift that motivated the schema fixtures.
+/// * `0x8B` -- `CommsStatus` gained `improv`, appended, and `MachineCommand` gained four
+///   Wi-Fi provisioning variants. The `MachineCommand` half is the usual appended-variant
+///   case an older peer merely fails to recognise. The `CommsStatus` half is not: it is a
+///   *struct*, and although the new field is last -- so nothing inside `CommsStatus` moves
+///   -- `CommsStatus` is itself a field of `Status`, and postcard has no length prefix to
+///   resynchronise on. An older host decoding a new `Status` reads `comms_status` without
+///   consuming `improv`, then reads that byte as the start of `comms_status_age`, and
+///   every field after it is garbage. That is exactly the failure this version exists to
+///   catch, and it is the same shape as the drift that motivated the schema fixtures.
 pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8B;
 
 /// Maximum number of counters or indicators carried in one sample frame.

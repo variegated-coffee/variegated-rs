@@ -550,6 +550,10 @@ pub struct DualBoilerSingleGroupController<
     // milliseconds; zero means close. `None` on a machine whose comms processor is not
     // wired for it, in which case requests are refused rather than silently dropped.
     wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+    // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
+    // channel because only the latest value matters and a receiver that missed an
+    // intermediate one has missed nothing.
+    wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
 
     // Status tracking
     previous_status: Option<Status>,
@@ -631,6 +635,9 @@ impl<
         // milliseconds; zero means close. `None` on a machine whose comms processor is not
         // wired for it, in which case requests are refused rather than silently dropped.
         wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+        // Where credentials go for the transceiver to put on the link. `None` on a machine
+        // with no comms processor.
+        wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
@@ -713,6 +720,7 @@ impl<
             wifi_credentials: StoredWifiCredentials::default(),
             wifi_publish_pending: false,
             wifi_provisioning_sender,
+            wifi_credentials_publisher,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
@@ -1030,6 +1038,16 @@ impl<
     }
 
     async fn publish_configuration_if_changed(&mut self, previous_configuration: DualBoilerSingleGroupConfiguration) -> DualBoilerSingleGroupConfiguration {
+        // Credentials go out on their own channel, not inside `Configuration`, so this is
+        // checked separately from the comparison below rather than folded into it. The
+        // whole point is that this value never touches the path the browser reads.
+        if self.wifi_publish_pending {
+            self.wifi_publish_pending = false;
+            if let Some(publisher) = self.wifi_credentials_publisher.as_ref() {
+                publisher.send(self.wifi_credentials.clone());
+            }
+        }
+
         if self.configuration != previous_configuration || self.bluetooth_publish_pending {
             self.bluetooth_publish_pending = false;
             self.publish_general_configuration().await;

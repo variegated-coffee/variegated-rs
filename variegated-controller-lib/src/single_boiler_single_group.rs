@@ -286,6 +286,9 @@ pub struct SingleBoilerSingleGroupController<
     // browser and a password has no business on it -- so a change announces itself.
     wifi_publish_pending: bool,
     wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+    // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
+    // channel because only the latest value matters.
+    wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
 }
 
 impl<
@@ -330,6 +333,9 @@ impl<
         // milliseconds; zero means close. `None` on a machine whose comms processor is not
         // wired for it, in which case requests are refused rather than silently dropped.
         wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+        // Where credentials go for the transceiver to put on the link. `None` on a machine
+        // with no comms processor.
+        wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
         // Already `start`ed by the caller, with `crate::WATCHDOG_TIMEOUT` -- the same
         // constant `task()` feeds it with. embassy-rp 0.10's `feed` sets the new timeout
         // rather than merely refreshing the old one, so the two values have to agree --
@@ -393,6 +399,7 @@ impl<
             wifi_credentials_loaded: false,
             wifi_publish_pending: false,
             wifi_provisioning_sender,
+            wifi_credentials_publisher,
         }
     }
 
@@ -461,6 +468,16 @@ impl<
                     if self.wifi_credentials.0.is_some() { "configured" } else { "none stored" }
                 );
                 self.wifi_publish_pending = true;
+            }
+
+            // Credentials go out on their own channel, never inside `Configuration` --
+            // that path ends at the browser. Checked here rather than folded into the
+            // configuration comparison below for the same reason.
+            if self.wifi_publish_pending {
+                self.wifi_publish_pending = false;
+                if let Some(publisher) = self.wifi_credentials_publisher.as_ref() {
+                    publisher.send(self.wifi_credentials.clone());
+                }
             }
 
             // A scan whose end was never reported -- a comms reset, or a link that dropped
