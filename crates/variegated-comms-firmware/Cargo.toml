@@ -150,10 +150,33 @@ esp-hal = { workspace = true, features = ["defmt", "unstable"] }
 # becomes a problem the fix is to make the dual-emit conditional, not to blind defmt
 # again.
 #
-# `critical-section` is back with it. It exists to make a print atomic, and there is a
-# print to serialise again -- concurrent writers interleaving inside one rzcobs frame
-# would corrupt the stream rather than merely reorder it. `timestamp` is kept as before,
-# so `_esp_println_timestamp` in main.rs stays a live export.
+# **`critical-section` is not a nicety here, it is the load-bearing half of this line,
+# and dropping it was a data race for as long as it was dropped.**
+#
+# In `esp-println/src/defmt.rs` the lock, the `TAKEN` re-entrancy check and `CS_RESTORE`
+# are all `#[cfg(feature = "critical-section")]`. The line after them is not:
+#
+#     unsafe { ENCODER.start_frame(do_write) }
+#
+# `ENCODER` is a single `static mut defmt::Encoder`. Without the feature, every
+# `defmt::*!` call from any task or interrupt mutates it with no mutual exclusion.
+#
+# `no-op` did not save us from that: it only makes `do_write` empty. `acquire()` still
+# ran and still drove the encoder, so the race was live while the output was being
+# discarded -- all of the hazard, none of the benefit.
+#
+# The symptom was a panic reading exactly `explicit panic` and nothing else, at random
+# moments under logging load. That is `core::panic!()` from `__defmt_default_panic`,
+# reached when the corrupted encoder tripped one of defmt's internal assertions; the
+# assertion text then went to the same broken logger and vanished. It was diagnosed on
+# 2026-08-11 after being mistaken for a Wi-Fi provisioning bug, because it happened to
+# fire during a credential write.
+#
+# So: if this firmware ever goes back to `no-op`, **keep `critical-section`**. The output
+# target is a choice; the lock is not.
+#
+# `timestamp` is kept as before, so `_esp_println_timestamp` in main.rs stays a live
+# export.
 esp-println = { workspace = true, default-features = false, features = ["jtag-serial", "critical-section", "defmt-espflash", "timestamp", "esp32c6"] }
 # The `log_*!` macros and the `log` -> debug-bus sink, the same crate and the same
 # `debug-bus` feature the application processor uses. `bus_sink` formats each
