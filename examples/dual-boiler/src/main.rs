@@ -121,7 +121,7 @@ use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
 use variegated_hal::SyncSendRawMutex;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
 use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
-use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
+use variegated_controller_lib::settings::{key, SequentialStorageSettingsStorage, SettingsStorage};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::Channel::{CIN3, CIN4};
@@ -479,7 +479,8 @@ type ScheduleStoreType = SequentialStorageScheduleStore<'static, SyncSendRawMute
 type SettingsStorageType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration>;
 /// The Bluetooth association list is the same shape as the settings blob -- a whole
 /// value, written at once, compared before writing -- so it reuses that store rather
-/// than getting one of its own. Only the payload type and the flash range differ.
+/// than getting one of its own. Only the payload type and the map key differ; both
+/// live in the same flash range.
 type BluetoothStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, BluetoothAssociations>;
 
 type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
@@ -2199,16 +2200,23 @@ async fn main_task(
     // Make schedule store reference available globally for display task (cross-core safe via CriticalSectionRawMutex)
     *SCHEDULE_STORE_REF.lock().await = Some(schedule_store_ref);
 
-    // Bluetooth associations, in the gap between the routine and schedule ranges.
+    // Bluetooth associations, at a key of their own in the settings range.
     //
-    // A range of its own rather than a field on the settings blob above, and that is the
-    // point of it: these blobs are postcard with a CRC and no version, so appending a
-    // field to the persistent configuration would make every previously stored copy fail
-    // to deserialize and fall back to `Default` -- resetting every boiler and PID setting
-    // on the first boot after the upgrade.
-    let bluetooth_store: BluetoothStoreType = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new(
+    // A key rather than a field on the settings blob above, and that is the point of it:
+    // these blobs are postcard with a CRC and no version, so appending a field to the
+    // persistent configuration would make every previously stored copy fail to
+    // deserialize and fall back to `Default` -- resetting every boiler and PID setting on
+    // the first boot after the upgrade.
+    //
+    // It used to be a flash range of its own (`0x0010_0000..0x0012_0000`) rather than a
+    // key, which cost a 128 KiB range per settings blob. That range is now abandoned
+    // rather than reused: nothing reads it, and leaving it alone means a machine rolled
+    // back to an older firmware still finds its associations. Machines upgraded across
+    // this change forget their pairings once.
+    let bluetooth_store: BluetoothStoreType = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new_with_key(
         flash,
-        0x0010_0000..0x0012_0000
+        0x0000_0000..0x0008_0000,
+        key::BLUETOOTH_ASSOCIATIONS,
     );
     let bluetooth_store_ref = BLUETOOTH_STORE.init(Mutex::new(bluetooth_store));
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());

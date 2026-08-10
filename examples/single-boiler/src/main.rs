@@ -63,7 +63,7 @@ use futures::future::join_all;
 use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
-use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
+use variegated_controller_lib::settings::{key, SequentialStorageSettingsStorage, SettingsStorage};
 use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, GroupConfiguration, MachineCommand, MachineConfiguration, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, RPMType, Status, TankConfiguration, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -507,11 +507,19 @@ async fn main_task(spawner: Spawner) -> ! {
     let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();
 
-    // Bluetooth associations, at a range of their own. Appending them to the settings
-    // blob above would instead make every previously stored copy fail to deserialize --
-    // postcard is positional and these blobs carry no version -- and silently reset the
-    // machine to defaults on the first boot after the upgrade.
-    let bluetooth_store = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new(flash, 0x0010_0000..0x0012_0000);
+    // Bluetooth associations, at a key of their own in the settings range. Appending them
+    // to the settings blob above would instead make every previously stored copy fail to
+    // deserialize -- postcard is positional and these blobs carry no version -- and
+    // silently reset the machine to defaults on the first boot after the upgrade.
+    //
+    // Formerly a flash range of its own (`0x0010_0000..0x0012_0000`). That range is
+    // abandoned rather than reused, so a rolled-back firmware still finds its
+    // associations; machines upgraded across this change forget their pairings once.
+    let bluetooth_store = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new_with_key(
+        flash,
+        0x0000_0000..0x0008_0000,
+        key::BLUETOOTH_ASSOCIATIONS,
+    );
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
 
     info!("Configuration loaded");
