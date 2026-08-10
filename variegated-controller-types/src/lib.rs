@@ -86,6 +86,7 @@ pub mod routines;
 pub mod schedule;
 pub mod shot_log;
 pub mod status;
+pub mod wifi;
 
 // Re-exports for backward compatibility
 pub use bluetooth::*;
@@ -103,5 +104,6 @@ pub use routines::core::*;
 pub use routines::parameters::*;
 pub use routines::steps::*;
 pub use schedule::*;
+pub use wifi::*;
 pub use shot_log::*;
 pub use status::*;
