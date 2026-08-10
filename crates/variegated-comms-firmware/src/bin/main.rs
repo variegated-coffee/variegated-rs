@@ -705,7 +705,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Generate random BLE address
     let rng = Rng::new();
-    let address_bytes = [
+    let mut address_bytes = [
         rng.random() as u8,
         (rng.random() >> 8) as u8,
         (rng.random() >> 16) as u8,
@@ -713,6 +713,26 @@ async fn main(spawner: Spawner) -> ! {
         rng.random() as u8,
         (rng.random() >> 8) as u8,
     ];
+
+    // Six random bytes are not a valid BLE random address. Core spec Vol 6, Part B
+    // §1.3.2 defines the top two bits of the most significant byte as the address
+    // sub-type: `11` static, `00` non-resolvable private, `01` resolvable private -- and
+    // `10` is not a valid type at all. A resolvable private address additionally has to
+    // carry a hash of an IRK, which a random draw will not be.
+    //
+    // `Address::random` does no fix-up; it just tags the bytes `AddrKind::RANDOM`. So an
+    // unmasked draw lands on an invalid sub-type a quarter of the time and on a malformed
+    // resolvable one another quarter, and `LE Set Random Address` rejects those with
+    // **Invalid HCI Command Parameters** -- which is the error the BLE runner has been
+    // dying with.
+    //
+    // Forcing `11` makes it a static random address: valid, stable for the power cycle,
+    // and the right sub-type for a device that has no bonding identity to protect. The
+    // remaining 46 bits must be neither all-zero nor all-one, which six random bytes
+    // satisfy with overwhelming probability -- and the all-zero draw would be caught by
+    // the `ReadBdAddr` check downstream rather than silently advertised.
+    address_bytes[5] |= 0b1100_0000;
+
     let address = Address::random(address_bytes);
     // Mirror the *same* array the controller is about to advertise, rather than
     // generating a second one for reporting: a second draw would put an address on
