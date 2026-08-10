@@ -112,45 +112,49 @@ esp-alloc.workspace = true
 esp-backtrace = { workspace = true, features = ["defmt"] }
 esp-bootloader-esp-idf.workspace = true
 esp-hal = { workspace = true, features = ["defmt", "unstable"] }
-# `no-op`: esp-println has **no output target at all** in this firmware. Every
-# `defmt::*!` call site still compiles and still costs a call, and the
-# `#[defmt::global_logger]` still exists (it lives behind `defmt-espflash`, not
-# behind an output target), but `Printer::write_bytes_in_cs` is empty.
+# `jtag-serial`: defmt output goes to the USB-Serial-JTAG.
 #
-# Two targets were rejected before this one, and both failures are instructive:
+# **This was `no-op` until 2026-08-11, and the reason it could change is that the
+# structured debug stream moved off this peripheral onto UART0** (see
+# `config::DEBUG_UART_BAUD`, "unlike the USB-Serial-JTAG this replaced"). The rejection
+# of every output target rested on contention with that stream; with the stream gone
+# from here, so is the contention.
 #
-#   * `auto` (the default) probes for USB-Serial-JTAG at runtime -- it watches the
-#     peripheral's SOF interrupt flag and switches to it the moment a host has
-#     ever been seen -- so it would write into the same FIFO the structured debug
-#     stream owns.
-#   * `uart` does not write to a UART peripheral. On the C6 it calls ROM
-#     `tx_one_char` and flushes via `tx_flush(get_channel())`, i.e. the *ROM
-#     console channel* -- which on a chip attached over native USB is the
-#     USB-Serial-JTAG, so it contends too. Worse, `write_bytes_in_cs` flushes
-#     every 32 bytes while holding `esp_sync::RawMutex`, which at 115200 baud is
-#     ~2.8 ms of busy-wait per chunk **with interrupts disabled**, on a processor
-#     running WiFi and BLE. The `auto` path has a self-limiting `TIMED_OUT` guard;
-#     the `uart` path has none.
+# What the old note got right, and still applies to the targets NOT chosen:
 #
-# Formatted log messages reach a host over the debug bus instead, via
-# `variegated-log`'s `log_*!` macros and its `bus_sink`. That removes both
-# problems outright rather than mitigating them.
+#   * `auto` probes for USB-Serial-JTAG at runtime, watching the peripheral's SOF
+#     interrupt flag. Now harmless, but there is nothing left to probe *for* -- this
+#     firmware knows which peripheral it wants, so name it.
+#   * `uart` does not write to a UART peripheral. On the C6 it calls ROM `tx_one_char`
+#     and flushes via `tx_flush(get_channel())`, i.e. the *ROM console channel*, which
+#     on a chip attached over native USB is the USB-Serial-JTAG anyway. Worse, it
+#     flushes every 32 bytes while holding `esp_sync::RawMutex` -- ~2.8 ms of busy-wait
+#     per chunk at 115200 **with interrupts disabled**, on a processor running WiFi and
+#     BLE, with no timeout. Still rejected, and for the stronger of the two reasons.
 #
-# CONSEQUENCE, and how it was paid: nothing that goes through esp-println has a
-# sink, which for Task 9 through 18 included `esp-backtrace`'s panic output -- a panic
-# on this processor halted it silently, with no backtrace anywhere. Task 19 fixed that
-# without giving esp-println a target back, because giving it one would restore both
-# problems above for the sake of an event that happens once. The panic handler in
-# `main.rs` writes its own bytes through `debug/panic_console.rs` instead, and the host
-# displays unstructured text on this wire rather than discarding it. Normal logging is
-# untouched and must stay that way: the bus carries it, and the busy-wait must not
-# come back.
+# `jtag-serial` is bounded where `uart` is not. `wait_for_flush` spins at most
+# `TIMEOUT_ITERATIONS = 50_000` and then latches a sticky `TIMED_OUT`, after which every
+# further write returns immediately without touching the FIFO. So the cost with no host
+# attached decays to nothing, and the worst case with one attached is a bounded spin
+# only when the FIFO is genuinely full.
 #
-# `critical-section` is dropped along with the other defaults: it exists to make a
-# print atomic, and there is no longer a print to serialise. `timestamp` is kept
-# so `_esp_println_timestamp` in main.rs stays a live export rather than becoming
-# a dangling one.
-esp-println = { workspace = true, default-features = false, features = ["no-op", "defmt-espflash", "timestamp", "esp32c6"] }
+# WHAT THIS BUYS: `defmt::unwrap!`/`assert!`/`panic!` messages become visible. They were
+# not. A panic on this processor printed `explicit panic` and nothing else -- that string
+# is `core::panic!()` from `__defmt_default_panic`, reached because the real assertion
+# text had been handed to a defmt logger with no sink. Diagnosing anything behind a defmt
+# assertion was impossible.
+#
+# WHAT IT COSTS: `variegated-log`'s `log_*!` macros dual-emit to defmt and to the `log`
+# facade, so normal logging now reaches *both* the debug bus and this wire. That is
+# duplication, and with a host attached it is real traffic on a busy processor. If it
+# becomes a problem the fix is to make the dual-emit conditional, not to blind defmt
+# again.
+#
+# `critical-section` is back with it. It exists to make a print atomic, and there is a
+# print to serialise again -- concurrent writers interleaving inside one rzcobs frame
+# would corrupt the stream rather than merely reorder it. `timestamp` is kept as before,
+# so `_esp_println_timestamp` in main.rs stays a live export.
+esp-println = { workspace = true, default-features = false, features = ["jtag-serial", "critical-section", "defmt-espflash", "timestamp", "esp32c6"] }
 # The `log_*!` macros and the `log` -> debug-bus sink, the same crate and the same
 # `debug-bus` feature the application processor uses. `bus_sink` formats each
 # record into a fixed `heapless::String<96>` and runs it past
