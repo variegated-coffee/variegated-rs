@@ -1,0 +1,27 @@
+[package]
+name = "variegated-improv-trouble"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Improv Wi-Fi provisioning: <https://www.improv-wifi.com/ble/>
+#
+# The wire codec has no BLE dependency and does not want one. Keeping `trouble-host`
+# out of this manifest is what lets the test suite run on the host without an
+# `embassy-time` driver, a `critical-section` implementation or a feature dance --
+# trouble-host's own tests need all three (see its Cargo.toml dev-dependencies).
+# The GATT service added later goes behind an optional `ble` feature so that stays true.
+
+# Deliberately NOT `harness = false`, unlike the sibling trouble crates. That setting
+# makes cargo expect the lib to provide its own `main`, and the unit tests below would
+# silently never run.
+[lib]
+bench = false
+
+[dependencies]
+heapless.workspace = true
+defmt = { workspace = true, optional = true }
+
+[features]
+default = ["defmt"]
+defmt = ["dep:defmt", "heapless/defmt"]
