@@ -384,6 +384,49 @@ fn formatting_stays_inside_the_volume() {
     }
 }
 
+/// The card actually in the machine, at its actual size.
+///
+/// Every other size here is a round number chosen to bracket a rule. This one is a
+/// measurement: a card sold as "32 GB" reports C_SIZE = 60872 through CMD9, which is
+/// (60872 + 1) * 1024 = 62,333,952 sectors — 29.7 GiB, and *below* the 32 GiB threshold
+/// where the cluster shift goes to 8. So the marketing number and the number the geometry
+/// rules see fall on opposite sides of the boundary, and picking the shift by reading the
+/// label would get it wrong.
+///
+/// Worth its own test because it is the case that runs on hardware. A rule that is right
+/// at 16384 MB and right at 32768 MB can still be wrong in between if the boundary is
+/// compared against the wrong unit.
+#[test]
+fn the_cards_real_reported_size_formats_with_the_expected_geometry() {
+    let sectors = 62_333_952u64;
+    let mut device = MemDevice::new(sectors);
+    let geometry = block_on(format(&mut device, "VARIEGATED", 1)).expect("format");
+
+    assert_eq!(geometry.volume_length, sectors);
+    assert_eq!(
+        geometry.sectors_per_cluster_shift, 6,
+        "29.7 GiB is under the 32 GiB threshold, so 32 KiB clusters"
+    );
+
+    // The heap has to fit, with every cluster it claims addressable.
+    let heap_sectors = sectors - geometry.cluster_heap_offset as u64;
+    let sectors_per_cluster = 1u64 << geometry.sectors_per_cluster_shift;
+    assert!(
+        geometry.cluster_count as u64 <= heap_sectors / sectors_per_cluster,
+        "claimed {} clusters, only {} fit",
+        geometry.cluster_count,
+        heap_sectors / sectors_per_cluster
+    );
+
+    // And the bitmap has to have a bit for each of them.
+    assert!(
+        geometry.bitmap_length as u64 * 8 >= geometry.cluster_count as u64,
+        "bitmap covers {} clusters, heap has {}",
+        geometry.bitmap_length as u64 * 8,
+        geometry.cluster_count
+    );
+}
+
 /// Hand the volume to an implementation that shares nothing with ours.
 ///
 /// Skipped rather than failed where `fsck_exfat` is absent: it ships with macOS, and a
