@@ -243,6 +243,86 @@ fn to_string<const N: usize>(bytes: &[u8]) -> Result<heapless::String<N>, ParseE
     heapless::String::try_from(text).map_err(|_| ParseError::TooLong)
 }
 
+/// Largest RPC result this crate will build.
+///
+/// Sized for the longest thing actually sent: a `GET_DEVICE_INFO` answer of four strings.
+/// A `GET_WIFI_NETWORKS` answer is deliberately *one network*, not a list, so it stays far
+/// under this -- see [`build_response`].
+pub const MAX_RESPONSE_LEN: usize = 160;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum BuildError {
+    BufferTooSmall,
+    /// A string whose length will not fit in the single length byte the format allows.
+    StringTooLong,
+    /// The strings together exceed what the frame's single total-length byte can describe.
+    ///
+    /// Separate from [`Self::StringTooLong`] because every individual string can be legal
+    /// while the total is not, and the two have different fixes: shorten one string, or
+    /// send fewer of them. This is the case `GET_WIFI_NETWORKS` would hit if its answer
+    /// were ever batched into one frame instead of sent one network at a time.
+    PayloadTooLong,
+}
+
+/// Encode an RPC result: `command, total_length, (len, bytes).., checksum`.
+///
+/// Returns the number of bytes written to `out`.
+///
+/// # One network per call
+///
+/// `GET_WIFI_NETWORKS` is answered by calling this once per network and then once with an
+/// empty `strings` to terminate the list. That is not a stylistic choice -- a list of
+/// networks batched into one result overruns the ATT MTU, and the reference implementation
+/// (`esphome/components/improv_serial/improv_serial_component.cpp:232-263`) sends them
+/// one at a time for exactly that reason. **The terminating empty result is required**;
+/// without it a client waits out its timeout instead of showing the list.
+pub fn build_response(
+    command: Command,
+    strings: &[&str],
+    out: &mut [u8],
+) -> Result<usize, BuildError> {
+    // Representability first, capacity second, and the order is deliberate: a string too
+    // long for the format's single length byte cannot be encoded into *any* buffer, so
+    // reporting `BufferTooSmall` for it would send the caller off to enlarge a buffer that
+    // was never the problem.
+    if strings.iter().any(|s| s.len() > u8::MAX as usize) {
+        return Err(BuildError::StringTooLong);
+    }
+    let payload_len: usize = strings.iter().map(|s| 1 + s.len()).sum();
+    // The total length is one byte too. Without this, a set of individually legal strings
+    // summing past 255 would truncate `out[1]` and emit a frame whose length field
+    // disagreed with its contents -- a corrupt packet, silently, rather than an error.
+    if payload_len > u8::MAX as usize {
+        return Err(BuildError::PayloadTooLong);
+    }
+    let total = 3 + payload_len;
+    if out.len() < total {
+        return Err(BuildError::BufferTooSmall);
+    }
+
+    out[0] = command as u8;
+    out[1] = payload_len as u8;
+
+    let mut pos = 2;
+    for text in strings {
+        out[pos] = text.len() as u8;
+        pos += 1;
+        out[pos..pos + text.len()].copy_from_slice(text.as_bytes());
+        pos += text.len();
+    }
+
+    // The checksum covers every byte before it, which is the whole frame bar the checksum
+    // itself. The C++ reference sums the whole vector including a checksum byte it has not
+    // written yet -- that byte is still zero, so the two agree.
+    let sum = out[..pos]
+        .iter()
+        .fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+    out[pos] = sum;
+
+    Ok(pos + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +459,93 @@ mod tests {
     fn rejects_a_packet_too_short_to_hold_a_header() {
         assert_eq!(parse_command(&[]), Err(ParseError::TooShort));
         assert_eq!(parse_command(&[0x01, 0x00]), Err(ParseError::TooShort));
+    }
+
+    #[test]
+    fn builds_a_wifi_settings_result_carrying_one_url() {
+        // 1 + 16 + 15 + sum("http://1.2.3.4/") = 1 + 16 + 15 + 987 = 1019, & 0xFF = 0xFB.
+        let expected: &[u8] = &[
+            0x01, 0x10, 0x0F, b'h', b't', b't', b'p', b':', b'/', b'/', b'1', b'.', b'2',
+            b'.', b'3', b'.', b'4', b'/', 0xFB,
+        ];
+        let mut out = [0u8; MAX_RESPONSE_LEN];
+        let len = build_response(Command::WifiSettings, &["http://1.2.3.4/"], &mut out)
+            .expect("should build");
+        assert_eq!(&out[..len], expected);
+    }
+
+    #[test]
+    fn builds_the_empty_result_that_terminates_a_network_list() {
+        // GET_WIFI_NETWORKS answers one network per notification and then an empty result
+        // to say "that is all". Without the terminator a client waits out its timeout.
+        let mut out = [0u8; MAX_RESPONSE_LEN];
+        let len = build_response(Command::GetWifiNetworks, &[], &mut out).expect("should build");
+        assert_eq!(&out[..len], &[0x04, 0x00, 0x04]);
+    }
+
+    #[test]
+    fn builds_a_network_entry_as_three_strings() {
+        // (ssid, rssi as decimal, "YES"/"NO"), per improv_serial_component.cpp.
+        // 4+14+5+77+121+78+101+116+3+45+52+50+3+89+69+83 = 910, & 0xFF = 0x8E.
+        let expected: &[u8] = &[
+            0x04, 0x0E, 0x05, b'M', b'y', b'N', b'e', b't', 0x03, b'-', b'4', b'2', 0x03,
+            b'Y', b'E', b'S', 0x8E,
+        ];
+        let mut out = [0u8; MAX_RESPONSE_LEN];
+        let len = build_response(Command::GetWifiNetworks, &["MyNet", "-42", "YES"], &mut out)
+            .expect("should build");
+        assert_eq!(&out[..len], expected);
+    }
+
+    #[test]
+    fn refuses_to_overrun_the_output_buffer() {
+        let mut out = [0u8; 4];
+        assert_eq!(
+            build_response(Command::WifiSettings, &["http://1.2.3.4/"], &mut out),
+            Err(BuildError::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn refuses_a_string_longer_than_a_length_byte_can_describe() {
+        let long = "x".repeat(256);
+        let mut out = [0u8; MAX_RESPONSE_LEN];
+        assert_eq!(
+            build_response(Command::GetDeviceInfo, &[&long], &mut out),
+            Err(BuildError::StringTooLong)
+        );
+    }
+
+    /// Individually legal strings whose total will not fit the frame's length byte.
+    ///
+    /// Found by the buffer-overrun test above disagreeing about which error it got: the
+    /// capacity check used to run first, which hid this case entirely. Four 100-byte
+    /// strings are each well under the 255 a length byte holds, but the payload totals 404
+    /// and `out[1] = payload_len as u8` would have written 148 -- a frame claiming a length
+    /// it does not have, emitted silently.
+    #[test]
+    fn refuses_a_payload_whose_total_will_not_fit_the_length_byte() {
+        let chunk = "y".repeat(100);
+        let strings = [chunk.as_str(), chunk.as_str(), chunk.as_str(), chunk.as_str()];
+        let mut out = [0u8; 512];
+        assert_eq!(
+            build_response(Command::GetDeviceInfo, &strings, &mut out),
+            Err(BuildError::PayloadTooLong)
+        );
+    }
+
+    /// The two halves agree: anything `build_response` produces, the checksum rule in
+    /// `parse_command` accepts. Not a round trip -- results and commands are different
+    /// shapes -- but it does pin the one field both sides compute.
+    #[test]
+    fn built_responses_carry_a_checksum_the_parser_would_accept() {
+        let mut out = [0u8; MAX_RESPONSE_LEN];
+        let len = build_response(Command::GetWifiNetworks, &["MyNet", "-42", "YES"], &mut out)
+            .expect("should build");
+        let frame = &out[..len];
+        let sum = frame[..len - 1]
+            .iter()
+            .fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+        assert_eq!(sum, frame[len - 1]);
     }
 }
