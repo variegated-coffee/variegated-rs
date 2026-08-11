@@ -628,9 +628,20 @@ pub struct RoutineEvent {
     /// Time since shot start (milliseconds)
     pub timestamp_millis: u64,
     /// Step we're transitioning from (None if starting routine)
-    pub from_step: Option<usize>,
+    ///
+    /// `u32` rather than `usize`, and that is a wire decision rather than a style one.
+    /// serde encodes `usize` as `u64` regardless of target width, but this producer is
+    /// 32-bit, where the `u32` and `u64` varints are byte-identical for every value it
+    /// can emit -- so a round-trip test could not tell a wrong choice from a right one.
+    /// The schema exporter refuses `usize` outright for exactly that reason, and
+    /// `ShotLog` is one of the types it exports.
+    ///
+    /// Widening does not change the encoded bytes, which is why
+    /// [`SHOT_LOG_FORMAT_VERSION`] stays where it is;
+    /// `the_encoding_has_not_moved_under_this_version` is what holds that claim.
+    pub from_step: Option<u32>,
     /// Step we're transitioning to
-    pub to_step: usize,
+    pub to_step: u32,
     /// Description of the exit condition that triggered this transition
     pub exit_condition_description: Option<String>,
     /// Description of the step we're entering
@@ -1085,5 +1096,30 @@ mod shot_log_prefix_tests {
         // A varint, so version 2 is one byte and is byte zero of the file.
         assert_eq!(encoded[0], SHOT_LOG_FORMAT_VERSION as u8);
         assert!(shot.version_supported());
+    }
+}
+
+#[cfg(test)]
+mod routine_event_width_tests {
+    use super::*;
+
+    /// The step indices must be a fixed width, not `usize`.
+    ///
+    /// `ShotLog` is an exported wire root, and the schema exporter refuses `usize`
+    /// outright: serde encodes it as `u64`, which on this 32-bit producer is
+    /// byte-identical to `u32` for every value it can emit, so no round-trip test could
+    /// tell a wrong choice from a right one. Declaring the width here is what makes the
+    /// encoding decidable, and it is why this compiles rather than asserting.
+    #[test]
+    fn step_indices_are_fixed_width() {
+        let event = RoutineEvent {
+            timestamp_millis: 1_500,
+            from_step: Some(2u32),
+            to_step: 3u32,
+            exit_condition_description: None,
+            step_description: None,
+        };
+        assert_eq!(event.to_step, 3u32);
+        assert_eq!(event.from_step, Some(2u32));
     }
 }

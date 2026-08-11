@@ -1050,8 +1050,12 @@ impl<
                                     .and_then(|log| log.samples.last())
                                     .map(|s| s.timestamp_millis)
                                     .unwrap_or(0),
-                                from_step: self.previous_routine_step,
-                                to_step: current_step,
+                                // Narrowed at the wire boundary. `current_step` stays a
+                                // `usize` because it indexes `steps` below; the log
+                                // carries a `u32` because `usize` cannot be described to
+                                // the schema exporter unambiguously.
+                                from_step: self.previous_routine_step.map(|step| step as u32),
+                                to_step: current_step as u32,
                                 exit_condition_description: None,
                                 step_description: routine.routine.steps.get(current_step)
                                     .and_then(|s| s.description.clone()),
