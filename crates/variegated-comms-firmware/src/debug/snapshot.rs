@@ -96,6 +96,18 @@ fn report_stack_high_water() {
     }
 }
 
+/// Bytes currently free across both heap regions.
+///
+/// The 1 Hz snapshot reports the *peak*, which is the right instrument for sizing and the
+/// wrong one for attribution: it only moves upward, so it cannot say which step of a
+/// sequence acquired the memory or whether anything was given back. This is for bracketing
+/// a suspect region -- read it either side and the difference is that region's cost.
+///
+/// Public because the interesting brackets are in `wifi` and `improv`, not here.
+pub fn heap_free() -> usize {
+    esp_alloc::HEAP.free()
+}
+
 pub fn publish_snapshot() {
     let stats = bus::stats();
 

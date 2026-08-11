@@ -162,7 +162,19 @@ async fn try_candidate(
     // Nothing on this path logs the credential, not even the SSID. `WifiCredentials`' `Format`
     // elides the password, but the SSID alone is enough to make a log line worth not writing
     // on a path that runs while someone is provisioning and may be sharing a screen.
-    log_info!("Trying candidate Wi-Fi credentials");
+    // Bracketed step by step, because a re-association is this firmware's peak-memory event
+    // and nobody knows which part of it costs what. Measured across a whole provisioning
+    // cycle the heap goes from ~73 kB to ~115 kB and stays there, but that cycle also holds
+    // a BLE connection open, and the two have never been told apart. `set_config` is
+    // exonerated by inspection -- on a second call with the mode unchanged it skips both
+    // `stop_impl` and `esp_wifi_start` and only reapplies the STA config -- so the cost is
+    // either the association itself or something outside this function entirely.
+    //
+    // Cheap to leave in: four `log_info!` on a path that runs when a human is provisioning.
+    log_info!(
+        "Trying candidate Wi-Fi credentials (heap free {})",
+        crate::debug::snapshot::heap_free()
+    );
 
     if controller.disconnect_async().await.is_err() {
         log_error!("Disconnect before trying a candidate failed");
@@ -170,12 +182,24 @@ async fn try_candidate(
     set_wifi_connected(false);
     WIFI_RSSI_SIGNAL.signal(None);
     WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+    log_info!(
+        "Candidate: disconnected (heap free {})",
+        crate::debug::snapshot::heap_free()
+    );
 
     apply_configuration(controller, &candidate);
+    log_info!(
+        "Candidate: reconfigured (heap free {})",
+        crate::debug::snapshot::heap_free()
+    );
 
     let associated = matches!(
         with_timeout(CANDIDATE_TIMEOUT, controller.connect_async()).await,
         Ok(Ok(_))
+    );
+    log_info!(
+        "Candidate: association attempt finished (heap free {})",
+        crate::debug::snapshot::heap_free()
     );
 
     if associated {

@@ -250,7 +250,15 @@ pub async fn improv_task(
         };
 
         let name = device_name().await;
-        log_info!("Improv provisioning window open for {} ms", duration_ms);
+        // The other half of the bracket in `wifi::try_candidate`. A provisioning cycle holds
+        // a BLE peripheral connection open *and* re-associates Wi-Fi, and the ~42 kB the
+        // heap never gets back has never been attributed to one or the other. These two
+        // lines bound the BLE session; the four in `try_candidate` bound the Wi-Fi work.
+        log_info!(
+            "Improv provisioning window open for {} ms (heap free {})",
+            duration_ms,
+            crate::debug::snapshot::heap_free()
+        );
 
         // Built per window rather than once, because the attribute table borrows `name` and
         // the machine can be renamed between windows. The characteristic value storage behind
@@ -295,5 +303,14 @@ pub async fn improv_task(
         // Set here rather than inside `run`, which is dropped without unwinding in two of the
         // three arms above and so cannot be relied on to report its own end.
         IMPROV_STATE.store(State::Stopped as u8, Ordering::Relaxed);
+
+        // Dropping `run` drops the `GattConnection` and the `Advertiser` with it, so whatever
+        // the BLE session was holding has been released by the time this runs. A figure here
+        // close to the one logged when the window opened means the session gave its memory
+        // back and the Wi-Fi path owns the loss; a figure well below it means the opposite.
+        log_info!(
+            "Improv provisioning window closed (heap free {})",
+            crate::debug::snapshot::heap_free()
+        );
     }
 }
