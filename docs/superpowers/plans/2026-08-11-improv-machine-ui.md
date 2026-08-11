@@ -56,6 +56,29 @@ less visible), or inverting the existing screen (subtle, and on the LCD indistin
 glitch). **If you want one of those instead, only Task 5's rendering changes — Tasks 3 and 4,
 which carry the event to the displays, are the same either way.**
 
+## As built — four things this plan got wrong
+
+All seven tasks are implemented and all three configurations compile. Four corrections, none
+of which changed the design:
+
+1. **The dual boiler's `IDENTIFY_WATCH` is a plain `static`, not a `StaticCell`.** The plan
+   assumed the two ends could be wired from one function. They cannot: `main` spawns the
+   display tasks and `main_task` builds the controller, and a `StaticCell` only hands its
+   reference to whoever calls `init` — which would have forced the sender through
+   `main_task`'s argument list. `Watch::new` is `const`, so a `static` works and the ordering
+   hazard the plan warned about disappears entirely.
+2. **The single boiler still needs a `StaticCell`**, for a reason the plan did not anticipate:
+   `NoopRawMutex` is not `Sync`, so it cannot back a `static` at all. That is still the right
+   mutex there — one executor, both ends in one function — so the deferred initialisation is
+   forced rather than chosen. The two examples therefore differ, and each says why.
+3. **The banner and the LCD rows are suppressed while brewing or running a routine.** Found by
+   checking risk 2 rather than by it biting: `render_extraction_info` draws its second row at
+   `EFFECTIVE_Y + 98`, which the 16 px strip covers completely, and on the 2×16 the
+   provisioning rows take the whole panel. The window cannot be *opened* while brewing, but it
+   can already be open when brewing starts, so this was reachable.
+4. **`IdentifyReceiver` is a named type alias** in each example rather than the receiver type
+   written out. Two task signatures each, and inline it is unreadable.
+
 ## Departures from what the progress note predicted
 
 `variegated-comms-rs/docs/superpowers/2026-08-11-improv-progress.md` sketched this work before
