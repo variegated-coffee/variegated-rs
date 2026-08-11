@@ -483,9 +483,22 @@ async fn main(spawner: Spawner) -> ! {
     // bytes`, which is the exact 32 kB of the increase. Do not spend time trying to grow
     // this; any further heap has to come out of `.stack`.
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    // 48 -> 64 kB. Everything past the 64 kB above comes out of `.stack`, which is the
-    // SRAM remainder, so this line and the stack are in direct competition and there is
-    // no third source.
+    // 48 -> 64 -> 56 kB. Everything past the 64 kB above comes out of `.stack`, which is
+    // the SRAM remainder, so this line and the stack are in direct competition and there
+    // is no third source.
+    //
+    // **Cut to 56 on 2026-08-11 to pay for the Improv GATT service**, which added 4024
+    // bytes of `.bss` (the 20-entry attribute table, the characteristic `StaticCell`s and
+    // a sixth BLE connection slot) and took `.stack` to 90144 -- below the 95848 recorded
+    // at the bottom of this comment as the last figure known to work. The failure was the
+    // `chip_v7_set_chan` load fault described there, to the letter, with `mtval=0x3`
+    // instead of `0x5`; `esp-rtos` also caught it directly once, as
+    // `Stack pointer: 40857b20, Task stack range: 40857d78 ..=` -- 600 bytes past the
+    // floor. This line returns 8192, for 98336.
+    //
+    // The margin was already gone before that service existed: the commit that adds only
+    // ~500 bytes of `.bss` overflowed by 600. So treat 95848 as a *lower* bound that had
+    // quietly been crossed, not as a safe target.
     //
     // Raised because the machine ran out: `memory allocation of 128 bytes failed` at
     // ~12 minutes with two BLE peripherals connected, and a snapshot shortly before it
@@ -523,11 +536,20 @@ async fn main(spawner: Spawner) -> ! {
     //   The cause was the shot-log download path putting a 1 kB chunk buffer in a
     //   `Signal` and holding another across two awaits in the HTTP handler, which the
     //   task pool multiplied. Moving those bytes to the heap returned 10240 to `.stack`
-    //   (95848). Measure with `rust-size -A` and `rust-nm --print-size --size-sort`
+    //   (95848).
+    // - The 64 -> 56 kB cut above is itself a squeeze, and belongs on this list. It takes
+    //   the two regions from 128 to 120 kB against a *pre-fix* exhaustion peak of 108808,
+    //   so the remaining margin is ~11 kB rather than the ~19 kB it was. The 1 Hz
+    //   snapshot's `Heap high-water` line is the thing that will say if that is not
+    //   enough; if it starts approaching 120 kB, the answer is to find static bytes
+    //   elsewhere, not to move this line again -- both directions have now drawn blood
+    //   within 10 kB of each other.
+    //
+    //   Measure with `rust-size -A` and `rust-nm --print-size --size-sort`
     //   before blaming the stack for anything: `.stack` is whatever SRAM is left after
     //   `.data` and `.bss`, so the number is computable from any build, and every byte
     //   of static costs a byte of stack one for one.
-    esp_alloc::heap_allocator!(size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 56 * 1024);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
