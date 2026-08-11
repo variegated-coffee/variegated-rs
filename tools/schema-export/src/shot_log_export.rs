@@ -13,6 +13,8 @@
 use std::io;
 use std::path::Path;
 
+use crc::{Crc, CRC_32_ISCSI};
+
 use crate::{emit, fixtures, roots};
 
 /// Write `schemas/v<N>.ts` and `fixtures/generated/v<N>.{bin,json}` under `out_dir`.
@@ -47,9 +49,17 @@ pub fn write(out_dir: &Path, version: u32, force: bool) -> io::Result<()> {
     // Both encodings, for the reason the fixtures module gives: the bytes catch wrong
     // node kinds, nesting, field counts and variant order, and are blind to field names
     // and to two same-typed fields being swapped. Only the JSON catches those.
+    //
+    // `to_allocvec_crc32`, not `to_allocvec`. A stored shot is exactly what
+    // `shot_log_storage.rs` writes -- the postcard encoding followed by a CRC-32/ISCSI
+    // trailer, no header and no container -- and that is what a downloaded `.BIN`
+    // contains and what plantlet is handed. A fixture without the trailer would be in a
+    // format no machine emits, and the decoder it exists to test would refuse it.
+    let crc = Crc::<u32>::new(&CRC_32_ISCSI);
     std::fs::write(
         fixture_dir.join(format!("v{version}.bin")),
-        postcard::to_allocvec(&shot).expect("the canonical shot must serialize"),
+        postcard::to_allocvec_crc32(&shot, crc.digest())
+            .expect("the canonical shot must serialize"),
     )?;
     std::fs::write(
         fixture_dir.join(format!("v{version}.json")),
