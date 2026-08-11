@@ -598,13 +598,15 @@ pub struct DualBoilerSingleGroupController<
     interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
     contention_strategy_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>,
 
-    // Shot state tracking
-    current_shot_state: Option<variegated_controller_types::ShotState>,
-    flow_rate_history: MovAvg<f32, f32, 10>,
-    pressure_history: MovAvg<f32, f32, 10>,
-    saturation_start_time: Option<Instant>,
-    last_shot_state_sample_time: Option<Instant>,
+    // Shot state tracking. The detection itself lives in `variegated-controller-types`
+    // rather than here, because this crate cannot be built for the host and the thresholds
+    // it uses are only defensible when they can be replayed against recorded shots.
+    shot_state: variegated_controller_types::ShotStateTracker,
     input_volume_at_first_drop: Option<InputVolumeType>,
+
+    /// Whether the currently open shot log was opened by `start_brewing` rather than by a
+    /// routine. Only that kind is closed by `stop_brewing`; see `finish_manual_shot_log`.
+    manual_shot_active: bool,
 }
 
 impl<
@@ -780,12 +782,9 @@ impl<
             contention_strategy_signal,
 
             // Shot state tracking initialization
-            current_shot_state: None,
-            flow_rate_history: MovAvg::default(),
-            pressure_history: MovAvg::default(),
-            saturation_start_time: None,
-            last_shot_state_sample_time: None,
+            shot_state: variegated_controller_types::ShotStateTracker::new(),
             input_volume_at_first_drop: None,
+            manual_shot_active: false,
         }
     }
 
@@ -1033,14 +1032,22 @@ impl<
                 }
             }
 
+            // Record a shot log sample.
+            //
+            // Outside the routine block below, and that placement is the whole of what made
+            // manual brews unlogged: `record_sample` needs nothing but a `Status`, and
+            // no-ops when no log is open, but sitting inside `if let Some(routine)` it could
+            // only ever run for a routine. Routine *events* stay inside, because those
+            // genuinely need the routine.
+            if let Some(status) = self.previous_status.as_ref() {
+                self.shot_logger.record_sample(status);
+            }
+
             // Handle routine execution
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
                     self.handle_routine_exit(false).await;
                 } else if let Some(status) = self.previous_status.as_ref() {
-                    // Record shot log sample
-                    self.shot_logger.record_sample(status);
-
                     // Detect and record step transitions
                     if routine.current_step != self.previous_routine_step {
                         if let Some(current_step) = routine.current_step {
@@ -1525,7 +1532,7 @@ impl<
             BrewStatus {
                 brew_time: start.elapsed().into(),
                 brew_input_volume,
-                shot_state: self.current_shot_state,
+                shot_state: self.shot_state.state(),
                 extracted_solids: self.accumulated_extracted_solids,
                 output_volume,
             }
@@ -1568,6 +1575,10 @@ impl<
                 // was still advertising.
                 improv: status.improv,
                 peripheral_connection_status: status.peripheral_connection_status.clone(),
+                // Carried through unchanged, like `improv` and unlike the timestamp: it
+                // counts syncs that happened on the other processor, and extrapolating a
+                // count would be inventing one.
+                sntp_sync_seq: status.sntp_sync_seq,
             }),
             // Published alongside, because everything above is extrapolated: the
             // timestamp keeps advancing whether or not the comms processor is alive, so
@@ -2486,12 +2497,10 @@ impl<
             self.last_extraction_time = Some(Instant::now());
 
             // Initialize shot state tracking
-            self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
-            self.flow_rate_history = MovAvg::default(); // Reset history
-            self.pressure_history = MovAvg::default(); // Reset history
-            self.saturation_start_time = None;
-            self.last_shot_state_sample_time = None; // Reset sampling timer
+            self.shot_state.start();
             self.input_volume_at_first_drop = None; // Will be set when transitioning to PostFirstDrop
+
+            self.start_manual_shot_log();
 
             self.group.set_brewing_state(true, 0).await;
 
@@ -2540,9 +2549,11 @@ impl<
             self.curve_start_time = None;
 
             // Clear shot state tracking
-            self.current_shot_state = None;
-            self.saturation_start_time = None;
+            self.shot_state.stop();
             self.input_volume_at_first_drop = None;
+
+            self.finish_manual_shot_log();
+
             self.group.set_brewing_state(false, 0).await;
 
             let _ = self.group.scale_set_configuration(ScaleConfiguration {
@@ -2552,89 +2563,122 @@ impl<
         }
     }
 
+    /// Feed the shot-state tracker this tick's sensor readings.
+    ///
+    /// The decision itself is [`variegated_controller_types::ShotStateTracker`]; everything
+    /// here is gathering inputs and reacting to a transition. `update` does its own rate
+    /// limiting, so this can be called on every 100 ms tick.
     fn update_shot_state(&mut self) {
-        // Constants for shot state detection
-        const FIRST_DROP_WEIGHT_THRESHOLD: f32 = 1.0; // grams
-        const EC_POST_FIRST_DROP_THRESHOLD: f32 = 1.0; // EC > 1.0 definitively indicates coffee is flowing
-        const FLOW_DECREASE_THRESHOLD: f32 = 3.0; // ml/s below average (dramatic change at saturation)
-        const PRESSURE_INCREASE_THRESHOLD: f32 = 3.0; // bar above average (dramatic change at saturation)
-        const SAMPLE_INTERVAL_MS: u64 = 333; // Sample every 333ms (3 samples/sec, 10 samples = 3.33 seconds history)
-
         if !self.group_brewing {
-            // Not brewing, no shot state
+            // Not brewing, no shot state. `stop_brewing` is what clears the tracker.
             return;
         }
 
-        // Check if it's time to sample (every 500ms)
-        let now = Instant::now();
-        let should_sample = match self.last_shot_state_sample_time {
-            None => true, // First sample
-            Some(last_time) => now.saturating_duration_since(last_time).as_millis() >= SAMPLE_INTERVAL_MS,
+        if self.shot_state.state().is_none() {
+            // Should not happen during brewing, but handle gracefully.
+            log_warn!("Shot state is None while brewing - restarting shot state tracking");
+            self.shot_state.start();
+        }
+
+        let inputs = variegated_controller_types::ShotStateInputs {
+            input_flow_rate: self.group.get_input_flow_rate(),
+            pressure: self.group.get_pressure(),
+            output_weight: self.group.get_output_weight(),
+            output_electrical_conductivity: self.group.get_output_electrical_conductivity(),
         };
 
-        if !should_sample {
-            return; // Skip this update, not time to sample yet
+        let Some(new_state) = self.shot_state.update(Instant::now().as_millis(), inputs) else {
+            return;
+        };
+
+        if new_state == variegated_controller_types::ShotState::PostFirstDrop {
+            // Captured here rather than inside the tracker: it is the *input* volume, which
+            // is the group's to report, and it is only wanted as the baseline for the
+            // output-volume derivation below.
+            self.input_volume_at_first_drop = self.group.get_input_volume();
         }
 
-        // Update sample time
-        self.last_shot_state_sample_time = Some(now);
+        log_info!(
+            "Shot state transition: -> {:?} (flow: {:?}, pressure: {:?}, weight: {:?}, ec: {:?}, input_vol: {:?})",
+            new_state,
+            inputs.input_flow_rate,
+            inputs.pressure,
+            inputs.output_weight,
+            inputs.output_electrical_conductivity,
+            self.input_volume_at_first_drop
+        );
+    }
 
-        let current_flow = self.group.get_input_flow_rate().unwrap_or(0.0);
-        let current_pressure = self.group.get_pressure().unwrap_or(0.0);
+    /// Open a shot log for a brew nobody scripted.
+    ///
+    /// A brew started from the panel -- the brew button, or a bare `StartBrewing` -- is as
+    /// much a shot as one a routine pulled, and until now only the routine path logged
+    /// anything at all. The logger never needed a routine to work: `record_sample` takes
+    /// only a `Status`, and `routine_metadata` has always been an `Option`. The three calls
+    /// simply lived on the routine path and nowhere else.
+    ///
+    /// No-ops if a routine is running, or if some other log is already open. Between them
+    /// those cover both orders: a routine that issues `StartBrewing` as a step must not
+    /// open a second log over its own, and a manual brew that a routine then interrupts is
+    /// handed over by `handle_routine_start` rather than closed twice.
+    fn start_manual_shot_log(&mut self) {
+        use variegated_controller_types::{ShotLogMetadata, ShotStatus, ShotType};
 
-        // Update histories and get averaged values (sampling at 3 Hz for 3.33s history window)
-        let flow_avg = self.flow_rate_history.try_feed(current_flow).unwrap_or(current_flow);
-        let pressure_avg = self.pressure_history.try_feed(current_pressure).unwrap_or(current_pressure);
-
-        // Early transition to PostFirstDrop if EC > 1.0 (definitive first-drop detection)
-        if let Some(ec) = self.group.get_output_electrical_conductivity() {
-            if ec > EC_POST_FIRST_DROP_THRESHOLD && self.current_shot_state != Some(variegated_controller_types::ShotState::PostFirstDrop) {
-                // Capture input volume at first drop for output volume calculation
-                self.input_volume_at_first_drop = self.group.get_input_volume();
-                log_info!("Shot state transition: {:?} -> PostFirstDrop (EC: {} > {}, input_vol: {:?})",
-                      self.current_shot_state, ec, EC_POST_FIRST_DROP_THRESHOLD, self.input_volume_at_first_drop);
-                self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
-                return;
-            }
+        if self.current_routine.is_some() || self.shot_logger.is_logging() {
+            return;
         }
 
-        match self.current_shot_state {
-            Some(variegated_controller_types::ShotState::HeadspaceFill) => {
-                // Check for transition to Saturation
-                // We need to detect when flow is decreasing AND pressure is increasing
+        self.shot_logger.start_shot(ShotLogMetadata {
+            // Copied, not moved, and the user's annotations only -- see the equivalent
+            // block in `handle_routine_start`.
+            annotations: self.pending_annotations.clone(),
+            shot_type: ShotType::Manual,
+            group_index: SingleGroup.as_index(),
+            // No routine, and that is the fact being recorded rather than a gap in one.
+            routine_metadata: None,
+            start_time_millis: Instant::now().as_millis(),
+            end_time_millis: None,
+            final_status: ShotStatus::Running,
+            recorded_at_unix_millis: None,
+        });
+        self.manual_shot_active = true;
+        log_debug!("Started a manual shot log");
+    }
 
-                // Simple slope approximation: compare current reading to average
-                // If current < average, flow is decreasing
-                // If current > average, pressure is increasing
-                let flow_decreasing = current_flow < flow_avg && (flow_avg - current_flow) > FLOW_DECREASE_THRESHOLD;
-                let pressure_increasing = current_pressure > pressure_avg && (current_pressure - pressure_avg) > PRESSURE_INCREASE_THRESHOLD;
+    /// Close a manual shot log and hand it to storage.
+    ///
+    /// Guarded on `manual_shot_active` rather than on "is a log open", because
+    /// `handle_routine_exit` stops brewing *before* it finishes its own log -- so an
+    /// unguarded version here would close the routine's log early, from the wrong place,
+    /// and the routine path would then find nothing to send.
+    fn finish_manual_shot_log(&mut self) {
+        use variegated_controller_types::ShotStatus;
 
-                if flow_decreasing && pressure_increasing {
-                    log_info!("Shot state transition: HeadspaceFill -> Saturation (flow: {}->{}, pressure: {}->{})",
-                          flow_avg, current_flow, pressure_avg, current_pressure);
-                    self.current_shot_state = Some(variegated_controller_types::ShotState::Saturation);
-                    self.saturation_start_time = Some(Instant::now());
+        if !self.manual_shot_active {
+            return;
+        }
+        self.manual_shot_active = false;
+
+        self.shot_logger.finish_shot(ShotStatus::Completed);
+        self.send_latest_shot_log();
+
+        // Cleared for the same reason the routine path clears them: an annotation carried
+        // into the next shot is indistinguishable from one the user entered for it.
+        self.pending_annotations.clear();
+    }
+
+    /// Hand the most recently finished shot to the storage task, if there is one listening.
+    ///
+    /// `try_send` rather than `send`: this runs inside the control loop, and a storage task
+    /// that has fallen behind must cost a shot log rather than a boiler update.
+    fn send_latest_shot_log(&mut self) {
+        if let Some(ref sender) = self.shot_log_sender {
+            if let Some(shot_log) = self.shot_logger.latest_log() {
+                if let Err(_) = sender.try_send(shot_log.clone()) {
+                    log_warn!("Failed to send shot log for storage (channel full)");
+                } else {
+                    log_debug!("Shot log sent for storage");
                 }
-            }
-            Some(variegated_controller_types::ShotState::Saturation) => {
-                // Check for transition to PostFirstDrop
-                if let Some(output_weight) = self.group.get_output_weight() {
-                    if output_weight > FIRST_DROP_WEIGHT_THRESHOLD {
-                        // Capture input volume at first drop for output volume calculation
-                        self.input_volume_at_first_drop = self.group.get_input_volume();
-                        log_info!("Shot state transition: Saturation -> PostFirstDrop (weight: {}g, input_vol: {:?})",
-                              output_weight, self.input_volume_at_first_drop);
-                        self.current_shot_state = Some(variegated_controller_types::ShotState::PostFirstDrop);
-                    }
-                }
-            }
-            Some(variegated_controller_types::ShotState::PostFirstDrop) => {
-                // Final state, no more transitions
-            }
-            None => {
-                // Should not happen during brewing, but handle gracefully
-                log_warn!("Shot state is None while brewing - resetting to HeadspaceFill");
-                self.current_shot_state = Some(variegated_controller_types::ShotState::HeadspaceFill);
             }
         }
     }
@@ -2739,7 +2783,16 @@ impl<
                 start_time_millis: embassy_time::Instant::now().as_millis(),
                 end_time_millis: None,
                 final_status: ShotStatus::Running,
+                // Filled in by `finish_shot`, from this shot's start `Instant` -- so a
+                // shot that begins before the clock syncs still gets a real start time if
+                // the clock arrives before the shot ends.
+                recorded_at_unix_millis: None,
             };
+            // A manual brew already in progress hands its log over here rather than
+            // keeping it: `start_shot` closes the open one as `Aborted`, and clearing the
+            // flag is what stops the eventual `stop_brewing` from closing *this* log in its
+            // place. The routine owns the shot from now on.
+            self.manual_shot_active = false;
             self.shot_logger.start_shot(metadata);
             self.previous_routine_step = None;
 
@@ -2792,17 +2845,7 @@ impl<
             // Finish shot logging
             use variegated_controller_types::ShotStatus;
             self.shot_logger.finish_shot(ShotStatus::Completed);
-
-            // Send completed shot log for storage (if sender configured)
-            if let Some(ref sender) = self.shot_log_sender {
-                if let Some(shot_log) = self.shot_logger.latest_log() {
-                    if let Err(_) = sender.try_send(shot_log.clone()) {
-                        log_warn!("Failed to send shot log for storage (channel full)");
-                    } else {
-                        log_debug!("Shot log sent for storage");
-                    }
-                }
-            }
+            self.send_latest_shot_log();
 
             // Cleared in full, including beans and grind. Carrying any of them forward
             // would label the next shot with this one's coffee whether or not the user

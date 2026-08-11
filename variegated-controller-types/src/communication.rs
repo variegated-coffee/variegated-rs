@@ -35,6 +35,23 @@ pub struct CommsStatus {
     /// as `Stopped` here, which is what the application processor's fallback deadline is
     /// for.
     pub improv: crate::wifi::ImprovState,
+    /// How many times the comms processor has successfully synchronised its clock against
+    /// the network, since it booted.
+    ///
+    /// The application processor re-anchors its own clock when this number *changes*, and
+    /// ignores `timestamp` otherwise. The distinction is the whole point of the field.
+    /// `timestamp` comes from the ESP32's RTC, which runs off an internal RC oscillator
+    /// with percent-level, temperature-dependent error; re-anchoring to it once a second --
+    /// which is what the application processor used to do -- imported that error wholesale
+    /// and threw away the far better clock it has locally. Anchoring only on a real sync
+    /// makes this a correction rather than a leash.
+    ///
+    /// Zero means "never synced", which is also what `timestamp: None` means; they are
+    /// consistent because both are written from the same flag.
+    ///
+    /// **Appended, not inserted.** postcard is positional and this type crosses the UART
+    /// between two separately-flashed binaries.
+    pub sntp_sync_seq: u32,
 }
 
 #[cfg(feature = "defmt")]
@@ -42,8 +59,9 @@ impl defmt::Format for CommsStatus {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(
             f,
-            "CommsStatus {{ timestamp: {:?}, wifi_connected: {}, wifi_rssi: {:?}, improv: {:?}, peripherals: {} }}",
+            "CommsStatus {{ timestamp: {:?}, sntp_sync_seq: {}, wifi_connected: {}, wifi_rssi: {:?}, improv: {:?}, peripherals: {} }}",
             self.timestamp,
+            self.sntp_sync_seq,
             self.wifi_connected,
             self.wifi_rssi,
             self.improv,

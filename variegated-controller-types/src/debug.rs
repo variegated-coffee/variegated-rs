@@ -406,6 +406,32 @@ pub struct DebugStateSnapshot {
     /// only sustained message diversity drains it.
     pub frames_rate_limited: u32,
     pub source_state: SourceState,
+    /// Deepest the main task's stack has been since boot, in bytes, or `None` on a source
+    /// that does not measure it.
+    ///
+    /// The counterpart to `heap_used`, and it belongs beside it for the reason that pair
+    /// exists at all: on the comms processor the heap and the stack come out of one pool --
+    /// `.stack` is whatever RWDATA is left after `.bss`, and the heap is a `.bss` static --
+    /// so a host watching only one of them is watching half the problem. Both edges have
+    /// taken that firmware down, within 10 kB of each other.
+    ///
+    /// A high-water mark rather than an instantaneous depth, unlike `heap_used`: a stack is
+    /// almost always shallow at the moment it is sampled, so a 1 Hz reading of the current
+    /// depth would say nothing about whether the deep path fits. See
+    /// `variegated-comms-firmware/src/stack.rs` for how it is measured, and for the two
+    /// readings that mean "unknown" rather than "fine".
+    ///
+    /// **Appended, not inserted.** postcard is positional and this type crosses the debug
+    /// link between two separately-built binaries.
+    pub stack_high_water: Option<u32>,
+    /// Total bytes the main task's stack can occupy, against which `stack_high_water` is
+    /// read.
+    ///
+    /// Sent rather than assumed, because it is not a constant anyone chose: the linker
+    /// hands the task whatever RWDATA is left after `.data` and `.bss`, so it moves
+    /// whenever an unrelated static changes size. A host that hard-coded it would go on
+    /// reporting a margin that had silently gone.
+    pub stack_size: Option<u32>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -447,6 +473,27 @@ pub struct ApplicationState {
     /// only because every relay drop is counted in both -- do not assume the two are
     /// disjoint sets of frames.
     pub link_frames_dropped: u32,
+    /// Deepest core 1's stack has reached, in bytes, or `None` on a board that does not
+    /// run core 1.
+    ///
+    /// Core 0's figures are on [`DebugStateSnapshot`] itself, because every source has a
+    /// primary stack; this pair is here because only the application processor has a second
+    /// core. `None` means the core is not in use, which is the single-boiler board -- not
+    /// that the measurement failed.
+    ///
+    /// Worth carrying separately rather than reporting the worse of the two: the two stacks
+    /// are sized independently and fail independently, and a single "worst" number would
+    /// say which value but not which core, which is the first thing anyone needs.
+    ///
+    /// **Appended, not inserted.** postcard is positional.
+    pub core1_stack_high_water: Option<u32>,
+    /// Total bytes core 1's stack can occupy, against which
+    /// [`Self::core1_stack_high_water`] is read.
+    ///
+    /// Unlike core 0's, this one *is* a number someone chose -- `CORE1_STACK_LENGTH` in the
+    /// board's `main.rs` -- but it is sent rather than assumed for the same reason: a host
+    /// that hard-coded it would report a margin against a size the firmware no longer uses.
+    pub core1_stack_size: Option<u32>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

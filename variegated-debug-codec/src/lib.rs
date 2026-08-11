@@ -1994,6 +1994,9 @@ mod tests {
             wifi_rssi: Some(-70),
             improv: variegated_controller_types::wifi::ImprovState::Provisioning,
             peripheral_connection_status,
+            // Maximal, like everything else in this fixture: this is the widest varint a
+            // `u32` can encode, so the frame it produces is the largest one possible.
+            sntp_sync_seq: u32::MAX,
         });
 
         for i in 0..MAX_PERIPHERALS as u16 {

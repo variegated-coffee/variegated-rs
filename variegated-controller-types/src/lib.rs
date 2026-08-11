@@ -85,6 +85,7 @@ pub mod peripherals;
 pub mod routines;
 pub mod schedule;
 pub mod shot_log;
+pub mod shot_state;
 pub mod status;
 pub mod wifi;
 
@@ -106,4 +107,5 @@ pub use routines::steps::*;
 pub use schedule::*;
 pub use wifi::*;
 pub use shot_log::*;
+pub use shot_state::*;
 pub use status::*;

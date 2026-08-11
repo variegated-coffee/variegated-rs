@@ -407,6 +407,16 @@ async fn main_task(spawner: Spawner) -> ! {
     // installs one, so it cannot happen here, and it is not worth panicking over.
     let _ = variegated_log::bus_sink::init();
 
+    // Without this, `TimeKeeper::set_time` returns `Err(Uninitialized)` forever: the
+    // transceiver's clock-sync path fires on every SNTP sync, fails, and reports
+    // `TimeSyncFailed` -- so this board has never had a wall clock, and every shot it logs
+    // is undated. There is no external RTC on a single-boiler board, so unlike the
+    // dual-boiler this is seeded only from SNTP, but that is the difference between a clock
+    // that arrives late and no clock at all.
+    //
+    // UTC, matching the dual-boiler. Neither board has a timezone in its configuration yet.
+    variegated_timekeeping::TimeKeeper::init(chrono::FixedOffset::east(0));
+
     defmt::info!("Starting!");
 
     let psram_config = embassy_rp::psram::Config::aps6404l();
@@ -1052,8 +1062,66 @@ fn publish_snapshot(psram_heap: bool) {
             routine_running: None,
             link_frames_relayed: relay.relayed,
             link_frames_dropped: relay.dropped,
+            // This board never calls `spawn_core1`, so there is no second stack to report.
+            // `None` says that, where a zero would claim a core 1 that exists and uses
+            // nothing.
+            core1_stack_high_water: None,
+            core1_stack_size: None,
         }),
+        stack_high_water: Some(core0_stack_high_water() as u32),
+        stack_size: Some(core0_stack_span() as u32),
     }));
+}
+
+/// Total bytes available to core 0's stack: `_stack_start - __sheap`.
+///
+/// A function rather than a constant because both bounds are linker symbols, resolved at
+/// link time. Mirrors the dual-boiler's copy; the two boards share a linker script and
+/// differ only in what runs on top of it.
+fn core0_stack_span() -> usize {
+    unsafe extern "C" {
+        static mut __sheap: u32;
+        static mut _stack_start: u32;
+    }
+    unsafe { ((&raw const _stack_start) as usize) - ((&raw const __sheap) as usize) }
+}
+
+/// Deepest point core 0's stack has ever reached, in bytes.
+///
+/// Needs no painting of its own: `cortex-m-rt`'s `paint-stack` feature, enabled in
+/// `examples/Cargo.toml` for both binaries, fills everything between `__sheap` and
+/// `_stack_start` with `0xCCCC_CCCC` before `main` runs. The stack grows *down* from
+/// `_stack_start`, so untouched paint survives at the bottom and the high-water mark is the
+/// distance from the last painted word to the top.
+///
+/// A value at or near [`core0_stack_span`] means the paint was consumed entirely, and the
+/// true requirement is unknown and at least that large.
+fn core0_stack_high_water() -> usize {
+    unsafe extern "C" {
+        static mut __sheap: u32;
+        static mut _stack_start: u32;
+    }
+
+    const PAINT: u32 = 0xCCCC_CCCC;
+
+    // SAFETY: reads only, and only of the region cortex-m-rt painted. A torn read against a
+    // word being pushed concurrently moves the answer by one frame, which does not matter
+    // for a high-water estimate.
+    unsafe {
+        let bottom = (&raw const __sheap) as usize;
+        let top = (&raw const _stack_start) as usize;
+        let span = top - bottom;
+
+        let mut untouched = 0usize;
+        while untouched < span {
+            let word = core::ptr::read_volatile((bottom + untouched) as *const u32);
+            if word != PAINT {
+                break;
+            }
+            untouched += 4;
+        }
+        span - untouched
+    }
 }
 
 #[embassy_executor::task]

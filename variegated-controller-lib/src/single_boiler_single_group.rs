@@ -231,6 +231,9 @@ pub struct SingleBoilerSingleGroupController<
     shot_logger: crate::shot_log::ShotLogger,
     previous_routine_step: Option<usize>,
     shot_log_sender: Option<Sender<'a, ChannelM, variegated_controller_types::ShotLog, 2>>,
+    /// Whether the currently open shot log was opened by `started_brewing` rather than by a
+    /// routine. Only that kind is closed by `stopped_brewing`; see `finish_manual_shot_log`.
+    manual_shot_active: bool,
     /// Annotations waiting to be stamped onto the next shot. See the equivalent field in
     /// `dual_boiler_single_group` for why this is RAM-only and cleared in full.
     pending_annotations: variegated_controller_types::ShotAnnotations,
@@ -392,6 +395,7 @@ impl<
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
             shot_log_sender,
+            manual_shot_active: false,
             pending_annotations: variegated_controller_types::ShotAnnotations::new(),
             shot_log_query_sender,
             sd_card_present,
@@ -563,13 +567,16 @@ impl<
                 }
             }
 
+            // Record a shot log sample. Outside the routine block, so a manual brew is
+            // logged too -- see the equivalent note in `dual_boiler_single_group`.
+            if let Some(status) = self.previous_status.as_ref() {
+                self.shot_logger.record_sample(status);
+            }
+
             if let Some(routine) = &mut self.current_routine {
                 if routine.finished_executing {
                     self.handle_routine_exit(false).await;
                 } else if let Some(status) = self.previous_status.as_ref() {
-                    // Record shot log sample
-                    self.shot_logger.record_sample(status);
-
                     // Detect and record step transitions
                     if routine.current_step != self.previous_routine_step {
                         if let Some(current_step) = routine.current_step {
@@ -876,6 +883,8 @@ impl<
                 // note on the dual-boiler controller's copy of this.
                 improv: status.improv,
                 peripheral_connection_status: FnvIndexMap::default(),
+                // Carried through unchanged -- see the note on the dual-boiler copy.
+                sntp_sync_seq: status.sntp_sync_seq,
             }),
             // Published alongside, because everything above is extrapolated: the
             // timestamp keeps advancing whether or not the comms processor is alive, so
@@ -1542,6 +1551,7 @@ impl<
     }
 
     async fn started_brewing(&mut self) {
+        self.start_manual_shot_log();
         self.brew_start_time = Some(Instant::now());
         self.brew_start_input_volume = self.group.get_input_volume();
         self.accumulated_extracted_solids = Some(0.0);
@@ -1578,10 +1588,68 @@ impl<
         self.accumulated_extracted_solids = None;
         self.last_extraction_time = None;
         self.curve_start_time = None;  // Reset curve start time when brewing stops
+
+        self.finish_manual_shot_log();
+
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(true),
             smoothing: Some(false)
         }).await;
+    }
+
+    /// Open a shot log for a brew nobody scripted.
+    ///
+    /// See the equivalent pair in `dual_boiler_single_group` for why the logger needs
+    /// nothing a manual brew lacks, and why both guards are here.
+    fn start_manual_shot_log(&mut self) {
+        use variegated_controller_types::{ShotLogMetadata, ShotStatus, ShotType};
+
+        if self.current_routine.is_some() || self.shot_logger.is_logging() {
+            return;
+        }
+
+        self.shot_logger.start_shot(ShotLogMetadata {
+            annotations: self.pending_annotations.clone(),
+            shot_type: ShotType::Manual,
+            group_index: SingleGroup.as_index(),
+            routine_metadata: None,
+            start_time_millis: Instant::now().as_millis(),
+            end_time_millis: None,
+            final_status: ShotStatus::Running,
+            recorded_at_unix_millis: None,
+        });
+        self.manual_shot_active = true;
+        log_debug!("Started a manual shot log");
+    }
+
+    /// Close a manual shot log and hand it to storage.
+    ///
+    /// Guarded on `manual_shot_active` because `handle_routine_exit` stops brewing before
+    /// it finishes its own log -- see the note on the dual-boiler version.
+    fn finish_manual_shot_log(&mut self) {
+        use variegated_controller_types::ShotStatus;
+
+        if !self.manual_shot_active {
+            return;
+        }
+        self.manual_shot_active = false;
+
+        self.shot_logger.finish_shot(ShotStatus::Completed);
+        self.send_latest_shot_log();
+        self.pending_annotations.clear();
+    }
+
+    /// Hand the most recently finished shot to the storage task, if there is one listening.
+    fn send_latest_shot_log(&mut self) {
+        if let Some(ref sender) = self.shot_log_sender {
+            if let Some(shot_log) = self.shot_logger.latest_log() {
+                if let Err(_) = sender.try_send(shot_log.clone()) {
+                    log_warn!("Failed to send shot log for storage (channel full)");
+                } else {
+                    log_debug!("Shot log sent for storage");
+                }
+            }
+        }
     }
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
@@ -1627,7 +1695,13 @@ impl<
                 start_time_millis: embassy_time::Instant::now().as_millis(),
                 end_time_millis: None,
                 final_status: ShotStatus::Running,
+                // Filled in by `finish_shot` -- see the equivalent block in
+                // `dual_boiler_single_group`.
+                recorded_at_unix_millis: None,
             };
+            // A manual brew already in progress hands its log over here -- see the note on
+            // the equivalent line in `dual_boiler_single_group`.
+            self.manual_shot_active = false;
             self.shot_logger.start_shot(metadata);
             self.previous_routine_step = None;
 
@@ -1672,17 +1746,7 @@ impl<
             // Finish shot logging
             use variegated_controller_types::ShotStatus;
             self.shot_logger.finish_shot(ShotStatus::Completed);
-
-            // Send completed shot log for storage (if sender configured)
-            if let Some(ref sender) = self.shot_log_sender {
-                if let Some(shot_log) = self.shot_logger.latest_log() {
-                    if let Err(_) = sender.try_send(shot_log.clone()) {
-                        log_warn!("Failed to send shot log for storage (channel full)");
-                    } else {
-                        log_debug!("Shot log sent for storage");
-                    }
-                }
-            }
+            self.send_latest_shot_log();
 
             // Cleared in full, including beans and grind. Carrying any of them forward
             // would label the next shot with this one's coffee whether or not the user

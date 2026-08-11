@@ -221,6 +221,17 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             // reporting per message would mean one `TimeSynchronized` per second
             // forever. Only transitions are interesting.
             let mut time_synced: Option<bool> = None;
+            // The last `CommsStatus::sntp_sync_seq` this loop acted on, so a re-anchor
+            // happens once per *sync* rather than once per status message. See the field's
+            // own documentation: the comms processor's RTC is an RC oscillator, and taking
+            // its word once a second is what made the application processor's clock drift
+            // despite having a 2 ppm TCXO on the I2C bus.
+            //
+            // `None` rather than `0` so that a comms processor which had already synced
+            // before this loop started -- an application-processor reset, a reflash of one
+            // side only -- still anchors on the first message instead of waiting for the
+            // next hourly sync.
+            let mut last_sntp_sync_seq: Option<u32> = None;
             // `link_healthy`: a garbage burst on the UART produces a COBS delimiter
             // roughly every 256 random bytes, which at 576 kbaud is a few hundred
             // `DeserError`s per second. One event per *burst* -- the first failure
@@ -300,23 +311,48 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         // different audiences, and a probe user must
                                         // not lose lines because a host tool gained
                                         // them.
+                                        // Only on a *new* sync. `timestamp` arrives on every
+                                        // status message, but between syncs it is just the
+                                        // comms processor's RC-based RTC free-running, and
+                                        // anchoring to that once a second was strictly worse
+                                        // than letting the application processor's own
+                                        // crystal run -- to say nothing of the battery-backed
+                                        // TCXO that re-anchors this clock every minute.
+                                        //
+                                        // The sequence number is what distinguishes the two.
+                                        // It only advances when SNTP actually returned an
+                                        // answer, so this branch is a correction from
+                                        // outside the machine and nothing else.
+                                        let is_new_sync =
+                                            last_sntp_sync_seq != Some(status.sntp_sync_seq);
+
                                         if now_unix >= MIN_PLAUSIBLE_UNIX_TIME {
-                                            if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
-                                                // Set time and sync to RTC if available
-                                                let ok = TimeKeeper::set_time(now_datetime).is_ok();
-                                                if ok {
-                                                    info!("System time synchronized to UTC (timestamp: {})", now_unix);
-                                                } else {
-                                                    info!("Failed to set system time");
-                                                }
-                                                // Edge only -- see `time_synced`.
-                                                if time_synced != Some(ok) {
-                                                    time_synced = Some(ok);
-                                                    bus::emit_event(if ok {
-                                                        DebugEvent::TimeSynchronized { unix: now_unix }
+                                            // The plausibility check stays outside the
+                                            // new-sync check, so that a repeated timestamp
+                                            // is simply not acted on rather than being
+                                            // reported as implausible in the arm below.
+                                            if is_new_sync {
+                                                last_sntp_sync_seq = Some(status.sntp_sync_seq);
+                                                if let Some(now_datetime) = DateTime::<Utc>::from_timestamp(now_unix as i64, 0) {
+                                                    // Authoritative, so whatever owns a
+                                                    // hardware clock can write the correction
+                                                    // through immediately rather than at its
+                                                    // next poll.
+                                                    let ok = TimeKeeper::set_time_authoritative(now_datetime).is_ok();
+                                                    if ok {
+                                                        info!("System time synchronized to UTC (timestamp: {})", now_unix);
                                                     } else {
-                                                        DebugEvent::TimeSyncFailed
-                                                    });
+                                                        info!("Failed to set system time");
+                                                    }
+                                                    // Edge only -- see `time_synced`.
+                                                    if time_synced != Some(ok) {
+                                                        time_synced = Some(ok);
+                                                        bus::emit_event(if ok {
+                                                            DebugEvent::TimeSynchronized { unix: now_unix }
+                                                        } else {
+                                                            DebugEvent::TimeSyncFailed
+                                                        });
+                                                    }
                                                 }
                                             }
                                         } else {

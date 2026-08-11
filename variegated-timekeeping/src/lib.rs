@@ -75,6 +75,7 @@ use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, TimeZone, Timelike,
 #[cfg(feature = "named-timezones")]
 use chrono_tz::Tz;
 use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
+use embassy_sync::signal::Signal;
 use embassy_time::Instant;
 
 pub mod error;
@@ -289,6 +290,15 @@ struct TimeKeeperState {
 static STATE: Mutex<CriticalSectionRawMutex, RefCell<Option<TimeKeeperState>>> =
     Mutex::new(RefCell::new(None));
 
+/// Raised by [`TimeKeeper::set_time_authoritative`], awaited by
+/// [`TimeKeeper::wait_for_authoritative_set`].
+///
+/// This exists so that a hardware clock can be corrected the moment the network supplies a
+/// better time, rather than on a poll. It is a `Signal` and therefore has room for exactly
+/// one waiter, which is the right shape here: the thing that owns the battery-backed RTC is
+/// singular by construction.
+static AUTHORITATIVE_SET: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// TimeKeeper singleton for managing system time.
 ///
 /// This zero-sized type provides static methods for accessing and manipulating
@@ -350,6 +360,11 @@ impl TimeKeeper {
     /// let now = Utc::now();
     /// TimeKeeper::set_time(now).unwrap();
     /// ```
+    /// Silent, and that is the distinction from
+    /// [`set_time_authoritative`](Self::set_time_authoritative). Use this for a re-anchor
+    /// against a clock that is already the reference -- reading a battery-backed RTC, say.
+    /// Announcing those would make the announcement useless: whatever listens in order to
+    /// *write* such a clock would be woken by its own reads.
     pub fn set_time(datetime: DateTime<Utc>) -> Result<()> {
         let now = Instant::now();
 
@@ -360,6 +375,32 @@ impl TimeKeeper {
             s.anchor_datetime = Some(datetime);
             Ok(())
         })
+    }
+
+    /// Set the current time from a source that outranks whatever is holding it now, and say
+    /// so.
+    ///
+    /// Identical to [`set_time`](Self::set_time) except that it raises the signal
+    /// [`wait_for_authoritative_set`](Self::wait_for_authoritative_set) awaits. Reserved for
+    /// a correction that arrives from outside the machine -- in practice SNTP -- so that a
+    /// local hardware clock can be rewritten immediately rather than at the next poll.
+    ///
+    /// The signal is raised even if the time did not change by much. Whether a correction is
+    /// worth acting on is the listener's judgement, not this function's, and a listener that
+    /// wants a threshold can compare before and after.
+    pub fn set_time_authoritative(datetime: DateTime<Utc>) -> Result<()> {
+        Self::set_time(datetime)?;
+        AUTHORITATIVE_SET.signal(());
+        Ok(())
+    }
+
+    /// Wait until someone calls [`set_time_authoritative`](Self::set_time_authoritative).
+    ///
+    /// One waiter only -- see [`AUTHORITATIVE_SET`]. A signal raised while nobody is waiting
+    /// is remembered, so a listener that starts late still sees the most recent correction
+    /// rather than missing it.
+    pub async fn wait_for_authoritative_set() {
+        AUTHORITATIVE_SET.wait().await
     }
 
     /// Set the timezone.

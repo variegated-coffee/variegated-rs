@@ -17,6 +17,19 @@ pub struct ShotLoggerConfig {
     pub max_logs: usize,
     /// Sample every Nth control loop tick (1 = every tick, 2 = every other tick, etc.)
     pub sample_decimation: u8,
+    /// Most samples a single shot may accumulate before recording stops.
+    ///
+    /// A shot log is held whole in RAM until the shot ends, so without a bound its size is
+    /// whatever the shot's duration happens to be -- and a brew has no duration of its own.
+    /// A routine ends when its exit conditions say so, but a brew started from the panel
+    /// runs until someone stops it, and "someone walked away" must cost a truncated log
+    /// rather than the heap.
+    ///
+    /// Recording *stops* at the cap rather than dropping the oldest samples. The interesting
+    /// part of a shot is its beginning -- the fill, saturation, first drop -- so a window
+    /// that slid forward would discard exactly what the log is for, and would also make
+    /// `timestamp_millis` stop starting at zero.
+    pub max_samples: usize,
 }
 
 impl Default for ShotLoggerConfig {
@@ -24,6 +37,10 @@ impl Default for ShotLoggerConfig {
         Self {
             max_logs: 10,
             sample_decimation: 1,
+            // Five minutes at the controllers' 10 Hz loop, against an espresso shot of
+            // twenty to forty seconds. Long enough that nothing deliberate reaches it, short
+            // enough that a forgotten brew is bounded.
+            max_samples: 3_000,
         }
     }
 }
@@ -93,6 +110,12 @@ impl ShotLogger {
         let Some(ref mut log) = self.current_log else {
             return;
         };
+
+        // Stop rather than grow without bound. See `ShotLoggerConfig::max_samples`; the
+        // log so far is kept and still finishes normally, it simply stops gaining samples.
+        if log.samples.len() >= self.config.max_samples {
+            return;
+        }
 
         let Some(start_time) = self.shot_start_time else {
             return;
@@ -170,6 +193,23 @@ impl ShotLogger {
         log.metadata.final_status = final_status;
         if let Some(start_time) = self.shot_start_time {
             log.metadata.end_time_millis = Some(start_time.elapsed().as_millis());
+
+            // The shot's wall clock, stamped here rather than in `start_shot`.
+            //
+            // `instant_to_datetime` maps the start `Instant` through the clock's current
+            // anchor, so this is the time the shot *started* however late the answer
+            // arrived. That matters on the first minute after a cold boot: the comms
+            // processor has to associate, get a lease and do SNTP before the machine
+            // knows the date at all, and a shot pulled in that window would otherwise be
+            // filed under `SHOTS/NODATE/` and carry no timestamp -- permanently -- even
+            // though the machine learned the time before the shot ended.
+            //
+            // `None` if the clock never became valid. That is a real answer and is
+            // carried as one, rather than being filled in with an uptime that would read
+            // as 1970.
+            log.metadata.recorded_at_unix_millis =
+                variegated_timekeeping::TimeKeeper::instant_to_datetime(start_time)
+                    .map(|dt| dt.timestamp_millis());
         }
 
         // Add to history

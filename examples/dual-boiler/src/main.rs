@@ -1951,7 +1951,20 @@ fn publish_snapshot(psram_heap: bool) {
             routine_running: None,
             link_frames_relayed: relay.relayed,
             link_frames_dropped: relay.dropped,
+            // Core 1's, alongside core 0's below. Both, because they are sized
+            // independently and fail independently: core 1's is the 96 kB
+            // `CORE1_STACK_LENGTH` chosen here, core 0's is whatever the linker script
+            // leaves, and knowing that one of them is close to its edge is useless without
+            // knowing which.
+            core1_stack_high_water: Some(core1_stack_high_water() as u32),
+            core1_stack_size: Some(CORE1_STACK_LENGTH as u32),
         }),
+        // Core 0's, which is the one that can overflow silently: there is no guard unless
+        // `install_core0_stack_guard()` runs, and this board went an unknown length of time
+        // overflowing it -- the failure surfaced as a HardFault in the timer queue, nowhere
+        // near the cause.
+        stack_high_water: Some(core0_stack_high_water() as u32),
+        stack_size: Some(core0_stack_span() as u32),
     }));
 }
 
@@ -2200,15 +2213,14 @@ async fn main_task(
     //TimeKeeper::init(Tz::Europe__Stockholm);
     TimeKeeper::init(FixedOffset::east(0));
 
-    let res = rtc.datetime().await;
-    match res {
-        Ok(datetime) => {
-            log_info!("RTC datetime: {:?}", datetime.format("%Y-%m-%d %H:%M:%S").to_string().as_str());
-        }
-        Err(e) => {
-            log_info!("Error reading RTC datetime");
-        }
-    }
+    // Seed the clock from the DS3231 before anything else can ask what time it is.
+    //
+    // This read used to happen here, get logged, and be thrown away -- so a machine with a
+    // perfectly good battery-backed TCXO on the Qwiic bus still booted with no clock at
+    // all, and every shot pulled before the comms processor had associated, taken a lease
+    // and completed SNTP was filed under `SHOTS/NODATE/`. `rtc_task` below keeps it
+    // re-anchored from here on.
+    anchor_from_rtc(&mut rtc).await;
 
     #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
     let output_weight_sig: &'static Watch<_, _, 3> = OUTPUT_WEIGHT_SIGNAL.init(Watch::new());
@@ -3175,23 +3187,105 @@ async fn main_task(
 
 }
 
+/// The lowest DS3231 reading treated as a real date rather than an unset chip.
+///
+/// The same floor `variegated_comms` applies to the comms processor's timestamp, and for
+/// the same reason: a clock that has never been set reads as some year long past, and
+/// taking it at face value is worse than having no clock at all -- a machine that knows it
+/// does not know the date files its shots under `NODATE`, whereas one that believes it is
+/// 2000 files them under a date that is confidently wrong.
+const RTC_MIN_PLAUSIBLE_YEAR: i32 = 2020;
+
+/// Re-anchor [`TimeKeeper`] from the DS3231.
+///
+/// Silent -- `set_time` rather than `set_time_authoritative` -- because this *is* the
+/// reference clock. Announcing it would wake [`sync_rtc`]'s writer arm, which would then
+/// write back the value it had just read, once a minute, forever.
+///
+/// The one-second guard is not an optimisation. The DS3231 reads at whole-second
+/// resolution while the RP2350's crystal drifts on the order of 2 ms per minute, so an
+/// unconditional re-anchor would be applying read quantisation rather than correcting
+/// anything -- and a displayed clock that re-anchors to a value up to a second either side
+/// of where it was can tick backwards. With the guard the minute tick is a no-op in steady
+/// state and only acts when the two have genuinely diverged.
+async fn anchor_from_rtc(rtc: &mut DS3231<QwiicI2CDevice>) {
+    use chrono::{Datelike, TimeZone};
+
+    let Ok(naive) = rtc.datetime().await else {
+        log_warn!("Could not read the DS3231; leaving the clock as it is");
+        return;
+    };
+
+    if naive.year() < RTC_MIN_PLAUSIBLE_YEAR {
+        log_warn!(
+            "DS3231 reads {:?}, which is before it could have been set -- ignoring it",
+            naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()
+        );
+        return;
+    }
+
+    let utc = chrono::Utc.from_utc_datetime(&naive);
+
+    if let Some(current) = TimeKeeper::now_utc() {
+        if (utc - current).num_milliseconds().abs() <= 1_000 {
+            return;
+        }
+        log_info!(
+            "Re-anchoring the clock to the DS3231: {:?} (was off by {} ms)",
+            naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str(),
+            (utc - current).num_milliseconds()
+        );
+    } else {
+        log_info!(
+            "Clock seeded from the DS3231: {:?}",
+            naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()
+        );
+    }
+
+    if TimeKeeper::set_time(utc).is_err() {
+        log_warn!("TimeKeeper is not initialized; cannot seed it from the DS3231");
+    }
+}
+
+/// Keep the application processor and the DS3231 agreeing, in both directions.
+///
+/// The DS3231 is the accurate clock -- a TCXO at a couple of parts per million, with a
+/// battery -- so it is what this processor keeps its own time against, once a minute. SNTP
+/// is the corrector: when the comms processor reports a genuinely new sync,
+/// `variegated_comms` calls `set_time_authoritative`, which wakes the first arm here and
+/// the correction is written through to the TCXO immediately.
+///
+/// What this replaces is the reason the clock drifted. The application processor used to
+/// re-anchor to `CommsStatus::timestamp` on every message, once a second -- that is the
+/// ESP32's RTC, running off an internal RC oscillator with percent-level, temperature
+/// dependent error -- while the DS3231 was written hourly and never read. The good clock
+/// was write-only and the bad one was in charge.
 async fn sync_rtc(rtc: &mut DS3231<QwiicI2CDevice>) {
-    Timer::after(Duration::from_secs(30)).await;
+    use embassy_futures::select::{select, Either};
 
     loop {
-        // Get current time from TimeKeeper
-        let now = TimeKeeper::now_utc();
-
-        if let Some(now) = now {
-            let naive = now.naive_utc();
-            let res = rtc.set_datetime(&naive).await;
-
-            match res {
-                Ok(()) => log_info!("RTC synchronized to UTC time: {:?}", naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()),
-                Err(e) => log_info!("Error setting RTC datetime"),
+        match select(
+            TimeKeeper::wait_for_authoritative_set(),
+            Timer::after(Duration::from_secs(60)),
+        )
+        .await
+        {
+            // A correction arrived from the network. Write it through to the TCXO now,
+            // rather than leaving the accurate clock wrong until some later poll.
+            Either::First(()) => {
+                if let Some(now) = TimeKeeper::now_utc() {
+                    let naive = now.naive_utc();
+                    match rtc.set_datetime(&naive).await {
+                        Ok(()) => log_info!(
+                            "DS3231 corrected from SNTP: {:?}",
+                            naive.format("%Y-%m-%d %H:%M:%S").to_string().as_str()
+                        ),
+                        Err(_e) => log_warn!("Error setting DS3231 datetime"),
+                    }
+                }
             }
+            // Minute tick. Take the accurate clock's word for it.
+            Either::Second(()) => anchor_from_rtc(rtc).await,
         }
-
-        Timer::after(Duration::from_secs(3600)).await;
     }
 }

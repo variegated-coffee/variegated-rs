@@ -294,8 +294,16 @@ pub fn encode_shot(shot: &ShotLog) -> Result<Vec<u8>, ShotLogStorageError> {
 /// matters.
 pub fn decode_shot(data: &[u8]) -> Result<ShotLog, ShotLogStorageError> {
     let crc = Crc::<u32>::new(&CRC_32_ISCSI);
-    let shot: ShotLog =
-        postcard::from_bytes_crc32(data, crc.digest()).map_err(|_| ShotLogStorageError::CrcError)?;
+    let shot: ShotLog = match postcard::from_bytes_crc32(data, crc.digest()) {
+        Ok(shot) => shot,
+        // A failed decode is not automatically damage, and saying so was wrong in the one
+        // case that matters most: a file from an *earlier* format. Version 3 gained a
+        // trailing metadata field in version 4, so a version 3 file read as version 4 runs
+        // out of bytes and fails here -- never reaching the version check below, and being
+        // reported to the user as "that shot is corrupt on the card" when it is a perfectly
+        // good shot this build simply cannot read.
+        Err(_) => return Err(classify_decode_failure(data, &crc)),
+    };
 
     if !shot.version_supported() {
         log_warn!(
@@ -306,6 +314,44 @@ pub fn decode_shot(data: &[u8]) -> Result<ShotLog, ShotLogStorageError> {
         return Err(ShotLogStorageError::UnsupportedVersion);
     }
     Ok(shot)
+}
+
+/// Why a decode that got past the CRC flavor failed.
+///
+/// Re-checks the trailer by hand, which is the only way to tell the two apart: the CRC
+/// flavor reports one error for "the checksum did not match" and for "the checksum matched
+/// and the bytes still would not parse", and those want opposite things said about them.
+///
+/// Order matters and follows the same reasoning as the host tool's: damage is reported as
+/// damage first. A corrupted file can easily present a plausible leading version byte, and
+/// "recorded by a different firmware version" would send someone looking for a format
+/// problem they do not have.
+fn classify_decode_failure(data: &[u8], crc: &Crc<u32>) -> ShotLogStorageError {
+    const TRAILER_LEN: usize = 4;
+
+    if data.len() < TRAILER_LEN {
+        return ShotLogStorageError::CrcError;
+    }
+    let (body, trailer) = data.split_at(data.len() - TRAILER_LEN);
+    // Little-endian, because that is how postcard's CRC flavor writes it.
+    let stored = u32::from_le_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
+    if crc.checksum(body) != stored {
+        return ShotLogStorageError::CrcError;
+    }
+
+    // Intact bytes that will not parse. The leading varint is the version, and it is the
+    // first thing in the file precisely so it can be read without understanding the rest.
+    match postcard::take_from_bytes::<u32>(body) {
+        Ok((version, _rest)) if version != SHOT_LOG_FORMAT_VERSION => {
+            log_warn!(
+                "SD: shot log is format version {}, this build reads {}",
+                version,
+                SHOT_LOG_FORMAT_VERSION
+            );
+            ShotLogStorageError::UnsupportedVersion
+        }
+        _ => ShotLogStorageError::SerializationError,
+    }
 }
 
 /// SD-card-backed [`ShotLogStorage`].
@@ -1223,10 +1269,22 @@ where
 ///
 /// `start_time_millis` is monotonic uptime, not wall clock, so it cannot supply a date
 /// on its own; it is only the fallback that keeps two undated shots from colliding.
+///
+/// The shot's own `recorded_at_unix_millis` is preferred over reading the clock again
+/// here, and the difference is not cosmetic: this runs at *store* time, which is after
+/// the shot ended and after the log made its way down a channel, so asking the clock
+/// afresh names the moment the file was written rather than the moment the shot was
+/// pulled. Since version 4 the blob carries the answer, and a filename that disagreed
+/// with the timestamp inside it would be a genuinely confusing thing to ship.
 fn current_shot_id(shot: &ShotLog) -> ShotLogId {
-    use chrono::{Datelike, Timelike};
+    use chrono::{DateTime, Datelike, Timelike, Utc};
 
-    match variegated_timekeeping::TimeKeeper::now_utc() {
+    let recorded_at = shot
+        .metadata
+        .recorded_at_unix_millis
+        .and_then(DateTime::<Utc>::from_timestamp_millis);
+
+    match recorded_at.or_else(variegated_timekeeping::TimeKeeper::now_utc) {
         Some(utc) => ShotLogId {
             day: Some(
                 utc.year() as u32 * 10_000 + utc.month() * 100 + utc.day(),

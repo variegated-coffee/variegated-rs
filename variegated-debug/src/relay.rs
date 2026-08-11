@@ -187,7 +187,11 @@ mod tests {
                 routine_running: Some(u16::MAX),
                 link_frames_relayed: u32::MAX,
                 link_frames_dropped: u32::MAX,
+                core1_stack_high_water: Some(u32::MAX),
+                core1_stack_size: Some(u32::MAX),
             }),
+            stack_high_water: Some(u32::MAX),
+            stack_size: Some(u32::MAX),
         }));
 
         let mut schema = wrapped_len(DebugPayload::FirmwareInfo {
