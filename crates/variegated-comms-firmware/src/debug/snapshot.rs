@@ -68,10 +68,39 @@ fn report_heap_high_water() {
     }
 }
 
+/// Log the main task's peak stack depth whenever it reaches a new high.
+///
+/// The counterpart to [`report_heap_high_water`], and it exists for the same reason: the
+/// heap and the stack come out of one pool -- `.stack` is whatever RWDATA is left after
+/// `.bss`, and the heap is a `.bss` static -- and both have now crashed this firmware. The
+/// heap's peak has been reported for a while, which is why its exhaustion was visible in
+/// the log before it was fatal. The stack's never has, which is why sizing it has been
+/// guesswork between one figure that crashed and one that did not.
+///
+/// Same 4 kB step and new-maximum-only rule as the heap, so a machine at steady state is
+/// silent and the log reads as a record of where the peak went.
+fn report_stack_high_water() {
+    static LAST_REPORTED: AtomicU32 = AtomicU32::new(0);
+    const REPORT_STEP: u32 = 4096;
+
+    let peak = crate::stack::high_water() as u32;
+    if peak >= LAST_REPORTED.load(Ordering::Relaxed).saturating_add(REPORT_STEP) {
+        LAST_REPORTED.store(peak, Ordering::Relaxed);
+        let span = crate::stack::span() as u32;
+        log_info!(
+            "Stack high-water {} bytes of {} ({} free)",
+            peak,
+            span,
+            span.saturating_sub(peak)
+        );
+    }
+}
+
 pub fn publish_snapshot() {
     let stats = bus::stats();
 
     report_heap_high_water();
+    report_stack_high_water();
 
     // `WIFI_RSSI_DBM` holds `NO_RSSI` before the first sample and while the link is
     // down. Mapping that to `None` is the whole reason the mirror is an `i16`.

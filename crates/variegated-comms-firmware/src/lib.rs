@@ -14,6 +14,7 @@ pub mod improv;
 /// request latency can be attributed to either the wake path or the radio. Delete once
 /// it has answered that.
 pub mod instrumentation;
+pub mod stack;
 pub mod time;
 pub mod utils;
 pub mod watchdog;

@@ -391,6 +391,14 @@ async fn application_processor_task(
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
+    // **First statement, and it has to stay first.** This writes every dead byte of the
+    // main task's stack, and "dead" is only true here -- before the executor, before any
+    // spawn, before anything below this frame has run. See `stack`'s module docs for why
+    // the measurement is worth the hazard: `.stack` is the RWDATA remainder, it has
+    // overflowed at 90,144 bytes and not at 97,616, and nobody has ever measured what it
+    // actually needs.
+    variegated_comms_firmware::stack::paint();
+
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
