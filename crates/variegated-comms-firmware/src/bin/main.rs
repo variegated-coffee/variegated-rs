@@ -878,14 +878,31 @@ async fn main(spawner: Spawner) -> ! {
     // -- it serves a 50 kB gzipped page and ESPHome telemetry -- and is the next lever
     // if the heap is still tight.
     //
-    // Deliberately *not* touched: `dynamic_rx_buf_num`/`dynamic_tx_buf_num`, which are
-    // caps on transient buffers rather than steady cost, and which the queue sizes above
-    // are sized against. Lowering those without lowering the queues would break the
-    // invariant this comment block was written to protect.
+    // `dynamic_rx_buf_num`/`dynamic_tx_buf_num` default to 32 each and **were** left alone,
+    // on the grounds that they are caps on transient buffers rather than steady cost. That
+    // was wrong, and the log says so.
+    //
+    // Measured across an Improv provisioning reconnect: heap free went 48076 -> 5032 and
+    // **stayed there**, ~43 kB acquired and never returned. The driver's dynamic buffers are
+    // a high-water pool -- ESP-IDF grows it on demand up to these caps and does not shrink
+    // it -- so "transient" describes the frames, not the memory. Every buffer is up to
+    // ~1.6 kB and comes out of `esp_alloc::HEAP`, because the blob's `malloc` is ours, so
+    // the default pair can reach far more than this firmware has to give. The machine then
+    // died on `memory allocation of 800 bytes failed`.
+    //
+    // 24/16. The RX cap must stay at or above `rx_queue_size`, which is the invariant the
+    // previous note was protecting: the queue holds `PacketBuffer` handles and each pins a
+    // dynamic buffer, so a cap below the queue depth is a queue that can never fill. Hence
+    // `rx_queue_size` 32 -> 24 alongside it, still far above the default 5 that latched the
+    // stack (see the paragraph above), and TX 16 to match `tx_queue_size` exactly.
+    //
+    // If throughput regresses, raise these *and* the matching queue -- never one alone.
     let radio_config = esp_radio::wifi::ControllerConfig::default()
-        .with_rx_queue_size(32)
+        .with_rx_queue_size(24)
         .with_tx_queue_size(16)
-        .with_static_rx_buf_num(6);
+        .with_static_rx_buf_num(6)
+        .with_dynamic_rx_buf_num(24)
+        .with_dynamic_tx_buf_num(16);
     let (controller, interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, radio_config).unwrap();
 

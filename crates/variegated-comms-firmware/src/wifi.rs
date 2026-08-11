@@ -142,15 +142,23 @@ async fn radio_request() -> RadioRequest {
 /// Try a candidate credential, and put the radio back where it was if it fails.
 ///
 /// Returns the credential to treat as current from here on -- the candidate if it associated,
-/// the previous one otherwise. **The caller has to adopt it.** The application processor
-/// pushes these same credentials back down the link once it has persisted them, and a
-/// `current` still holding the old value would read that push as a change and tear down the
-/// association the user is at that moment being told succeeded.
+/// the previous one otherwise -- and whether it associated. **The caller has to adopt both.**
+///
+/// The credential, because the application processor pushes these same credentials back down
+/// the link once it has persisted them, and a `current` still holding the old value would
+/// read that push as a change and tear down the association the user is at that moment being
+/// told succeeded.
+///
+/// The flag, because `controller.is_connected()` is **not** a usable substitute the instant
+/// this returns. It lags the association, so a caller that fell through to its reconnect path
+/// on `!is_connected()` would call `connect_async` against a station that had just associated
+/// and tear it straight back down. That was observed: a successful provision left the machine
+/// with no network at all, the DHCP lease never arrived, and Improv answered with no URL.
 async fn try_candidate(
     controller: &mut WifiController<'static>,
     candidate: WifiCredentials,
     previous: &WifiCredentials,
-) -> WifiCredentials {
+) -> (WifiCredentials, bool) {
     // Nothing on this path logs the credential, not even the SSID. `WifiCredentials`' `Format`
     // elides the password, but the SSID alone is enough to make a log line worth not writing
     // on a path that runs while someone is provisioning and may be sharing a screen.
@@ -174,7 +182,7 @@ async fn try_candidate(
         set_wifi_connected(true);
         WIFI_CANDIDATE_RESULT.signal(true);
         log_info!("Candidate Wi-Fi credentials associated");
-        candidate
+        (candidate, true)
     } else {
         // The working network goes back before the answer goes out. Answering first would
         // race the Improv task into reporting a credential that is about to be discarded --
@@ -184,7 +192,7 @@ async fn try_candidate(
         let _ = controller.disconnect_async().await;
         apply_configuration(controller, previous);
         WIFI_CANDIDATE_RESULT.signal(false);
-        previous.clone()
+        (previous.clone(), false)
     }
 }
 
@@ -334,12 +342,20 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // Improv wants the radio.
                     Either4::Third(Either::Second(request)) => match request {
                         RadioRequest::Candidate(candidate) => {
-                            current = try_candidate(&mut controller, candidate, &current).await;
-                            // Out to the outer loop either way. On success the association is
-                            // fresh and the `is_connected()` check re-enters this loop
-                            // immediately; on failure the restored configuration needs the
-                            // reconnect the outer loop is about to do.
-                            break;
+                            let (adopted, associated) =
+                                try_candidate(&mut controller, candidate, &current).await;
+                            current = adopted;
+                            // **Stay in this loop when it worked.** The association is fresh
+                            // and there is nothing to re-establish; dropping to the outer
+                            // loop would re-read `is_connected()`, which lags, find it false,
+                            // and reconnect over the top of the link that was just made. That
+                            // is exactly what left a provisioned machine with no network.
+                            //
+                            // On failure the restored configuration does need the outer
+                            // loop's reconnect, so that path is unchanged.
+                            if !associated {
+                                break;
+                            }
                         }
                         // Serviced in place: a scan puts the controller back the way it found
                         // it, so there is nothing for the outer loop to re-establish.
@@ -441,8 +457,13 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             // complete inside the driver, but `try_candidate` disconnects before it
             // configures anything, so the two cannot overlap -- and `set_wifi_connected`'s
             // `swap` is what keeps the event stream paired if it does complete late.
+            // Reached with the link already down, so unlike the arm in the connected loop
+            // there is no association here to protect: the outer loop's next pass re-reads
+            // `is_connected()` and does the right thing either way.
             Either::Second(RadioRequest::Candidate(candidate)) => {
-                current = try_candidate(&mut controller, candidate, &current).await;
+                let (adopted, _associated) =
+                    try_candidate(&mut controller, candidate, &current).await;
+                current = adopted;
             }
             Either::Second(RadioRequest::Scan) => run_scan(&mut controller).await,
         }
