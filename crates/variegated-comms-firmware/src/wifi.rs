@@ -261,6 +261,38 @@ type CredentialsReceiver = embassy_sync::watch::Receiver<
     { crate::channels::WIFI_CREDENTIAL_RECEIVERS },
 >;
 
+/// Resolve only when the stored credentials become something *other* than what is in use.
+///
+/// The application processor re-publishes the credential it already sent -- once at every
+/// boot, when the controller sets `wifi_publish_pending`, and again after a successful
+/// provision. Such an echo changes nothing and **must not resolve**, because both loops below
+/// race this against something that is destroyed by losing the race:
+///
+/// * `connect_async` calls `esp_wifi_connect` *synchronously* and only then awaits the event,
+///   so dropping the future does not cancel the attempt -- the driver is still connecting.
+///   Re-issuing it returns `ESP_ERR_WIFI_CONN` ("station control block wrong"), which esp-radio
+///   does not map and therefore **panics** on rather than returning. That is a firmware crash
+///   from an echo, and it is intermittent because it needs the echo to land inside the
+///   association attempt.
+/// * `wait_for_disconnect_async` is a pure wait, so dropping and recreating it opens a window
+///   in which a disconnect event can be missed entirely.
+///
+/// Filtering here rather than in each arm is what makes both safe: an echo is consumed and
+/// logged without ever waking the select, so nothing gets dropped and nothing is re-issued.
+async fn credentials_change(
+    credentials_rx: &mut CredentialsReceiver,
+    current: &WifiCredentials,
+) -> Option<WifiCredentials> {
+    loop {
+        match credentials_rx.changed().await {
+            Some(credentials) if credentials == *current => {
+                log_info!("Wi-Fi credentials confirmed by the application processor");
+            }
+            other => break other,
+        }
+    }
+}
+
 /// Wait until this machine has a network to join, **servicing Improv while waiting**.
 ///
 /// Returns the credentials to treat as current, and whether the radio is *already* associated
@@ -379,7 +411,11 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // next to an actual link loss. Reconnect polls first because it is the
                     // one that can be raised while the machine is otherwise idle.
                     select(WIFI_RECONNECT_REQUEST.wait(), radio_request()),
-                    credentials_rx.changed(),
+                    // Filtered, like the retry loop's. Here the cost of an echo waking this
+                    // select is subtler than a panic but no more welcome: the `continue` it
+                    // used to take dropped and recreated `wait_for_disconnect_async`, and a
+                    // disconnect landing in that window is not reported at all.
+                    credentials_change(&mut credentials_rx, &current),
                 ).await {
                     Either4::First(_) => {
                         // Disconnected - clear RSSI and break to reconnect.
@@ -461,21 +497,13 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // its own: the old network may still be perfectly connectable, so
                     // nothing would ever prompt a change, and a user who has just
                     // provisioned a different network is watching.
+                    // An echo of the credential in use never reaches here: `credentials_change`
+                    // absorbs it. That guard is what stops a successful Improv provision --
+                    // which the application processor persists and pushes straight back down
+                    // -- from reading as a change and tearing down the association the user is
+                    // at that moment being told succeeded.
                     Either4::Fourth(credentials) => {
                         match credentials {
-                            // The application processor echoing back what we just proved.
-                            //
-                            // A successful Improv provision reports the credential up the
-                            // link; that processor persists it and pushes the new value down
-                            // unprompted, which arrives here. Without this check the push
-                            // reads as a credential change and disconnects the association
-                            // the user is at that moment being told succeeded.
-                            Some(credentials) if credentials == current => {
-                                log_info!(
-                                    "Wi-Fi credentials confirmed by the application processor"
-                                );
-                                continue;
-                            }
                             Some(credentials) => {
                                 log_info!("Wi-Fi credentials changed; reconnecting");
                                 current = credentials;
@@ -560,10 +588,15 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
         // machine sitting here retrying a network it could not reach would ignore a new
         // password until the old one worked, which is the one thing that was never going to
         // happen. Clearing them had the same problem.
+        //
+        // `credentials_change`, not `credentials_rx.changed()`. Winning this race destroys the
+        // connect attempt in a way that cannot be undone or safely repeated -- see the note on
+        // that function, which is the whole reason it exists. Every arm below that returns to
+        // the top of this loop must leave the driver with no connect in flight.
         match select3(
             controller.connect_async(),
             radio_request(),
-            credentials_rx.changed(),
+            credentials_change(&mut credentials_rx, &current),
         )
         .await
         {
@@ -595,17 +628,26 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                 current = adopted;
                 just_associated = associated;
             }
-            Either3::Second(RadioRequest::Scan) => run_scan(&mut controller).await,
+            // Disconnected first, unlike the candidate arm above, which gets it from
+            // `try_candidate`. `connect_async` has already issued `esp_wifi_connect` and been
+            // dropped mid-attempt, so the driver is still connecting; scanning on top of that
+            // returns `ESP_ERR_WIFI_STATE`, which esp-radio does not map and panics on.
+            Either3::Second(RadioRequest::Scan) => {
+                let _ = controller.disconnect_async().await;
+                run_scan(&mut controller).await;
+            }
             // A credential change while the link is down. Applied rather than left for the
             // next association to notice, because on this path there may never be one: this
             // is the retry loop for a network that is not answering, and the whole reason a
             // new credential arrived is that the old one is not going to start working.
+            //
+            // An echo of the credential already in use never reaches here -- `credentials_change`
+            // absorbs it -- so both arms below are genuine changes, and both disconnect before
+            // touching the configuration.
             Either3::Third(credentials) => match credentials {
-                Some(credentials) if credentials == current => {
-                    log_info!("Wi-Fi credentials confirmed by the application processor");
-                }
                 Some(credentials) => {
                     log_info!("Wi-Fi credentials changed; retrying with them");
+                    let _ = controller.disconnect_async().await;
                     current = credentials;
                     apply_configuration(&mut controller, &current);
                 }
