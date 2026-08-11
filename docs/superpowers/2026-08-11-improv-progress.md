@@ -22,7 +22,8 @@ reboot the comms processor joins the network. Neither processor crashes.
 | 3 | Wire types, credential store at key 1, link plumbing | done, hardware-verified |
 | 4 | `connection_task` takes credentials from the link; `env!` deleted | done, hardware-verified |
 | 5 | GATT service, advertising, `CONNS` 5→6, capabilities | **done, hardware-verified** |
-| 6 | Machine UI: provisioning indicator, Identify, button hold, menu entry | **built, not yet on hardware** |
+| 6 | Machine UI: provisioning indicator, Identify, button hold, menu entry | **built; happy path exercised on the dual boiler** |
+| — | Unprovisioned machines can be provisioned; `ClearWifiCredentials` debug op | **done, hardware-verified** |
 
 ## What exists now that plan 5 must build on
 
@@ -178,10 +179,50 @@ should not start advertising. Not gated on `MachineMode`: provisioning should no
 heating the machine, and the recognizer emits no `Press` after a hold, so the tap cannot also
 fire. Single boiler, Settings → "WiFi Setup", which opens on entry and closes on exit.
 
-**Not yet verified on hardware.** The checks that matter are in the plan's Verification
-section; two of them are there because they are how this regresses into something worse than it
-replaced -- a normal button-6 press must still dispense water, and pulling the comms
-processor's power mid-window must clear the indicator within three seconds rather than latch it.
+**The happy path is exercised on the dual boiler.** Not the whole checklist: the two checks in
+the plan's Verification section that exist because they are how this regresses into something
+*worse* than it replaced are still unrun -- a normal button-6 press must still dispense water,
+and pulling the comms processor's power mid-window must clear the indicator within three
+seconds rather than latch it. Nothing on the single boiler has been run at all.
+
+## An unprovisioned machine can now be provisioned
+
+The bug that mattered most, fixed after plan 6. `connection_task` parked on a bare
+`credentials_rx.changed()` until the application processor sent it a network, so a machine with
+**none** -- the primary Improv use case -- never reached the arms that answer a candidate or a
+scan. A client could connect, send a password, and get back nothing but the 30 s timeout in
+`MachineHandler::provision`, reported as `UnableToConnect` for a credential the radio had never
+been asked to try.
+
+The park is now `park_until_provisioned`, and there is exactly **one** unprovisioned state:
+entered at boot, and returned to when the credentials are cleared. Clearing applies the empty
+configuration rather than leaving the old SSID in the station, so the two are byte-identical --
+which is what makes the debug op below a reproduction rather than an announcement.
+
+The question that had blocked this is answered: **scanning works from the park.**
+`esp_radio::wifi::new` applies `ControllerConfig::initial_config`, which defaults to
+`Config::Station(..)`, and that call is what starts the station.
+
+**`AppDebugOp::ClearWifiCredentials` is how you get back to that state.** In the CLI palette as
+`app: ClearWifiCredentials`; confirmed, and guarded by `WIFI_CLEAR_CONFIRM` like `SdFormatCard`.
+A debug op rather than a `MachineCommand` because forgetting a network is something a developer
+does to a bench, not something a user does to a machine. It reaches the controller by signal,
+because the credentials are the controller's and clearing them has to publish the cleared value
+down the link as well as write it to flash. `DEBUG_PROTOCOL_VERSION` is now `0x8C`.
+
+### The esp-radio trap this uncovered -- read before editing either select in `wifi.rs`
+
+`WifiController::connect_async` issues `esp_wifi_connect` **synchronously** and only then awaits
+the event, so dropping the future does *not* cancel the attempt: the driver is still connecting.
+Re-issuing it returns `ESP_ERR_WIFI_CONN` (12295), and `WifiError::from_error_code` maps five
+codes and **panics** on everything else -- so it cannot be caught, only avoided. Scanning on top
+of a dropped connect is the same trap one code along (`ESP_ERR_WIFI_STATE`, 12294).
+
+This is why every arm of the retry select must leave the driver with no connect in flight, and
+why credential updates arrive through `credentials_change` rather than `credentials_rx.changed()`:
+the application processor re-publishes the credential already in use at every boot, and that
+echo winning the race was enough to panic the firmware. It presented as an intermittent
+boot-time crash. The invariant is stated at both selects in `wifi.rs`; keep it there.
 
 Still outstanding from plan 5, as bench work rather than code: the wrong-password path
 (expect error `0x03`, state back to `Authorized`, old network still up), the scan RPC (drive
