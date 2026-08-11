@@ -247,6 +247,16 @@ impl GraphicalDisplayState {
     where
         D: DrawTarget<Color = Rgb565>,
     {
+        // Not while the screen is being used for something that cannot wait.
+        // `render_extraction_info` draws its second row at `EFFECTIVE_Y + 98`, which this strip
+        // would cover completely -- and those are the numbers a user watches while pulling a
+        // shot. The window cannot be *opened* while brewing, but it can already be open when
+        // brewing starts, so this is reachable. The banner comes back the moment the shot ends.
+        match self.shared_state.get_display_mode() {
+            DisplayMode::Brewing | DisplayMode::RoutineExecution => return Ok(()),
+            _ => {}
+        }
+
         let comms_stale = self.shared_state.status.comms_status_age
             .map(|age| age >= COMMS_STATUS_STALE_AFTER)
             .unwrap_or(true);

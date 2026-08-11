@@ -61,6 +61,14 @@ impl LcdDisplayState {
     /// Every string here is at most 16 characters -- `pad_or_truncate_to_16` would cut a
     /// longer one silently, mid-word.
     pub fn provisioning_rows(&self) -> Option<(String, String)> {
+        // Not while the screen is being used for something that cannot wait. This takes the
+        // whole panel, and on 2x16 that means the shot timer and weight go with it. The window
+        // cannot be *opened* while brewing, but it can already be open when brewing starts.
+        match self.shared_state.get_display_mode() {
+            DisplayMode::Brewing | DisplayMode::RoutineExecution => return None,
+            _ => {}
+        }
+
         let comms_stale = self.shared_state.status.comms_status_age
             .map(|age| age >= COMMS_STATUS_STALE_AFTER)
             .unwrap_or(true);
