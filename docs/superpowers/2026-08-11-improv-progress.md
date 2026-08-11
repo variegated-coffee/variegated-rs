@@ -22,7 +22,7 @@ reboot the comms processor joins the network. Neither processor crashes.
 | 3 | Wire types, credential store at key 1, link plumbing | done, hardware-verified |
 | 4 | `connection_task` takes credentials from the link; `env!` deleted | done, hardware-verified |
 | 5 | GATT service, advertising, `CONNS` 5→6, capabilities | **done, hardware-verified** |
-| 6 | Button hold, display symbol, single-boiler menu entry | **not started** |
+| 6 | Machine UI: provisioning indicator, Identify, button hold, menu entry | **built, not yet on hardware** |
 
 ## What exists now that plan 5 must build on
 
@@ -135,30 +135,53 @@ bytes of that is the sixth connection slot; the rest is the 20-entry attribute t
 two characteristic `StaticCell`s. On this chip `.stack` is the SRAM remainder, so a second
 GATT service would cost the same way.
 
-## Plan 6, which is next and entirely unbuilt
+## Plan 6, built on 2026-08-11 and not yet on hardware
 
-Verified absent on 2026-08-11, with the pattern to copy named for each. All of it is in
-`variegated-rs`.
+Entirely in `variegated-rs`; the plan is at
+`variegated-rs/docs/superpowers/plans/2026-08-11-improv-machine-ui.md`, and its "As built"
+section records where it was wrong. Six commits, `8258ed9`..`bb94595`. All three
+configurations compile (`dual-boiler`, `dual-boiler,character-display`, `single-boiler`) with
+no new warnings.
 
-* **Nothing renders the state.** `comms_status.improv` reaches the controller and is carried
-  into shared state (`dual_boiler_single_group.rs:1492`, `single_boiler_single_group.rs:826`),
-  but `display/graphical_renderer.rs::render_status_icons` draws only `W`/`S`/`B`. Follow the
-  `W` icon's three-state staleness discipline documented there: a stale `comms_status` is a
-  latch, so a dead comms processor would otherwise leave a claim on screen indefinitely.
-  On the 2×16 LCD, `lcd_renderer.rs::format_standby_row1` already ends in a padding space.
-* **`IdentifyMachine` does nothing** but `log_info!("Identify requested")` on both controllers
-  (`dual_boiler_single_group.rs:2358`, `single_boiler_single_group.rs:1435`). The dual-boiler
-  comment calls itself a placeholder for this step. **What it should actually do is an open
-  design question** -- the spec says only "make the machine identifiable to someone standing
-  in front of it". Flashing or inverting the display, or a timed message, are the candidates;
-  the LCD machines have fewer options.
-* **No way to open the window from the machine.** Only `variegated-cli`'s palette.
-  `buttons.rs` has `button_5_hold_start` (3000 ms, machine off) as the pattern for the
-  button-6 five-second hold; there is no `button_6_hold_start`. The recognizer emits no
-  `Press` on release after a hold (`buttons.rs:258-263`), so the water-tap toggle will not
-  also fire.
-* **Single-boiler has no menu entry** -- `MenuItemId::SettingsWifiProvisioning` in
-  `list_menu.rs`.
+**Provisioning state costs no plumbing.** `CommsStatus.improv` already reaches every renderer
+through `Status`, so this is rendering only:
+
+- TFT: a 16 px banner across the bottom of the effective area, drawn last so it overlays every
+  mode -- "Wi-Fi setup: ready to pair / connecting... / connected".
+- 2×16 LCD: both rows, ahead of the mode match.
+- Single-boiler OLED: a dedicated screen reached from the settings menu.
+
+Not the `P` status letter the earlier draft of this note proposed: `belka` already draws `P`,
+`dual-boiler` enables `belka`, and a letter cannot say what a user in a provisioning window
+needs to know. Both dual-boiler indicators are **suppressed while brewing or running a
+routine** -- the banner sits exactly over `render_extraction_info`'s second row, and the LCD
+rows take the whole panel. The window cannot be *opened* while brewing but can already be open
+when brewing starts. All three carry the `W` icon's staleness check: `comms_status` is a latch,
+so a dead comms processor must not leave a standing invitation to pair on screen.
+
+**Identify is a full-screen flash** -- fully lit and fully dark alternating at 4 Hz for three
+seconds, on all three panels. The point of Improv Identify is to answer "which of these
+machines am I talking to" for someone standing in the room, which a line of text does not.
+
+It travels on its own `Watch<_, Instant, 2>`, **not** on `Status`. Adding a field there would
+be a wire change, a `DEBUG_PROTOCOL_VERSION` bump, and a field in a struct that exists in ~10
+copies of RAM on a firmware with none to spare. A `Watch` rather than a channel because the
+dual boiler has two display tasks and only the latest request matters; an `Instant` rather than
+a unit so the flash is anchored to when the controller handled the command, and so the value
+genuinely changes, which is what `Receiver::try_changed` keys off. The dual boiler's is a plain
+`static` (its two ends are in different functions, and `Watch::new` is `const`); the single
+boiler's is a `StaticCell`, because `NoopRawMutex` is not `Sync`.
+
+**Opening the window from the machine**: dual boiler, hold button 6 for five seconds -- longer
+than button 5's three, because button 6 is the water tap and a slightly long press for water
+should not start advertising. Not gated on `MachineMode`: provisioning should not require
+heating the machine, and the recognizer emits no `Press` after a hold, so the tap cannot also
+fire. Single boiler, Settings → "WiFi Setup", which opens on entry and closes on exit.
+
+**Not yet verified on hardware.** The checks that matter are in the plan's Verification
+section; two of them are there because they are how this regresses into something worse than it
+replaced -- a normal button-6 press must still dispense water, and pulling the comms
+processor's power mid-window must clear the indicator within three seconds rather than latch it.
 
 Still outstanding from plan 5, as bench work rather than code: the wrong-password path
 (expect error `0x03`, state back to `Authorized`, old network still up), the scan RPC (drive
