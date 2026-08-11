@@ -168,12 +168,12 @@ where
             .with_attribute_server(&server.server)
             .map_err(BleHostError::BleHost)?;
 
-        // The MTU is the single most useful number on this path. A maximal `WIFI_SETTINGS`
-        // is ~99 bytes and trouble-host 0.6.0 cannot reassemble a long write (see `serve`),
-        // so anything under ~104 here means provisioning *will* fail, and will fail as a
-        // parse error rather than as anything that names the real cause.
+        // The MTU here is the pre-negotiation default -- 23 -- because the exchange happens
+        // a moment later, and reading it at connect time says nothing. It is logged again on
+        // the RPC write, where it is the number that decides whether the packet arrived
+        // whole. Kept as "initial" rather than removed so the connect event has a line.
         info!(
-            "improv: client connected, ATT MTU {=u16}",
+            "improv: client connected, initial ATT MTU {=u16}",
             connection.raw().att_mtu()
         );
 
@@ -225,7 +225,26 @@ async fn serve<H: ImprovHandler>(
                         event.data().len(),
                         service.rpc_command.handle
                     );
+                    let handle = event.handle();
                     accept_write(event).await;
+
+                    // **Re-announce the state the moment the client subscribes.**
+                    //
+                    // The push at the top of this function happens as soon as the
+                    // connection is up, which is always *before* the client has written
+                    // its CCCDs -- observed at 375 ms on a Chrome client. `notify` is
+                    // silently a no-op with no subscriber (it returns `Ok` and sends
+                    // nothing), so that first announcement reaches nobody. A client that
+                    // waits to be told its state, rather than reading the characteristic,
+                    // would then wait forever, having subscribed a moment too late.
+                    //
+                    // Gated on the current-state CCCD specifically, so subscribing to the
+                    // result characteristic does not re-announce anything, and so a real
+                    // error state is never overwritten.
+                    if Some(handle) == service.current_state.cccd_handle {
+                        let current = *state;
+                        set_state(connection, service, handler, state, current).await;
+                    }
                     continue;
                 }
 
@@ -251,8 +270,14 @@ async fn serve<H: ImprovHandler>(
                     );
                 }
                 // The length alone, never the bytes: a `WIFI_SETTINGS` frame is mostly
-                // credential.
-                info!("improv: RPC write, {=usize} B", len);
+                // credential. The MTU beside it because that is the pair that explains a
+                // truncated packet -- anything under ~104 cannot carry a maximal
+                // `WIFI_SETTINGS`, and trouble-host 0.6.0 cannot reassemble a long write.
+                info!(
+                    "improv: RPC write, {=usize} B (ATT MTU {=u16})",
+                    len,
+                    connection.raw().att_mtu()
+                );
 
                 // Replied to *before* the RPC runs, and that ordering is load bearing.
                 // `provision` can take half a minute; a client left waiting on an ATT write
@@ -262,7 +287,29 @@ async fn serve<H: ImprovHandler>(
 
                 dispatch(connection, service, handler, state, &packet[..len]).await;
             }
+            // Reads, logged because the trace went dark exactly here. A client that reads
+            // the state characteristic rather than waiting for a notification takes this
+            // path, and without it "the client subscribed and stopped" is indistinguishable
+            // from "the client read the state and did not like it".
+            GattConnectionEvent::Gatt {
+                event: GattEvent::Read(event),
+            } => {
+                info!("improv: read of handle {=u16}", event.handle());
+                match event.accept() {
+                    Ok(reply) => reply.send().await,
+                    Err(error) => warn_!("improv: could not accept a read: {}", error),
+                }
+            }
             GattConnectionEvent::Gatt { event } => accept_gatt(event).await,
+            // Answering this needs a `&Stack`, which `Peripheral` keeps private, so there is
+            // nothing to respond with from here. trouble-host's own `Drop` complains too;
+            // this names it in our own log so it is attributable. If a client's parameter
+            // request ever turns out to matter, threading the stack in is the fix.
+            GattConnectionEvent::RequestConnectionParams(_) => {
+                warn_!("improv: connection parameter request left unanswered")
+            }
+            GattConnectionEvent::PhyUpdated { .. } => info!("improv: phy updated"),
+            GattConnectionEvent::DataLengthUpdated { .. } => info!("improv: data length updated"),
             _ => {}
         }
     }
