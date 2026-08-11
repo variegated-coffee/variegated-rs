@@ -223,7 +223,7 @@ defmt.workspace = true
 sntpc = { workspace = true, features = ["defmt"] }
 jiff = { workspace = true, features = ["static"] }
 log.workspace = true
-esphome-device = { path = "../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
+esphome-device = { path = "../../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
 
 #[patch."https://github.com/vpetrigo/sntpc"]
 #sntpc = { git = "https://github.com/vpetrigo/sntpc", branch = "master" }

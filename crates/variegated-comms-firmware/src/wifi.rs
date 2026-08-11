@@ -3,7 +3,7 @@
 use variegated_log::{log_error, log_info};
 use embassy_net::Runner as NetRunner;
 use embassy_time::{with_timeout, Duration, Timer};
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use esp_radio::wifi::{
     AuthenticationMethod, Config as WifiConfig, Interface, WifiController, scan::ScanConfig,
     sta::StationConfig,
@@ -251,6 +251,78 @@ async fn run_scan(controller: &mut WifiController<'static>) {
     WIFI_SCAN_RESULT.signal(networks);
 }
 
+/// The receiver [`connection_task`] takes on [`WIFI_CREDENTIALS`].
+///
+/// Named because [`park_until_provisioned`] takes one and the type is unreadable inline.
+type CredentialsReceiver = embassy_sync::watch::Receiver<
+    'static,
+    embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+    Option<WifiCredentials>,
+    { crate::channels::WIFI_CREDENTIAL_RECEIVERS },
+>;
+
+/// Wait until this machine has a network to join, **servicing Improv while waiting**.
+///
+/// Returns the credentials to treat as current, and whether the radio is *already* associated
+/// with them -- which it is when they came from an Improv candidate, and is not when they
+/// arrived over the link. The radio is left configured for them either way, so the caller has
+/// nothing to apply.
+///
+/// This is the unprovisioned state, and there is exactly one of it: entered at boot, and
+/// returned to when the application processor reports the credentials cleared. Keeping the two
+/// identical is the point -- the state a machine is in before it has ever been provisioned is
+/// the state Improv exists to get it out of, and a bench machine that could only reach it by
+/// having its flash erased was a state nobody tested.
+///
+/// **Servicing Improv from here is the whole reason this function exists.** The wait used to be
+/// a bare `credentials_rx.changed()`, which meant a machine with no stored network -- the
+/// primary Improv use case -- parked before the arm that answers a candidate. A client could
+/// connect, send a password, and get nothing back but the 30 s timeout in
+/// `improv::MachineHandler::provision`, which reported `UnableToConnect` for a credential the
+/// radio had never been asked to try.
+///
+/// Scanning works here even though nothing has configured the station yet: `esp_radio::wifi::new`
+/// applies `ControllerConfig::initial_config`, which defaults to `Config::Station(..)`, and that
+/// call is what starts it. That was the open question that kept this fix waiting.
+async fn park_until_provisioned(
+    controller: &mut WifiController<'static>,
+    credentials_rx: &mut CredentialsReceiver,
+) -> (WifiCredentials, bool) {
+    log_info!("Waiting for Wi-Fi credentials from the application processor");
+
+    loop {
+        match select(credentials_rx.changed(), radio_request()).await {
+            Either::First(Some(credentials)) => {
+                apply_configuration(controller, &credentials);
+                break (credentials, false);
+            }
+            // A machine with no network configured. Reported at info, not warn: this is the
+            // normal state of an unprovisioned machine, not a fault.
+            Either::First(None) => {
+                log_info!("No Wi-Fi network configured; waiting to be provisioned")
+            }
+            Either::Second(RadioRequest::Candidate(candidate)) => {
+                // `previous` is the empty credential, because there is no previous -- which is
+                // also exactly what the station holds, so the restore `try_candidate` performs
+                // on failure puts it back where it started rather than somewhere invented.
+                let (adopted, associated) =
+                    try_candidate(controller, candidate, &WifiCredentials::default()).await;
+                if associated {
+                    // Returned *without* re-applying the configuration. `try_candidate` has
+                    // already configured and associated, and `set_config` on a live
+                    // association tears it down -- the same fault that once left a
+                    // provisioned machine with no network. See the note on `try_candidate`.
+                    break (adopted, true);
+                }
+                // A failed candidate leaves the machine where it was: unprovisioned, with the
+                // client already told. Keep waiting rather than falling through to a connect
+                // loop with nothing to connect to.
+            }
+            Either::Second(RadioRequest::Scan) => run_scan(controller).await,
+        }
+    }
+}
+
 /// WiFi connection management task
 ///
 /// Maintains WiFi connection, reconnecting when disconnected.
@@ -275,27 +347,25 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
     //
     // That processor asks for credentials at boot and repeats every ten seconds until
     // answered, so on a healthy link this resolves within a second or two. On a broken one
-    // it blocks forever, which is the correct and *visible* failure: the alternative --
+    // it parks forever, which is the correct and *visible* failure: the alternative --
     // retrying an empty configuration -- would fill the log with association failures that
     // say nothing about the actual fault, which is that the link never delivered.
     let mut credentials_rx = WIFI_CREDENTIALS
         .receiver()
         .expect("the credential watch is sized for this receiver");
 
-    log_info!("Waiting for Wi-Fi credentials from the application processor");
-    let mut current = loop {
-        match credentials_rx.changed().await {
-            Some(credentials) => break credentials,
-            // A machine with no network configured. Reported at info, not warn: this is the
-            // normal state of an unprovisioned machine, not a fault.
-            None => log_info!("No Wi-Fi network configured; waiting to be provisioned"),
-        }
-    };
-
-    apply_configuration(&mut controller, &current);
+    let (mut current, mut just_associated) =
+        park_until_provisioned(&mut controller, &mut credentials_rx).await;
 
     loop {
-        if controller.is_connected() {
+        // `just_associated` is consulted alongside the controller's own view because
+        // `is_connected()` **lags** a fresh association. A candidate that has just succeeded
+        // would otherwise be found disconnected here, take the reconnect path, and call
+        // `connect_async` over the top of the link it had only just made -- which is the
+        // exact fault that left a provisioned machine with no network at all. See the note on
+        // `try_candidate`. True for one pass, then cleared.
+        if just_associated || controller.is_connected() {
+            just_associated = false;
             // While connected, periodically update RSSI and wait for disconnect.
             loop {
                 // The reconnect request is the last arm, so it can never displace an
@@ -414,13 +484,34 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                                 }
                                 apply_configuration(&mut controller, &current);
                             }
-                            // Credentials cleared. Disconnect and let the loop fall through
-                            // to `connect_async`, which will fail against a station with no
-                            // SSID -- honest, and rare enough not to be worth a second
-                            // parking state. Nothing clears credentials today.
+                            // Credentials cleared -- `AppDebugOp::ClearWifiCredentials`, which
+                            // exists to reach exactly this state.
+                            //
+                            // Back to the parked state rather than falling through to
+                            // `connect_async`. That used to be the behaviour, on the grounds
+                            // that failing against a station with no SSID was honest and rare;
+                            // it is no longer rare, and an unbounded retry loop against an
+                            // empty configuration is precisely the log-spam-that-says-nothing
+                            // this task avoids at boot.
+                            //
+                            // The empty configuration is applied first so the radio genuinely
+                            // forgets: without it the station keeps the old SSID and the
+                            // driver reconnects to the network the operator just asked it to
+                            // forget. That leaves this identical to a cold boot, which is the
+                            // property that makes the debug op a real reproduction.
                             None => {
-                                log_info!("Wi-Fi credentials cleared; disconnecting");
+                                log_info!("Wi-Fi credentials cleared; returning to the unprovisioned state");
                                 let _ = controller.disconnect_async().await;
+                                apply_configuration(&mut controller, &WifiCredentials::default());
+                                set_wifi_connected(false);
+                                WIFI_RSSI_SIGNAL.signal(None);
+                                WIFI_RSSI_DBM.store(NO_RSSI, Ordering::Relaxed);
+                                let (adopted, associated) =
+                                    park_until_provisioned(&mut controller, &mut credentials_rx)
+                                        .await;
+                                current = adopted;
+                                just_associated = associated;
+                                break;
                             }
                         }
                         set_wifi_connected(false);
@@ -464,8 +555,19 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
         // blocks for as long as it takes, and the common case for a candidate is a machine
         // that has *no* network yet -- so a candidate raised here would otherwise not be seen
         // until an attempt against a network the user is trying to replace had timed out.
-        match select(controller.connect_async(), radio_request()).await {
-            Either::First(Ok(_)) => {
+        // Three-way, not two. The credential receiver was missing from this select entirely,
+        // which meant a credential *change* was only ever noticed from the connected loop: a
+        // machine sitting here retrying a network it could not reach would ignore a new
+        // password until the old one worked, which is the one thing that was never going to
+        // happen. Clearing them had the same problem.
+        match select3(
+            controller.connect_async(),
+            radio_request(),
+            credentials_rx.changed(),
+        )
+        .await
+        {
+            Either3::First(Ok(_)) => {
                 // Edge triggered: `connect_async` waits for the association rather
                 // than polling, so failed attempts fall to the `Err` arm and emit
                 // nothing. The helper's `swap` closes the window between this
@@ -473,7 +575,7 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                 // loop.
                 set_wifi_connected(true);
             }
-            Either::First(Err(_e)) => {
+            Either3::First(Err(_e)) => {
                 log_error!("Failed to connect to WiFi");
                 Timer::after(Duration::from_millis(5000)).await
             }
@@ -481,15 +583,45 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             // complete inside the driver, but `try_candidate` disconnects before it
             // configures anything, so the two cannot overlap -- and `set_wifi_connected`'s
             // `swap` is what keeps the event stream paired if it does complete late.
-            // Reached with the link already down, so unlike the arm in the connected loop
-            // there is no association here to protect: the outer loop's next pass re-reads
-            // `is_connected()` and does the right thing either way.
-            Either::Second(RadioRequest::Candidate(candidate)) => {
-                let (adopted, _associated) =
+            //
+            // The verdict is adopted here as well, not discarded. This arm used to drop it,
+            // reasoning that the link was already down so there was no association to
+            // protect -- but if the candidate *succeeded* there now is one, and the next pass
+            // of the outer loop would read a lagging `is_connected()`, find it false, and
+            // reconnect over the top of it. Same fault as the connected arm, one loop later.
+            Either3::Second(RadioRequest::Candidate(candidate)) => {
+                let (adopted, associated) =
                     try_candidate(&mut controller, candidate, &current).await;
                 current = adopted;
+                just_associated = associated;
             }
-            Either::Second(RadioRequest::Scan) => run_scan(&mut controller).await,
+            Either3::Second(RadioRequest::Scan) => run_scan(&mut controller).await,
+            // A credential change while the link is down. Applied rather than left for the
+            // next association to notice, because on this path there may never be one: this
+            // is the retry loop for a network that is not answering, and the whole reason a
+            // new credential arrived is that the old one is not going to start working.
+            Either3::Third(credentials) => match credentials {
+                Some(credentials) if credentials == current => {
+                    log_info!("Wi-Fi credentials confirmed by the application processor");
+                }
+                Some(credentials) => {
+                    log_info!("Wi-Fi credentials changed; retrying with them");
+                    current = credentials;
+                    apply_configuration(&mut controller, &current);
+                }
+                // Cleared. Back to the parked state, exactly as the connected arm does -- see
+                // the note there for why an empty configuration is applied rather than the
+                // old one left in place.
+                None => {
+                    log_info!("Wi-Fi credentials cleared; returning to the unprovisioned state");
+                    let _ = controller.disconnect_async().await;
+                    apply_configuration(&mut controller, &WifiCredentials::default());
+                    let (adopted, associated) =
+                        park_until_provisioned(&mut controller, &mut credentials_rx).await;
+                    current = adopted;
+                    just_associated = associated;
+                }
+            },
         }
     }
 }
