@@ -70,12 +70,25 @@ impl ImprovHandler for MachineHandler {
         WIFI_CANDIDATE_RESULT.reset();
         WIFI_CANDIDATE.signal(candidate.clone());
 
+        log_info!("Improv: handed a candidate credential to the Wi-Fi task");
+
         let associated = match with_timeout(CANDIDATE_REPLY_TIMEOUT, WIFI_CANDIDATE_RESULT.wait())
             .await
         {
-            Ok(associated) => associated,
+            Ok(associated) => {
+                log_info!("Improv: candidate verdict: associated={}", associated);
+                associated
+            }
+            // A timeout here does not mean the password was wrong -- it means nothing was
+            // listening. `connection_task` only polls for candidates once it has credentials
+            // of its own, so an unprovisioned machine parks before the arm that would answer
+            // this. Said explicitly because the two are reported to the client identically.
             Err(_) => {
-                log_error!("The Wi-Fi task did not answer a candidate credential");
+                log_error!(
+                    "Improv: the Wi-Fi task did not answer a candidate within {} s -- \
+                     is it parked waiting for credentials?",
+                    CANDIDATE_REPLY_TIMEOUT.as_secs()
+                );
                 false
             }
         };
@@ -97,6 +110,8 @@ impl ImprovHandler for MachineHandler {
             .is_err()
         {
             log_error!("Provisioned Wi-Fi credentials dropped: report channel full");
+        } else {
+            log_info!("Improv: reported the provisioned credential to the application processor");
         }
 
         Ok(local_url().await)
@@ -106,9 +121,15 @@ impl ImprovHandler for MachineHandler {
         WIFI_SCAN_RESULT.reset();
         WIFI_SCAN_REQUEST.signal(());
 
-        let found = with_timeout(SCAN_TIMEOUT, WIFI_SCAN_RESULT.wait())
-            .await
-            .unwrap_or_default();
+        let found = match with_timeout(SCAN_TIMEOUT, WIFI_SCAN_RESULT.wait()).await {
+            Ok(found) => found,
+            // Same caveat as the candidate timeout above: nothing was listening, which is
+            // not the same as "no networks", but the protocol cannot express the difference.
+            Err(_) => {
+                log_error!("Improv: the Wi-Fi task did not answer a scan request");
+                alloc::vec::Vec::new()
+            }
+        };
 
         // Truncated rather than refused if the connection task somehow returned more than the
         // scan was configured for: a short list is a usable answer and an error is not.
@@ -162,7 +183,10 @@ async fn local_url() -> Option<Url> {
             return Some(url);
         }
         if Instant::now() >= deadline {
-            log_warn!("Provisioned, but no address to hand back yet");
+            log_warn!(
+                "Improv: provisioned, but no DHCP lease after {} s -- answering with no URL",
+                ADDRESS_TIMEOUT.as_secs()
+            );
             return None;
         }
         Timer::after(Duration::from_millis(250)).await;
@@ -260,7 +284,11 @@ pub async fn improv_task(
             // `run` loops over connections and only returns on error.
             Either3::Third(result) => match result {
                 Ok(()) => log_info!("Improv service stopped"),
-                Err(_) => log_error!("Improv service failed"),
+                // The error itself, not just that there was one. This arm used to discard
+                // it, which made an advertisement the controller rejected -- the single most
+                // likely failure here, and the one that produces no other symptom -- look
+                // identical to every other way the service can stop.
+                Err(error) => log_error!("Improv service failed: {:?}", error),
             },
         }
 

@@ -17,6 +17,7 @@ use crate::codec::{
     CAPABILITY_DEVICE_INFO, CAPABILITY_IDENTIFY, CAPABILITY_SCAN_WIFI, MAX_COMMAND_LEN,
     MAX_RESPONSE_LEN,
 };
+use crate::fmt::{info, warn_};
 use crate::handler::ImprovHandler;
 
 /// Everything this implementation supports: Identify, Device Info, Scan.
@@ -146,6 +147,11 @@ where
         )
         .map_err(|_| BleHostError::BleHost(Error::InvalidValue))?;
 
+        info!(
+            "improv: advertising, state {}, capabilities {=u8:#04x}, adv {=usize} B, scan {=usize} B",
+            state, CAPABILITIES, adv_len, scan_len
+        );
+
         let advertiser = peripheral
             .advertise(
                 &Default::default(),
@@ -162,7 +168,17 @@ where
             .with_attribute_server(&server.server)
             .map_err(BleHostError::BleHost)?;
 
+        // The MTU is the single most useful number on this path. A maximal `WIFI_SETTINGS`
+        // is ~99 bytes and trouble-host 0.6.0 cannot reassemble a long write (see `serve`),
+        // so anything under ~104 here means provisioning *will* fail, and will fail as a
+        // parse error rather than as anything that names the real cause.
+        info!(
+            "improv: client connected, ATT MTU {=u16}",
+            connection.raw().att_mtu()
+        );
+
         serve(&connection, &server.improv, handler, &mut state).await;
+        info!("improv: client gone, back to advertising");
     }
 }
 
@@ -186,16 +202,30 @@ async fn serve<H: ImprovHandler>(
 
     loop {
         match connection.next().await {
-            GattConnectionEvent::Disconnected { .. } => return,
+            GattConnectionEvent::Disconnected { reason } => {
+                info!("improv: disconnected, reason {}", reason);
+                return;
+            }
             GattConnectionEvent::Gatt {
                 event: GattEvent::Write(event),
             } => {
                 if event.handle() != service.rpc_command.handle {
                     // Some other write -- a CCCD subscription, almost certainly. Hand it to
                     // the attribute server unexamined.
-                    if let Ok(reply) = event.accept() {
-                        reply.send().await;
-                    }
+                    //
+                    // Logged rather than passed over in silence, because *which* CCCDs a
+                    // client subscribes to is the difference between "the device answered
+                    // and nobody was listening" and "the device never answered". A client
+                    // that provisions successfully but shows nothing will have subscribed to
+                    // handle `rpc_result` and no other.
+                    info!(
+                        "improv: write to handle {=u16} ({=usize} B) -- not the RPC \
+                         characteristic ({=u16}), likely a CCCD",
+                        event.handle(),
+                        event.data().len(),
+                        service.rpc_command.handle
+                    );
+                    accept_write(event).await;
                     continue;
                 }
 
@@ -213,24 +243,48 @@ async fn serve<H: ImprovHandler>(
                 let mut packet = [0u8; MAX_COMMAND_LEN];
                 let len = event.data().len().min(MAX_COMMAND_LEN);
                 packet[..len].copy_from_slice(&event.data()[..len]);
+                if event.data().len() > MAX_COMMAND_LEN {
+                    warn_!(
+                        "improv: RPC write of {=usize} B truncated to {=usize}",
+                        event.data().len(),
+                        MAX_COMMAND_LEN
+                    );
+                }
+                // The length alone, never the bytes: a `WIFI_SETTINGS` frame is mostly
+                // credential.
+                info!("improv: RPC write, {=usize} B", len);
 
                 // Replied to *before* the RPC runs, and that ordering is load bearing.
                 // `provision` can take half a minute; a client left waiting on an ATT write
                 // response that long gives up and drops the link, and the result it was
                 // waiting for would then have nowhere to go.
-                if let Ok(reply) = event.accept() {
-                    reply.send().await;
-                }
+                accept_write(event).await;
 
                 dispatch(connection, service, handler, state, &packet[..len]).await;
             }
-            GattConnectionEvent::Gatt { event } => {
-                if let Ok(reply) = event.accept() {
-                    reply.send().await;
-                }
-            }
+            GattConnectionEvent::Gatt { event } => accept_gatt(event).await,
             _ => {}
         }
+    }
+}
+
+/// Accept a write event and flush the reply, saying so if either half fails.
+///
+/// `accept()` failing means the attribute server refused the write, and the client is left
+/// waiting on a response that will never come -- which presents as a provisioning attempt
+/// that simply stops, with nothing in the log. That was the shape of this function before it
+/// had a `warn_!` in it.
+async fn accept_write<P: PacketPool>(event: WriteEvent<'_, '_, P>) {
+    match event.accept() {
+        Ok(reply) => reply.send().await,
+        Err(error) => warn_!("improv: could not accept an RPC write: {}", error),
+    }
+}
+
+async fn accept_gatt<P: PacketPool>(event: GattEvent<'_, '_, P>) {
+    match event.accept() {
+        Ok(reply) => reply.send().await,
+        Err(error) => warn_!("improv: could not accept a GATT event: {}", error),
     }
 }
 
@@ -244,9 +298,16 @@ async fn dispatch<H: ImprovHandler>(
 ) {
     let request = match parse_command(packet) {
         Ok(request) => request,
-        // The error is reported; the packet is not logged anywhere. A malformed
-        // `WIFI_SETTINGS` can still contain most of a password.
-        Err(error) => return set_error(connection, service, error.error_state()).await,
+        Err(error) => {
+            // The `ParseError` variant, never the packet. A malformed `WIFI_SETTINGS` still
+            // contains most of a credential, and this is exactly the case where someone will
+            // be tempted to dump the bytes.
+            //
+            // `LengthMismatch` here almost always means a truncated write, i.e. the MTU
+            // logged at connect time was too small -- see the note in `serve`.
+            warn_!("improv: refusing an RPC: {}", error);
+            return set_error(connection, service, error.error_state()).await;
+        }
     };
 
     // Cleared on every accepted RPC, so a client sees the error belonging to *this* exchange
@@ -257,9 +318,13 @@ async fn dispatch<H: ImprovHandler>(
         // No result frame. `IDENTIFY` is fire-and-forget in both reference implementations,
         // and a client not expecting one would report the extra notification as a malformed
         // response to whatever it asks next.
-        Request::Identify => handler.identify(),
+        Request::Identify => {
+            info!("improv: RPC Identify");
+            handler.identify()
+        }
 
         Request::GetDeviceInfo => {
+            info!("improv: RPC GetDeviceInfo");
             let info = handler.device_info();
             respond(
                 connection,
@@ -276,7 +341,10 @@ async fn dispatch<H: ImprovHandler>(
         }
 
         Request::GetWifiNetworks => {
-            for network in handler.scan().await {
+            info!("improv: RPC GetWifiNetworks");
+            let networks = handler.scan().await;
+            info!("improv: reporting {=usize} networks", networks.len());
+            for network in networks {
                 let mut rssi = heapless::String::<8>::new();
                 // Infallible: an `i8` renders in at most four characters.
                 let _ = core::fmt::Write::write_fmt(&mut rssi, format_args!("{}", network.rssi));
@@ -298,12 +366,21 @@ async fn dispatch<H: ImprovHandler>(
         }
 
         Request::WifiSettings(settings) => {
+            // SSID length, not the SSID, and never the password. The point of this line is
+            // to confirm both fields survived the write intact -- a truncated packet that
+            // still parsed would show up here as a short password.
+            info!(
+                "improv: RPC WifiSettings, ssid {=usize} B, password {=usize} B",
+                settings.ssid.len(),
+                settings.password.len()
+            );
             set_state(connection, service, handler, state, State::Provisioning).await;
             match handler
                 .provision(settings.ssid.as_str(), settings.password.as_str())
                 .await
             {
                 Ok(url) => {
+                    info!("improv: provisioned, url present: {=bool}", url.is_some());
                     set_state(connection, service, handler, state, State::Provisioned).await;
                     match url {
                         Some(url) => {
@@ -316,6 +393,7 @@ async fn dispatch<H: ImprovHandler>(
                     }
                 }
                 Err(error) => {
+                    warn_!("improv: provisioning failed: {}", error);
                     // Back to `Authorized`, not `Stopped`: the window is still open and the
                     // user is expected to try again with a different password.
                     set_state(connection, service, handler, state, State::Authorized).await;
@@ -334,16 +412,25 @@ async fn respond(
     strings: &[&str],
 ) {
     let mut buffer = [0u8; MAX_RESPONSE_LEN];
-    let Ok(len) = build_response(command, strings, &mut buffer) else {
+    let len = match build_response(command, strings, &mut buffer) {
+        Ok(len) => len,
         // Unreachable for anything this module builds -- the buffer is `MAX_RESPONSE_LEN` and
         // every caller's strings are bounded -- but a device name comes from a machine
         // definition, which comes off a wire, so it is refused rather than trusted.
-        return;
+        Err(error) => return warn_!("improv: could not build a {} result: {}", command, error),
     };
     let Ok(value) = heapless::Vec::<u8, MAX_RESPONSE_LEN>::from_slice(&buffer[..len]) else {
-        return;
+        return warn_!("improv: a {} result of {=usize} B did not fit", command, len);
     };
-    let _ = service.rpc_result.notify(connection, &value).await;
+    // **The most likely silent failure on this path.** `notify` returns `Err(NotFound)` when
+    // the characteristic has no CCCD, and simply does nothing -- returning `Ok` -- when the
+    // client has not subscribed. The second case is indistinguishable from success here, so
+    // a result logged as sent and never seen by the client means "not subscribed", and the
+    // CCCD writes logged in `serve` are how to confirm that.
+    match service.rpc_result.notify(connection, &value).await {
+        Ok(()) => info!("improv: sent a {} result, {=usize} B", command, len),
+        Err(error) => warn_!("improv: could not send a {} result: {}", command, error),
+    }
 }
 
 /// Move to a new state, tell the machine, and tell the client.
@@ -356,7 +443,10 @@ async fn set_state<H: ImprovHandler>(
 ) {
     *current = next;
     handler.state_changed(next);
-    let _ = service.current_state.notify(connection, &(next as u8)).await;
+    info!("improv: state -> {}", next);
+    if let Err(error) = service.current_state.notify(connection, &(next as u8)).await {
+        warn_!("improv: could not notify state {}: {}", next, error);
+    }
 }
 
 async fn set_error(
@@ -364,5 +454,10 @@ async fn set_error(
     service: &ImprovService,
     error: ErrorState,
 ) {
-    let _ = service.error_state.notify(connection, &(error as u8)).await;
+    if error != ErrorState::None {
+        warn_!("improv: reporting error {}", error);
+    }
+    if let Err(e) = service.error_state.notify(connection, &(error as u8)).await {
+        warn_!("improv: could not notify error {}: {}", error, e);
+    }
 }

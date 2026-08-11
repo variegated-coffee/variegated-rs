@@ -15,6 +15,9 @@
 //! type would put a live Wi-Fi password into the debug stream, the TCP debug server and any
 //! log a user pastes into an issue.
 
+#[cfg(feature = "ble")]
+mod fmt;
+
 pub mod codec;
 pub mod handler;
 

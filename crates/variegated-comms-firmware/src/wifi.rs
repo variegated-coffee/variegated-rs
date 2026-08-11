@@ -128,8 +128,14 @@ enum RadioRequest {
 /// and it is this same task's waker either way.
 async fn radio_request() -> RadioRequest {
     match select(WIFI_CANDIDATE.wait(), WIFI_SCAN_REQUEST.wait()).await {
-        Either::First(candidate) => RadioRequest::Candidate(candidate),
-        Either::Second(()) => RadioRequest::Scan,
+        Either::First(candidate) => {
+            log_info!("Wi-Fi task: taking a candidate credential from Improv");
+            RadioRequest::Candidate(candidate)
+        }
+        Either::Second(()) => {
+            log_info!("Wi-Fi task: taking a scan request from Improv");
+            RadioRequest::Scan
+        }
     }
 }
 
