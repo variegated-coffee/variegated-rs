@@ -12,9 +12,15 @@ use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 
 use variegated_controller_types::debug::DebugEvent;
 
-use crate::channels::{LAST_SNTP_SYNC_MS, SNTP_RESYNC_REQUEST, TIME_SYNCED};
+use crate::channels::{LAST_SNTP_SYNC_MS, SNTP_RESYNC_REQUEST, SNTP_SYNC_SEQ, TIME_SYNCED};
 use crate::config::{NTP_SERVER, USEC_IN_SEC};
 use crate::debug::bus;
+
+/// How long to wait after a successful sync. See the note at the bottom of `sntp_task`.
+const SYNC_INTERVAL_SECS: u64 = 3_600;
+
+/// How long to wait after a failed one.
+const RETRY_INTERVAL_SECS: u64 = 60;
 
 /// Adapter making an embassy-net `UdpSocket` usable by sntpc.
 ///
@@ -89,29 +95,6 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    // Resolve NTP server
-    log_info!("Resolving NTP server: {}", NTP_SERVER);
-    // Both failure arms are edge triggered in the strongest sense available: the
-    // task *returns*, so each can fire at most once per boot and SNTP is then dead
-    // for this power cycle. No loop, no polling, nothing to flood.
-    //
-    // `SntpFailed` carries no reason, so the two arms are indistinguishable on the
-    // wire once their `log_error!` is gone. That is accepted rather than worked
-    // around: giving the variant a field is a wire-format change, and what a host
-    // needs from here -- "the clock will never sync this boot" -- is fully carried
-    // by the event plus `CommsState::sntp_synced_ms_ago` staying `None`.
-    let ntp_addrs = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
-        Ok(addrs) if !addrs.is_empty() => addrs,
-        Ok(_) => {
-            bus::emit_event(DebugEvent::SntpFailed);
-            return;
-        }
-        Err(_e) => {
-            bus::emit_event(DebugEvent::SntpFailed);
-            return;
-        }
-    };
-
     // Create UDP socket for NTP.
     //
     // Sized to the protocol rather than to a round number. An SNTP packet is 48 bytes
@@ -160,15 +143,39 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     //
     // `None` at the start so the first pass always reports, whichever way it goes.
     let mut last_ok: Option<bool> = None;
+    // Resolved lazily and kept until something goes wrong, rather than once at boot.
+    //
+    // Both DNS failure arms used to `return`, which killed SNTP for the whole power cycle:
+    // a machine that came up before its router's resolver did never got a clock again until
+    // someone power-cycled it, and `SNTP_RESYNC_REQUEST` had no consumer from then on. A
+    // resolved address was also kept forever, so a pool member that went away took SNTP
+    // with it. Both are now retried, on the short interval below.
+    let mut ntp_addr: Option<IpAddr> = None;
 
     loop {
-        let addr: IpAddr = ntp_addrs[0].into();
-        let result = get_time(
-            SocketAddr::from((addr, 123)),
-            &socket,
-            NtpContext::new(Timestamp::new(rtc)),
-        )
-        .await;
+        if ntp_addr.is_none() {
+            log_info!("Resolving NTP server: {}", NTP_SERVER);
+            ntp_addr = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
+                Ok(addrs) => addrs.first().map(|a| (*a).into()),
+                Err(_e) => None,
+            };
+        }
+
+        // A lookup that produced nothing is a failed sync like any other, and reports
+        // itself the same way -- `SntpFailed` carries no reason, and what a host needs from
+        // here is "the clock is not syncing", which is fully carried by the event plus
+        // `CommsState::sntp_synced_ms_ago` going stale.
+        let result = match ntp_addr {
+            Some(addr) => {
+                get_time(
+                    SocketAddr::from((addr, 123)),
+                    &socket,
+                    NtpContext::new(Timestamp::new(rtc)),
+                )
+                .await
+            }
+            None => Err(sntpc::Error::Network),
+        };
 
         match result {
             Ok(time) => {
@@ -185,6 +192,12 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
                     embassy_time::Instant::now().as_millis(),
                     Ordering::Relaxed,
                 );
+                // Announces the sync to the application processor, which re-anchors its
+                // clock on the *change* and ignores the timestamp otherwise. `Relaxed` for
+                // the same reason as its neighbours: the reader is a 1 Hz status task on
+                // the other side of a UART, and no ordering against anything else is
+                // implied or wanted.
+                SNTP_SYNC_SEQ.add(1, Ordering::Relaxed);
 
                 if last_ok != Some(true) {
                     bus::emit_event(DebugEvent::SntpSynced { unix: time.sec() as u64 });
@@ -192,6 +205,9 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
                 last_ok = Some(true);
             }
             Err(_e) => {
+                // Re-resolve next time round. The failure may be the address rather than
+                // the network, and nothing else would ever find that out.
+                ntp_addr = None;
                 if last_ok != Some(false) {
                     bus::emit_event(DebugEvent::SntpFailed);
                 }
@@ -199,24 +215,34 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
             }
         }
 
-        // Sync every 300 seconds, or as soon as a debug host asks.
+        // An hour after a success, a minute after a failure, or as soon as a debug host
+        // asks.
         //
-        // Without the second arm an operator who can see the clock is wrong waits up
-        // to five minutes to find out whether it can be fixed, which on an
-        // interactive debug path is indistinguishable from the command having done
-        // nothing. The resulting `SntpSynced`/`SntpFailed` is the answer -- but only
-        // if the outcome *changed*, because `last_ok` above makes those events edge
-        // triggered; a resync that succeeds on a clock that was already synced is
-        // silent here and visible as `sntp_synced_ms_ago` dropping back to ~0 in the
-        // next snapshot.
+        // An hour rather than the five minutes this used to use, because the clock this
+        // feeds is no longer the one the machine runs on. The application processor takes a
+        // correction from here and otherwise keeps time against a battery-backed TCXO, so
+        // syncing more often than hourly corrects a drift that is already smaller than the
+        // one-second resolution the correction is carried in.
         //
-        // A request raised before the socket exists is not served at all: the two
-        // failure arms above `return` from this task, so a device whose DNS lookup
-        // failed at boot has no SNTP for the rest of the power cycle and this signal
-        // has no consumer. That is pre-existing behaviour, not something the request
-        // path introduced.
+        // The failure interval is deliberately much shorter and is not a retry storm: a
+        // failed sync is a *missing* clock, not a slightly stale one, and a machine that
+        // comes up before its router does should not wait an hour to notice the network
+        // arrived. One packet a minute is nothing.
+        //
+        // The last arm is the interactive path. Without it an operator who can see the
+        // clock is wrong waits up to an hour to find out whether it can be fixed, which is
+        // indistinguishable from the command having done nothing. The resulting
+        // `SntpSynced`/`SntpFailed` is the answer -- but only if the outcome *changed*,
+        // because `last_ok` above makes those events edge triggered; a resync that succeeds
+        // on a clock that was already synced is silent here and visible as
+        // `sntp_synced_ms_ago` dropping back to ~0 in the next snapshot.
+        let interval = if last_ok == Some(true) {
+            SYNC_INTERVAL_SECS
+        } else {
+            RETRY_INTERVAL_SECS
+        };
         let _ = select(
-            Timer::after(Duration::from_secs(300)),
+            Timer::after(Duration::from_secs(interval)),
             SNTP_RESYNC_REQUEST.wait(),
         )
         .await;

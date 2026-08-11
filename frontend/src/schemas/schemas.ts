@@ -372,7 +372,8 @@ export const CommsStatusSchema = struct({
   wifi_connected: bool(),
   wifi_rssi: option(i8()),
   peripheral_connection_status: map(u16(), WirelessConnectionStatusSchema),
-  improv: ImprovStateSchema
+  improv: ImprovStateSchema,
+  sntp_sync_seq: u32()
 });
 
 export const DerivedParameterSchema = struct({

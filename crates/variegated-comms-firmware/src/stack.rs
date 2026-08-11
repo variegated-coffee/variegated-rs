@@ -5,24 +5,30 @@
 //! `.stack` on this chip is not a size anyone chose. `esp-hal`'s `ld/sections/stack.x`
 //! defines it as whatever is left of RWDATA after `.data` and `.bss`, and `esp_rtos::start`
 //! hands exactly that span to the main task. So it moves whenever an unrelated static
-//! changes size, and it has twice been changed by accident:
+//! changes size, and it has twice been changed by accident -- including by the heap, which
+//! is itself a `.bss` static and therefore its direct competitor.
 //!
-//! * At 90,144 bytes the main task overflowed inside `esp_radio::wifi::new()`. `esp-rtos`
-//!   caught it once (`Stack pointer: 40857b20, Task stack range: 40857d78 ..=`, 600 bytes
-//!   past the floor); the other attempts presented as a load access fault in
-//!   `chip_v7_set_chan` with a different address per build, which is the overrun landing on
-//!   whatever the linker had put at the top of `.bss`.
-//! * At 97,616 bytes it does not.
+//! This module is what makes the trade measurable. Before it, the state of knowledge was
+//! two irreproducible crashes and a survival, which is not enough to size anything with:
+//! 90,144 overflowed inside `esp_radio::wifi::new()` and 97,616 did not, while 85,608 had
+//! failed consistently and 87,256 had survived. Meanwhile the heap had *also* run out, at
+//! 121,552 of 122,880 during a provisioning reconnect. Both edges of one pool, hit within
+//! 10 kB of each other, with a measurement on only one of them.
 //!
-//! **That is the entire state of knowledge, and it is not enough to size anything with.**
-//! Nobody has ever measured what the main task actually needs; ~90 kB of call depth for a
-//! radio bring-up is implausible enough that a single oversized frame is the likelier
-//! explanation, and the difference decides whether tens of kilobytes can be handed to the
-//! heap -- which has *also* run out, at 121,552 bytes of 122,880 during a provisioning
-//! reconnect. The two come from one pool and both edges have now been hit.
+//! **What it now reports: a peak of 94,028 against a span of 97,408.** That is ~3.4 kB of
+//! headroom, which is what decided the heap split in `bin/main.rs` -- see the block above
+//! `heap_allocator!` there for the current numbers on both sides and the rule for changing
+//! them.
 //!
-//! The heap has had `esp_alloc::HEAP.stats().max_usage` reported at 1 Hz for a while, which
-//! is why that failure was visible in the log before it was fatal. This is the other half.
+//! Note what the figure means. `esp_rtos::main` runs the executor on the main thread, so
+//! **every embassy task is polled on this one stack**, and 94,028 is the deepest single
+//! poll rather than main's own depth. ~90 kB of call depth for a radio bring-up was always
+//! implausible enough that a single oversized frame was the likelier explanation, and that
+//! is where the room is: `postcard::from_bytes_cobs::<..Configuration>` is the documented
+//! suspect, and shrinking it buys space on both sides at once.
+//!
+//! The peak is logged at 1 Hz on every new maximum, alongside the heap's, and both travel
+//! to a host in `DebugStateSnapshot`.
 
 /// Written across the unused stack before the executor starts, so depth can be read back.
 ///

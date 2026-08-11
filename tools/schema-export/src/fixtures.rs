@@ -242,6 +242,9 @@ fn status_maximal() -> Status {
             // top of this function is about.
             improv: ImprovState::Provisioning,
             peripheral_connection_status,
+            // Non-zero for the same reason `improv` is not `Stopped`: zero is what a
+            // decoder that does not know this field exists would produce by accident.
+            sntp_sync_seq: 7,
         }),
         // Subsecond, so the `nanos` half of `Duration` is exercised rather than left at
         // zero -- postcard encodes the two varints separately.
@@ -536,6 +539,9 @@ fn machine_commands() -> Vec<MachineCommand> {
             // fixtures cannot both pass on a decoder that hardcodes one value.
             improv: ImprovState::Authorized,
             peripheral_connection_status: comms_peripherals,
+            // Different again from `status_maximal`'s, so neither fixture can pass on a
+            // decoder that hardcodes the other's value.
+            sntp_sync_seq: 12,
         }),
         AddScheduleItem(schedule_item()),
         RemoveScheduleItem(3),
@@ -725,6 +731,11 @@ pub fn canonical_shot() -> ShotLog {
             // note on `ShotLogMetadata::end_time_millis`.
             end_time_millis: Some(28_500),
             final_status: ShotStatus::Completed,
+            // The field version 4 added, and the only wall clock in the file. A real
+            // date -- 2026-08-11T06:29:11.930Z -- rather than a round number, so a
+            // decoder that lost or shifted it renders something obviously wrong instead
+            // of a plausible epoch.
+            recorded_at_unix_millis: Some(1_786_429_751_930),
         },
         samples: vec![
             sample_at(0, false, 1.0, 0.0),

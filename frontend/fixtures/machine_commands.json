@@ -172,7 +172,8 @@
           "rssi": -61
         }
       },
-      "improv": "Authorized"
+      "improv": "Authorized",
+      "sntp_sync_seq": 12
     }
   },
   {

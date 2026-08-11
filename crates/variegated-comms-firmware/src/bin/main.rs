@@ -241,7 +241,7 @@ async fn comms_status_signaller_task(
     stack: embassy_net::Stack<'static>,
 ) {
     use variegated_comms_firmware::ble;
-    use variegated_comms_firmware::channels::{COMMS_STATUS_SIGNAL, NO_IPV4, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_RSSI_SIGNAL};
+    use variegated_comms_firmware::channels::{COMMS_STATUS_SIGNAL, NO_IPV4, SNTP_SYNC_SEQ, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_RSSI_SIGNAL};
     use variegated_comms_firmware::config::USEC_IN_SEC;
     use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
     use heapless::index_map::FnvIndexMap;
@@ -301,6 +301,10 @@ async fn comms_status_signaller_task(
             // `Stopped` whenever no provisioning window is open, which is nearly always.
             improv: variegated_comms_firmware::channels::improv_state(),
             peripheral_connection_status,
+            // What tells the application processor that `timestamp` is worth acting on.
+            // It anchors its clock when this changes and ignores the timestamp the rest of
+            // the time, so the RTC's own drift between syncs stays on this processor.
+            sntp_sync_seq: SNTP_SYNC_SEQ.load(Ordering::Relaxed),
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);
         Timer::after(Duration::from_secs(1)).await;
@@ -491,95 +495,82 @@ async fn main(spawner: Spawner) -> ! {
     // bytes`, which is the exact 32 kB of the increase. Do not spend time trying to grow
     // this; any further heap has to come out of `.stack`.
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    // 48 -> 64 -> 56 -> 40 kB. Everything past the 64 kB above comes out of `.stack`, which
-    // is the SRAM remainder, so this line and the stack are in direct competition and there
-    // is no third source.
+    // The second heap region, and the only one of the two with a choice behind it.
     //
-    // **This number is now measured on both sides rather than guessed.** The 1 Hz snapshot
-    // reports `Heap high-water` and `Stack high-water`, and the figures that set this line
-    // are:
+    // Everything past the 64 kB above comes out of `.stack` -- which is not a size anyone
+    // picks either, but whatever RWDATA is left after `.data` and `.bss`. So this line and
+    // the stack are in direct competition and there is no third source: every byte of
+    // static costs a byte of `.stack`, one for one, including this allocator's own.
     //
-    //   * heap peak 82356, across a full Improv provisioning cycle with a BLE client
-    //     connected -- which is this firmware's peak-memory event.
-    //   * stack peak 94028 of 95640, i.e. **1612 bytes of headroom**, which is nothing.
+    // # Where this leaves the machine, measured
     //
-    // 56 -> 40 moves 16384 bytes from a heap with ~40 kB spare to a stack with ~1.6 kB
-    // spare. Leaves the heap ~24 kB over its measured peak and the stack ~18 kB over its
-    // own. Do not raise this line again without reading both high-water figures first;
-    // that is what they exist for.
+    // Peaks from the 1 Hz snapshot's `Heap high-water` and `Stack high-water` lines;
+    // section sizes from `scripts/memory-report.sh`:
     //
-    // # How the two edges were found, because both cost a day
+    //     heap     82356 peak  of 122880   (64 kB reclaimed + 56 kB here)   ~40 kB spare
+    //     .stack   94028 peak  of  97408                                   ~3.4 kB spare
     //
-    // The stack overflowed at 90144 and did not at 97616. It presented as a load access
-    // fault in `chip_v7_set_chan` at a different address per build -- the overrun landing on
-    // whatever the linker had put at the top of `.bss` -- and `esp-rtos` caught it directly
-    // once, as `Stack pointer: 40857b20, Task stack range: 40857d78 ..=`, 600 bytes past the
-    // floor. **The margin was already gone before the Improv service existed**: a commit
-    // adding ~500 bytes of `.bss` overflowed by 600. So the 95848 recorded below is a lower
-    // bound that had quietly been crossed, not a safe target.
+    // **The binding constraint is the stack, and it binds by about one deep call.** The
+    // heap peak is a full Improv provisioning cycle with a BLE client connected, which is
+    // this firmware's peak-memory event, so it is unlikely to be beaten by much.
     //
-    // The heap exhausted at 121552 of 122880 during provisioning, taking the machine down
-    // on `memory allocation of 800 bytes failed`. That was **not** a leak in the driver, as
-    // first assumed: `wifi::try_candidate` now brackets the heap either side of each step of
-    // a re-association and it costs *nothing*, netting ~1.2 kB freed. It was churn -- the
-    // caller tore down the link it had just made and the station cycled -- and fixing that
-    // took post-provisioning usage from ~115 kB to ~74 kB.
+    // Read both lines before moving this number in either direction. They exist because
+    // this was sized by comment for a long time, and the comment still said the peak was
+    // 28 kB while the machine was using 108 -- that figure predated the frontend's
+    // WebSocket client, and `WsMessage` wraps `Configuration`, `Status`,
+    // `MachineDefinition` and `RoutineStorage`, so every status push at up to 5 Hz
+    // allocates through `to_allocvec` on top of the ESPHome server and the pubsub clones.
     //
-    // Note what the stack figure means: `esp_rtos::main` runs the executor on the main
-    // thread, so **every embassy task is polled on this one stack** and 94028 is the deepest
-    // single poll, not main's own depth. `postcard::from_bytes_cobs::<..Configuration>` is
-    // the documented suspect.
+    // Note what the stack figure *is*: `esp_rtos::main` runs the executor on the main
+    // thread, so **every embassy task is polled on this one stack**, and 94028 is the
+    // deepest single poll rather than main's own depth.
+    // `postcard::from_bytes_cobs::<..Configuration>` is the documented suspect. Shrinking
+    // that frame buys room on both sides at once and is worth more than moving this line.
     //
-    // Raised because the machine ran out: `memory allocation of 128 bytes failed` at
-    // ~12 minutes with two BLE peripherals connected, and a snapshot shortly before it
-    // read `heap_used: 108808, heap_free: 5880` -- 95% of the 114688 bytes the two
-    // regions gave. A 128-byte request fits in almost any gap, so that was genuine
-    // exhaustion rather than the fragmentation failure below.
+    // # What each edge did when it was crossed, because both cost a day
     //
-    // **The 28 kB peak this used to be sized against is long dead.** That figure was
-    // measured before the frontend's WebSocket client worked, and `WsMessage` wraps
-    // `Configuration`, `Status`, `MachineDefinition` and `RoutineStorage` -- so every
-    // status push at up to 5 Hz allocates through `to_allocvec`, on top of the ESPHome
-    // server and the pubsub clones. Nothing had looked at the real figure since. The
-    // 1 Hz snapshot task now logs esp-alloc's own high-water mark on every new maximum,
-    // so the next person sizing this has a measurement rather than a comment.
+    // **Heap**, twice, both genuine exhaustion rather than fragmentation -- the failing
+    // requests were 128 and 800 bytes, which fit in almost any gap:
     //
-    // History of the other direction, because both have drawn blood:
+    //   * `heap_used: 108808, heap_free: 5880` of 114688, at ~12 minutes with two BLE
+    //     peripherals connected.
+    //   * 121552 of 122880 during provisioning. **Not** a driver leak, though it was
+    //     assumed to be one: `wifi::try_candidate` brackets the heap either side of every
+    //     step of a re-association and it costs nothing. It was churn -- the caller tore
+    //     down the link it had just made and the station cycled -- and fixing that took
+    //     post-provisioning usage from ~115 kB to ~74 kB, which is most of the margin in
+    //     the table above.
     //
-    // - Squeezing this to 40 kB fired `handle_alloc_error` on the ESPHome entity table,
-    //   which needed a single contiguous 12000-byte block. That block no longer exists
-    //   -- the table is built in `.bss` now (`esphome/entity_builder.rs`) -- so the
-    //   contiguity constraint that set the old floor is gone, and what remains is a
-    //   plain capacity question.
-    // - `.stack` at 71704 overflowed and 87256 did not, but treat both as observations
-    //   rather than bounds: the failures here are not reliably reproducible, so a run
-    //   that survived proves less than it looks. A stack overflow on this chip does not
-    //   announce itself either -- the last one arrived as a load access fault inside
-    //   `embassy_time_queue_utils::Queue::next_expiration`, because the overrun corrupted
-    //   a `next` pointer in embassy's intrusive timer list in `.bss`.
-    // - **85608 crashed consistently**, which is the tightest failing figure on record and
-    //   sits *above* the 71704 that failed before -- so the 87256 that survived is not a
-    //   floor either. It arrived as a defmt panic followed by a load access fault in
-    //   `chip_v7_set_chan` with `mtval=0x00000005`: the same shape as the entry above,
-    //   a corrupted pointer in someone else's `.bss`, in a different victim.
+    // **Stack**, which does not announce itself. It arrives as a load access fault at a
+    // different address per build, because the overrun lands on whatever the linker put at
+    // the top of `.bss`: `chip_v7_set_chan` twice, and once
+    // `embassy_time_queue_utils::Queue::next_expiration`, that one a corrupted `next`
+    // pointer in embassy's intrusive timer list. `esp-rtos` caught it directly only once,
+    // as `Stack pointer: 40857b20, Task stack range: 40857d78 ..=`.
     //
-    //   The cause was the shot-log download path putting a 1 kB chunk buffer in a
-    //   `Signal` and holding another across two awaits in the HTTP handler, which the
-    //   task pool multiplied. Moving those bytes to the heap returned 10240 to `.stack`
-    //   (95848).
-    // - The 64 -> 56 kB cut above is itself a squeeze, and belongs on this list. It takes
-    //   the two regions from 128 to 120 kB against a *pre-fix* exhaustion peak of 108808,
-    //   so the remaining margin is ~11 kB rather than the ~19 kB it was. The 1 Hz
-    //   snapshot's `Heap high-water` line is the thing that will say if that is not
-    //   enough; if it starts approaching 120 kB, the answer is to find static bytes
-    //   elsewhere, not to move this line again -- both directions have now drawn blood
-    //   within 10 kB of each other.
+    // The observations do not form a bound and must not be read as one -- 85608 failed
+    // consistently while 87256 survived, and 90144 failed while 97616 survived:
     //
-    //   Measure with `rust-size -A` and `rust-nm --print-size --size-sort`
-    //   before blaming the stack for anything: `.stack` is whatever SRAM is left after
-    //   `.data` and `.bss`, so the number is computable from any build, and every byte
-    //   of static costs a byte of stack one for one.
-    esp_alloc::heap_allocator!(size: 40 * 1024);
+    //     71704 failed   85608 failed   87256 survived   90144 failed   97616 survived
+    //
+    // Two things came out of that. Every figure recorded as "survived" is a lower bound
+    // that had quietly been crossed: the margin was already gone before the Improv service
+    // existed, and a commit adding ~500 bytes of `.bss` overflowed by 600. And the change
+    // that bought the most was not this line -- the shot-log download path held a 1 kB
+    // chunk buffer in a `Signal` and another across two awaits in the HTTP handler, and the
+    // task pool multiplied both; moving those bytes to the heap returned 10240 to `.stack`.
+    //
+    // The 40 kB floor that `handle_alloc_error` used to enforce here is gone. It was the
+    // ESPHome entity table needing one contiguous 12000-byte block, and that table is built
+    // in `.bss` now (`esphome/entity_builder.rs`), so what remains is a plain capacity
+    // question rather than a contiguity one.
+    //
+    // If the heap has to grow again, the bytes are likelier to be found in statics than
+    // taken from `.stack`. Every task pool is size 1, so the largest entries in
+    // `scripts/memory-report.sh` are single futures with big inline buffers:
+    // `application_processor_task` 18896, `http_server_task` 17696, `esphome_server_task`
+    // 17104, `debug_tcp_task` 9040, `websocket_server_task` 7008.
+    esp_alloc::heap_allocator!(size: 56 * 1024);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

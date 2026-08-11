@@ -21,6 +21,12 @@
 # firmware: `.stack` at 90144 overflowed inside `esp_radio::wifi::new()`, and the heap at
 # 120 kB exhausted during a Wi-Fi reconnect. Watch both columns, not the binary size.
 #
+# This reports the sizes the linker produced. The other half -- what the firmware actually
+# *uses* -- is measured on the device and logged at 1 Hz as `Heap high-water` and
+# `Stack high-water`, and travels to a host in `DebugStateSnapshot`. Size a change against
+# both: this script says what is available, those lines say what is needed, and the block
+# above `heap_allocator!` in `bin/main.rs` records where the two currently stand.
+#
 # Usage: scripts/memory-report.sh [elf-path] [top-n]
 #
 # Defaults to the release binary and the top 30 objects. Takes its options on argv rather

@@ -142,6 +142,13 @@ impl FlowEstimator {
     /// `None` rather than `0.0` while warming up. Zero is a *measurement* here -- it means
     /// "not flowing" -- so reporting it before the estimator can tell would be a lie of
     /// exactly the kind the debug snapshot's "absent, never zero" rule exists to prevent.
+    ///
+    /// A weight of exactly zero is the other side of that same rule and goes the other way:
+    /// it is not a gap in the estimator's knowledge, it is a measurement of nothing having
+    /// flowed, so it reports `Some(0.0)`. Returning `None` there left the application
+    /// processor's `Watch` holding whatever the last real reading was -- in practice the
+    /// large negative spike from the cup being lifted or the scale taring -- for the whole
+    /// of headspace fill, which is exactly the window in which the true answer is zero.
     fn push(&mut self, now: Instant, weight: f32) -> Option<f32> {
         // A reading of exactly zero is the observable end state of a tare, and the tare is
         // the one discontinuity that would otherwise wreck this. Keying on the value rather
@@ -158,7 +165,7 @@ impl FlowEstimator {
         // exactly `0.0` or `-0.0` (which compare equal), never an accumulated near-zero.
         if weight == 0.0 {
             self.reset();
-            return None;
+            return Some(0.0);
         }
 
         if self.samples.is_full() {
@@ -776,10 +783,12 @@ async fn acaia_measurement_loop(
                                                         // here rather than in the driver because this is as
                                                         // close to arrival as the value gets.
                                                         //
-                                                        // `None` while the estimator warms up or straddles a
-                                                        // tare, and in that case nothing is sent at all --
-                                                        // the application processor's watch keeps its last
-                                                        // value, which `BluetoothScale` zeroes on disconnect.
+                                                        // `None` while the estimator warms up, and in that case
+                                                        // nothing is sent at all -- the application processor's
+                                                        // watch keeps its last value, which `BluetoothScale`
+                                                        // zeroes on disconnect. A tare is *not* one of those
+                                                        // gaps: it reports zero, so the watch cannot sit on a
+                                                        // pre-tare reading through headspace fill.
                                                         //
                                                         // Shares the weight's drop-rather-than-block
                                                         // discipline, but deliberately not its logging: two

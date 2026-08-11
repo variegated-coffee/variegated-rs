@@ -255,7 +255,8 @@
           "rssi": -70
         }
       },
-      "improv": "Provisioning"
+      "improv": "Provisioning",
+      "sntp_sync_seq": 7
     },
     "comms_status_age": {
       "secs": 1,

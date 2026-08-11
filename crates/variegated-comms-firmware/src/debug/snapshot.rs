@@ -198,6 +198,16 @@ pub fn publish_snapshot() {
             bt_address,
             wifi_ip,
         }),
+        // The other half of the memory picture. `heap_used` above is an instantaneous
+        // sample and this is a high-water mark, which is not an inconsistency: a heap's
+        // occupancy at 1 Hz is meaningful, a stack's is not -- it is shallow whenever
+        // nothing deep happens to be running.
+        //
+        // Both come from the same pool on this chip, so a host that had only the heap
+        // figure could watch it sit comfortably at 60% while the stack it is competing with
+        // ran out. Sent together for that reason.
+        stack_high_water: Some(crate::stack::high_water() as u32),
+        stack_size: Some(crate::stack::span() as u32),
     }));
 }
 

@@ -325,6 +325,19 @@ pub static TIME_SYNCED: AtomicBool = AtomicBool::new(false);
 // "synced at boot" on a device whose clock never synced at all.
 pub static LAST_SNTP_SYNC_MS: AtomicU64 = AtomicU64::new(0);
 
+// How many times SNTP has successfully returned an answer since boot. Incremented by
+// sntp_task, reported on every `CommsStatus`, and read by the application processor.
+//
+// Distinct from TIME_SYNCED, which latches: this one keeps counting, and it is the change
+// that carries the meaning. The application processor re-anchors its clock when this
+// advances and ignores `CommsStatus::timestamp` otherwise, because between syncs that
+// timestamp is only this processor's RC-based RTC free-running -- see the field's own
+// documentation in `variegated-controller-types`.
+//
+// Wrapping at u32 is fine and needs no handling: the reader compares for inequality, not
+// ordering, and an hourly sync would take half a million years to get there.
+pub static SNTP_SYNC_SEQ: AtomicU32 = AtomicU32::new(0);
+
 // WiFi Connection Status - updated by connection_task, read by comms_status_signaller_task.
 //
 // esp-radio 0.18 removed the free function `wifi::sta_state()`, so connection
