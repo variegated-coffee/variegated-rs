@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
 use core::ops::Deref;
 use core::pin::Pin;
-use defmt::{info, unwrap, warn};
+use defmt::{error, info, unwrap, warn};
 use heapless::index_map::FnvIndexMap;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
@@ -343,6 +343,13 @@ static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<NoopRawMutex, StoredWifiCredenti
 /// but it means the deferred initialisation is forced rather than chosen. Sized `2` to match
 /// the dual boiler, though only one receiver is ever taken.
 static IDENTIFY_WATCH: StaticCell<Watch<NoopRawMutex, embassy_time::Instant, 2>> = StaticCell::new();
+/// Raised by `AppDebugOp::ClearWifiCredentials`, drained by the controller.
+///
+/// A plain `static` rather than a `StaticCell`, unlike its neighbours: `Signal::new` is
+/// `const` and `CriticalSectionRawMutex` is `Sync`, which `NoopRawMutex` is not. The debug
+/// task cannot do this work itself -- the credentials are the controller's, and clearing them
+/// has to publish the cleared value down the link as well as write it to flash.
+static CLEAR_WIFI_CREDENTIALS_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
@@ -820,6 +827,7 @@ async fn main_task(spawner: Spawner) -> ! {
         // to re-annotate, so `SetShotAnnotations` is refused rather than queued.
         None,
         Some(identify_watch.sender()),
+        &CLEAR_WIFI_CREDENTIALS_REQUEST,
     );
 
     // Controller will publish configuration automatically in its task loop
@@ -1083,6 +1091,19 @@ async fn debug_command_task(
             }
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
                 warn!("SD format requested, but this board has no SD card");
+            }
+            DebugCommand::App(AppDebugOp::ClearWifiCredentials { confirm }) => {
+                // The guard, checked here so a refused command never reaches the code that
+                // can forget anything.
+                if confirm == variegated_controller_types::debug_command::WIFI_CLEAR_CONFIRM {
+                    warn!("Wi-Fi credentials clear requested; the stored network will be forgotten");
+                    CLEAR_WIFI_CREDENTIALS_REQUEST.signal(());
+                } else {
+                    error!(
+                        "Wi-Fi credentials clear refused: confirmation {:#010x} is not the required value",
+                        confirm
+                    );
+                }
             }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}

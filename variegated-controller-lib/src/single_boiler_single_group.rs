@@ -291,6 +291,13 @@ pub struct SingleBoilerSingleGroupController<
     // should extend it rather than queue behind it. `None` on a machine with no display to
     // flash, in which case Identify does nothing, which the Improv spec explicitly allows.
     identify_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, Instant, 2>>,
+    // Raised by `AppDebugOp::ClearWifiCredentials`. Not a `MachineCommand`, so it has no route
+    // into `handle_command` and is polled in the task loop instead. A `Signal` because the
+    // request carries no payload and two clears in a row are one clear.
+    clear_wifi_credentials_signal: &'static embassy_sync::signal::Signal<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        (),
+    >,
     // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
     // channel because only the latest value matters.
     wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
@@ -356,6 +363,12 @@ impl<
         >,
         // Where `IdentifyMachine` goes. `None` on a machine with no display to flash.
         identify_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, Instant, 2>>,
+        // Raised by the debug op that forgets the stored network. Not an `Option`: every
+        // machine has a credential store.
+        clear_wifi_credentials_signal: &'static embassy_sync::signal::Signal<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            (),
+        >,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -407,6 +420,7 @@ impl<
             wifi_publish_pending: false,
             wifi_provisioning_sender,
             identify_publisher,
+            clear_wifi_credentials_signal,
             wifi_credentials_publisher,
         }
     }
@@ -442,6 +456,24 @@ impl<
             log_warn!("Failed to save Wi-Fi credentials");
         }
         self.wifi_publish_pending = true;
+    }
+
+    /// Forget the stored network, persistently.
+    ///
+    /// Identical to the dual boiler's, and identical for a reason: this reproduces the state a
+    /// machine is in before it has ever been provisioned, and that state is not
+    /// machine-specific. Writing the cleared value is the point -- one that merely
+    /// disconnected would come back knowing a network after the next reboot. Saving also sets
+    /// `wifi_publish_pending`, so the comms processor is told and parks.
+    async fn clear_wifi_credentials(&mut self) {
+        if self.wifi_credentials.0.is_none() {
+            log_info!("Wi-Fi credentials already cleared; nothing to forget");
+            return;
+        }
+        // Never logs the SSID. Same rule as everywhere else on this path.
+        self.wifi_credentials = StoredWifiCredentials(None);
+        self.save_wifi_credentials().await;
+        log_warn!("Wi-Fi credentials cleared; this machine is now unprovisioned");
     }
 
     pub async fn task(&mut self) {
@@ -506,6 +538,13 @@ impl<
                 let config = self.general_configuration(current_config.clone());
                 self.configuration_channel_sender.publish_immediate(config);
                 last_configuration = current_config;
+            }
+
+            // The debug op that forgets the stored network. Polled here rather than handled in
+            // `handle_command`, because it is deliberately not a `MachineCommand` -- see the
+            // note on the field. `try_take` so this loop keeps running the boiler.
+            if self.clear_wifi_credentials_signal.try_take().is_some() {
+                self.clear_wifi_credentials().await;
             }
 
             while !self.command_channel_receiver.is_empty() {

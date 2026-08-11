@@ -1107,6 +1107,13 @@ static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<SyncSendRawMutex, StoredWifiCred
 /// which builds the controller. A `StaticCell` can only hand its reference to whoever calls
 /// `init`, so it would have forced the sender through `main_task`'s argument list for no gain.
 static IDENTIFY_WATCH: Watch<SyncSendRawMutex, Instant, 2> = Watch::new();
+/// Raised by `AppDebugOp::ClearWifiCredentials`, drained by the controller.
+///
+/// A `Signal` rather than a channel, like `SD_SELF_TEST_REQUEST` above and for the same
+/// reason: the request carries nothing and two of them in a row are one of them. The debug
+/// task cannot do this work itself -- the credentials are the controller's, and clearing them
+/// has to publish the cleared value down the link as well as write it to flash.
+static CLEAR_WIFI_CREDENTIALS_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -2038,6 +2045,21 @@ async fn debug_command_task(
             #[cfg(not(feature = "sd-card-storage"))]
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
                 log_warn!("SD format requested, but this build has no SD storage");
+            }
+            DebugCommand::App(AppDebugOp::ClearWifiCredentials { confirm }) => {
+                // The guard, checked here rather than in the controller so a refused command
+                // never reaches the code that can forget anything. Same shape as the SD
+                // format guard above, and for the same reason: a payload-free destructive
+                // command, adjacent on the wire to ones run constantly while testing.
+                if confirm == variegated_controller_types::debug_command::WIFI_CLEAR_CONFIRM {
+                    log_warn!("Wi-Fi credentials clear requested; the stored network will be forgotten");
+                    CLEAR_WIFI_CREDENTIALS_REQUEST.signal(());
+                } else {
+                    log_error!(
+                        "Wi-Fi credentials clear refused: confirmation {:#010x} is not the required value",
+                        confirm
+                    );
+                }
             }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
@@ -3026,6 +3048,7 @@ async fn main_task(
         sd_card_present,
         shot_log_query_sender,
         Some(IDENTIFY_WATCH.sender()),
+        &CLEAR_WIFI_CREDENTIALS_REQUEST,
     );
 
     // Create status subscriber for LCD display and spawn the task.

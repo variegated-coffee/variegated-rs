@@ -103,7 +103,13 @@ use crate::Status;
 ///   consuming `improv`, then reads that byte as the start of `comms_status_age`, and
 ///   every field after it is garbage. That is exactly the failure this version exists to
 ///   catch, and it is the same shape as the drift that motivated the schema fixtures.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8B;
+/// * `0x8C` -- `AppDebugOp` gained `ClearWifiCredentials`, appended. Device-inbound, so the
+///   same direction as `SdFormatCard` at `0x8A` and bumped for the same reason: it is
+///   destructive, and a version mismatch should report itself as one rather than as a command
+///   the operator did not type. It carries its own magic-value guard as well, because the
+///   version byte protects against a *differently built* peer and the guard against a
+///   *corrupted frame* from a correctly built one -- two different failures.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8C;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

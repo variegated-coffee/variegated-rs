@@ -563,6 +563,17 @@ pub struct DualBoilerSingleGroupController<
     // `None` on a machine with no display wired for it, in which case Identify does nothing,
     // which the Improv spec explicitly allows.
     identify_publisher: Option<watch::Sender<'a, ChannelM, Instant, 2>>,
+    // Raised by `AppDebugOp::ClearWifiCredentials`, which reaches this processor's debug task
+    // rather than the command channel -- it is not a machine command, so it has no route into
+    // `handle_command` and is polled in the task loop instead.
+    //
+    // A `Signal` rather than a channel because the request carries no payload and has no
+    // ordering to preserve: two clears in a row are one clear. Mirrors
+    // `interlock_enabled_signal`'s shape, which is the other `&'static Signal` here.
+    clear_wifi_credentials_signal: &'static embassy_sync::signal::Signal<
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        (),
+    >,
     // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
     // channel because only the latest value matters and a receiver that missed an
     // intermediate one has missed nothing.
@@ -670,6 +681,13 @@ impl<
         >,
         // Where `IdentifyMachine` goes. `None` on a machine with no display to flash.
         identify_publisher: Option<watch::Sender<'a, ChannelM, Instant, 2>>,
+        // Raised by the debug op that forgets the stored network. Not an `Option`, unlike its
+        // neighbours: every machine has a credential store, so there is no machine for which
+        // this does not apply.
+        clear_wifi_credentials_signal: &'static embassy_sync::signal::Signal<
+            embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+            (),
+        >,
     ) -> Self {
         // Create configuration objects from persistent config defaults
         // These will be overridden when the persistent config is loaded from flash
@@ -736,6 +754,7 @@ impl<
             wifi_publish_pending: false,
             wifi_provisioning_sender,
             identify_publisher,
+            clear_wifi_credentials_signal,
             wifi_credentials_publisher,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
@@ -887,6 +906,32 @@ impl<
     /// `Configuration` publish. That path ends at the browser, and a password has no
     /// business on it -- so this needs a flag of its own rather than reusing
     /// `bluetooth_publish_pending`'s trick of dirtying the configuration.
+    /// Forget the stored network, persistently.
+    ///
+    /// Writing the cleared value is the whole point: the state this reproduces is a machine
+    /// that has *never* been provisioned, and one that merely disconnected would come back
+    /// knowing a network after the next reboot.
+    ///
+    /// `save_wifi_credentials` also sets `wifi_publish_pending`, so the comms processor is
+    /// told on the next tick and parks waiting to be provisioned. That is what makes a reboot
+    /// unnecessary to reach the state -- and still worth doing to prove it survives one.
+    ///
+    /// A no-op with a distinct log line when there was nothing stored, rather than a silent
+    /// one: this is a debug affordance, and "already clear" is a different answer from
+    /// "cleared" to whoever just typed it.
+    async fn clear_wifi_credentials(&mut self) {
+        if self.wifi_credentials.0.is_none() {
+            log_info!("Wi-Fi credentials already cleared; nothing to forget");
+            return;
+        }
+        // Never logs the SSID, here or anywhere on this path. The rule is the same one
+        // `try_candidate` states on the comms side: a credential is not written to a log that
+        // someone may be sharing a screen of while provisioning.
+        self.wifi_credentials = StoredWifiCredentials(None);
+        self.save_wifi_credentials().await;
+        log_warn!("Wi-Fi credentials cleared; this machine is now unprovisioned");
+    }
+
     async fn save_wifi_credentials(&mut self) {
         match with_timeout(Duration::from_millis(100), self.wifi_store.lock()).await {
             Ok(mut store) => {
@@ -966,6 +1011,18 @@ impl<
             }
 
             last_published_configuration = self.publish_configuration_if_changed(last_published_configuration).await;
+
+            // The debug op that forgets the stored network.
+            //
+            // Polled here rather than handled in `handle_command`, because it is deliberately
+            // not a `MachineCommand`: forgetting a network is something a developer does to a
+            // bench, not something a user does to a machine, so it has no business in the
+            // palette every client shares.
+            //
+            // `try_take` rather than `wait`: this loop must keep running the boilers.
+            if self.clear_wifi_credentials_signal.try_take().is_some() {
+                self.clear_wifi_credentials().await;
+            }
 
             // Handle incoming commands
             while !self.command_channel_receiver.is_empty() {

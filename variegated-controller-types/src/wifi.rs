@@ -20,7 +20,13 @@ pub const WIFI_PASSWORD_LEN: usize = 64;
 /// since there is nowhere for such a value to go on either side of the link.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-#[derive(Clone, PartialEq, Eq)]
+/// `Default` is the *empty* credential -- no SSID, no password -- which is the station's
+/// state before anything configures it and the state the comms firmware restores it to when a
+/// network is forgotten. It is not a placeholder: `wifi::park_until_provisioned` hands it to
+/// `try_candidate` as the "previous" network to fall back to on a machine that has none, so
+/// that a failed candidate puts the radio back exactly where `esp_radio::wifi::new` left it
+/// rather than somewhere invented. Derives do not reach the wire, so this changes no format.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct WifiCredentials {
     pub ssid: heapless::String<WIFI_SSID_LEN>,
     pub password: heapless::String<WIFI_PASSWORD_LEN>,

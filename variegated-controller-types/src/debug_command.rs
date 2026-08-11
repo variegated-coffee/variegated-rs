@@ -84,7 +84,41 @@ pub enum AppDebugOp {
     /// otherwise erase the card. With the guard, the corrupted command decodes with a
     /// `confirm` that is not the constant, and is refused.
     SdFormatCard { confirm: u32 },
+    /// **Forget the stored Wi-Fi credentials**, returning the machine to its unprovisioned
+    /// state.
+    ///
+    /// Appended, not inserted -- see the note on the enum above.
+    ///
+    /// A debug op rather than a `MachineCommand` because it is not something a user does to a
+    /// machine; it is something a developer does to a *bench*. The unprovisioned state is
+    /// where Improv's bugs live -- getting a new machine onto Wi-Fi is the whole point of the
+    /// protocol -- and on any machine that has ever been on a network it was previously
+    /// unreachable without erasing flash.
+    ///
+    /// Cleared *and persisted*, so the machine comes back after a reboot still not knowing a
+    /// network. The comms processor is told immediately as well, and parks waiting to be
+    /// provisioned rather than retrying an empty configuration, so a reboot is not required to
+    /// reach the state -- only to prove it survives one.
+    ///
+    /// **This severs the link it may well have arrived on.** Recovery is Improv over BLE or
+    /// the debug link over USB, neither of which needs the network, so it is recoverable
+    /// rather than dangerous -- but it is not undoable.
+    ///
+    /// `confirm` must equal [`WIFI_CLEAR_CONFIRM`] or the command is refused, for the reason
+    /// [`Self::SdFormatCard`] carries its own guard, and with a sharper edge: this variant
+    /// sits one discriminant past a command whose neighbours are run constantly while
+    /// provisioning is being tested, on a link the SD work established does corrupt bytes. A
+    /// machine that silently lost its network mid-session would be blamed on the provisioning
+    /// code, which is the most expensive way for this to go wrong.
+    ClearWifiCredentials { confirm: u32 },
 }
+
+/// The value [`AppDebugOp::ClearWifiCredentials`] requires.
+///
+/// Arbitrary, like [`SD_FORMAT_CONFIRM`], and chosen the same way: it only has to be a value
+/// no plausible corruption or uninitialised field lands on, so it is neither `0` nor
+/// `0xFFFF_FFFF`.
+pub const WIFI_CLEAR_CONFIRM: u32 = 0x5746_2143; // "WF!C"
 
 /// The value [`AppDebugOp::SdFormatCard`] requires.
 ///
@@ -142,6 +176,7 @@ impl DebugCommand {
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => "sd_self_test",
             DebugCommand::App(AppDebugOp::SdListShots) => "sd_list_shots",
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => "sd_format_card",
+            DebugCommand::App(AppDebugOp::ClearWifiCredentials { .. }) => "clear_wifi_credentials",
             DebugCommand::Comms(CommsDebugOp::ReconnectWifi) => "reconnect_wifi",
             DebugCommand::Comms(CommsDebugOp::ResyncSntp) => "resync_sntp",
             DebugCommand::Comms(CommsDebugOp::RescanBle) => "rescan_ble",
