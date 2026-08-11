@@ -56,10 +56,26 @@ pub struct ImprovService {
     pub error_state: u8,
     /// Write-only, per the protocol -- `sdk-js` never reads it.
     ///
+    /// **Both write properties, and that is not belt-and-braces.** Web Bluetooth refuses
+    /// `writeValueWithoutResponse()` on a characteristic that does not advertise
+    /// `WRITE_WITHOUT_RESPONSE`, and it refuses it *in the browser* -- the call throws and
+    /// nothing reaches the air. With only `write` declared, a client that writes that way
+    /// produces no ATT traffic, no error on this side, and no symptom beyond a UI that
+    /// spins. Declaring both leaves the choice to the client, which is the only party that
+    /// knows which method it is going to call.
+    ///
+    /// `GattEvent::new` maps `AttReq::Write` and `AttCmd::Write` to the same
+    /// `GattEvent::Write`, so [`serve`] needs no second path for the command form; `accept`
+    /// on a command simply sends nothing back, which is what the client expects.
+    ///
     /// Sized for a maximal `WIFI_SETTINGS` packet, which is ~99 bytes and so far past the
     /// 23-byte default ATT MTU. See the note on long writes in [`serve`] for why the MTU is
     /// the only mechanism that makes this arrive whole.
-    #[characteristic(uuid = "00467768-6228-2272-4663-277478268003", write)]
+    #[characteristic(
+        uuid = "00467768-6228-2272-4663-277478268003",
+        write,
+        write_without_response
+    )]
     pub rpc_command: heapless::Vec<u8, MAX_COMMAND_LEN>,
     #[characteristic(uuid = "00467768-6228-2272-4663-277478268004", read, notify)]
     pub rpc_result: heapless::Vec<u8, MAX_RESPONSE_LEN>,
@@ -300,7 +316,27 @@ async fn serve<H: ImprovHandler>(
                     Err(error) => warn_!("improv: could not accept a read: {}", error),
                 }
             }
-            GattConnectionEvent::Gatt { event } => accept_gatt(event).await,
+            // A request the attribute table refused on permissions. It becomes an ATT error
+            // to the client and nothing else, so without this line it is indistinguishable
+            // from the request never having been sent -- which is exactly the ambiguity that
+            // made an RPC write that never arrived impossible to tell from one that arrived
+            // and was rejected.
+            GattConnectionEvent::Gatt {
+                event: GattEvent::NotAllowed(event),
+            } => {
+                warn_!(
+                    "improv: refused a request on handle {=u16} on permissions",
+                    event.handle()
+                );
+                match event.accept() {
+                    Ok(reply) => reply.send().await,
+                    Err(error) => warn_!("improv: could not answer a refusal: {}", error),
+                }
+            }
+            GattConnectionEvent::Gatt { event } => {
+                info!("improv: other GATT event");
+                accept_gatt(event).await
+            }
             // Answering this needs a `&Stack`, which `Peripheral` keeps private, so there is
             // nothing to respond with from here. trouble-host's own `Drop` complains too;
             // this names it in our own log so it is attributable. If a client's parameter
