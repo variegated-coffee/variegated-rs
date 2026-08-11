@@ -21,7 +21,7 @@ reboot the comms processor joins the network. Neither processor crashes.
 | 2 | `variegated-improv-trouble` codec crate, 19 host tests | done |
 | 3 | Wire types, credential store at key 1, link plumbing | done, hardware-verified |
 | 4 | `connection_task` takes credentials from the link; `env!` deleted | done, hardware-verified |
-| 5 | GATT service, advertising, `CONNS` 5→6, capabilities | code complete, **not yet on hardware** |
+| 5 | GATT service, advertising, `CONNS` 5→6, capabilities | **done, hardware-verified** |
 | 6 | Button hold, display symbol, single-boiler menu entry | **not started** |
 
 ## What exists now that plan 5 must build on
@@ -72,6 +72,39 @@ bytes; use this rather than `try_from`.
 **`SetWifiCredentials` is in the CLI palette** (`variegated-cli`), which is how a machine
 gets provisioned until plan 5 lands. `OpenWifiProvisioningWindow` is there too.
 
+## Plan 5 is proven end to end
+
+A full cycle works from `improv-wifi.com` in Chrome: the window opens, the device advertises
+and is found, Identify round-trips to the application processor, credentials are written, the
+radio associates with them, the credential is reported up the link, persisted, echoed back,
+and the URL comes back to the client. Post-provisioning the machine stays on the new network.
+
+**Three faults were fixed between "the code compiles" and that working**, none of which the
+plan predicted, and all of which presented as "the client just spins":
+
+1. **The state was announced before the client could hear it.** `serve` pushed the state the
+   instant the connection was up -- 375 ms before the client wrote its CCCDs -- and `notify`
+   with no subscriber returns `Ok` and sends nothing. It is now re-announced when the
+   current-state CCCD is written.
+2. **The RPC characteristic declared only `WRITE`.** Web Bluetooth refuses
+   `writeValueWithoutResponse()` on a characteristic without `WRITE_WITHOUT_RESPONSE`, and it
+   refuses it *in the browser*, so no ATT traffic reached the device at all -- for Identify
+   and for WifiSettings alike. Both properties are now declared. This is the one to remember:
+   every RPC blocked uniformly, which no server-side fault produces.
+3. **A successful provision left the machine with no Wi-Fi.** See the memory-budget note; the
+   caller reconnected over the link `try_candidate` had just made.
+
+Diagnosing any of it needed logging that did not exist -- the service had none, and every
+fallible call on the path was a discarded `Result`. What is there now: advertising start,
+connection accept, CCCD writes (which say whether the client subscribed at all), reads, every
+RPC with its length and the negotiated MTU, parse refusals with the `ParseError`, state
+transitions, notify failures, and `GattEvent::NotAllowed`. **Lengths and command names only,
+never packet bytes** -- a `WIFI_SETTINGS` frame is mostly credential.
+
+Note the `improv:` lines come from the crate and use `defmt` directly, like the sibling BLE
+drivers, so they reach the espflash monitor but not the debug bus. The `Improv:` and
+`Wi-Fi task:` lines are firmware-side `log_*!` and reach both.
+
 ## Plan 5, as built
 
 Every item that was outstanding here is done; see
@@ -101,6 +134,36 @@ Measured cost of the whole service: `.bss` 249016 → 253040, `.stack` 94232 →
 bytes of that is the sixth connection slot; the rest is the 20-entry attribute table and the
 two characteristic `StaticCell`s. On this chip `.stack` is the SRAM remainder, so a second
 GATT service would cost the same way.
+
+## Plan 6, which is next and entirely unbuilt
+
+Verified absent on 2026-08-11, with the pattern to copy named for each. All of it is in
+`variegated-rs`.
+
+* **Nothing renders the state.** `comms_status.improv` reaches the controller and is carried
+  into shared state (`dual_boiler_single_group.rs:1492`, `single_boiler_single_group.rs:826`),
+  but `display/graphical_renderer.rs::render_status_icons` draws only `W`/`S`/`B`. Follow the
+  `W` icon's three-state staleness discipline documented there: a stale `comms_status` is a
+  latch, so a dead comms processor would otherwise leave a claim on screen indefinitely.
+  On the 2×16 LCD, `lcd_renderer.rs::format_standby_row1` already ends in a padding space.
+* **`IdentifyMachine` does nothing** but `log_info!("Identify requested")` on both controllers
+  (`dual_boiler_single_group.rs:2358`, `single_boiler_single_group.rs:1435`). The dual-boiler
+  comment calls itself a placeholder for this step. **What it should actually do is an open
+  design question** -- the spec says only "make the machine identifiable to someone standing
+  in front of it". Flashing or inverting the display, or a timed message, are the candidates;
+  the LCD machines have fewer options.
+* **No way to open the window from the machine.** Only `variegated-cli`'s palette.
+  `buttons.rs` has `button_5_hold_start` (3000 ms, machine off) as the pattern for the
+  button-6 five-second hold; there is no `button_6_hold_start`. The recognizer emits no
+  `Press` on release after a hold (`buttons.rs:258-263`), so the water-tap toggle will not
+  also fire.
+* **Single-boiler has no menu entry** -- `MenuItemId::SettingsWifiProvisioning` in
+  `list_menu.rs`.
+
+Still outstanding from plan 5, as bench work rather than code: the wrong-password path
+(expect error `0x03`, state back to `Authorized`, old network still up), the scan RPC (drive
+it from nRF Connect -- the web client never sends `GET_WIFI_NETWORKS` over BLE), window
+self-expiry after five minutes, and whether the scales survive a five-minute advertisement.
 
 ## Two latent bugs found and fixed on the way — read these before debugging anything
 
