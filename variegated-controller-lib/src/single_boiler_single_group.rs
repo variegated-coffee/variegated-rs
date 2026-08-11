@@ -286,6 +286,11 @@ pub struct SingleBoilerSingleGroupController<
     // browser and a password has no business on it -- so a change announces itself.
     wifi_publish_pending: bool,
     wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+    // Where `IdentifyMachine` goes, carrying the instant it was handled. A `Watch` rather than
+    // a channel: only the latest request matters, and a second Identify arriving mid-flash
+    // should extend it rather than queue behind it. `None` on a machine with no display to
+    // flash, in which case Identify does nothing, which the Improv spec explicitly allows.
+    identify_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, Instant, 2>>,
     // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
     // channel because only the latest value matters.
     wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
@@ -349,6 +354,8 @@ impl<
         shot_log_query_sender: Option<
             Sender<'a, ChannelM, crate::shot_log_query::ShotLogQuery, 1>,
         >,
+        // Where `IdentifyMachine` goes. `None` on a machine with no display to flash.
+        identify_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, Instant, 2>>,
     ) -> Self {
         Self {
             command_channel_receiver,
@@ -399,6 +406,7 @@ impl<
             wifi_credentials_loaded: false,
             wifi_publish_pending: false,
             wifi_provisioning_sender,
+            identify_publisher,
             wifi_credentials_publisher,
         }
     }
@@ -1433,7 +1441,12 @@ impl<
                 }
             }
             MachineCommand::IdentifyMachine => {
+                // Logged as well as published: this is the far end of a round trip that starts
+                // in a browser, and the log is the only place both ends are visible at once.
                 log_info!("Identify requested");
+                if let Some(publisher) = self.identify_publisher.as_ref() {
+                    publisher.send(Instant::now());
+                }
             }
             MachineCommand::SetShotAnnotations(id, annotations) => {
                 // Identical to the dual-boiler arm, and identical for a reason: the

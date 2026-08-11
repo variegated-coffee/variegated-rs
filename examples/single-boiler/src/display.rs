@@ -10,7 +10,7 @@ use embassy_rp::spi::{Async, Spi};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Receiver;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Delay, Duration};
+use embassy_time::{Delay, Duration, Instant};
 use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, RoundedRectangle, StyledDrawable};
 use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
@@ -52,7 +52,22 @@ pub struct DisplayController {
     status: Status,
     ui_status: UIStatus,
     routine_repository: &'static RoutineRepository,
+    /// Improv Identify requests, carrying the instant the controller handled one.
+    identify_receiver: IdentifyReceiver,
+    /// When the identify flash ends, if one is running.
+    identify_until: Option<Instant>,
 }
+
+/// How long the machine identifies itself for after an Improv Identify request.
+///
+/// Long enough to find the machine by eye from across a room, short enough that someone who did
+/// not mean to press it is not left watching a strobing panel. The Improv spec sets no
+/// duration -- it says only "make the device identifiable to someone standing in front of it".
+const IDENTIFY_FLASH_DURATION: Duration = Duration::from_secs(3);
+
+/// The receiver [`DisplayController`] takes for identify requests.
+pub type IdentifyReceiver =
+    embassy_sync::watch::Receiver<'static, NoopRawMutex, Instant, 2>;
 
 impl DisplayController {
     pub fn new(
@@ -63,7 +78,8 @@ impl DisplayController {
         text_style_large: embedded_graphics::mono_font::MonoTextStyle<'static, BinaryColor>,
         status_receiver: StatusSubscriber,
         ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>,
-        routine_repository: &'static RoutineRepository
+        routine_repository: &'static RoutineRepository,
+        identify_receiver: IdentifyReceiver,
     ) -> Self {
         Self {
             display,
@@ -76,7 +92,9 @@ impl DisplayController {
             ui_status_receiver,
             status: Status::default(),
             ui_status: UIStatus::default(),
-            routine_repository
+            routine_repository,
+            identify_receiver,
+            identify_until: None,
         }
     }
     
@@ -142,6 +160,30 @@ impl DisplayController {
     pub async fn render_frame(&mut self) {
         self.update_status();
         self.display.clear();
+
+        // An identify flash replaces the screen rather than overlaying it. The point of Improv
+        // Identify is to answer "which of these machines am I talking to" for someone standing
+        // in the room, and a panel alternating fully lit and fully dark at 4 Hz answers that in
+        // a way no amount of text can. 4 Hz reads as deliberate; faster reads as a fault.
+        //
+        // `identify_until` is left set once it has passed. Only `update_status` writes it, and
+        // a stale `Some` in the past costs one comparison per frame.
+        if let Some(until) = self.identify_until {
+            let now = Instant::now();
+            if now < until {
+                if (now.as_millis() / 250) % 2 == 0 {
+                    Rectangle::new(Point::zero(), Size::new(128, 64))
+                        .into_styled(PrimitiveStyleBuilder::new()
+                            .fill_color(BinaryColor::On)
+                            .build())
+                        .draw(&mut self.display)
+                        .unwrap();
+                }
+                self.display.flush().await.expect("Failed to flush display");
+                return;
+            }
+        }
+
         self.render_status_animation();
 
         // Clone the necessary data to avoid borrowing issues
@@ -1283,6 +1325,15 @@ impl DisplayController {
                 self.ui_status = ui_status_update;
             }
         }
+
+        // Drained here with the others because it is the same kind of thing: whatever arrived
+        // since the last frame, applied before anything is drawn. `try_changed` rather than
+        // `changed` so the render loop keeps running -- and because a `Watch` reports a change
+        // only to a receiver that has not seen it, a second Identify mid-flash pushes the
+        // deadline out rather than queueing behind the first.
+        if let Some(requested_at) = self.identify_receiver.try_changed() {
+            self.identify_until = Some(requested_at + IDENTIFY_FLASH_DURATION);
+        }
     }
     
     /// Format parameter value with appropriate unit
@@ -1575,7 +1626,8 @@ pub async fn display_task(
     disp_p: DisplayPeripherals,
     status_receiver: StatusSubscriber,
     ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>,
-    routine_repository: &'static RoutineRepository
+    routine_repository: &'static RoutineRepository,
+    identify_receiver: IdentifyReceiver,
 ) {
     let spi_config = embassy_rp::spi::Config::default();
     let mut spi = Spi::new(
@@ -1641,7 +1693,8 @@ pub async fn display_task(
         text_style_large,
         status_receiver,
         ui_status_receiver,
-        routine_repository
+        routine_repository,
+        identify_receiver,
     );
 
     controller.render_loop().await;

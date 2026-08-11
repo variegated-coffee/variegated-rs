@@ -550,6 +550,19 @@ pub struct DualBoilerSingleGroupController<
     // milliseconds; zero means close. `None` on a machine whose comms processor is not
     // wired for it, in which case requests are refused rather than silently dropped.
     wifi_provisioning_sender: Option<Sender<'a, ChannelM, u32, 2>>,
+    // Where `IdentifyMachine` goes, carrying the instant it was handled.
+    //
+    // A `Watch` rather than a channel, unlike `wifi_provisioning_sender` directly above: this
+    // machine can have both display tasks built, only the latest request matters, and a second
+    // Identify arriving mid-flash should extend it rather than queue behind it.
+    //
+    // An `Instant` rather than a unit so the flash is anchored to when the command was
+    // *handled*, not to when a display noticed -- and so the value genuinely changes, which is
+    // what `Receiver::try_changed` keys off.
+    //
+    // `None` on a machine with no display wired for it, in which case Identify does nothing,
+    // which the Improv spec explicitly allows.
+    identify_publisher: Option<watch::Sender<'a, ChannelM, Instant, 2>>,
     // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
     // channel because only the latest value matters and a receiver that missed an
     // intermediate one has missed nothing.
@@ -655,6 +668,8 @@ impl<
         shot_log_query_sender: Option<
             Sender<'a, ChannelM, crate::shot_log_query::ShotLogQuery, 1>,
         >,
+        // Where `IdentifyMachine` goes. `None` on a machine with no display to flash.
+        identify_publisher: Option<watch::Sender<'a, ChannelM, Instant, 2>>,
     ) -> Self {
         // Create configuration objects from persistent config defaults
         // These will be overridden when the persistent config is loaded from flash
@@ -720,6 +735,7 @@ impl<
             wifi_credentials: StoredWifiCredentials::default(),
             wifi_publish_pending: false,
             wifi_provisioning_sender,
+            identify_publisher,
             wifi_credentials_publisher,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
@@ -2356,10 +2372,13 @@ impl<
                 }
             }
             MachineCommand::IdentifyMachine => {
-                // Nothing to do on this machine yet -- the display hook lands with the
-                // machine UI. Logged rather than ignored so the round trip is visible while
-                // the far end is being brought up.
+                // Still logged as well as published: this is the far end of a round trip that
+                // starts in a browser, and the log is the only place both ends are visible at
+                // once.
                 log_info!("Identify requested");
+                if let Some(publisher) = self.identify_publisher.as_ref() {
+                    publisher.send(Instant::now());
+                }
             }
             MachineCommand::SetShotAnnotations(id, annotations) => {
                 // Editing a *stored* shot is a whole-file rewrite on the card, which

@@ -34,6 +34,7 @@ use crate::GROUP_SCALE_PERIPHERAL_ID;
 use crate::BELKA_PERIPHERAL_ID;
 use variegated_timekeeping::DateTimeInZone;
 use core::time::Duration;
+use embassy_time::Instant;
 
 // Display dimensions in landscape mode
 const DISPLAY_WIDTH: i32 = 428;
@@ -64,6 +65,8 @@ pub struct GraphicalDisplayState {
     pub next_schedule: Option<(ScheduleItem, DateTimeInZone)>,
     /// Cached current routine being executed
     pub current_routine: Option<Routine>,
+    /// When the Improv identify flash ends, if one is running. Set by the display task.
+    pub identify_until: Option<Instant>,
 }
 
 impl GraphicalDisplayState {
@@ -74,6 +77,7 @@ impl GraphicalDisplayState {
             animation_state: false,
             next_schedule: None,
             current_routine: None,
+            identify_until: None,
         }
     }
 
@@ -178,6 +182,25 @@ impl GraphicalDisplayState {
             // Clear display
             display.clear(Rgb565::BLACK).ok();
         });
+
+        // An identify flash replaces the screen rather than overlaying it. The point of Improv
+        // Identify is to answer "which of these machines am I talking to" for someone standing
+        // in the room, and a panel that alternates fully lit and fully dark answers that in a
+        // way no amount of text on the usual screen can.
+        //
+        // `identify_until` is not cleared once it has passed: this method has `&mut self` but
+        // the deadline belongs to the display task, which is the only thing that knows when a
+        // new one arrives. A stale `Some` in the past costs one comparison per frame.
+        if let Some(until) = self.identify_until {
+            let now = Instant::now();
+            if now < until {
+                // 4 Hz: fast enough to read as deliberate, slow enough that each phase is a
+                // visible state rather than a flicker.
+                let lit = (now.as_millis() / 250) % 2 == 0;
+                display.clear(if lit { Rgb565::WHITE } else { Rgb565::BLACK }).ok();
+                return Ok(());
+            }
+        }
 
         // === Effective area ===
 /*        Rectangle::new(Point::new(EFFECTIVE_X, EFFECTIVE_Y), Size::new(EFFECTIVE_WIDTH as u32, EFFECTIVE_HEIGHT as u32))

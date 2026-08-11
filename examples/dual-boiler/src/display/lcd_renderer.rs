@@ -7,6 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::format;
 use chrono::Timelike;
 use core::time::Duration;
+use embassy_time::Instant;
 use hd44780_controller::controller::{Controller, state::Init};
 use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, COMMS_STATUS_STALE_AFTER};
 use variegated_controller_types::wifi::ImprovState;
@@ -28,6 +29,8 @@ pub struct LcdDisplayState {
     routine_repository: &'static RoutineRepositoryMutex,
     /// Cached current routine being executed (fetched once per execution)
     pub current_routine: Option<Routine>,
+    /// When the Improv identify flash ends, if one is running. Set by the display task.
+    pub identify_until: Option<Instant>,
 }
 
 impl LcdDisplayState {
@@ -39,6 +42,7 @@ impl LcdDisplayState {
             display_initialized: false,
             routine_repository,
             current_routine: None,
+            identify_until: None,
         }
     }
 
@@ -78,6 +82,22 @@ impl LcdDisplayState {
 
     /// Get the formatted text for the current display state
     pub async fn get_display_text(&self) -> (String, String) {
+        // Ahead of the provisioning rows below: Identify is only ever sent from inside a
+        // provisioning window, so anything checked after them would never be reached.
+        //
+        // Both rows filled and both rows blank, alternating at 4 Hz. The 2x16 has no other way
+        // to be seen from across a room, which is the whole point of Improv Identify. The blank
+        // phase relies on `pad_or_truncate_to_16` padding the empty string out with spaces --
+        // a short write would leave the previous frame's characters on the panel.
+        if let Some(until) = self.identify_until {
+            let now = Instant::now();
+            if now < until {
+                let lit = (now.as_millis() / 250) % 2 == 0;
+                let row = if lit { "*".repeat(16) } else { String::new() };
+                return (row.clone(), row);
+            }
+        }
+
         // Ahead of the mode match rather than inside it: the window can be open in any mode,
         // and a copy of this check in each arm is a copy that will be missed when an arm is
         // added.

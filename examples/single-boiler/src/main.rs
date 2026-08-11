@@ -332,6 +332,17 @@ static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<NoopRawMutex, u32, 2>> = St
 /// The credentials the controller last loaded or stored, for the transceiver to put on the
 /// link. A `Watch` because only the latest value matters.
 static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<NoopRawMutex, StoredWifiCredentials, 2>> = StaticCell::new();
+/// When the controller last handled an Improv `IdentifyMachine`, for the display to flash on.
+///
+/// A `Watch` because only the latest request matters: a second Identify arriving mid-flash
+/// should extend it, not queue behind it.
+///
+/// A `StaticCell` rather than the plain `static` the dual boiler uses, because `NoopRawMutex`
+/// is not `Sync` and so cannot back a `static` at all. That is the correct mutex here -- this
+/// board has one executor, and both ends of this watch are reached from the same function --
+/// but it means the deferred initialisation is forced rather than chosen. Sized `2` to match
+/// the dual boiler, though only one receiver is ever taken.
+static IDENTIFY_WATCH: StaticCell<Watch<NoopRawMutex, embassy_time::Instant, 2>> = StaticCell::new();
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
@@ -538,6 +549,7 @@ async fn main_task(spawner: Spawner) -> ! {
     );
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
     let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());
+    let identify_watch = IDENTIFY_WATCH.init(Watch::new());
 
     info!("Configuration loaded");
     
@@ -807,6 +819,7 @@ async fn main_task(spawner: Spawner) -> ! {
         // shot_log_query_sender: `None`. With nowhere to store a shot there is nothing
         // to re-annotate, so `SetShotAnnotations` is refused rather than queued.
         None,
+        Some(identify_watch.sender()),
     );
 
     // Controller will publish configuration automatically in its task loop
@@ -862,7 +875,13 @@ async fn main_task(spawner: Spawner) -> ! {
     info!("Creating display task");
     let disp_p = display_peripherals!(p);
 
-    spawner.spawn(display::display_task(disp_p, status_channel.subscriber().unwrap(), ui_status_channel.receiver(), routine_repository_ref).unwrap());
+    spawner.spawn(display::display_task(
+        disp_p,
+        status_channel.subscriber().unwrap(),
+        ui_status_channel.receiver(),
+        routine_repository_ref,
+        identify_watch.receiver().expect("the identify watch has a receiver slot for the display"),
+    ).unwrap());
 
     info!("Creating esp transceiver task");
     let esp_p = esp32_peripherals!(p);

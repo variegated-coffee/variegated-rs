@@ -835,6 +835,10 @@ fn main() -> ! {
             reset_pin,
         } = disp_p;
 
+        let identify_receiver_tft = IDENTIFY_WATCH
+            .receiver()
+            .expect("the identify watch is sized for both display receivers");
+
         paint_core1_stack();
         spawn_core1(
             p.CORE1,
@@ -878,7 +882,8 @@ fn main() -> ! {
                         spi_config.clone(),
                         dc,
                         reset,
-                        status_channel.subscriber().expect("Failed to get TFT status subscriber")
+                        status_channel.subscriber().expect("Failed to get TFT status subscriber"),
+                        identify_receiver_tft
                     )));
 
                     log_info!("Spawning backlight task on core 1");
@@ -1086,6 +1091,22 @@ static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u32, 2>> 
 /// missed an intermediate one has missed nothing. Sized for one receiver -- the
 /// transceiver -- plus the sender's own slot.
 static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<SyncSendRawMutex, StoredWifiCredentials, 2>> = StaticCell::new();
+/// When the controller last handled an Improv `IdentifyMachine`, for the displays to flash on.
+///
+/// A `Watch` rather than a channel because it has two receivers -- the TFT task on core 1 and
+/// the character LCD task on core 0 -- and because only the latest request matters: a second
+/// Identify arriving mid-flash should extend it, not queue behind it.
+///
+/// `SyncSendRawMutex` for the same reason as the channels above: the receivers straddle both
+/// cores. Sized for exactly the two display tasks; a spare slot would only hide a wiring
+/// mistake, and `receiver()` returning `None` at boot is the failure worth having.
+///
+/// A plain `static` rather than a `StaticCell`, unlike every channel above it. `Watch::new` is
+/// `const`, and the two ends of this one are reached from *different functions* -- the
+/// receivers from `main`, which spawns the display tasks, and the sender from `main_task`,
+/// which builds the controller. A `StaticCell` can only hand its reference to whoever calls
+/// `init`, so it would have forced the sender through `main_task`'s argument list for no gain.
+static IDENTIFY_WATCH: Watch<SyncSendRawMutex, Instant, 2> = Watch::new();
 static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
@@ -3004,6 +3025,7 @@ async fn main_task(
         shot_log_sender,
         sd_card_present,
         shot_log_query_sender,
+        Some(IDENTIFY_WATCH.sender()),
     );
 
     // Create status subscriber for LCD display and spawn the task.
@@ -3016,10 +3038,14 @@ async fn main_task(
         let display_status_receiver = status_channel
             .subscriber()
             .expect("Failed to get display status subscriber");
+        let identify_receiver_lcd = IDENTIFY_WATCH
+            .receiver()
+            .expect("the identify watch is sized for both display receivers");
         spawner.spawn(unwrap!(lcd_display_task(
             lcd_device,
             display_status_receiver,
-            routine_repository_ref
+            routine_repository_ref,
+            identify_receiver_lcd
         )));
     }
 

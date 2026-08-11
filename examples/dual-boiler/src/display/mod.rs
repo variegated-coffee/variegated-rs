@@ -49,6 +49,25 @@ use variegated_instrumentation::instrumented_section;
 #[cfg(feature = "tft-display")]
 use variegated_nv3007::{prelude::*, Builder, displays::nv3007::{Nv3007_168_428, Nv3007Variant}};
 
+/// How long the machine identifies itself for after an Improv Identify request.
+///
+/// Long enough to find the machine by eye from across a room, short enough that someone who did
+/// not mean to press it is not left watching a strobing panel. The Improv spec sets no
+/// duration -- it says only "make the device identifiable to someone standing in front of it".
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
+const IDENTIFY_FLASH_DURATION: Duration = Duration::from_secs(3);
+
+/// The receiver each display task takes for [`IDENTIFY_FLASH_DURATION`]-long flashes.
+///
+/// Named because it is written out in two task signatures and is unreadable inline.
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
+pub type IdentifyReceiver = embassy_sync::watch::Receiver<
+    'static,
+    variegated_hal::SyncSendRawMutex,
+    embassy_time::Instant,
+    2,
+>;
+
 #[cfg(feature = "character-display")]
 pub mod lcd_renderer;
 
@@ -81,6 +100,7 @@ pub async fn lcd_display_task(
     lcd_device: Mcp23017HD44780Device<I2cDevice<'static, NoopRawMutex, I2c<'static, embassy_rp::peripherals::I2C1, Async>>, Delay>,
     mut status_receiver: StatusSubscriber,
     routine_repository: &'static crate::RoutineRepositoryMutex,
+    mut identify_receiver: IdentifyReceiver,
 ) {
     // Initialize the HD44780 LCD controller configuration
     let initial_config = InitialConfig {
@@ -132,6 +152,14 @@ pub async fn lcd_display_task(
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);
+        }
+
+        // `try_changed`, not `changed`: this loop has to keep rendering. A `Watch` reports a
+        // change only to a receiver that has not seen it, so a second Identify during a flash
+        // lands here and pushes the deadline out -- which is what pressing the button twice
+        // means.
+        if let Some(requested_at) = identify_receiver.try_changed() {
+            display_state.identify_until = Some(requested_at + IDENTIFY_FLASH_DURATION);
         }
 
         // Update cached routine when routine execution changes
@@ -200,7 +228,8 @@ pub async fn graphical_display_task(
     spi_config: embassy_rp::spi::Config,
     dc: Output<'static>,
     mut reset: Output<'static>,
-    mut status_receiver: StatusSubscriber
+    mut status_receiver: StatusSubscriber,
+    mut identify_receiver: IdentifyReceiver,
 ) {
     use crate::display::GraphicalDisplayState;
 
@@ -257,6 +286,12 @@ pub async fn graphical_display_task(
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);
+        }
+
+        // See the note in `lcd_display_task`: `try_changed` so the loop keeps rendering, and
+        // so a repeated Identify extends the flash rather than queueing behind it.
+        if let Some(requested_at) = identify_receiver.try_changed() {
+            display_state.identify_until = Some(requested_at + IDENTIFY_FLASH_DURATION);
         }
 
         // Query schedule store periodically (every ~1 second = 100 * 10ms)
