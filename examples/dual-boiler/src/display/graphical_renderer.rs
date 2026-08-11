@@ -25,6 +25,7 @@ use u8g2_fonts::{
 };
 
 use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState, COMMS_STATUS_STALE_AFTER};
+use variegated_controller_types::wifi::ImprovState;
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
 #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
@@ -198,6 +199,76 @@ impl GraphicalDisplayState {
             DisplayMode::PostBrew => self.render_post_brew_mode(display)?,
             DisplayMode::RoutineExecution => self.render_routine_mode(display)?,
         }
+
+        // After the mode renderer, not before: this is an overlay, and drawing it last puts it
+        // on top in every mode rather than in the ones that happened to be considered.
+        self.render_provisioning_banner(display).ok();
+
+        Ok(())
+    }
+
+    /// The Improv provisioning window, drawn over whatever the mode renderer put there.
+    ///
+    /// An overlay rather than another letter in the status column, for two reasons. The column
+    /// is out of letters -- `belka` already draws `P` for the portal, and `dual-boiler` enables
+    /// `belka` -- and, more to the point, a letter cannot say the thing a user in a
+    /// provisioning window actually needs, which is what is happening and where to go next.
+    /// Covering the bottom strip is the right trade for a mode that is transient, deliberately
+    /// entered, and self-expiring.
+    ///
+    /// Staleness is checked exactly as the `W` icon checks it, and for the same reason:
+    /// `comms_status` is a latch, so a comms processor that died mid-window would otherwise
+    /// leave "ready to pair" on screen indefinitely, inviting a user to pair with nothing.
+    /// Drawing nothing is the honest rendering of "we no longer know".
+    fn render_provisioning_banner<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let comms_stale = self.shared_state.status.comms_status_age
+            .map(|age| age >= COMMS_STATUS_STALE_AFTER)
+            .unwrap_or(true);
+        if comms_stale {
+            return Ok(());
+        }
+
+        let improv = match self.shared_state.status.comms_status.as_ref() {
+            Some(comms) => comms.improv,
+            None => return Ok(()),
+        };
+
+        // `Provisioned` draws too. The client has been told the credentials work, but the
+        // window stays open until it expires or is closed, and someone watching the machine
+        // should see the outcome rather than an abrupt return to the normal screen.
+        let label = match improv {
+            ImprovState::Stopped => return Ok(()),
+            ImprovState::AwaitingAuthorization | ImprovState::Authorized => {
+                "Wi-Fi setup: ready to pair"
+            }
+            ImprovState::Provisioning => "Wi-Fi setup: connecting...",
+            ImprovState::Provisioned => "Wi-Fi setup: connected",
+        };
+
+        const BANNER_HEIGHT: i32 = 16;
+        let top = EFFECTIVE_Y + EFFECTIVE_HEIGHT - BANNER_HEIGHT;
+
+        Rectangle::new(
+            Point::new(EFFECTIVE_X, top),
+            Size::new(EFFECTIVE_WIDTH as u32, BANNER_HEIGHT as u32),
+        )
+            .into_styled(PrimitiveStyleBuilder::new()
+                .fill_color(Rgb565::CSS_DARK_BLUE)
+                .build())
+            .draw(display)?;
+
+        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+        small_font.render_aligned(
+            format_args!("{}", label),
+            Point::new(EFFECTIVE_CENTER_X, top + 2),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
 
         Ok(())
     }
