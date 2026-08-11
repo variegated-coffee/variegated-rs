@@ -42,6 +42,7 @@ pub enum MenuItemId {
     Routine(RoutineIndex),
     SettingsInformation,
     SettingsScaleSettings,
+    SettingsWifiProvisioning,
     SettingsManualBrew,
     SettingsDebugInfo,
     SettingsBoilerTemperature,
@@ -67,6 +68,10 @@ const SETTINGS_MENU_ITEMS: &[SettingsMenuDefinition] = &[
     SettingsMenuDefinition {
         label: "Scale Settings", 
         id: MenuItemId::SettingsScaleSettings,
+    },
+    SettingsMenuDefinition {
+        label: "WiFi Setup",
+        id: MenuItemId::SettingsWifiProvisioning,
     },
     SettingsMenuDefinition {
         label: "Manual Brew",

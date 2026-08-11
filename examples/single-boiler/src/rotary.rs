@@ -127,6 +127,12 @@ pub(crate) enum UIState {
     ListMenu(ListMenuType, ListMenuState, Option<Box<(ListMenuType, ListMenuState)>>, Option<Vec<ListMenuItem>>),
     SettingsInformation,
     SettingsDebugInfo,
+    /// The Improv provisioning window: opened on entry, closed on exit.
+    ///
+    /// Carries no state of its own. What it renders comes from `Status.comms_status.improv`,
+    /// which the comms processor reports once a second, so the screen tracks the radio rather
+    /// than tracking what this processor last asked for.
+    WifiProvisioning,
     ScaleSettings(ScaleSettingsSubState),
     RoutineParameters(RoutineIndex, RoutineParameterEditState),
     ParameterManipulation {
@@ -375,6 +381,12 @@ pub async fn handle_menu_item_activation(
         MenuItemId::SettingsDebugInfo => Some(UIState::SettingsDebugInfo),
         MenuItemId::SettingsScaleSettings => Some(UIState::ScaleSettings(ScaleSettingsSubState::default())),
         MenuItemId::SettingsManualBrew => Some(UIState::ManualBrew(ControlMode::default())),
+        MenuItemId::SettingsWifiProvisioning => {
+            // Handled at the call site, which has the command sender this function does not:
+            // entering the screen has to *open* the window, not merely display it. Same shape
+            // as `SettingsBoilerTemperature` below.
+            None
+        },
         MenuItemId::SettingsBoilerTemperature => {
             // This is now handled inline in the match statement to have access to configuration
             None
@@ -601,6 +613,18 @@ where
                             
                             // Handle menu item activation
                             match menu_item_id {
+                                MenuItemId::SettingsWifiProvisioning => {
+                                    // Five minutes, matching the dual boiler's button hold.
+                                    // The controller refuses this outright while the machine is
+                                    // busy; the screen then shows "Not open" and the user finds
+                                    // out by reading it rather than by being told twice.
+                                    self.command_sender.send(
+                                        MachineCommand::OpenWifiProvisioningWindow {
+                                            duration_ms: 300_000,
+                                        }
+                                    ).await;
+                                    self.status.state = UIState::WifiProvisioning;
+                                },
                                 MenuItemId::SettingsBoilerTemperature => {
                                     // Get current boiler temperature from configuration
                                     let current_temp = if let Some(ref config) = self.current_configuration {
@@ -765,6 +789,15 @@ where
                     }
                     UIState::SettingsInformation | UIState::SettingsDebugInfo => {
                         // Go back to settings menu
+                        let menu_state = ListMenuState::new();
+                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
+                    }
+                    UIState::WifiProvisioning => {
+                        // Closed explicitly rather than left to expire. Leaving the screen is
+                        // the clearest statement a user can make that they are done, and five
+                        // more minutes of connectable advertising shares one antenna with
+                        // Wi-Fi and with the live link to the scale.
+                        self.command_sender.send(MachineCommand::CloseWifiProvisioningWindow).await;
                         let menu_state = ListMenuState::new();
                         self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
                     }

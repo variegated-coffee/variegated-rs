@@ -201,6 +201,9 @@ impl DisplayController {
             UIState::SettingsDebugInfo => {
                 self.render_old().await;
             }
+            UIState::WifiProvisioning => {
+                self.render_wifi_provisioning();
+            }
             UIState::ScaleSettings(substate) => {
                 self.render_scale_settings(substate).await;
             }
@@ -324,6 +327,66 @@ impl DisplayController {
                 64
             );
         }
+    }
+
+    /// The Improv provisioning window, entered from the settings menu.
+    ///
+    /// Reports what the *radio* says, not what this processor last asked for: the window is
+    /// opened by a command that the controller can refuse -- it does, while the machine is busy
+    /// -- so a screen that assumed success would claim to be pairable when nothing was
+    /// advertising. "Not open" is a real outcome and says so.
+    ///
+    /// The staleness check is the one the dual boiler's `W` icon documents, for the same
+    /// reason: `comms_status` is a latch, so a comms processor that stopped reporting would
+    /// otherwise leave a standing invitation to pair on a screen with nothing behind it.
+    fn render_wifi_provisioning(&mut self) {
+        use variegated_controller_types::{wifi::ImprovState, COMMS_STATUS_STALE_AFTER};
+
+        Text::with_text_style("WiFi Setup", Point::new(64, 0), self.text_style_medium_small, TextStyleBuilder::new()
+            .alignment(Alignment::Center)
+            .baseline(Baseline::Top)
+            .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        Line::new(Point::new(0, 10), Point::new(128, 10))
+            .into_styled(PrimitiveStyleBuilder::new()
+                .stroke_color(BinaryColor::On)
+                .stroke_width(1)
+                .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        let comms_stale = self.status.comms_status_age
+            .map(|age| age >= COMMS_STATUS_STALE_AFTER)
+            .unwrap_or(true);
+
+        let (state_line, hint) = if comms_stale {
+            ("No comms", "")
+        } else {
+            match self.status.comms_status.as_ref().map(|comms| comms.improv) {
+                Some(ImprovState::AwaitingAuthorization) | Some(ImprovState::Authorized) => {
+                    ("Ready to pair", "improv-wifi.com")
+                }
+                Some(ImprovState::Provisioning) => ("Connecting...", ""),
+                Some(ImprovState::Provisioned) => ("Connected", ""),
+                Some(ImprovState::Stopped) | None => ("Not open", "Machine busy?"),
+            }
+        };
+
+        Text::with_text_style(state_line, Point::new(64, 20), self.text_style_medium, TextStyleBuilder::new()
+            .alignment(Alignment::Center)
+            .baseline(Baseline::Top)
+            .build())
+            .draw(&mut self.display)
+            .unwrap();
+
+        Text::with_text_style(hint, Point::new(64, 42), self.text_style_small, TextStyleBuilder::new()
+            .alignment(Alignment::Center)
+            .baseline(Baseline::Top)
+            .build())
+            .draw(&mut self.display)
+            .unwrap();
     }
 
     async fn render_settings_information(&mut self) {
