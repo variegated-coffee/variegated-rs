@@ -491,22 +491,44 @@ async fn main(spawner: Spawner) -> ! {
     // bytes`, which is the exact 32 kB of the increase. Do not spend time trying to grow
     // this; any further heap has to come out of `.stack`.
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
-    // 48 -> 64 -> 56 kB. Everything past the 64 kB above comes out of `.stack`, which is
-    // the SRAM remainder, so this line and the stack are in direct competition and there
+    // 48 -> 64 -> 56 -> 40 kB. Everything past the 64 kB above comes out of `.stack`, which
+    // is the SRAM remainder, so this line and the stack are in direct competition and there
     // is no third source.
     //
-    // **Cut to 56 on 2026-08-11 to pay for the Improv GATT service**, which added 4024
-    // bytes of `.bss` (the 20-entry attribute table, the characteristic `StaticCell`s and
-    // a sixth BLE connection slot) and took `.stack` to 90144 -- below the 95848 recorded
-    // at the bottom of this comment as the last figure known to work. The failure was the
-    // `chip_v7_set_chan` load fault described there, to the letter, with `mtval=0x3`
-    // instead of `0x5`; `esp-rtos` also caught it directly once, as
-    // `Stack pointer: 40857b20, Task stack range: 40857d78 ..=` -- 600 bytes past the
-    // floor. This line returns 8192, for 98336.
+    // **This number is now measured on both sides rather than guessed.** The 1 Hz snapshot
+    // reports `Heap high-water` and `Stack high-water`, and the figures that set this line
+    // are:
     //
-    // The margin was already gone before that service existed: the commit that adds only
-    // ~500 bytes of `.bss` overflowed by 600. So treat 95848 as a *lower* bound that had
-    // quietly been crossed, not as a safe target.
+    //   * heap peak 82356, across a full Improv provisioning cycle with a BLE client
+    //     connected -- which is this firmware's peak-memory event.
+    //   * stack peak 94028 of 95640, i.e. **1612 bytes of headroom**, which is nothing.
+    //
+    // 56 -> 40 moves 16384 bytes from a heap with ~40 kB spare to a stack with ~1.6 kB
+    // spare. Leaves the heap ~24 kB over its measured peak and the stack ~18 kB over its
+    // own. Do not raise this line again without reading both high-water figures first;
+    // that is what they exist for.
+    //
+    // # How the two edges were found, because both cost a day
+    //
+    // The stack overflowed at 90144 and did not at 97616. It presented as a load access
+    // fault in `chip_v7_set_chan` at a different address per build -- the overrun landing on
+    // whatever the linker had put at the top of `.bss` -- and `esp-rtos` caught it directly
+    // once, as `Stack pointer: 40857b20, Task stack range: 40857d78 ..=`, 600 bytes past the
+    // floor. **The margin was already gone before the Improv service existed**: a commit
+    // adding ~500 bytes of `.bss` overflowed by 600. So the 95848 recorded below is a lower
+    // bound that had quietly been crossed, not a safe target.
+    //
+    // The heap exhausted at 121552 of 122880 during provisioning, taking the machine down
+    // on `memory allocation of 800 bytes failed`. That was **not** a leak in the driver, as
+    // first assumed: `wifi::try_candidate` now brackets the heap either side of each step of
+    // a re-association and it costs *nothing*, netting ~1.2 kB freed. It was churn -- the
+    // caller tore down the link it had just made and the station cycled -- and fixing that
+    // took post-provisioning usage from ~115 kB to ~74 kB.
+    //
+    // Note what the stack figure means: `esp_rtos::main` runs the executor on the main
+    // thread, so **every embassy task is polled on this one stack** and 94028 is the deepest
+    // single poll, not main's own depth. `postcard::from_bytes_cobs::<..Configuration>` is
+    // the documented suspect.
     //
     // Raised because the machine ran out: `memory allocation of 128 bytes failed` at
     // ~12 minutes with two BLE peripherals connected, and a snapshot shortly before it
@@ -557,7 +579,7 @@ async fn main(spawner: Spawner) -> ! {
     //   before blaming the stack for anything: `.stack` is whatever SRAM is left after
     //   `.data` and `.bss`, so the number is computable from any build, and every byte
     //   of static costs a byte of stack one for one.
-    esp_alloc::heap_allocator!(size: 56 * 1024);
+    esp_alloc::heap_allocator!(size: 40 * 1024);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

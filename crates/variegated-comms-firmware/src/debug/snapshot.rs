@@ -56,13 +56,19 @@ fn report_heap_high_water() {
     static LAST_REPORTED: AtomicU32 = AtomicU32::new(0);
     const REPORT_STEP: u32 = 4096;
 
-    let peak = esp_alloc::HEAP.stats().max_usage as u32;
+    let stats = esp_alloc::HEAP.stats();
+    let peak = stats.max_usage as u32;
     if peak >= LAST_REPORTED.load(Ordering::Relaxed).saturating_add(REPORT_STEP) {
         LAST_REPORTED.store(peak, Ordering::Relaxed);
+        // `stats.size`, not `peak + free`. The latter is what this line used to print and it
+        // is not a total of anything: it moves every time either term moves, so the same
+        // heap reported "of 122880" and "of 129548" a few seconds apart. It cost two wrong
+        // diagnoses -- once reading a 43 kB retention as a smaller fraction than it was,
+        // once as evidence the total itself was fluctuating.
         log_info!(
             "Heap high-water {} bytes of {} ({} free now)",
             peak,
-            peak + esp_alloc::HEAP.free() as u32,
+            stats.size as u32,
             esp_alloc::HEAP.free() as u32
         );
     }
