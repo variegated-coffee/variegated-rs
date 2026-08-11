@@ -8,7 +8,8 @@ use alloc::format;
 use chrono::Timelike;
 use core::time::Duration;
 use hd44780_controller::controller::{Controller, state::Init};
-use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition};
+use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, COMMS_STATUS_STALE_AFTER};
+use variegated_controller_types::wifi::ImprovState;
 use variegated_timekeeping::TimeKeeper;
 use variegated_controller_lib::routine::RoutineRepository;
 
@@ -41,8 +42,49 @@ impl LcdDisplayState {
         }
     }
 
+    /// Both rows, while the Improv provisioning window is open.
+    ///
+    /// The whole display, not the spare character at the end of
+    /// [`Self::format_standby_row1`]. A 2x16 is full at all times, and one glyph tucked into
+    /// the padding would be indistinguishable from a rendering fault. The window is a mode the
+    /// user deliberately entered and which expires on its own, so taking the panel for its
+    /// duration is proportionate.
+    ///
+    /// `None` means "not in a window, or no longer sure". The staleness check is the `W`
+    /// icon's, for the reason documented on the graphical renderer: `comms_status` is a latch,
+    /// and a dead comms processor must not leave a standing invitation to pair on screen.
+    ///
+    /// Every string here is at most 16 characters -- `pad_or_truncate_to_16` would cut a
+    /// longer one silently, mid-word.
+    pub fn provisioning_rows(&self) -> Option<(String, String)> {
+        let comms_stale = self.shared_state.status.comms_status_age
+            .map(|age| age >= COMMS_STATUS_STALE_AFTER)
+            .unwrap_or(true);
+        if comms_stale {
+            return None;
+        }
+
+        let improv = self.shared_state.status.comms_status.as_ref()?.improv;
+
+        let second = match improv {
+            ImprovState::Stopped => return None,
+            ImprovState::AwaitingAuthorization | ImprovState::Authorized => "Ready to pair",
+            ImprovState::Provisioning => "Connecting...",
+            ImprovState::Provisioned => "Connected",
+        };
+
+        Some(("WiFi Setup".to_string(), second.to_string()))
+    }
+
     /// Get the formatted text for the current display state
     pub async fn get_display_text(&self) -> (String, String) {
+        // Ahead of the mode match rather than inside it: the window can be open in any mode,
+        // and a copy of this check in each arm is a copy that will be missed when an arm is
+        // added.
+        if let Some(rows) = self.provisioning_rows() {
+            return rows;
+        }
+
         match self.shared_state.get_display_mode() {
             DisplayMode::Off => {
                 (self.format_off_row1(), self.format_off_row2())
