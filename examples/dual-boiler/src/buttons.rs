@@ -346,6 +346,8 @@ pub struct ButtonEventHandler {
     machine_mode: MachineMode,
     /// Tracks when button 5 hold started (for 3-second hold to turn off)
     button_5_hold_start: Option<Instant>,
+    /// Tracks when button 6 hold started (for 5-second hold to open Wi-Fi setup)
+    button_6_hold_start: Option<Instant>,
 }
 
 impl ButtonEventHandler {
@@ -359,6 +361,7 @@ impl ButtonEventHandler {
             routine_executing: false,
             machine_mode: MachineMode::Off,
             button_5_hold_start: None,
+            button_6_hold_start: None,
         }
     }
 
@@ -398,6 +401,10 @@ impl ButtonEventHandler {
                     self.button_5_hold_start = Some(now);
                     defmt::debug!("Button 5 hold started at {:?}", now);
                 }
+                if buttons.contains(WATER_TAP_BUTTON) {
+                    self.button_6_hold_start = Some(now);
+                    defmt::debug!("Button 6 hold started at {:?}", now);
+                }
                 vec![]
             }
             ButtonEvent::PressAndHoldChange { .. } => {
@@ -409,6 +416,10 @@ impl ButtonEventHandler {
                 if buttons.contains(BREWING_BUTTON) {
                     self.button_5_hold_start = None;
                     defmt::debug!("Button 5 hold stopped");
+                }
+                if buttons.contains(WATER_TAP_BUTTON) {
+                    self.button_6_hold_start = None;
+                    defmt::debug!("Button 6 hold stopped");
                 }
                 vec![]
             }
@@ -488,9 +499,22 @@ impl ButtonEventHandler {
     }
 
     /// Check for long hold conditions and return appropriate command
-    /// Currently checks for button 5 held >= 3 seconds to turn machine off
+    ///
+    /// Button 5 held >= 3 seconds turns the machine off; button 6 held >= 5 seconds opens the
+    /// Improv provisioning window.
+    ///
+    /// Neither can also fire the button's normal press action: the recognizer emits `Press`
+    /// only out of `Tracking`, and once a hold is recognised the release produces
+    /// `PressAndHoldStop` and nothing else (see `RecognizerState::Holding` above).
     pub fn check_long_hold(&mut self, now: Instant) -> Option<MachineCommand> {
         const LONG_HOLD_THRESHOLD_MS: u64 = 3000; // 3 seconds
+        // Longer than button 5's, because this one is reached by holding the *water tap*
+        // button, and someone who wanted water and held on a moment too long should not find
+        // the machine advertising itself over Bluetooth.
+        const PROVISIONING_HOLD_THRESHOLD_MS: u64 = 5000; // 5 seconds
+        // Five minutes. Long enough to fetch a phone and type a password, short enough that a
+        // window opened by accident closes itself long before anyone would notice it was open.
+        const PROVISIONING_WINDOW_MS: u32 = 300_000;
 
         if let Some(hold_start) = self.button_5_hold_start {
             let elapsed = now.saturating_duration_since(hold_start).as_millis();
@@ -500,6 +524,28 @@ impl ButtonEventHandler {
                 self.button_5_hold_start = None;
                 defmt::info!("Button 5 held for {}ms - turning machine off", elapsed);
                 return Some(MachineCommand::SetMachineMode(MachineMode::Off));
+            }
+        }
+
+        if let Some(hold_start) = self.button_6_hold_start {
+            let elapsed = now.saturating_duration_since(hold_start).as_millis();
+
+            if elapsed >= PROVISIONING_HOLD_THRESHOLD_MS {
+                // Cleared for the same reason as above: this runs on a 10 ms poll, and without
+                // it the request would be re-sent a hundred times a second until release.
+                self.button_6_hold_start = None;
+                defmt::info!(
+                    "Button 6 held for {}ms - opening the Wi-Fi provisioning window",
+                    elapsed
+                );
+                // Deliberately not gated on `machine_mode`. Provisioning a machine should not
+                // require heating it, and a hold produces no `Press`, so this cannot collide
+                // with the any-button-turns-it-on rule in `handle_press`. The controller
+                // refuses the request while the machine is busy, which is the check that
+                // matters and is the only place that knows coffee is being made.
+                return Some(MachineCommand::OpenWifiProvisioningWindow {
+                    duration_ms: PROVISIONING_WINDOW_MS,
+                });
             }
         }
 
