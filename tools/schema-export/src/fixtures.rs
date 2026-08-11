@@ -636,6 +636,110 @@ fn shot_annotations() -> ShotAnnotations {
     annotations
 }
 
+/// A complete shot, as `SHOTS/<day>/<time>.BIN` holds one.
+///
+/// Two samples rather than one, because a single sample cannot reveal a length-prefix bug
+/// in the sample vector -- and that vector is both the largest repeated structure in the
+/// file and the one a wrong schema desynchronizes on. The two differ in the fields that
+/// change during a shot, so a decoder that reads the second sample's bytes as the first's
+/// produces a visible value change rather than a plausible duplicate.
+///
+/// The maps hold two entries each where the type allows it, for the same reason the
+/// module note gives: a one-entry map hides a length-prefix bug.
+pub fn canonical_shot() -> ShotLog {
+    let mut boiler_samples = FnvIndexMap::new();
+    let _ = boiler_samples.insert(
+        0u8,
+        BoilerSample {
+            temperature: Some(93.5),
+            pressure: Some(1.25),
+            water_level: None,
+            // Not the first variant, so a variant-index off-by-one cannot encode as zero
+            // either way and pass.
+            output: Output::FixedDutyCycle(42),
+        },
+    );
+    let _ = boiler_samples.insert(
+        1u8,
+        BoilerSample {
+            temperature: Some(124.0),
+            pressure: None,
+            water_level: Some(75),
+            output: Output::Off,
+        },
+    );
+
+    let mut water_tap_samples = FnvIndexMap::new();
+    let _ = water_tap_samples.insert(0u8, WaterTapSample { is_dispensing: false });
+
+    let group_sample = |brewing: bool, pressure: f32, flow_out: f32| GroupSample {
+        is_brewing: brewing,
+        brew_time: Some(core::time::Duration::from_secs(12)),
+        brew_input_volume: Some(38.5),
+        input_flow_rate: Some(2.25),
+        input_volume: Some(38.5),
+        output_flow_rate: Some(flow_out),
+        output_weight: Some(21.5),
+        pressure: Some(pressure),
+        temperature: Some(93.0),
+        // The three fields version 3 added, in the middle of this struct rather than at
+        // its end -- which is why a version 2 file decodes as nonsense under version 3.
+        output_temperature: Some(78.5),
+        output_electrical_conductivity: Some(1250.0),
+        extraction_rate: Some(0.125),
+        pump_output: Output::FixedDutyCycle(65),
+        shot_state: Some(ShotState::Saturation),
+        extracted_solids: Some(2.25),
+        output_volume: Some(24.0),
+    };
+
+    let sample_at = |t: u64, brewing: bool, pressure: f32, flow_out: f32| {
+        let mut group_samples = FnvIndexMap::new();
+        let _ = group_samples.insert(0u8, group_sample(brewing, pressure, flow_out));
+        ShotLogSample {
+            timestamp_millis: t,
+            boiler_samples: boiler_samples.clone(),
+            group_samples,
+            water_tap_samples: water_tap_samples.clone(),
+        }
+    };
+
+    let mut resolved_parameters = FnvIndexMap::new();
+    let _ = resolved_parameters.insert(0u8, 6.0f32);
+    let _ = resolved_parameters.insert(1u8, 85.0f32);
+
+    ShotLog {
+        version: SHOT_LOG_FORMAT_VERSION,
+        metadata: ShotLogMetadata {
+            annotations: shot_annotations(),
+            shot_type: ShotType::Routine,
+            group_index: 0,
+            routine_metadata: Some(RoutineExecutionMetadata {
+                routine_index: RoutineIndex::Custom(1),
+                routine_name: "6 bar, 85 mL".into(),
+                routine_type: RoutineType::UserDefined,
+                resolved_parameters,
+            }),
+            start_time_millis: 1_800_000,
+            // A duration, not a timestamp, despite sitting beside one that is. See the
+            // note on `ShotLogMetadata::end_time_millis`.
+            end_time_millis: Some(28_500),
+            final_status: ShotStatus::Completed,
+        },
+        samples: vec![
+            sample_at(0, false, 1.0, 0.0),
+            sample_at(250, true, 6.0, 1.75),
+        ],
+        routine_events: vec![RoutineEvent {
+            timestamp_millis: 4_000,
+            from_step: Some(0),
+            to_step: 1,
+            exit_condition_description: Some("pressure >= 6.0 bar".into()),
+            step_description: Some("Ramp to 6 bar".into()),
+        }],
+    }
+}
+
 pub fn all() -> Vec<Fixture> {
     vec![
         fixture("status_maximal", "StatusSchema", &status_maximal()),
@@ -661,6 +765,16 @@ pub fn all() -> Vec<Fixture> {
         fixture("shot_log_list", "ShotLogListSchema", &shot_log_list()),
     ]
 }
+// `canonical_shot` is deliberately absent from this list. Everything here is written to
+// `frontend/fixtures/` and named in its `index.json`, which the frontend harness walks,
+// resolving each entry's `schema` against `frontend/src/schemas/schemas.ts` -- and
+// `ShotLog` is not one of that file's roots, so there is no `ShotLogSchema` there to
+// resolve. Adding it would break the harness on a fixture it cannot use.
+//
+// The shot is written by `shot_log_export` instead, into the plantlet repository beside
+// the schema that *can* decode it. It loses nothing by not being here: the compile-error
+// guarantee this module exists for comes from the exhaustive struct literal being
+// compiled, not from appearing in `all()`.
 
 /// A listing as `GET /shots` returns it.
 ///

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub mod emit;
 pub mod fixtures;
 pub mod roots;
+pub mod shot_log_export;
 
 /// Where the generated file and its inputs live, relative to the repository root.
 pub const SCHEMAS_PATH: &str = "frontend/src/schemas/schemas.ts";

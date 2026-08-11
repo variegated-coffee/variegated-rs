@@ -7,7 +7,7 @@ use variegated_comms_api_types::api_types::{
 };
 use variegated_comms_api_types::ws_types::WsMessage;
 use variegated_controller_types::{
-    Configuration, MachineCommand, MachineDefinition, ShotLogList, Status,
+    Configuration, MachineCommand, MachineDefinition, ShotLog, ShotLogList, Status,
 };
 use variegated_postcard_schema::Registry;
 
@@ -47,5 +47,24 @@ pub fn registry() -> Registry {
     reg.root::<SetFillPumpConfigurationRequest>();
     reg.root::<SetSteamValveOpennessRequest>();
 
+    reg
+}
+
+/// The stored shot log, and everything reachable from it.
+///
+/// Separate from [`registry`] because the two have different lifetimes rather than
+/// different contents. That one describes what the firmware and its frontend speak *now*
+/// and is regenerated on every build, so it may follow the Rust types wherever they go.
+/// This one is rendered once per [`variegated_controller_types::SHOT_LOG_FORMAT_VERSION`]
+/// and then frozen: a shot written to a card today is decoded by whatever reads it years
+/// from now, and postcard is positional, so a schema that drifted forward would
+/// mis-decode every older file rather than failing on one.
+///
+/// `ShotLog` is deliberately the only root. Anything else here would put types in the
+/// frozen file that have nothing to do with the format it describes, and each of those
+/// would then be frozen too.
+pub fn shot_log_registry() -> Registry {
+    let mut reg = Registry::new();
+    reg.root::<ShotLog>();
     reg
 }
