@@ -350,13 +350,20 @@ fn forward_shot_log_query<M: embassy_sync::blocking_mutex::raw::RawMutex, SM: em
 /// 4. Configuration monitoring and proactive broadcasting
 /// 5. Structured debug frame relaying (see [`debug_relay`])
 ///
-/// `link_baud` is the baud rate `uart_tx`/`uart_rx` were configured with. It is
-/// passed rather than read back because embassy exposes no getter, and it is needed
-/// because the debug relay's byte budget is a *fraction* of the link rather than an
-/// absolute -- `dual-boiler` runs this link at 576 kbaud and `single-boiler` at
-/// 115 200 with no hardware flow control, so one figure cannot serve both. See
-/// [`debug_relay::relay`]. Callers should pass the same binding they set on
-/// `uart::Config` so the two cannot drift apart.
+/// `link_baud` is the baud rate `uart_tx`/`uart_rx` were configured with. It is passed
+/// rather than read back because embassy exposes no getter, and it is needed because the
+/// debug relay's byte budget is a *fraction* of the link rather than an absolute. See
+/// [`debug_relay::relay`].
+///
+/// Both boards now run this link at 576 kbaud with hardware flow control, which is not a
+/// choice either of them makes: `variegated-comms-firmware`'s `config::uart_config`
+/// hardcodes that rate and flow-control pair, and nothing negotiates -- `ProtocolConfig`
+/// describes the protocol, not the wire. An application processor that disagrees has no
+/// link at all, which is the state `single-boiler` was in while it ran 115 200 without
+/// RTS/CTS.
+///
+/// Callers should pass the same binding they set on `uart::Config` so the two cannot drift
+/// apart.
 ///
 /// `DM` is separate from `M` because the debug command channel's mutex is not this
 /// caller's to choose: `variegated_debug::usb_cdc::CommandSink` fixes it to

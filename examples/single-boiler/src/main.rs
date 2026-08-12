@@ -123,20 +123,36 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
 async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>) {
-    // One binding for both the UART and the debug relay's byte budget, so the two
-    // cannot drift apart. It matters more on this board than on dual-boiler: this
-    // link is five times slower *and* has no hardware flow control (`Uart::new`, not
-    // `new_with_rtscts`), so there is nothing to push back if debug traffic is
-    // budgeted for the wrong link speed -- it overruns the receiver's FIFO and
-    // corrupts Status rather than merely delaying it.
-    let baudrate = 115200;
+    // One binding for both the UART and the debug relay's byte budget, so the two cannot
+    // drift apart.
+    //
+    // **576 kbaud with hardware flow control, because the far end is not configurable.**
+    // `variegated-comms-firmware`'s `config::uart_config` hardcodes exactly this rate and
+    // `HwFlowControl { cts: Enabled, rts: Enabled(122) }`, and wires GPIO18/GPIO19 as the
+    // flow-control pair. Nothing negotiates a rate -- `ProtocolConfig` carries a protocol
+    // version and maximum counts, nothing about the wire -- so a mismatch here is not a
+    // slower link, it is no link at all.
+    //
+    // This board ran `Uart::new` at 115200 with no flow control, against a comms processor
+    // at 576 k. The two ends disagreed by a factor of five, which is why this machine had
+    // no Wi-Fi, no frontend, no Bluetooth and no clock.
+    //
+    // Both processors are on the same APEC SoM, so this UART and its RTS/CTS lines are
+    // SoM-internal and identical to the dual-boiler's. The carrier is not involved; the
+    // pins were already declared in `board-cfg.toml` and carried through
+    // `Esp32Peripherals`, and simply were not passed.
+    let baudrate = 576_000;
     let mut config = uart::Config::default();
     config.baudrate = baudrate;
 
-    let mut uart = Uart::new(
+    // Argument order is tx, rx, **rts, cts** -- the pair is easy to transpose, and doing so
+    // deadlocks the link rather than failing to build.
+    let mut uart = Uart::new_with_rtscts(
         esp_p.uart,
         esp_p.tx_pin,
         esp_p.rx_pin,
+        esp_p.rts_pin,
+        esp_p.cts_pin,
         Irqs,
         esp_p.dma_rx,
         esp_p.dma_tx,

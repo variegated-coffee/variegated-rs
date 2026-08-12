@@ -94,11 +94,15 @@ static FRAMES_DROPPED: AtomicU32 = AtomicU32::new(0);
 /// `RequestConfiguration`, `RequestMachineDefinition` and `RequestRoutines` with a
 /// `tx_sender.send(..).await` and forwards `MachineCommand`s while it is at it.
 ///
-/// That is worse than latency on `single-boiler`. The link there is 115200 with no
-/// RTS/CTS and `embassy_rp::uart::UartRx<Async>::read` arms DMA per call, so a parked
-/// reader leaves only the 32-byte hardware FIFO -- about 2.8 ms before bytes are lost,
-/// COBS desynchronises and the link reports a decode error. A debug feature is not
-/// allowed to cause that.
+/// That was worse than latency on `single-boiler` while that board ran the link at 115200
+/// with no RTS/CTS: `embassy_rp::uart::UartRx<Async>::read` arms DMA per call, so a parked
+/// reader left only the 32-byte hardware FIFO -- about 2.8 ms before bytes were lost, COBS
+/// desynchronised and the link reported a decode error.
+///
+/// Both boards now run 576 kbaud with hardware flow control, so a parked reader de-asserts
+/// RTS and the far end stops rather than overrunning. The reservation stays: flow control
+/// converts the failure from lost bytes into stalled telemetry, which is better but still
+/// not something a debug feature may inflict on the machine's own traffic.
 ///
 /// Two slots, because the reader needs one for the response it is sending and one for
 /// the next one to have somewhere to go. Refusing here is a drop like any other and is
@@ -144,13 +148,17 @@ fn note_dropped() {
     bus::note_dropped();
 }
 
-/// `link_baud` is the UART's configured baud rate. The byte budget is a *fraction*
-/// of the link rather than an absolute, because that is what its justification has
-/// always been -- and because the two boards do not agree: `dual-boiler` runs this
-/// link at 576 kbaud with hardware flow control, `single-boiler` at 115 200 with
-/// none. A single absolute figure is 5% of one and 26% of the other, and on the
-/// board with no RTS/CTS there is nothing to push back when debug traffic
-/// oversubscribes it.
+/// `link_baud` is the UART's configured baud rate. The byte budget is a *fraction* of the
+/// link rather than an absolute, because that is what its justification has always been:
+/// the budget exists to leave the machine's own traffic room, and "room" is a proportion of
+/// the wire, not a number of bytes.
+///
+/// Both boards now run 576 kbaud with hardware flow control. They did not always -- while
+/// `single-boiler` ran 115 200 with no RTS/CTS, one absolute figure would have been 5% of
+/// one link and 26% of the other, and on the board with no flow control there was nothing
+/// to push back when debug traffic oversubscribed it. Keeping the budget proportional is
+/// what made that difference harmless, and is why it survives the two rates converging: the
+/// next board to differ costs nothing here.
 pub async fn relay<M: embassy_sync::blocking_mutex::raw::RawMutex>(
     tx_sender: Sender<'_, M, Vec<u8>, 10>,
     link_baud: u32,
