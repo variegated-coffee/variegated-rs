@@ -2078,7 +2078,10 @@ impl<
             MachineCommand::AddRoutine(routine) => {
                 log_info!("Adding new routine");
                 match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => repo.add_routine(routine).await,
+                    Ok(mut repo) => match repo.add_routine(routine).await {
+                        Ok(index) => log_info!("Added routine at index {:?}", index),
+                        Err(e) => log_warn!("Failed to add routine: {}", e),
+                    },
                     Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }

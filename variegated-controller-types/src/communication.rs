@@ -89,6 +89,17 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     RequestStatus,
     RequestMachineDefinition,
     RequestConfiguration,
+    /// Ask for a summary of every stored routine.
+    ///
+    /// Answered with [`ApplicationProcessorToCommsProcessorMessage::RoutineSummaries`].
+    /// This used to bring back every routine's full definition in one frame; it now
+    /// brings back names, types and counts, and a definition is fetched one at a time
+    /// through [`Self::RequestRoutineChunk`] when something actually needs one.
+    ///
+    /// Unlike the other periodic requests on this enum, the comms processor repeats this
+    /// one forever rather than stopping once answered, because routines change while the
+    /// machine runs. That is affordable only because the reply is now small and the
+    /// receiver skips its own work when the list is unchanged.
     RequestRoutines,
     ExternalPeripheralSensorReading(ExternalPeripheralSensorReading),
     /// Ask for the most recent stored shots, newest first.
@@ -166,6 +177,39 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     ///
     /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
     WifiProvisioningIdentify,
+    /// Ask for one slice of a routine's definition.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Answered with [`ApplicationProcessorToCommsProcessorMessage::RoutineChunk`], or
+    /// [`ApplicationProcessorToCommsProcessorMessage::RoutineNotFound`] if the index is
+    /// empty.
+    RequestRoutineChunk { index: RoutineIndex, offset: u16 },
+    /// One slice of a routine on its way to storage.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// `index: None` creates, letting the repository assign an index; `Some` replaces the
+    /// routine already there. `total` is the full encoded length, carried on every chunk
+    /// so an oversized routine can be refused on the first one rather than after
+    /// reassembling all of it.
+    ///
+    /// The chunk is smaller than [`ApplicationProcessorToCommsProcessorMessage::RoutineChunk`]'s
+    /// -- see [`crate::ROUTINE_WRITE_CHUNK_LEN`] for why the two directions are not
+    /// symmetric.
+    ///
+    /// This does not travel as a [`MachineCommand`], despite `AddRoutine` and
+    /// `UpdateRoutine` existing: those carry a decoded `Routine`, which would put the
+    /// decode back on the comms processor that this change exists to keep out of the
+    /// business of understanding routines. They remain on the wire for the debug CLI,
+    /// which injects them from a host that has memory to spare.
+    RoutineWriteChunk {
+        index: Option<RoutineIndex>,
+        offset: u16,
+        total: u16,
+        last: bool,
+        bytes: heapless::Vec<u8, { crate::ROUTINE_WRITE_CHUNK_LEN }>,
+    },
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -176,7 +220,23 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     Status(Status),
     MachineDefinition(MachineDefinition),
     Configuration(Configuration),
-    Routines(RoutineList),
+    /// A summary of every stored routine: enough to list them, not enough to run or edit
+    /// one.
+    ///
+    /// **Repurposed in place**, replacing `Routines(RoutineList)` -- the payload kept its
+    /// role but not its shape, exactly as the three shot-log variants below did. Both
+    /// processors are flashed from the same tree, which is what makes reusing a
+    /// discriminant cheaper than appending and leaving a permanent hole.
+    ///
+    /// The definitions themselves now travel one at a time as opaque bytes, through
+    /// [`Self::RoutineChunk`]. The comms processor never read them: it re-keyed the map
+    /// by [`RoutineIndex`] and forwarded it, which cost several deep copies of every
+    /// routine every fifteen seconds to serve a frontend that wants one at a time.
+    ///
+    /// Sent in answer to [`CommsProcessorToApplicationProcessorMessage::RequestRoutines`],
+    /// and **unsolicited** after a write, so a change announces itself rather than
+    /// waiting out the poll interval.
+    RoutineSummaries(RoutineSummaryList),
     /// The most recent stored shots, newest first, with their annotations.
     ///
     /// **Repurposed in place** -- see
@@ -307,6 +367,48 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// Appended, not inserted -- see the note on
     /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
     CloseWifiProvisioningWindow,
+    /// One slice of a routine's postcard encoding, exactly as it would be stored.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// **Bytes, not a `Routine`.** The only consumer is an HTTP response body on the
+    /// comms processor, so decoding here would be to re-encode identically a moment
+    /// later -- and that processor's heap is shared with Wi-Fi, BLE and the ESPHome
+    /// server, where a `Routine` costs five to ten allocations per step. This is the same
+    /// reasoning `handle_get_shot` already runs on: the download *is* the stored record.
+    ///
+    /// Chunked, and echoing `index` and `offset`, for the same reasons
+    /// [`Self::ShotLogChunk`] does -- this protocol has no correlation id, and those two
+    /// fields are the only way a reply can be matched to its request. A maximal routine
+    /// is two chunks.
+    RoutineChunk {
+        index: RoutineIndex,
+        offset: u16,
+        total: u16,
+        last: bool,
+        bytes: heapless::Vec<u8, { crate::ROUTINE_CHUNK_LEN }>,
+    },
+    /// There is no routine at that index.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// Separate from an empty [`Self::RoutineChunk`] so that "absent" and "zero bytes"
+    /// cannot be confused, and so a request for a deleted routine is a clean 404 rather
+    /// than a five-second wait on a timeout.
+    RoutineNotFound(RoutineIndex),
+    /// The outcome of a [`CommsProcessorToApplicationProcessorMessage::RoutineWriteChunk`]
+    /// sequence.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// [`RoutineWriteOutcome::Stored`] carries the index actually written, which on a
+    /// create is the one the repository *assigned* -- and is the only way the caller
+    /// learns it. Before this existed, a save was fire-and-forget and a routine too large
+    /// to persist was indistinguishable from one that stored cleanly.
+    RoutineWriteResult(RoutineWriteOutcome),
 }
 
 /// An operation on a scale, as carried by

@@ -636,7 +636,16 @@ pub trait RoutineRepository {
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine>;
 
     /// Add a new routine. Always assigns a Custom variant index, using the first available slot.
-    async fn add_routine(&mut self, routine: Routine);
+    ///
+    /// Returns the index it was given. That index is chosen here and nowhere else, so
+    /// returning it is the only way a caller can name what it just created -- an HTTP
+    /// client that posts a routine has to be told where it landed.
+    ///
+    /// Fallible rather than panicking. A routine whose encoding exceeds the 2048-byte
+    /// serialization buffer cannot be stored, and that is a property of what the *user*
+    /// typed, not an invariant of this code: it used to `expect`, which was unreachable
+    /// only for as long as no client could submit a routine.
+    async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str>;
 
     /// Add an internal routine at a specific Internal index. Internal routines are never persisted to flash.
     /// Returns an error if the index is not an Internal variant.
@@ -759,9 +768,9 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         self.cache.get(&storage_index)
     }
 
-    async fn add_routine(&mut self, routine: Routine) {
+    async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
         //info!("Adding new routine");
-        self.load_from_flash().await.ok().unwrap();
+        self.load_from_flash().await?;
 
         // Find first available Custom index
         let mut inner_index = 0u32;
@@ -777,8 +786,12 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         let routine_index = RoutineIndex::Custom(inner_index);
         let storage_index = routine_index.to_storage_index();
         let opt = Some(routine);
-        self.store_in_flash(storage_index, &opt).await.expect("Failed to store routine in flash");
+        // Flash first, cache second, and the failure returns rather than panicking. The
+        // ordering matters as much as the fallibility: caching a routine the flash
+        // refused would leave the machine serving something a reboot loses.
+        self.store_in_flash(storage_index, &opt).await?;
         self.cache.insert(storage_index, opt.unwrap());
+        Ok(routine_index)
     }
 
     async fn add_internal_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
@@ -932,7 +945,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
         self.routines.get(&storage_index)
     }
 
-    async fn add_routine(&mut self, routine: Routine) {
+    async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
         // Find first available Custom index
         let mut inner_index = 0u32;
         loop {
@@ -947,6 +960,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
         let routine_index = RoutineIndex::Custom(inner_index);
         let storage_index = routine_index.to_storage_index();
         self.routines.insert(storage_index, routine);
+        Ok(routine_index)
     }
 
     async fn add_internal_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {

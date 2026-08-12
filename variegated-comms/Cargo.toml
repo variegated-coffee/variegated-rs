@@ -19,6 +19,11 @@ chrono.workspace = true
 # sibling crate depends on postcard with defaults on, so they unify anyway.
 postcard = { workspace = true, features = ["alloc"] }
 serde.workspace = true
+# For the fixed-capacity byte vectors the chunked wire variants carry. Building a
+# `RoutineChunk` means naming its `heapless::Vec` payload, so this crate has to see the
+# same `heapless` the types crate does -- the workspace pin is what keeps them the same
+# version, since two would not unify and the field would be unconstructable.
+heapless.workspace = true
 
 # Core libraries
 embedded-alloc.workspace = true

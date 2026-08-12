@@ -24,8 +24,16 @@ use variegated_controller_types::{
     MachineCommand,
     MachineDefinition,
     PeripheralId,
+    Routine,
+    RoutineIndex,
+    RoutineSummary,
+    RoutineSummaryList,
+    RoutineWriteError,
+    RoutineWriteOutcome,
     ScaleOp,
-    Status
+    Status,
+    ROUTINE_CHUNK_LEN,
+    ROUTINE_MAX_ENCODED_LEN,
 };
 use variegated_debug::bus;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver, Sender};
@@ -41,6 +49,256 @@ use variegated_timekeeping::TimeKeeper;
 /// Anything below this is the comms processor's RTC counting up from zero
 /// before SNTP has synced, not an actual date.
 const MIN_PLAUSIBLE_UNIX_TIME: u64 = 1_577_836_800;
+
+/// The largest COBS frame the far side can reassemble.
+///
+/// Matches `CobsAccumulator::<4096>` on both ends of this link -- see the note beside
+/// this side's accumulator below. A frame at or over this length is not truncated on
+/// arrival, it is *lost*: the accumulator overruns, discards, and resynchronises on the
+/// next sentinel, so an oversized reply looks exactly like a dead link.
+const LINK_FRAME_LIMIT: usize = 4096;
+
+/// Serialize a reply and hand it to the link, refusing to send one the far side cannot
+/// reassemble.
+///
+/// This check did not exist, and its absence had already shipped a real failure: the old
+/// `Routines` reply carried every routine's full definition in one frame, so a machine
+/// with about a dozen routines silently stopped being able to answer `RequestRoutines`
+/// at all. Nothing reported it, because on the wire an overrun and a missing reply are
+/// the same event. Summaries make that ceiling remote rather than imminent, which is a
+/// reason to keep the guard rather than to skip it.
+///
+/// Returns the frame, or `None` having already logged why not.
+fn frame_for_link(
+    response: &ApplicationProcessorToCommsProcessorMessage,
+    what: &str,
+) -> Option<Vec<u8>> {
+    match to_allocvec_cobs(response) {
+        Ok(output) if output.len() <= LINK_FRAME_LIMIT => Some(output),
+        Ok(output) => {
+            error!(
+                "Refusing to send {}: {} bytes exceeds the {} byte link frame limit",
+                what,
+                output.len(),
+                LINK_FRAME_LIMIT
+            );
+            None
+        }
+        Err(_) => {
+            error!("Failed to serialize {}", what);
+            None
+        }
+    }
+}
+
+/// A routine being reassembled from `RoutineWriteChunk`s.
+///
+/// One at a time, because the comms processor holds a lock for the whole sequence and
+/// there is no correlation id to tell two interleaved writes apart. A chunk that does not
+/// continue the sequence in progress is refused rather than merged -- splicing two
+/// routines together would produce bytes that might still decode, into a routine nobody
+/// wrote.
+struct RoutineWriteAssembly {
+    /// `None` for a create, `Some` to replace.
+    index: Option<RoutineIndex>,
+    /// The full encoded length the first chunk promised.
+    total: u16,
+    buffer: [u8; ROUTINE_MAX_ENCODED_LEN],
+    len: usize,
+}
+
+/// Summarise every stored routine and frame the reply.
+///
+/// **No routine is cloned.** `iterate_routines_with_indices` yields references and
+/// `RoutineSummary::from` copies only the name out of each, which is the whole point of
+/// the summary: this used to deep-clone the repository's entire cache into a fresh map
+/// before serialising it, every fifteen seconds, and the far side then cloned it twice
+/// more.
+async fn build_routine_summaries<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository>(
+    repository: &'static embassy_sync::mutex::Mutex<M, R>,
+) -> Option<Vec<u8>> {
+    let list = {
+        let mut repo = repository.lock().await;
+        let routines = repo
+            .iterate_routines_with_indices()
+            .await
+            .map(|(index, routine)| (index, RoutineSummary::from(routine)))
+            .collect::<BTreeMap<_, _>>();
+        RoutineSummaryList { routines }
+    };
+
+    frame_for_link(
+        &ApplicationProcessorToCommsProcessorMessage::RoutineSummaries(list),
+        "routine summaries",
+    )
+}
+
+/// Cut one chunk out of an encoded routine.
+///
+/// `offset` past the end yields an empty final chunk rather than an error, so a receiver
+/// that miscounts stops instead of looping -- `last` is what terminates the download, and
+/// it is true here whenever there is nothing after this slice.
+fn routine_chunk(
+    index: RoutineIndex,
+    offset: u16,
+    encoded: &[u8],
+) -> ApplicationProcessorToCommsProcessorMessage {
+    let total = encoded.len();
+    let start = (offset as usize).min(total);
+    let end = (start + ROUTINE_CHUNK_LEN).min(total);
+
+    let mut bytes = heapless::Vec::new();
+    // Cannot fail: the slice is at most `ROUTINE_CHUNK_LEN`, which is the vector's
+    // capacity.
+    let _ = bytes.extend_from_slice(&encoded[start..end]);
+
+    ApplicationProcessorToCommsProcessorMessage::RoutineChunk {
+        index,
+        offset: start as u16,
+        total: total as u16,
+        last: end >= total,
+        bytes,
+    }
+}
+
+/// Fold one inbound chunk into the routine being assembled.
+///
+/// Returns `None` while more chunks are expected, `Some(Ok(()))` when the last one has
+/// landed and `state` holds a complete encoding, and `Some(Err(_))` when the sequence is
+/// refused.
+///
+/// Every refusal path here matters more than it looks. postcard is positional and
+/// non-self-describing, so a routine assembled from chunks that skipped, repeated or
+/// interleaved does not fail to decode -- it decodes into a *different routine*, which
+/// would then be written to flash over the one the user was editing.
+fn accept_routine_write_chunk(
+    state: &mut Option<RoutineWriteAssembly>,
+    index: Option<RoutineIndex>,
+    offset: u16,
+    total: u16,
+    last: bool,
+    bytes: &[u8],
+) -> Option<Result<(), RoutineWriteError>> {
+    if offset == 0 {
+        // A fresh sequence displaces any half-finished one. The far side sends a whole
+        // routine under a lock, so a new first chunk means the previous sequence died --
+        // its sender timed out, or the link dropped mid-write.
+        if state.is_some() {
+            info!("Discarding an incomplete routine write");
+        }
+
+        if total as usize > ROUTINE_MAX_ENCODED_LEN {
+            // Refused on the first chunk rather than after reassembling, which is why
+            // `total` rides on every chunk instead of being inferred at the end.
+            error!("Refusing a {} byte routine write: over the {} byte ceiling", total, ROUTINE_MAX_ENCODED_LEN);
+            *state = None;
+            return Some(Err(RoutineWriteError::TooLarge));
+        }
+
+        if matches!(index, Some(RoutineIndex::Internal(_))) {
+            // Checked here rather than left to the repository, which reports it as an
+            // opaque string this arm would have to match on.
+            *state = None;
+            return Some(Err(RoutineWriteError::Immutable));
+        }
+
+        *state = Some(RoutineWriteAssembly {
+            index,
+            total,
+            buffer: [0u8; ROUTINE_MAX_ENCODED_LEN],
+            len: 0,
+        });
+    }
+
+    let assembly = match state.as_mut() {
+        Some(assembly) => assembly,
+        // A continuation with nothing to continue: the first chunk was refused, or this
+        // is a stray from a sequence already abandoned.
+        None => return Some(Err(RoutineWriteError::Malformed)),
+    };
+
+    // Contiguity, addressing and length, in that order. `index` and `total` are compared
+    // because they are the only evidence that this chunk belongs to this sequence --
+    // there is no correlation id on this link.
+    if assembly.len != offset as usize
+        || assembly.index != index
+        || assembly.total != total
+        || assembly.len + bytes.len() > assembly.total as usize
+    {
+        *state = None;
+        return Some(Err(RoutineWriteError::Malformed));
+    }
+
+    assembly.buffer[assembly.len..assembly.len + bytes.len()].copy_from_slice(bytes);
+    assembly.len += bytes.len();
+
+    if !last {
+        return None;
+    }
+
+    // `last` is not taken on trust: a sender that sets it early would otherwise store a
+    // truncated routine, and a truncated postcard encoding can still decode.
+    if assembly.len != assembly.total as usize {
+        *state = None;
+        return Some(Err(RoutineWriteError::Malformed));
+    }
+
+    Some(Ok(()))
+}
+
+/// Decode an assembled routine and put it in the repository.
+///
+/// The decode happens *here* rather than on the comms processor, which is the point of
+/// the whole byte pass-through: this side has the flash, the 2 kB buffer and the room to
+/// build a `Routine`; that side has a 56 kB heap shared with Wi-Fi and BLE.
+async fn store_routine<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository>(
+    repository: &'static embassy_sync::mutex::Mutex<M, R>,
+    index: Option<RoutineIndex>,
+    bytes: &[u8],
+) -> RoutineWriteOutcome {
+    let routine: Routine = match postcard::from_bytes(bytes) {
+        Ok(routine) => routine,
+        Err(_) => {
+            error!("A routine write did not decode");
+            return RoutineWriteOutcome::Failed(RoutineWriteError::Malformed);
+        }
+    };
+
+    // Bounded, like every other repository access on this task. This runs on the UART
+    // reader, which also carries status and configuration; waiting indefinitely on a
+    // contended repository would stall the whole link behind one save.
+    let mut repo = match embassy_time::with_timeout(
+        embassy_time::Duration::from_millis(100),
+        repository.lock(),
+    )
+    .await
+    {
+        Ok(repo) => repo,
+        Err(_) => {
+            error!("Failed to acquire routine_repository lock for a write (timeout)");
+            return RoutineWriteOutcome::Failed(RoutineWriteError::Storage);
+        }
+    };
+
+    match index {
+        // An upsert, deliberately: writing to an unoccupied index is how a routine gets
+        // placed on a hardware button.
+        Some(index) => match repo.update_routine(index, routine).await {
+            Ok(()) => RoutineWriteOutcome::Stored(index),
+            Err(e) => {
+                error!("Failed to update routine: {}", e);
+                RoutineWriteOutcome::Failed(RoutineWriteError::Storage)
+            }
+        },
+        None => match repo.add_routine(routine).await {
+            Ok(index) => RoutineWriteOutcome::Stored(index),
+            Err(e) => {
+                error!("Failed to add routine: {}", e);
+                RoutineWriteOutcome::Failed(RoutineWriteError::Storage)
+            }
+        },
+    }
+}
 
 /// Hand a shot-log request to the storage task, or refuse it in a way the far side can
 /// act on.
@@ -208,6 +466,20 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             // Measured by `variegated_debug::relay`'s
             // `a_max_size_command_survives_the_inter_processor_hop`.
             let mut cobs_buf: CobsAccumulator<4096> = CobsAccumulator::new();
+
+            // Where a routine is encoded on its way *out*, one chunk at a time. Sized to
+            // the storage ceiling, because that is the largest routine that can exist:
+            // the repository writes through a buffer of exactly this size, so anything
+            // bigger was never persisted.
+            //
+            // Declared here rather than inside the arm so its cost is visible. This is
+            // the RP2350, with 520 kB of SRAM and no contest for it -- the asymmetry with
+            // the comms processor, which counts every static byte against its stack, is
+            // the reason the two directions chunk at different sizes.
+            let mut routine_tx_scratch = [0u8; ROUTINE_MAX_ENCODED_LEN];
+            // And the routine being assembled on its way *in*, if any. `None` between
+            // writes, which is most of the time.
+            let mut routine_write: Option<RoutineWriteAssembly> = None;
 
             // Both of these exist to make typed events **edge triggered**, which is the
             // criterion `DebugEvent`'s own documentation sets for promoting a site --
@@ -450,25 +722,104 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::RequestRoutines => {
-                                    info!("Routines requested by ESP32");
+                                    info!("Routine summaries requested by ESP32");
 
-                                    let mut repo_locked = routine_repository.lock().await;
-                                    // Fetch routines from repository with their indices
-                                    let routines_with_indices = repo_locked.iterate_routines_with_indices().await;
-
-                                    let routines = routines_with_indices
-                                        .map(|(idx, r)| (idx, r.clone()))
-                                        .collect::<BTreeMap<_, _>>();
-                                    let routine_list = variegated_controller_types::RoutineList { routines };
-
-                                    // Send the routines
-                                    let response = ApplicationProcessorToCommsProcessorMessage::Routines(routine_list);
-                                    if let Ok(output) = to_allocvec_cobs(&response) {
+                                    if let Some(output) = build_routine_summaries(routine_repository).await {
                                         let _ = tx_sender.send(output).await;
-                                        info!("Sent routines to ESP32");
+                                        info!("Sent routine summaries to ESP32");
                                         bus::emit_event(DebugEvent::RoutinesSent);
-                                    } else {
-                                        info!("Failed to serialize routines");
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::RequestRoutineChunk { index, offset } => {
+                                    // Re-encoded per chunk rather than encoded once and
+                                    // held. A maximal routine is two chunks, so the
+                                    // repeated work is one extra `to_slice` against 2 kB
+                                    // of `BTreeMap`-resident routine -- and the
+                                    // alternative is cross-message state that has to be
+                                    // invalidated when the routine is edited underneath
+                                    // it, which is a correctness problem in exchange for
+                                    // a memcpy.
+                                    let response = {
+                                        let mut repo_locked = routine_repository.lock().await;
+                                        match repo_locked.get_routine(index).await {
+                                            Some(routine) => {
+                                                match postcard::to_slice(routine, &mut routine_tx_scratch) {
+                                                    Ok(encoded) => routine_chunk(index, offset, encoded),
+                                                    Err(_) => {
+                                                        // Storable but not encodable into
+                                                        // 2 kB should be impossible -- the
+                                                        // repository used the same ceiling
+                                                        // to write it. Reported as absent
+                                                        // rather than left to time out.
+                                                        error!("Routine {:?} does not fit the chunk scratch buffer", index);
+                                                        ApplicationProcessorToCommsProcessorMessage::RoutineNotFound(index)
+                                                    }
+                                                }
+                                            }
+                                            None => ApplicationProcessorToCommsProcessorMessage::RoutineNotFound(index),
+                                        }
+                                    };
+
+                                    if let Some(output) = frame_for_link(&response, "routine chunk") {
+                                        let _ = tx_sender.send(output).await;
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::RoutineWriteChunk { index, offset, total, last, bytes } => {
+                                    let outcome = accept_routine_write_chunk(
+                                        &mut routine_write,
+                                        index,
+                                        offset,
+                                        total,
+                                        last,
+                                        &bytes,
+                                    );
+
+                                    // `Some` only on the last chunk, or on a refusal. The
+                                    // intermediate chunks are silent: acknowledging each
+                                    // one would double the traffic to tell the far side
+                                    // something it already knows, since it is sending them
+                                    // back to back under a lock.
+                                    if let Some(assembled) = outcome {
+                                        let result = match assembled {
+                                            Err(e) => RoutineWriteOutcome::Failed(e),
+                                            Ok(()) => {
+                                                let state = routine_write.take();
+                                                match state {
+                                                    None => RoutineWriteOutcome::Failed(RoutineWriteError::Malformed),
+                                                    Some(state) => {
+                                                        store_routine(
+                                                            routine_repository,
+                                                            state.index,
+                                                            &state.buffer[..state.len],
+                                                        )
+                                                        .await
+                                                    }
+                                                }
+                                            }
+                                        };
+
+                                        if matches!(result, RoutineWriteOutcome::Failed(_)) {
+                                            // A refusal ends the sequence: the far side
+                                            // stops sending, and leaving a half-filled
+                                            // buffer behind would make the next write look
+                                            // like a continuation of this one.
+                                            routine_write = None;
+                                        }
+
+                                        let response = ApplicationProcessorToCommsProcessorMessage::RoutineWriteResult(result);
+                                        if let Some(output) = frame_for_link(&response, "routine write result") {
+                                            let _ = tx_sender.send(output).await;
+                                        }
+
+                                        // The write changed the list, so say so rather
+                                        // than letting the far side discover it on its
+                                        // next poll. It compares against its cache before
+                                        // republishing, so this costs nothing when the
+                                        // write was refused and nothing changed.
+                                        if let Some(output) = build_routine_summaries(routine_repository).await {
+                                            let _ = tx_sender.send(output).await;
+                                            bus::emit_event(DebugEvent::RoutinesSent);
+                                        }
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit } => {

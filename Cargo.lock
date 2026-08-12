@@ -2494,6 +2494,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-alloc",
+ "heapless 0.9.3",
  "postcard",
  "serde",
  "variegated-controller-lib",

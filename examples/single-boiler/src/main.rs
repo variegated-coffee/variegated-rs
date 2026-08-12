@@ -675,17 +675,22 @@ async fn main_task(spawner: Spawner) -> ! {
     let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
 
     let mut routine_repository = InMemoryRoutineRepository::new();
-    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_shot_routine(SingleGroup.as_index()));
-    routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index()));
+    // `.await` on every one of these, which they did not have. `add_routine` is `async`,
+    // so the calls used to build eleven futures and drop them unpolled -- this machine
+    // seeded *zero* routines and the list came back empty. The compiler said nothing
+    // because an unawaited future is only a lint, and nothing else here reads the
+    // repository at boot to notice.
+    let _ = routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index())).await;
+    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index())).await;
+    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index())).await;
+    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
+    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
 
