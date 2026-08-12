@@ -24,6 +24,13 @@ pub mod sampler;
 pub mod status;
 pub mod suppress;
 
+// The linker symbols are `cortex-m-rt`'s, so this is meaningless anywhere else -- and the
+// comms processor is a riscv32 with a wholly different memory layout. Gated on the chip
+// features rather than on `usb-cdc-rp`, because reporting a stack is not a transport
+// concern.
+#[cfg(any(feature = "rp2040", feature = "rp235xa", feature = "rp235xb"))]
+pub mod stack;
+
 #[cfg(feature = "usb-cdc-rp")]
 pub mod usb_cdc;
 

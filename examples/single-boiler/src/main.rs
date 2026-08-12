@@ -367,34 +367,6 @@ static DEBUG_COMMANDS: StaticCell<Channel<CriticalSectionRawMutex, DebugCommand,
 static DEBUG_USB: StaticCell<DebugUsbResources> = StaticCell::new();
 static SETTINGS_FLASH_MUTEX: StaticCell<SettingsFlashMutex> = StaticCell::new();
 
-fn check_stack_usage() -> (usize, usize) {
-    unsafe extern "C" {
-        static _stack_end: u8;
-        static _stack_start: u8;
-    }
-
-    const STACK_PAINT_VALUE: u32 = 0xCCCC_CCCC;
-
-    unsafe {
-        let stack_end = &_stack_end as *const u8 as usize;
-        let stack_start = &_stack_start as *const u8 as usize;
-
-        let mut ptr = stack_end as *const u32;
-        let mut unused_bytes = 0;
-
-        // Count consecutive painted words
-        while (ptr as usize) < stack_start && ptr.read_volatile() == STACK_PAINT_VALUE {
-            unused_bytes += 4;
-            ptr = ptr.add(1);
-        }
-
-        let total_stack = stack_start - stack_end;
-        let used_stack = total_stack - unused_bytes;
-
-        (used_stack, total_stack)
-    }
-}
-
 #[embassy_executor::task]
 async fn main_task(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
@@ -932,9 +904,6 @@ async fn main_task(spawner: Spawner) -> ! {
     spawner.spawn(debug_snapshot_task(psram_heap, debug_status_receiver).unwrap());
     spawner.spawn(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap).unwrap());
 
-    info!("Creating heap stat tasks");
-    spawner.spawn(heap_stats_task().unwrap());
-
     info!("Creating huge future join task");
 
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
@@ -1073,60 +1042,9 @@ fn publish_snapshot(psram_heap: bool) {
             core1_stack_high_water: None,
             core1_stack_size: None,
         }),
-        stack_high_water: Some(core0_stack_high_water() as u32),
-        stack_size: Some(core0_stack_span() as u32),
+        stack_high_water: Some(variegated_debug::stack::core0_high_water() as u32),
+        stack_size: Some(variegated_debug::stack::core0_span() as u32),
     }));
-}
-
-/// Total bytes available to core 0's stack: `_stack_start - __sheap`.
-///
-/// A function rather than a constant because both bounds are linker symbols, resolved at
-/// link time. Mirrors the dual-boiler's copy; the two boards share a linker script and
-/// differ only in what runs on top of it.
-fn core0_stack_span() -> usize {
-    unsafe extern "C" {
-        static mut __sheap: u32;
-        static mut _stack_start: u32;
-    }
-    unsafe { ((&raw const _stack_start) as usize) - ((&raw const __sheap) as usize) }
-}
-
-/// Deepest point core 0's stack has ever reached, in bytes.
-///
-/// Needs no painting of its own: `cortex-m-rt`'s `paint-stack` feature, enabled in
-/// `examples/Cargo.toml` for both binaries, fills everything between `__sheap` and
-/// `_stack_start` with `0xCCCC_CCCC` before `main` runs. The stack grows *down* from
-/// `_stack_start`, so untouched paint survives at the bottom and the high-water mark is the
-/// distance from the last painted word to the top.
-///
-/// A value at or near [`core0_stack_span`] means the paint was consumed entirely, and the
-/// true requirement is unknown and at least that large.
-fn core0_stack_high_water() -> usize {
-    unsafe extern "C" {
-        static mut __sheap: u32;
-        static mut _stack_start: u32;
-    }
-
-    const PAINT: u32 = 0xCCCC_CCCC;
-
-    // SAFETY: reads only, and only of the region cortex-m-rt painted. A torn read against a
-    // word being pushed concurrently moves the answer by one frame, which does not matter
-    // for a high-water estimate.
-    unsafe {
-        let bottom = (&raw const __sheap) as usize;
-        let top = (&raw const _stack_start) as usize;
-        let span = top - bottom;
-
-        let mut untouched = 0usize;
-        while untouched < span {
-            let word = core::ptr::read_volatile((bottom + untouched) as *const u32);
-            if word != PAINT {
-                break;
-            }
-            untouched += 4;
-        }
-        span - untouched
-    }
 }
 
 #[embassy_executor::task]
@@ -1184,15 +1102,10 @@ async fn debug_command_task(
     }
 }
 
-#[embassy_executor::task]
-async fn heap_stats_task() {
-    loop {
-        let used = HEAP.used();
-        let free = HEAP.free();
-
-        let (stack_usage, total_stack) = check_stack_usage();
-
-        info!("Heap used: {} bytes, free: {} bytes, stack used: {} / {}", used, free, stack_usage, total_stack);
-        Timer::after_millis(5000).await;
-    }
-}
+// `heap_stats_task` was here, logging heap and stack every five seconds over defmt.
+//
+// Deleted rather than ported, because it was a *second* measurement of things the 1 Hz
+// debug snapshot already reports through the link and the TUI already renders -- and it
+// measured the stack with its own `check_stack_usage`, reading `_stack_end` where the
+// snapshot's copy read `__sheap`. Two numbers for one stack, from different symbols, both
+// live in the same binary, is how they came to disagree in the first place.

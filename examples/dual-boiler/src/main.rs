@@ -607,62 +607,10 @@ static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
 ///   overflow on core 0 runs silently into `.bss` instead. Its absence proves nothing.
 /// * `UNALIGNED` (24), `UNDEFINSTR` (16), `INVSTATE` (17) -- corrupted control flow or a
 ///   bad pointer dereferenced as code.
-/// Deepest point core 0's stack has ever reached, in bytes.
-///
-/// The counterpart to [`core1_stack_high_water`], and it needs no painting of its own:
-/// `cortex-m-rt`'s `paint-stack` feature (enabled in `examples/Cargo.toml`) fills
-/// everything between `__sheap` and `_stack_start` with `0xCCCC_CCCC` before `main` runs.
-/// Core 0's stack grows *down* from `_stack_start`, so untouched paint survives at the
-/// bottom and the high-water mark is the distance from the last painted word to the top.
-///
-/// Worth having permanently rather than as a one-off measurement. Core 0 overflowed this
-/// stack silently for an unknown length of time -- there is no guard unless
-/// `install_core0_stack_guard()` is called, and until 2026-08-10 it was not -- and the
-/// failure surfaced as a HardFault in the timer queue, nowhere near the cause. A number in
-/// the debug snapshot is what makes "we are close to the edge" visible before it is fatal.
-///
-/// A value at or near the full span means the paint was consumed entirely and the true
-/// requirement is unknown and at least this large.
-/// Total bytes available to core 0's stack: `_stack_start - __sheap`.
-///
-/// A function rather than a constant because both bounds are linker symbols, resolved at
-/// link time. This is also the value `install_core0_stack_guard()` programs into `MSPLIM`,
-/// so a high-water reading approaching it means the guard is about to fire.
-fn core0_stack_span() -> usize {
-    unsafe extern "C" {
-        static mut __sheap: u32;
-        static mut _stack_start: u32;
-    }
-    unsafe { ((&raw const _stack_start) as usize) - ((&raw const __sheap) as usize) }
-}
-
-fn core0_stack_high_water() -> usize {
-    unsafe extern "C" {
-        static mut __sheap: u32;
-        static mut _stack_start: u32;
-    }
-
-    const PAINT: u32 = 0xCCCC_CCCC;
-
-    // SAFETY: reads only, and only of the region cortex-m-rt painted. A torn read against a
-    // word being pushed concurrently moves the answer by one frame, which does not matter
-    // for a high-water estimate.
-    unsafe {
-        let bottom = (&raw const __sheap) as usize;
-        let top = (&raw const _stack_start) as usize;
-        let span = top - bottom;
-
-        let mut untouched = 0usize;
-        while untouched < span {
-            let word = core::ptr::read_volatile((bottom + untouched) as *const u32);
-            if word != PAINT {
-                break;
-            }
-            untouched += 4;
-        }
-        span - untouched
-    }
-}
+// Core 0's stack span and high-water mark are `variegated_debug::stack`. They were here,
+// and a second, differently-symbolled copy was in `single-boiler` -- the `paint-stack`
+// feature this depends on is still enabled in `examples/Cargo.toml`, which is the one part
+// that cannot move into a library.
 
 /// Fault registers, written before any lock is taken. See the handler.
 ///
@@ -1876,13 +1824,13 @@ async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscr
     loop {
         publish_snapshot(psram_heap);
 
-        let high_water = core0_stack_high_water();
+        let high_water = variegated_debug::stack::core0_high_water();
         if high_water > worst_stack {
             worst_stack = high_water;
             log_info!(
                 "core0 stack high-water: {} of {} bytes",
                 high_water,
-                core0_stack_span()
+                variegated_debug::stack::core0_span()
             );
         }
 
@@ -1963,8 +1911,8 @@ fn publish_snapshot(psram_heap: bool) {
         // `install_core0_stack_guard()` runs, and this board went an unknown length of time
         // overflowing it -- the failure surfaced as a HardFault in the timer queue, nowhere
         // near the cause.
-        stack_high_water: Some(core0_stack_high_water() as u32),
-        stack_size: Some(core0_stack_span() as u32),
+        stack_high_water: Some(variegated_debug::stack::core0_high_water() as u32),
+        stack_size: Some(variegated_debug::stack::core0_span() as u32),
     }));
 }
 
