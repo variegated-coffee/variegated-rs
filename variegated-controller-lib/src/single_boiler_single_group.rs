@@ -1208,27 +1208,19 @@ impl<
                 // Save after updating PID parameters
                 self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             }
+            // The mode table is `crate::single_boiler_state`, which is host-tested. It used
+            // to be two chains of `if`/`else if` here, and `PowerSave` had no arm returning
+            // from it -- a machine that entered power save stayed there until reboot, and
+            // the steam switch, which requires `BrewModeIdle`, could never work again. That
+            // went unnoticed because no UI on either board sends these commands.
+            //
+            // Refusals are deliberate and stay refusals: the machine will not change mode
+            // while it is brewing.
             MachineCommand::EnableBoiler(boiler_index) => {
-                if boiler_index == 0 && self.state == SingleBoilerSingleGroupControllerState::SteamModeIdle {
-                    log_info!("Enabling brew boiler");
-                    self.transition_to_state(SingleBoilerSingleGroupControllerState::BrewModeIdle).await;
-                } else if boiler_index == 1 && self.state == SingleBoilerSingleGroupControllerState::BrewModeIdle {
-                    log_info!("Enabling steam boiler");
-                    self.transition_to_state(SingleBoilerSingleGroupControllerState::SteamModeIdle).await;
-                } else {
-                    log_warn!("Invalid boiler index or state for enabling boiler: {} Current state: {:?}", boiler_index, self.state);
-                }
+                self.apply_boiler_mode_command(true, boiler_index).await;
             }
             MachineCommand::DisableBoiler(boiler_index) => {
-                if boiler_index == 1 && self.state == SingleBoilerSingleGroupControllerState::SteamModeIdle {
-                    log_info!("Going back to brew mode");
-                    self.transition_to_state(SingleBoilerSingleGroupControllerState::BrewModeIdle).await;
-                } else if boiler_index == 0 && self.state == SingleBoilerSingleGroupControllerState::BrewModeIdle {
-                    log_info!("Going in to power save mode");
-                    self.transition_to_state(SingleBoilerSingleGroupControllerState::PowerSave).await;
-                } else {
-                    log_warn!("Invalid boiler index or state for disabling boiler: {} Current state: {:?}", boiler_index, self.state);
-                }
+                self.apply_boiler_mode_command(false, boiler_index).await;
             },
             MachineCommand::TareGroupScale(group_index) => {
                 if group_index == 0 {
@@ -1525,6 +1517,28 @@ impl<
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Apply an `EnableBoiler`/`DisableBoiler` against the mode table.
+    ///
+    /// The decision is `single_boiler_state::boiler_mode_transition`, which is pure and
+    /// host-tested; this only carries it out and says what happened. A `None` is a refusal
+    /// rather than an error -- the machine declining to change mode mid-brew is the wanted
+    /// behaviour -- but it is logged, because it is also what a caller sees when it names a
+    /// boiler that does not exist.
+    async fn apply_boiler_mode_command(&mut self, enable: bool, boiler_index: BoilerIndex) {
+        match crate::single_boiler_state::boiler_mode_transition(self.state, enable, boiler_index) {
+            Some(next) => {
+                log_info!("Boiler mode: {:?} -> {:?}", self.state, next);
+                self.transition_to_state(next).await;
+            }
+            None => log_warn!(
+                "Refusing to {} boiler {} in state {:?}",
+                if enable { "enable" } else { "disable" },
+                boiler_index,
+                self.state
+            ),
         }
     }
 

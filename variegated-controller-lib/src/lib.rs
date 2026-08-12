@@ -27,6 +27,9 @@ pub mod flash;
 pub mod routine;
 pub mod routine_progress;
 pub mod settings;
+// Ungated, unlike the controller below: the mode table is pure and its interesting property
+// -- that no mode is a dead end -- is one a host test can state.
+pub mod single_boiler_state;
 #[cfg(feature = "hardware")]
 pub mod single_boiler_single_group;
 #[cfg(feature = "hardware")]
