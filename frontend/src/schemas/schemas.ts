@@ -186,7 +186,8 @@ export const ParameterUnitSchema = enumType('ParameterUnit', {
   Bar: unitVariant('Bar'),
   MillilitersPerSecond: unitVariant('MillilitersPerSecond'),
   Grams: unitVariant('Grams'),
-  Percent: unitVariant('Percent')
+  Percent: unitVariant('Percent'),
+  Milliliters: unitVariant('Milliliters')
 });
 
 export const ParameterValueSchema = enumType('ParameterValue', {
