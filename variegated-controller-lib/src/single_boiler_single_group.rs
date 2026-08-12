@@ -21,7 +21,7 @@ use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankIndex, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankIndex, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -55,8 +55,15 @@ pub struct SingleBoilerSingleGroupPersistentConfiguration {
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SingleBoilerSingleGroupEphemeralConfiguration {
+    /// Whether the machine is switched on, as the user understands it.
+    ///
+    /// Ephemeral, like the dual-boiler's: a machine comes up off and is turned on, rather
+    /// than remembering. Nothing here is written to flash, so adding this field cannot
+    /// disturb stored settings.
+    pub mode: MachineMode,
     pub group_brew_control_state: GroupBrewControlState,
 }
+
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SingleBoilerSingleGroupConfiguration {
@@ -132,6 +139,9 @@ impl<'a> Value<'a> for SingleBoilerSingleGroupPersistentConfiguration {
 impl Default for SingleBoilerSingleGroupEphemeralConfiguration {
     fn default() -> Self {
         Self {
+            // Off, matching the dual-boiler. A machine that came up hot without anyone
+            // asking would be the surprising choice, not this one.
+            mode: MachineMode::Off,
             group_brew_control_state: GroupBrewControlState {
                 mode: GroupBrewControlMode::FixedDutyCycle,
                 values: GroupBrewControlTargetValues {
@@ -786,6 +796,27 @@ impl<
                 (boiler_state, pump_state)
             }
         };
+
+        // The mode gates everything above, applied last so there is one place it can be
+        // forgotten rather than five. A machine that is off heats nothing and pumps nothing,
+        // whatever state the controller happens to be in.
+        //
+        // The dual-boiler spells this as three `effective_*_control_mode` helpers on its
+        // configuration, because there the caller has to choose between two real boilers.
+        // Here the match above has already chosen, so the same rule is one branch rather
+        // than three methods.
+        //
+        // Only the *modes* are forced to `Off`; the values are left alone. The targets a
+        // user configured are what the machine returns to when it is switched back on, and
+        // what the interface goes on showing as the setpoint in the meantime.
+        let (mut actual_boiler_control_state, mut actual_pump_control_state) =
+            (actual_boiler_control_state, actual_pump_control_state);
+
+        if self.ephemeral_configuration.mode != MachineMode::On {
+            actual_boiler_control_state.mode = BoilerControlMode::Off;
+            actual_pump_control_state.mode = GroupBrewControlMode::Off;
+        }
+
         (actual_boiler_control_state, actual_pump_control_state)
     }
 
@@ -927,7 +958,10 @@ impl<
             water_tap_statuses: FnvIndexMap::new(),
             steam_wand_statuses: FnvIndexMap::new(),
             tank_statuses,
-            mode: Default::default(),
+            // The machine's own mode, not a placeholder. This was `Default::default()` --
+            // which is `MachineMode::Off` -- so the machine reported itself off no matter
+            // what, and there was no field to report from anyway.
+            mode: self.ephemeral_configuration.mode,
             routine_execution,
             comms_status,
             comms_status_age,
@@ -1254,6 +1288,30 @@ impl<
             MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
                 defmt::warn!("Ignoring unsupported command in finally block: {:?}", command);
             }
+            // Turning the machine on and off. This had no arm at all, so it fell into the
+            // catch-all below and vanished -- which is why it failed identically from the
+            // UI, the web interface and the debug link, with nothing anywhere saying so.
+            MachineCommand::SetMachineMode(mode) => {
+                log_info!("Setting machine mode to {:?}", mode);
+                self.ephemeral_configuration.mode = mode;
+
+                // Anything in flight stops with it. Leaving a brew running on a machine the
+                // user has just switched off would be the surprising reading of "off", and
+                // the gate in `get_control_targets` would cut the pump underneath it
+                // anyway -- this way the state machine agrees, and the shot log is closed.
+                if mode != MachineMode::On {
+                    match self.state {
+                        SingleBoilerSingleGroupControllerState::Brewing
+                        | SingleBoilerSingleGroupControllerState::PumpingToWaterTap => {
+                            self.transition_to_state(
+                                SingleBoilerSingleGroupControllerState::BrewModeIdle,
+                            )
+                            .await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             MachineCommand::OptimizeConfigurationStorage => {
                 log_info!("Optimizing configuration storage");
                 if let Err(e) = self.configuration_store.optimize_storage().await {
@@ -1516,7 +1574,24 @@ impl<
                     ),
                 }
             }
-            _ => {}
+            // Everything this controller does not implement, named rather than dropped.
+            //
+            // This arm was `_ => {}`. Sixteen of the fifty-one `MachineCommand` variants
+            // land here, and while they were silent a command that did nothing was
+            // indistinguishable from one that worked -- which is exactly how
+            // `SetMachineMode` came to be reported as "the machine is always Off and cannot
+            // be turned on, from the UI, the web interface *or* the debug link". All three
+            // were accepting the command and throwing it away.
+            //
+            // `label()` rather than `{:?}`: `MachineCommand` has no `Debug`, and this needs
+            // to reach the `log` half of `log_warn!` -- and so the debug bus and the host's
+            // Events pane -- not only a probe.
+            //
+            // Some of these are genuinely inapplicable to a one-boiler, one-element machine
+            // and always will be; others are unimplemented and tracked in
+            // `SINGLE_BOILER_GAPS.md`. From here the two look the same, which is why this
+            // says "does not handle" rather than guessing at a reason.
+            other => log_warn!("Unhandled MachineCommand: {}", other.label()),
         }
     }
 
