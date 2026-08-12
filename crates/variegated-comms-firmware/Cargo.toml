@@ -195,7 +195,13 @@ esp-println = { workspace = true, default-features = false, features = ["jtag-se
 # are what pull in `embassy-rp`, `embassy-usb-logger` and `defmt-rtt`, none of
 # which build for riscv32 -- and `defmt-rtt` would additionally collide with
 # `esp-println`'s `#[defmt::global_logger]`.
-variegated-log = { path = "../../variegated-rs/variegated-log", default-features = false, features = ["debug-bus"] }
+#
+# `defmt` **is** named, and must stay named. It is a default feature of that crate, and
+# this line passes `default-features = false` -- so dropping it would silently switch the
+# defmt half of every `log_*!` back off, which is exactly the state the block above
+# describes as having cost a day to diagnose. It became a feature so that *host* test
+# builds can turn it off; nothing about this firmware changed.
+variegated-log = { path = "../../variegated-rs/variegated-log", default-features = false, features = ["debug-bus", "defmt"] }
 esp-rtos = { workspace = true, features = ["esp-radio", "defmt", "embassy"] }
 static_cell.workspace = true
 # 0.18 removed the `smoltcp` feature entirely -- the blocking smoltcp path is
