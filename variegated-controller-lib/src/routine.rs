@@ -21,7 +21,8 @@ use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUp
 pub use variegated_controller_types::{
     Routine, RoutineParameter, ParameterUnit, RoutineType, RoutineStep,
     RoutineCommand, RoutineExit, RoutineExitCondition, StateCondition,
-    ParameterValue, RoutineStepExitType, RoutineParameters, DerivedFormula
+    ParameterValue, RoutineStepExitType, RoutineParameters, DerivedFormula,
+    DerivedParameter,
 };
 
 pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
@@ -88,6 +89,59 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
     }
 }
 
+/// What a [`ParameterValue`] is worth, given a routine's resolved parameters.
+///
+/// **This is the only correct implementation, and it is now the only one.** Three others
+/// existed, one per display renderer, and none of them had the routine's formulas to work
+/// from -- so each guessed at `DerivedParameter`, and they guessed differently.
+///
+/// `parameters` is the *base* parameter map: the routine's defaults, overridden by whatever
+/// was passed at run time. It is what `Status.routine_execution.resolved_parameters`
+/// carries. `derived` is the routine's `derived_parameters`, which is where the formulas
+/// live and which the status does not carry.
+///
+/// The two index spaces are separate -- `DerivedParameter`'s own documentation says so --
+/// which is why a derived index cannot simply be looked up in `parameters`. Doing that
+/// returns zero when the index is absent and, when the two spaces happen to collide, an
+/// unrelated parameter's value. A renderer did exactly that.
+pub fn resolve_parameter_value(
+    pv: &ParameterValue,
+    parameters: &RoutineParameters,
+    derived: &[DerivedParameter],
+) -> f32 {
+    match pv {
+        ParameterValue::Static(v) => *v,
+        ParameterValue::Parameter(idx) => parameters.get(idx).copied().unwrap_or(0.0),
+        ParameterValue::DerivedParameter(idx) => resolve_derived_parameter(*idx, parameters, derived),
+    }
+}
+
+/// Evaluate one derived parameter's formula.
+///
+/// `0.0` for an index with no formula, which is the same answer the execution context has
+/// always given: a routine referring to a derived parameter it does not define is a
+/// malformed routine, and there is nothing better to return from a pure function.
+pub fn resolve_derived_parameter(
+    idx: u8,
+    parameters: &RoutineParameters,
+    derived: &[DerivedParameter],
+) -> f32 {
+    let Some(derived) = derived.iter().find(|p| p.index == idx) else {
+        return 0.0;
+    };
+
+    let base = |p: &u8| parameters.get(p).copied().unwrap_or(0.0);
+
+    match &derived.formula {
+        DerivedFormula::Linear { base_param, multiplier, offset } => {
+            base(base_param) * multiplier + offset
+        }
+        DerivedFormula::Sum { params } => params.iter().map(&base).sum(),
+        DerivedFormula::Difference { param_a, param_b } => base(param_a) - base(param_b),
+        DerivedFormula::Product { params } => params.iter().map(&base).product(),
+    }
+}
+
 pub struct RoutineExecutionContext<StateT, ConfigurationT> {
     pub(crate) routine_index: RoutineIndex,
     pub(crate) routine: Routine,
@@ -130,47 +184,13 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
     }
 
     fn resolve_value(&self, pv: &ParameterValue) -> f32 {
-        match pv {
-            ParameterValue::Static(v) => *v,
-            ParameterValue::Parameter(idx) => {
-                self.parameters.get(idx).copied().unwrap_or(0.0)
-            }
-            ParameterValue::DerivedParameter(idx) => {
-                self.resolve_derived_parameter(*idx)
-            }
-        }
+        resolve_parameter_value(pv, &self.parameters, &self.routine.derived_parameters)
     }
-    
+
     fn resolve_derived_parameter(&self, idx: u8) -> f32 {
-        if let Some(derived) = self.routine.derived_parameters.iter()
-            .find(|p| p.index == idx) {
-            
-            match &derived.formula {
-                DerivedFormula::Linear { base_param, multiplier, offset } => {
-                    let base_value = self.parameters.get(base_param).copied().unwrap_or(0.0);
-                    base_value * multiplier + offset
-                }
-                DerivedFormula::Sum { params } => {
-                    params.iter()
-                        .map(|p| self.parameters.get(p).copied().unwrap_or(0.0))
-                        .sum()
-                }
-                DerivedFormula::Difference { param_a, param_b } => {
-                    let a = self.parameters.get(param_a).copied().unwrap_or(0.0);
-                    let b = self.parameters.get(param_b).copied().unwrap_or(0.0);
-                    a - b
-                }
-                DerivedFormula::Product { params } => {
-                    params.iter()
-                        .map(|p| self.parameters.get(p).copied().unwrap_or(0.0))
-                        .product()
-                }
-            }
-        } else {
-            0.0
-        }
+        resolve_derived_parameter(idx, &self.parameters, &self.routine.derived_parameters)
     }
-    
+
     fn create_linear_transition_curve(
         &self, 
         current_value: f32, 

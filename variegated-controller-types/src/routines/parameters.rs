@@ -111,6 +111,16 @@ pub enum ParameterUnit {
     MillilitersPerSecond,
     Grams,
     Percent,
+    /// Volume, as `StateCondition::InputVolumeAboveRelativeToStart` measures it.
+    ///
+    /// Appended, not inserted: postcard encodes an enum as its declaration-order
+    /// discriminant, so anything but the end would renumber the variants after it and
+    /// silently mis-decode every stored routine that names a unit.
+    ///
+    /// It was missing because no display could render that condition -- the three renderers
+    /// covered 25, 13 and 8 of the sixteen `StateCondition` variants between them, and this
+    /// was in none of them. The exhaustive match in `routine_progress` is what surfaced it.
+    Milliliters,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

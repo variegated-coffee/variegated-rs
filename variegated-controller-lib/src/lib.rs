@@ -25,6 +25,7 @@
 
 pub mod flash;
 pub mod routine;
+pub mod routine_progress;
 pub mod settings;
 #[cfg(feature = "hardware")]
 pub mod single_boiler_single_group;

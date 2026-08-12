@@ -1408,6 +1408,7 @@ impl DisplayController {
             Some(ParameterUnit::MillilitersPerSecond) => format!("{:.1}ml/s", value),
             Some(ParameterUnit::Grams) => format!("{:.1}g", value),
             Some(ParameterUnit::Percent) => format!("{:.1}%", value),
+            Some(ParameterUnit::Milliliters) => format!("{:.1}ml", value),
             None => format!("{:.1}", value),
         }
     }
