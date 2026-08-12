@@ -64,7 +64,7 @@ use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::settings::{key, SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, GroupConfiguration, MachineCommand, MachineConfiguration, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, RPMType, Status, TankConfiguration, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
+use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, GroupConfiguration, MachineCommand, MachineConfiguration, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TankConfiguration, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::{OutputRate, FDC1004};
@@ -817,12 +817,31 @@ async fn main_task(spawner: Spawner) -> ! {
         })),
     );
 
+    // Steam is a **toggle switch**, unlike the brew and water buttons, so it holds its
+    // position: one edge when it is turned on, one when it is turned off. `Pull::Up` with a
+    // switch to ground makes "on" the low level, so the falling edge is the switch being
+    // turned on.
+    //
+    // Boiler **index 1 is the virtual steam boiler**, not a second physical one. This
+    // machine has one heating element; `SteamModeIdle` drives it from
+    // `steam_boiler_control_state` and presents it to the rest of the system as a separate
+    // boiler. `EnableBoiler(1)` on a single-boiler machine reads like a mistake and is not.
+    //
+    // This used to send `RunRoutine(RoutineIndex::Internal(2))`, which could not work twice
+    // over: nothing on this board ever registered an internal routine -- `add_internal_routine`
+    // is never called, and `add_routine` only ever assigns `Custom` indices -- and no routine
+    // could have entered steam mode anyway, because `RoutineCommand` has no `EnableBoiler`.
+    // Flipping the switch logged "Routine not found: Internal(2)" and did nothing.
+    //
+    // `.with_initial_state()` because a switch has a position at power-on and edges alone
+    // would miss it; see its documentation.
     let mut steam_action = GpioCommandSender::new(
         Input::new(button_p.pin_steam, Pull::Up),
         command_channel.sender(),
-        Some(MachineCommand::CancelRoutine),
-        Some(MachineCommand::RunRoutine(RoutineIndex::Internal(2), None)),
-    );
+        Some(MachineCommand::DisableBoiler(1)),
+        Some(MachineCommand::EnableBoiler(1)),
+    )
+    .with_initial_state();
 
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
 
