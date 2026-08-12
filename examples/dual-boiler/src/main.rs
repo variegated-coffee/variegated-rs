@@ -720,38 +720,13 @@ fn main() -> ! {
     // it cannot happen here, and it is not worth panicking over if it ever does.
     let _ = variegated_log::bus_sink::init();
 
-    let psram_config = embassy_rp::psram::Config::aps6404l();
-    variegated_log::log_info!("Initing!");
+    // Where the heap goes is `variegated_hal::heap`; the allocator itself stays here,
+    // because `HEAP` is what `#[global_allocator]` names.
+    let region = variegated_hal::heap::probe(p.QMI_CS1, p.PIN_0);
+    let psram_heap = region.psram;
 
-    let psram = embassy_rp::psram::Psram::new(QmiCs1::new(p.QMI_CS1, p.PIN_0), psram_config);
-    let psram_heap = psram.is_ok();
-
-    if let Ok(psram) = psram {
-        log_info!("PSRAM initialized successfully, using PSRAM for heap");
-
-        #[allow(static_mut_refs)]
-        {
-            unsafe {
-                const PSRAM_ADDRESS: usize = 0x11000000;
-                let ptr = PSRAM_ADDRESS as *mut u8; // Using u8 for byte array
-                HEAP.init(PSRAM_ADDRESS, psram.size() as usize);
-
-                log_info!("Heap initialized in PSRAM");
-            }
-        }
-    } else {
-        log_info!("Failed to initialize PSRAM, using internal RAM for heap");
-
-        #[allow(static_mut_refs)]
-        unsafe {
-            use core::mem::MaybeUninit;
-            const HEAP_SIZE: usize = 65535; // 64 KiB heap size
-            static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
-            unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
-
-            log_info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
-        }
-    }
+    // SAFETY: once, at boot, before any task runs and before the first allocation.
+    unsafe { HEAP.init(region.address, region.size) }
 
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
 
@@ -2269,7 +2244,16 @@ async fn main_task(
         variegated_controller_lib::WATCHDOG_TIMEOUT.as_millis()
     );
 
-    let settings_storage: SequentialStorageSettingsStorage<SyncSendRawMutex, SettingsFlashType, DualBoilerSingleGroupPersistentConfiguration> = SequentialStorageSettingsStorage::<_, _, DualBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    // All three stores, over one flash range keyed by `settings::key`. The range and the
+    // reasoning about why these are keys rather than ranges of their own are
+    // `variegated_controller_lib::settings::machine_stores`; both boards used to spell them
+    // out separately, three literals each.
+    let (settings_storage, bluetooth_store, wifi_store) =
+        variegated_controller_lib::settings::machine_stores::<
+            SyncSendRawMutex,
+            SettingsFlashType,
+            DualBoilerSingleGroupPersistentConfiguration,
+        >(flash);
     let settings_storage_ref = SETTINGS_STORAGE.init(Mutex::new(settings_storage));
 
     // Load initial configuration
@@ -2320,33 +2304,9 @@ async fn main_task(
     *SCHEDULE_STORE_REF.lock().await = Some(schedule_store_ref);
 
     // Bluetooth associations, at a key of their own in the settings range.
-    //
-    // A key rather than a field on the settings blob above, and that is the point of it:
-    // these blobs are postcard with a CRC and no version, so appending a field to the
-    // persistent configuration would make every previously stored copy fail to
-    // deserialize and fall back to `Default` -- resetting every boiler and PID setting on
-    // the first boot after the upgrade.
-    //
-    // It used to be a flash range of its own (`0x0010_0000..0x0012_0000`) rather than a
-    // key, which cost a 128 KiB range per settings blob. That range is now abandoned
-    // rather than reused: nothing reads it, and leaving it alone means a machine rolled
-    // back to an older firmware still finds its associations. Machines upgraded across
-    // this change forget their pairings once.
-    let bluetooth_store: BluetoothStoreType = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new_with_key(
-        flash,
-        0x0000_0000..0x0008_0000,
-        key::BLUETOOTH_ASSOCIATIONS,
-    );
     let bluetooth_store_ref = BLUETOOTH_STORE.init(Mutex::new(bluetooth_store));
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
 
-    // Wi-Fi credentials, at a third key in the same range. See the note on the Bluetooth
-    // store above for why a key rather than a field on the settings blob.
-    let wifi_store: WifiStoreType = SequentialStorageSettingsStorage::<_, _, StoredWifiCredentials>::new_with_key(
-        flash,
-        0x0000_0000..0x0008_0000,
-        key::WIFI_CREDENTIALS,
-    );
     let wifi_store_ref = WIFI_STORE.init(Mutex::new(wifi_store));
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
     let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());

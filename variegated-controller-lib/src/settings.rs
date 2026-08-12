@@ -34,6 +34,60 @@ pub mod key {
     pub const BLUETOOTH_ASSOCIATIONS: u8 = 2;
 }
 
+/// The flash range every settings store lives in.
+///
+/// **A constant rather than a literal at each call site.** Both boards wrote
+/// `0x0000_0000..0x0008_0000` into their own `main.rs`, three times each, alongside the
+/// same explanatory comments -- so changing where a machine keeps its settings meant
+/// finding six literals across two binaries, and getting one wrong reads as that machine
+/// having been reset to defaults rather than as a mistake.
+///
+/// The three stores that share it are distinguished by [`key`], not by address.
+pub const SETTINGS_RANGE: Range<u32> = 0x0000_0000..0x0008_0000;
+
+/// The three stores every machine keeps, over one flash range.
+///
+/// Returned rather than boxed into a struct because each has a different `SettingsT` and
+/// the caller wraps them in `Mutex`es of its own choosing.
+///
+/// The configuration store's type is the caller's: `DualBoilerSingleGroupPersistentConfiguration`
+/// on one board and `SingleBoilerSingleGroupPersistentConfiguration` on the other. That is
+/// the only thing that genuinely differed between the two copies of this.
+pub fn machine_stores<'a, M, T, ConfigT>(
+    flash: &'a Mutex<M, T>,
+) -> (
+    SequentialStorageSettingsStorage<'a, M, T, ConfigT>,
+    SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::bluetooth::BluetoothAssociations>,
+    SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::wifi::StoredWifiCredentials>,
+)
+where
+    M: RawMutex,
+    T: MultiwriteNorFlash,
+    ConfigT: for<'b> Value<'b> + Default + Clone + PartialEq,
+{
+    (
+        SequentialStorageSettingsStorage::new(flash, SETTINGS_RANGE),
+        // Keys rather than ranges of their own. Appending these to the configuration blob
+        // instead would make every previously stored copy fail to deserialize -- postcard
+        // is positional and these blobs carry no version -- and silently reset the machine
+        // to defaults on the first boot after the upgrade.
+        //
+        // The associations formerly had a range of their own, `0x0010_0000..0x0012_0000`.
+        // It is abandoned rather than reused, so a rolled-back firmware still finds them;
+        // machines upgraded across that change forget their pairings once.
+        SequentialStorageSettingsStorage::new_with_key(
+            flash,
+            SETTINGS_RANGE,
+            key::BLUETOOTH_ASSOCIATIONS,
+        ),
+        SequentialStorageSettingsStorage::new_with_key(
+            flash,
+            SETTINGS_RANGE,
+            key::WIFI_CREDENTIALS,
+        ),
+    )
+}
+
 pub trait SettingsStorage<SettingsT: Default> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
     async fn save_settings(&mut self, data: &SettingsT) -> Result<(), &'static str>;

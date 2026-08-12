@@ -68,6 +68,10 @@ pub mod noop;
 pub mod pump;
 pub mod heating_element;
 pub mod external_sensor;
+// RP2350-only: the QMI window and the PSRAM driver are `embassy-rp`'s, and only the
+// rp235x variants have external-memory support.
+#[cfg(feature = "rp235x")]
+pub mod heap;
 
 #[derive(Debug, Format)]
 pub enum BoilerFillMechanismError {

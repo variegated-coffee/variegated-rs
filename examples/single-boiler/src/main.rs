@@ -95,13 +95,9 @@ use crate::rotary::{UIStatus};
 
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 
-// NoopDispatcher for single-boiler without external sensors
-pub struct NoopDispatcher;
-
-impl ExternalSensorDispatcher for NoopDispatcher {
-    fn dispatch_reading(&self, _reading: &ExternalPeripheralSensorReading) {}
-    fn dispatch_connection_status(&self, _peripheral_id: PeripheralId, _connected: bool) {}
-}
+// `NoopDispatcher` is `variegated_controller_lib::external_sensor_dispatcher`'s, beside the
+// trait it implements.
+use variegated_controller_lib::external_sensor_dispatcher::NoopDispatcher;
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
@@ -394,41 +390,17 @@ async fn main_task(spawner: Spawner) -> ! {
 
     defmt::info!("Starting!");
 
-    let psram_config = embassy_rp::psram::Config::aps6404l();
-    defmt::info!("Initing!");
+    // Where the heap goes is `variegated_hal::heap`; the allocator itself stays here,
+    // because `HEAP` is what `#[global_allocator]` names.
+    //
+    // The copy this replaced carried an unused 1 KiB `HEAP_MEM` and an unused `ptr` inside
+    // the PSRAM branch -- dead code that came along when the block was copied from the
+    // dual-boiler and then edited on one side only.
+    let region = variegated_hal::heap::probe(p.QMI_CS1, p.PIN_0);
+    let psram_heap = region.psram;
 
-    let psram = embassy_rp::psram::Psram::new(QmiCs1::new(p.QMI_CS1, p.PIN_0), psram_config);
-    let psram_heap = psram.is_ok();
-
-    if let Ok(psram) = psram {
-        info!("PSRAM initialized successfully, using PSRAM for heap");
-
-        #[allow(static_mut_refs)]
-        {
-            use core::mem::MaybeUninit;
-            const HEAP_SIZE: usize = 1024;
-            static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-            unsafe {
-                const PSRAM_ADDRESS: usize = 0x11000000;
-                let ptr = PSRAM_ADDRESS as *mut u8; // Using u8 for byte array
-                HEAP.init(PSRAM_ADDRESS, psram.size() as usize);
-
-                info!("Heap initialized in PSRAM");
-            }
-        }
-    } else {
-        info!("Failed to initialize PSRAM, using internal RAM for heap");
-
-        #[allow(static_mut_refs)]
-        unsafe {
-            use core::mem::MaybeUninit;
-            const HEAP_SIZE: usize = 65535; // 64 KiB heap size
-            static mut HEAP_MEM: [u8; HEAP_SIZE] = [0xEE; HEAP_SIZE];
-            unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
-
-            info!("Heap initialized at addr: {:?}, size: {}", HEAP_MEM.as_ptr(), HEAP_SIZE);
-        }
-    }
+    // SAFETY: once, at boot, before any task runs and before the first allocation.
+    unsafe { HEAP.init(region.address, region.size) }
 
     let i2c_p = qwiic_i2c_bus_peripherals!(p);
     let i2c_bus = embassy_rp::i2c::I2c::new_async(i2c_p.i2c, i2c_p.scl_pin, i2c_p.sda_pin, Irqs, i2c::Config::default());
@@ -514,31 +486,19 @@ async fn main_task(spawner: Spawner) -> ! {
     let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
-    let mut settings_storage = SequentialStorageSettingsStorage::<_, _, SingleBoilerSingleGroupPersistentConfiguration>::new(flash, 0x0000_0000..0x0008_0000);
+    // All three stores, over one flash range keyed by `settings::key`. The range and the
+    // reasoning about why these are keys rather than ranges of their own are
+    // `variegated_controller_lib::settings::machine_stores`; both boards used to spell them
+    // out separately.
+    let (mut settings_storage, bluetooth_store, wifi_store) =
+        variegated_controller_lib::settings::machine_stores::<
+            _,
+            _,
+            SingleBoilerSingleGroupPersistentConfiguration,
+        >(flash);
     let configuration = settings_storage.load_settings().await.unwrap_or_default();
 
-    // Bluetooth associations, at a key of their own in the settings range. Appending them
-    // to the settings blob above would instead make every previously stored copy fail to
-    // deserialize -- postcard is positional and these blobs carry no version -- and
-    // silently reset the machine to defaults on the first boot after the upgrade.
-    //
-    // Formerly a flash range of its own (`0x0010_0000..0x0012_0000`). That range is
-    // abandoned rather than reused, so a rolled-back firmware still finds its
-    // associations; machines upgraded across this change forget their pairings once.
-    let bluetooth_store = SequentialStorageSettingsStorage::<_, _, BluetoothAssociations>::new_with_key(
-        flash,
-        0x0000_0000..0x0008_0000,
-        key::BLUETOOTH_ASSOCIATIONS,
-    );
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
-
-    // Wi-Fi credentials, at a third key in the same range. See the note on the Bluetooth
-    // store above for why a key rather than a field on the settings blob.
-    let wifi_store = SequentialStorageSettingsStorage::<_, _, StoredWifiCredentials>::new_with_key(
-        flash,
-        0x0000_0000..0x0008_0000,
-        key::WIFI_CREDENTIALS,
-    );
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
     let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());
     let identify_watch = IDENTIFY_WATCH.init(Watch::new());

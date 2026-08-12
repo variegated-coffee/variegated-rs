@@ -12,3 +12,16 @@ pub trait ExternalSensorDispatcher: Send + Sync {
     /// Dispatch a connection status change to the appropriate handler.
     fn dispatch_connection_status(&self, peripheral_id: PeripheralId, connected: bool);
 }
+
+/// A dispatcher for a machine with no externally-driven sensors.
+///
+/// `esp_transceiver_main` is generic over the dispatcher and takes an `Option` of one, but
+/// a type still has to be named for the `None` -- so a board with nothing to dispatch to
+/// needs a type that does nothing. Every such board would otherwise declare its own, and
+/// one already had.
+pub struct NoopDispatcher;
+
+impl ExternalSensorDispatcher for NoopDispatcher {
+    fn dispatch_reading(&self, _reading: &ExternalPeripheralSensorReading) {}
+    fn dispatch_connection_status(&self, _peripheral_id: PeripheralId, _connected: bool) {}
+}
