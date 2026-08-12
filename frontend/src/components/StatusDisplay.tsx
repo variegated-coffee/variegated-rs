@@ -1,6 +1,6 @@
 import { useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
-import { Status, RoutineStorage } from '../schemas/schemas';
+import { Status, RoutineSummaryStorage } from '../schemas/schemas';
 import { useMachine } from '../contexts/MachineContext';
 import { BoilerStatusCard } from './BoilerStatusCard';
 import { GroupStatusCard } from './GroupStatusCard';
@@ -10,7 +10,7 @@ import { getWebSocketService } from '../services/websocket';
 
 interface StatusDisplayProps {
   status: Status;
-  routines: RoutineStorage;
+  routines: RoutineSummaryStorage;
 }
 
 const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {

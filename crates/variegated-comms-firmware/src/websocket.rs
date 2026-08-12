@@ -1,6 +1,5 @@
 //! WebSocket server for real-time bidirectional communication
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use embassy_net::tcp::{TcpSocket, TcpReader, TcpWriter};
 use embassy_net::Stack;
@@ -11,9 +10,12 @@ use edge_ws::{FrameHeader, FrameType};
 use embedded_io_async::Write;
 use variegated_log::{log_info, log_warn, log_error, log_debug};
 use postcard;
-use variegated_controller_types::{MachineCommand, RoutineIndex};
+use variegated_controller_types::MachineCommand;
 
-use crate::api_types::RoutineStorage;
+// `RoutineIndex` and `BTreeMap` are gone from here on purpose: splitting the summary list
+// into its three maps now happens once, in `RoutineSummaryStorage::from_list`, rather than
+// in three copies of the same loop -- one of which was in a function nothing called.
+use crate::api_types::RoutineSummaryStorage;
 use crate::channels::{
     ApplicationStatusSubscriber, ApplicationConfigurationSubscriber, ApplicationRoutineSubscriber,
     MACHINE_DEFINITION, ROUTINE_CACHE, MACHINE_COMMAND_CAPACITY,
@@ -138,6 +140,15 @@ async fn handle_websocket_connection(
     // this server has a variant for, so accepting it only moves the failure from
     // "payload too large" to a postcard error.
     //
+    // That reasoning was true of the *type* and false in practice for a while, and it is
+    // worth saying why. `MachineCommand` is 128 bytes in memory because its `Routine`
+    // payload sits behind `Vec` and `String` pointers -- but `AddRoutine` and
+    // `UpdateRoutine` *serialise* to the whole definition, several kilobytes of it. The
+    // frontend saved routines that way, so every real save was rejected here and took the
+    // connection down with it. Routine writes now go over HTTP, where the body limit is
+    // sized for them, and nothing a client can say on this socket carries a routine any
+    // more. See `api/routines.ts` in the frontend.
+    //
     // `header_buf` is *not* a send buffer, whatever its old name suggested. The
     // payload never passes through it -- `send_frame_tx` writes the serialised
     // `FrameHeader` here and then writes the payload straight from its own slice in a
@@ -227,29 +238,11 @@ async fn handle_websocket_connection(
                             log_info!("Sending ConfigurationUpdate to client");
                             Some(encode_ws_message(&WsMessage::ConfigurationUpdate(config)))
                         }
-                        Either::Second(Either::Second(Either::Second(routine_list))) => {
-                            // Convert RoutineList to RoutineStorage and send to client
+                        Either::Second(Either::Second(Either::Second(summaries))) => {
                             log_info!("Sending RoutinesUpdate to client");
-                            let mut internal = BTreeMap::new();
-                            let mut function = BTreeMap::new();
-                            let mut custom = BTreeMap::new();
-
-                            for (idx, routine) in routine_list.routines.iter() {
-                                match idx {
-                                    RoutineIndex::Internal(n) => {
-                                        internal.insert(*n as u32, routine.clone());
-                                    }
-                                    RoutineIndex::Function(n) => {
-                                        function.insert(*n as u32, routine.clone());
-                                    }
-                                    RoutineIndex::Custom(n) => {
-                                        custom.insert(*n as u32, routine.clone());
-                                    }
-                                }
-                            }
-
-                            let routine_storage = RoutineStorage { internal, function, custom };
-                            Some(encode_ws_message(&WsMessage::RoutinesUpdate(routine_storage)))
+                            Some(encode_ws_message(&WsMessage::RoutinesUpdate(
+                                RoutineSummaryStorage::from_list(&summaries),
+                            )))
                         }
                     };
 
@@ -337,89 +330,6 @@ async fn handle_websocket_connection(
             }
         }
     }
-}
-
-/// Handle a message from the client
-async fn handle_client_message<'a>(
-    msg: WsMessage<'a>,
-    socket: &mut TcpSocket<'_>,
-    send_buf: &mut [u8],
-    command_sender: &Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
-) -> Result<(), &'static str> {
-    match msg {
-        WsMessage::RequestMachineDefinition => {
-            log_info!("Received RequestMachineDefinition");
-            // Get machine definition from cache
-            let guard = MACHINE_DEFINITION.lock().await;
-            if let Some(machine_def) = guard.as_ref() {
-                let response = WsMessage::MachineDefinition(machine_def.clone());
-                send_ws_message(socket, send_buf, &response).await?;
-                log_info!("Sent MachineDefinition response");
-            } else {
-                log_warn!("Machine definition not available, sending error");
-                let response = WsMessage::CommandAck {
-                    id: 0,
-                    success: false,
-                    error: Some("Machine definition not available yet"),
-                };
-                send_ws_message(socket, send_buf, &response).await?;
-            }
-        }
-        WsMessage::RequestRoutines => {
-            log_info!("Received RequestRoutines");
-            // Get routines from cache
-            let guard = ROUTINE_CACHE.lock().await;
-            if let Some(routine_list) = guard.as_ref() {
-                // Convert RoutineList to RoutineStorage by categorizing by RoutineIndex
-                let mut internal = BTreeMap::new();
-                let mut function = BTreeMap::new();
-                let mut custom = BTreeMap::new();
-
-                for (idx, routine) in routine_list.routines.iter() {
-                    match idx {
-                        RoutineIndex::Internal(n) => {
-                            internal.insert(*n as u32, routine.clone());
-                        }
-                        RoutineIndex::Function(n) => {
-                            function.insert(*n as u32, routine.clone());
-                        }
-                        RoutineIndex::Custom(n) => {
-                            custom.insert(*n as u32, routine.clone());
-                        }
-                    }
-                }
-
-                let storage = RoutineStorage {
-                    internal,
-                    function,
-                    custom,
-                };
-                let response = WsMessage::RoutinesUpdate(storage);
-                send_ws_message(socket, send_buf, &response).await?;
-                log_info!("Sent RoutinesUpdate response");
-            } else {
-                log_warn!("Routines not available, sending error");
-                let response = WsMessage::CommandAck {
-                    id: 0,
-                    success: false,
-                    error: Some("Routines not available yet"),
-                };
-                send_ws_message(socket, send_buf, &response).await?;
-            }
-        }
-        WsMessage::SendMachineCommand(cmd) => {
-            // Forward command to machine command channel
-            log_info!("Received SendMachineCommand, forwarding");
-            if command_sender.try_send(cmd).is_err() {
-                log_warn!("Command channel full, dropping command");
-            }
-        }
-        // Server-to-client messages should not come from client
-        _ => {
-            log_warn!("Received unexpected message type from client");
-        }
-    }
-    Ok(())
 }
 
 /// State for receiving WebSocket frames that persists across select cancellations
@@ -629,43 +539,10 @@ async fn receive_frame<'a>(
     }
 }
 
-/// Send a WebSocket frame
-async fn send_frame(
-    socket: &mut TcpSocket<'_>,
-    buf: &mut [u8],
-    frame_type: FrameType,
-    payload: &[u8],
-) -> Result<(), &'static str> {
-    let header = FrameHeader {
-        frame_type,
-        payload_len: payload.len() as u64,
-        mask_key: None, // Server never masks
-    };
-
-    // Serialize header to buffer
-    let header_len = header.serialize(buf).map_err(|_| "Failed to serialize frame header")?;
-
-    // Write header
-    socket.write_all(&buf[..header_len]).await.map_err(|_| "Failed to send frame header")?;
-
-    // Write payload
-    if !payload.is_empty() {
-        socket.write_all(payload).await.map_err(|_| "Failed to send payload")?;
-    }
-
-    Ok(())
-}
-
-/// Send a WsMessage as a binary frame
-async fn send_ws_message(
-    socket: &mut TcpSocket<'_>,
-    buf: &mut [u8],
-    msg: &WsMessage<'_>,
-) -> Result<(), &'static str> {
-    let serialized = postcard::to_allocvec(msg).map_err(|_| "Failed to serialize message")?;
-    // Use false for Fragmented to indicate this is a complete, non-fragmented message
-    send_frame(socket, buf, FrameType::Binary(false), &serialized).await
-}
+// `send_frame` used to sit here, taking a whole `TcpSocket`. Its only caller was
+// `send_ws_message`, which in turn was only reachable from a client-message handler that
+// nothing had called since the receive loop moved to `ClientRequest::from_ws`. The live
+// path splits the socket and writes through `send_frame_tx` below.
 
 /// Receive a WebSocket frame using TcpReader
 async fn receive_frame_rx<'a>(
@@ -868,31 +745,9 @@ async fn handle_client_request_tx(
             let encoded = {
                 let guard = ROUTINE_CACHE.lock().await;
                 match guard.as_ref() {
-                    Some(routine_list) => {
-                        let mut internal = BTreeMap::new();
-                        let mut function = BTreeMap::new();
-                        let mut custom = BTreeMap::new();
-
-                        for (idx, routine) in routine_list.routines.iter() {
-                            match idx {
-                                RoutineIndex::Internal(n) => {
-                                    internal.insert(*n as u32, routine.clone());
-                                }
-                                RoutineIndex::Function(n) => {
-                                    function.insert(*n as u32, routine.clone());
-                                }
-                                RoutineIndex::Custom(n) => {
-                                    custom.insert(*n as u32, routine.clone());
-                                }
-                            }
-                        }
-
-                        encode_ws_message(&WsMessage::RoutinesUpdate(RoutineStorage {
-                            internal,
-                            function,
-                            custom,
-                        }))?
-                    }
+                    Some(summaries) => encode_ws_message(&WsMessage::RoutinesUpdate(
+                        RoutineSummaryStorage::from_list(summaries),
+                    ))?,
                     None => {
                         log_warn!("Routines not available, sending error");
                         encode_ws_message(&WsMessage::CommandAck {

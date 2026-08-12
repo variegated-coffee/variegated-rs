@@ -1,4 +1,4 @@
-import { Routine, RoutineIndex, RoutineStorage } from '../schemas/schemas';
+import { RoutineIndex, RoutineSummary, RoutineSummaryStorage } from '../schemas/schemas';
 
 // Helper type for routine identification
 export type RoutineIdentifier = {
@@ -7,12 +7,15 @@ export type RoutineIdentifier = {
 };
 
 /**
- * Get a routine from storage using a routine identifier
+ * Get a routine's *summary* from storage using a routine identifier.
+ *
+ * Summaries, not definitions: the list the machine pushes carries names, types and counts.
+ * A definition comes from `api/routines.ts` and lives in `state/routineBodies.ts`.
  */
-export function getRoutine(
-  storage: RoutineStorage,
+export function getRoutineSummary(
+  storage: RoutineSummaryStorage,
   identifier: RoutineIdentifier
-): Routine | undefined {
+): RoutineSummary | undefined {
   switch (identifier.type) {
     case 'internal':
       return storage.internal?.get(identifier.index);
@@ -24,24 +27,41 @@ export function getRoutine(
 }
 
 /**
- * Get a routine from storage using a RoutineIndex from the Status
+ * Get a routine's summary from a RoutineIndex, as carried in the Status.
  */
-export function getRoutineFromIndex(
-  storage: RoutineStorage,
+export function getRoutineSummaryFromIndex(
+  storage: RoutineSummaryStorage,
   routineIndex: RoutineIndex
-): Routine | undefined {
-  if (routineIndex.type === 'Internal') {
-    return storage.internal?.get(routineIndex.value);
-  } else if (routineIndex.type === 'Function') {
-    return storage.function?.get(routineIndex.value);
-  } else if (routineIndex.type === 'Custom') {
-    return storage.custom?.get(routineIndex.value);
-  }
-  return undefined;
+): RoutineSummary | undefined {
+  const identifier = identifierFromIndex(routineIndex);
+  return identifier === null ? undefined : getRoutineSummary(storage, identifier);
 }
 
 /**
- * Build a URL for routine operations (PUT, DELETE)
+ * The path-shaped identifier for a wire `RoutineIndex`.
+ *
+ * The two spellings exist because one is the postcard enum and the other is a URL
+ * segment. This is the single place they are related, so a fourth index kind is one edit.
+ */
+export function identifierFromIndex(routineIndex: RoutineIndex): RoutineIdentifier | null {
+  if (routineIndex.type === 'Internal') return { type: 'internal', index: routineIndex.value };
+  if (routineIndex.type === 'Function') return { type: 'function', index: routineIndex.value };
+  if (routineIndex.type === 'Custom') return { type: 'custom', index: routineIndex.value };
+  return null;
+}
+
+/** The wire `RoutineIndex` for a path-shaped identifier. */
+export function indexFromIdentifier(identifier: RoutineIdentifier): RoutineIndex {
+  if (identifier.type === 'internal') return { type: 'Internal', value: identifier.index };
+  if (identifier.type === 'function') return { type: 'Function', value: identifier.index };
+  return { type: 'Custom', value: identifier.index };
+}
+
+/**
+ * Where a routine's definition is fetched, saved and deleted.
+ *
+ * `GET` streams the definition, `PUT` replaces it, `DELETE` removes it. Creating uses
+ * `/routines/custom` with no index, because the machine assigns it.
  */
 export function buildRoutineUrl(identifier: RoutineIdentifier): string {
   return `/routines/${identifier.type}/${identifier.index}`;
@@ -80,20 +100,4 @@ export function getRoutineIndexLabel(routineIndex: RoutineIndex): string {
     return `Custom #${routineIndex.value}`;
   }
   return 'Unknown';
-}
-
-/**
- * Count total routines across all types
- */
-export function getTotalRoutineCount(storage: RoutineStorage): number {
-  return (storage.internal?.size || 0) +
-         (storage.function?.size || 0) +
-         (storage.custom?.size || 0);
-}
-
-/**
- * Check if a routine exists at the given identifier
- */
-export function routineExists(storage: RoutineStorage, identifier: RoutineIdentifier): boolean {
-  return getRoutine(storage, identifier) !== undefined;
 }

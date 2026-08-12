@@ -7,7 +7,7 @@ use embassy_sync::watch::Watch;
 use portable_atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
-use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineList, ScaleOp, Status};
+use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
     ShotAnnotations, ShotLogId, ShotLogList, ShotLogStorageError,
 };
@@ -58,14 +58,23 @@ pub static WIFI_RSSI_DBM: AtomicI16 = AtomicI16::new(NO_RSSI);
 // Using Mutex<Option<>> since OnceLock is std-only
 pub static MACHINE_DEFINITION: Mutex<CriticalSectionRawMutex, Option<MachineDefinition>> = Mutex::new(None);
 
-// Routine Cache - periodically updated from application processor
-pub static ROUTINE_CACHE: Mutex<CriticalSectionRawMutex, Option<RoutineList>> = Mutex::new(None);
+/// Every stored routine's name, type and counts -- **not** its definition.
+///
+/// Periodically refreshed from the application processor. Cached, unlike the shot-log
+/// replies further down, because two emitters serve it (the HTTP listing and the
+/// WebSocket push) and a client asks for it on every connection: this is a small value
+/// read often, where a shot is a large value read once.
+///
+/// The definitions themselves are not held here and are never decoded on this processor
+/// at all. They move as opaque bytes through [`routine_request`], one routine at a time,
+/// straight into an HTTP response body.
+pub static ROUTINE_CACHE: Mutex<CriticalSectionRawMutex, Option<RoutineSummaryList>> = Mutex::new(None);
 
-// Application Routine Channel - for pushing routine updates to WebSocket clients
+// Application Routine Channel - for pushing routine summary updates to WebSocket clients
 pub const APPLICATION_ROUTINE_RECEIVERS: usize = 4;
-pub type ApplicationRoutineChannel = PubSubChannel<CriticalSectionRawMutex, RoutineList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
-pub type ApplicationRoutineSubscriber = Subscriber<'static, CriticalSectionRawMutex, RoutineList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
-pub type ApplicationRoutinePublisher = Publisher<'static, CriticalSectionRawMutex, RoutineList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
+pub type ApplicationRoutineChannel = PubSubChannel<CriticalSectionRawMutex, RoutineSummaryList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
+pub type ApplicationRoutineSubscriber = Subscriber<'static, CriticalSectionRawMutex, RoutineSummaryList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
+pub type ApplicationRoutinePublisher = Publisher<'static, CriticalSectionRawMutex, RoutineSummaryList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
 
 pub static ROUTINE_CHANNEL: StaticCell<ApplicationRoutineChannel> = StaticCell::new();
 
@@ -570,4 +579,127 @@ pub async fn shot_log_request(
     embassy_time::with_timeout(timeout, SHOT_LOG_REPLY.wait())
         .await
         .map_err(|_| ShotLogRequestError::Timeout)
+}
+
+// ============================================================================
+// Routine definitions
+// ============================================================================
+
+/// One slice of a routine, on its way to a client.
+///
+/// **The bytes are on the heap, not inline**, for the reason [`ShotLogReply`] gives at
+/// length: a `Signal` stores its payload inline, so a `heapless::Vec<u8,
+/// ROUTINE_CHUNK_LEN>` here would spend a permanent kilobyte of `.bss` to carry data
+/// that exists for milliseconds -- and on this chip `.stack` is the SRAM left over after
+/// `.data` and `.bss`, so that kilobyte comes straight out of the stack.
+///
+/// The wire type keeps its `heapless::Vec`; the application processor has the SRAM and
+/// would rather not have the allocator.
+#[derive(Clone, Debug)]
+pub enum RoutineReply {
+    Chunk {
+        index: RoutineIndex,
+        offset: u16,
+        total: u16,
+        last: bool,
+        bytes: alloc::vec::Vec<u8>,
+    },
+    /// No routine at that index. A real answer, and a fast one -- without it a client
+    /// asking for a deleted routine would sit out the whole timeout and then be told the
+    /// machine is not responding.
+    NotFound(RoutineIndex),
+    /// How a write ended, including the index a create was given.
+    WriteResult(RoutineWriteOutcome),
+}
+
+/// A routine to be written, already encoded.
+///
+/// Not decoded here, and that is the point: these bytes came off a socket as postcard and
+/// go onto the link as postcard, so building a `Routine` in between would be to take it
+/// apart and put it back together identically, five to ten allocations per step, on the
+/// heap Wi-Fi and BLE are sharing.
+#[derive(Clone, Debug)]
+pub struct RoutineWrite {
+    /// `None` creates and lets the application processor assign an index.
+    pub index: Option<RoutineIndex>,
+    pub bytes: alloc::vec::Vec<u8>,
+}
+
+/// Why a routine request produced nothing usable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutineRequestError {
+    /// No answer within the timeout.
+    Timeout,
+    /// The far side answered, but not the question that was asked.
+    Mismatched,
+}
+
+/// A chunk request bound for the application processor, picked up by its sender task.
+pub static ROUTINE_REQUEST: Signal<CriticalSectionRawMutex, (RoutineIndex, u16)> = Signal::new();
+
+/// A routine to be written, picked up by the same task.
+pub static ROUTINE_WRITE: Signal<CriticalSectionRawMutex, RoutineWrite> = Signal::new();
+
+/// Answers to both, published by the receiver task.
+pub static ROUTINE_REPLY: Signal<CriticalSectionRawMutex, RoutineReply> = Signal::new();
+
+/// Serialises routine traffic to exactly one exchange in flight.
+///
+/// The same job [`SHOT_LOG_LOCK`] does, and a **separate** lock rather than the same one:
+/// sharing would park a routine fetch behind a fifty-kilobyte shot download, and the
+/// frontend walks every routine on connect.
+///
+/// It covers writes as well as reads, so a save and a fetch can never interleave on a
+/// link that has no correlation id -- and a multi-chunk write stays contiguous, which the
+/// far side requires.
+pub static ROUTINE_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+
+/// Ask the application processor for one slice of a routine.
+///
+/// Deliberately **not cached**. A definition is fetched when a client opens a routine, and
+/// the client caches it far more cheaply than this processor could -- it has orders of
+/// magnitude more memory, and it is the one that knows when it is done with it.
+pub async fn routine_request(
+    index: RoutineIndex,
+    offset: u16,
+    timeout: embassy_time::Duration,
+) -> Result<RoutineReply, RoutineRequestError> {
+    let _guard = ROUTINE_LOCK.lock().await;
+
+    // Inside the lock and before the request goes out -- see the identical ordering in
+    // `shot_log_request`, and the reason it is load-bearing.
+    ROUTINE_REPLY.reset();
+    ROUTINE_REQUEST.signal((index, offset));
+
+    embassy_time::with_timeout(timeout, ROUTINE_REPLY.wait())
+        .await
+        .map_err(|_| RoutineRequestError::Timeout)
+}
+
+/// Send a routine to the application processor and wait for it to be stored.
+///
+/// One call per routine, however many chunks it takes: the far side reassembles and
+/// answers once, so this waits for a single [`RoutineReply::WriteResult`].
+///
+/// Holding [`ROUTINE_LOCK`] across the whole write is what makes chunking safe. The
+/// application processor accepts a write only as a contiguous sequence from offset zero,
+/// so a second writer cutting in would have its first chunk discard the first writer's
+/// progress -- and the first writer would then be told its routine was malformed.
+pub async fn routine_write(
+    index: Option<RoutineIndex>,
+    bytes: alloc::vec::Vec<u8>,
+    timeout: embassy_time::Duration,
+) -> Result<RoutineWriteOutcome, RoutineRequestError> {
+    let _guard = ROUTINE_LOCK.lock().await;
+
+    ROUTINE_REPLY.reset();
+    ROUTINE_WRITE.signal(RoutineWrite { index, bytes });
+
+    match embassy_time::with_timeout(timeout, ROUTINE_REPLY.wait()).await {
+        Ok(RoutineReply::WriteResult(outcome)) => Ok(outcome),
+        // A chunk or a not-found in answer to a write means the two paths have crossed,
+        // which the lock should prevent. Reported rather than coerced into a success.
+        Ok(_) => Err(RoutineRequestError::Mismatched),
+        Err(_) => Err(RoutineRequestError::Timeout),
+    }
 }

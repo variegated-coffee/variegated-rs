@@ -1,15 +1,20 @@
 import { memo } from 'preact/compat';
-import { useState } from 'preact/hooks';
-import { RoutineExecutionStatus, Status, RoutineStorage, RoutineCommand, RoutineExit } from '../schemas/schemas';
+import { useEffect, useState } from 'preact/hooks';
+import { RoutineExecutionStatus, Status, RoutineSummaryStorage, RoutineCommand, RoutineExit } from '../schemas/schemas';
 import { useMachine } from '../contexts/MachineContext';
 import { formatCommand } from '../utils/commandFormatter';
 import { formatExitCondition, formatExitAction } from '../utils/exitConditionFormatter';
-import { getRoutineFromIndex, getRoutineIndexLabel } from '../utils/routineHelpers';
+import {
+  getRoutineSummaryFromIndex,
+  getRoutineIndexLabel,
+  identifierFromIndex,
+} from '../utils/routineHelpers';
+import { loadRoutineBody, useRoutineBody } from '../state/routineBodies';
 import { getWebSocketService } from '../services/websocket';
 
 interface RoutineExecutionCardProps {
   execution: RoutineExecutionStatus;
-  routines: RoutineStorage;
+  routines: RoutineSummaryStorage;
   status: Status;
 }
 
@@ -42,11 +47,34 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
     showSuccess('Routine cancelled successfully');
   };
 
-  // Get the routine being executed
-  const routine = getRoutineFromIndex(routines, execution.routine_index);
+  // The name and the step total come from the summary, which is always present -- so the
+  // card can say "Backflush, step 3 of 8" the instant a routine starts.
+  const summary = getRoutineSummaryFromIndex(routines, execution.routine_index);
   const routineLabel = getRoutineIndexLabel(execution.routine_index);
 
-  if (!routine) {
+  // The step's description, its exit conditions and its entry commands need the
+  // definition. The background walk will normally have fetched it long before a shot
+  // starts; this covers the case where it has not -- a page opened mid-routine.
+  //
+  // Keyed on the running routine rather than fetched once: a routine can end and another
+  // begin without this component unmounting.
+  const identifier = identifierFromIndex(execution.routine_index);
+  const routine = useRoutineBody(identifier);
+
+  useEffect(() => {
+    if (identifier === null || routine) return;
+    // Failure is not surfaced here. This card appears on the machine's main screen
+    // whenever a routine runs, unprompted, so an error banner would be for something the
+    // user did not ask for and cannot act on. It degrades to name and progress, which is
+    // most of what the card is for.
+    loadRoutineBody(identifier).catch(() => {});
+    // Depending on `identifier` itself would re-run this on every render: it is a fresh
+    // object each time, built from the status, and status arrives at 5 Hz. The two fields
+    // are what actually identify the routine.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identifier?.type, identifier?.index, routine]);
+
+  if (!summary) {
     return (
       <div
         style={{
@@ -64,11 +92,14 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
     );
   }
 
-  // Get current step info
-  const currentStep = execution.current_step !== null && execution.current_step !== undefined
+  // Get current step info. `currentStep` is null until the definition arrives, which the
+  // renderers below already handle -- they were written for a routine that had been
+  // deleted out from under a running execution.
+  const currentStep = routine && execution.current_step !== null && execution.current_step !== undefined
     ? routine.steps[execution.current_step]
     : null;
-  const totalSteps = routine.steps.length;
+  // From the summary, so the progress counter is right before the body loads.
+  const totalSteps = summary.step_count;
   const stepNumber = (execution.current_step ?? 0) + 1;
 
   // Format times
@@ -247,7 +278,7 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
         <div>
           <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: '600', color: '#155724' }}>
-            {routine.name}
+            {summary.name}
           </h3>
           <div style={{ fontSize: '0.9rem', color: '#155724', marginTop: '0.25rem' }}>
             Step {stepNumber} of {totalSteps}

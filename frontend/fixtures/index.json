@@ -5,5 +5,8 @@
   { "name": "ws_command_ack", "schema": "WsMessageSchema" },
   { "name": "ws_status_update", "schema": "WsMessageSchema" },
   { "name": "ws_request_routines", "schema": "WsMessageSchema" },
-  { "name": "shot_log_list", "schema": "ShotLogListSchema" }
+  { "name": "shot_log_list", "schema": "ShotLogListSchema" },
+  { "name": "routine_summaries", "schema": "RoutineSummaryStorageSchema" },
+  { "name": "ws_routines_update", "schema": "WsMessageSchema" },
+  { "name": "routine", "schema": "RoutineSchema" }
 ]

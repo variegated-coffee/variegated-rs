@@ -1,0 +1,59 @@
+{
+  "routine_type": "Cleaning",
+  "name": "Fixture",
+  "parameters": [
+    {
+      "index": 0,
+      "name": "Dose",
+      "default": 18.0,
+      "unit": "Grams"
+    }
+  ],
+  "derived_parameters": [
+    {
+      "index": 1,
+      "name": "Yield",
+      "unit": "Grams",
+      "formula": {
+        "Linear": {
+          "base_param": 0,
+          "multiplier": 2.0,
+          "offset": 0.0
+        }
+      }
+    }
+  ],
+  "steps": [
+    {
+      "entry_command": [
+        {
+          "StartBrewing": 0
+        }
+      ],
+      "exits": [
+        {
+          "condition": {
+            "StateConditionMet": {
+              "GroupPressureAbove": [
+                0,
+                {
+                  "Static": 9.0
+                }
+              ]
+            }
+          },
+          "then": {
+            "JumpToStep": 2
+          },
+          "description": "Reached pressure"
+        }
+      ],
+      "description": "Brew"
+    }
+  ],
+  "finally": [
+    {
+      "StopBrewing": 0
+    }
+  ]
+}

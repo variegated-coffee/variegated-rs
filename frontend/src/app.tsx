@@ -8,18 +8,19 @@ import { ConfigurationPanel } from './components/ConfigurationPanel';
 import { JsonModal } from './components/JsonModal';
 import { MachineProvider } from './contexts/MachineContext';
 import { createWebSocketService, getWebSocketService } from './services/websocket';
+import { syncRoutineBodies } from './state/routineBodies';
 import {
   MachineDefinition,
   Status,
   Configuration,
-  RoutineStorage
+  RoutineSummaryStorage
 } from './schemas/schemas';
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [config, setConfig] = useState<Configuration | null>(null);
   const [machineDefinition, setMachineDefinition] = useState<MachineDefinition | null>(null);
-  const [routines, setRoutines] = useState<RoutineStorage | null>(null);
+  const [routines, setRoutines] = useState<RoutineSummaryStorage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
@@ -57,6 +58,9 @@ export function App() {
       },
       onRoutinesUpdate: (newRoutines) => {
         setRoutines(newRoutines);
+        // Start walking the definitions in the background. A no-op when the list is
+        // unchanged, which is the usual case -- see `syncRoutineBodies`.
+        syncRoutineBodies(newRoutines);
       },
       onConnect: () => {
         setConnected(true);
@@ -153,7 +157,7 @@ export function App() {
         </div>
 
         {/* Status Display */}
-        <StatusDisplay status={status as Status} routines={routines as RoutineStorage} />
+        <StatusDisplay status={status as Status} routines={routines as RoutineSummaryStorage} />
 
         {/* Configuration Panel */}
         <ConfigurationPanel configuration={config as Configuration} />

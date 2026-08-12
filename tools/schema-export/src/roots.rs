@@ -1,13 +1,14 @@
 //! The types the frontend speaks, and everything reachable from them.
 
 use variegated_comms_api_types::api_types::{
-    RoutineStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
+    RoutineSummaryStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
     SetGroupControlRequest, SetGroupPumpConfigurationRequest, SetPidParametersRequest,
     SetSteamValveOpennessRequest, SetWaterTapPumpConfigurationRequest,
 };
 use variegated_comms_api_types::ws_types::WsMessage;
 use variegated_controller_types::{
-    Configuration, MachineCommand, MachineDefinition, ShotLog, ShotLogList, Status,
+    Configuration, MachineCommand, MachineDefinition, Routine, RoutineIndex, ShotLog,
+    ShotLogList, Status,
 };
 use variegated_postcard_schema::Registry;
 
@@ -32,11 +33,23 @@ pub fn registry() -> Registry {
     reg.root::<Status>();
     reg.root::<Configuration>();
     reg.root::<MachineDefinition>();
-    reg.root::<RoutineStorage>();
+    reg.root::<RoutineSummaryStorage>();
 
     // The envelope, and the command payload it carries.
     reg.root::<WsMessage<'static>>();
     reg.root::<MachineCommand>();
+
+    // A routine definition, fetched and saved one at a time over HTTP.
+    //
+    // An explicit root rather than a type reached transitively. It used to arrive through
+    // `MachineCommand::AddRoutine`, which the frontend no longer sends -- a definition is
+    // several kilobytes and the WebSocket's inbound frames are capped at 256 bytes. The
+    // frontend still needs this schema for `GET`/`PUT /routines/{type}/{index}`, and that
+    // should not depend on a command variant it has stopped using.
+    reg.root::<Routine>();
+    // The `POST` response: a create is assigned its index by the machine, so this is how
+    // a client learns where its routine landed.
+    reg.root::<RoutineIndex>();
 
     // HTTP request bodies.
     reg.root::<SetBoilerControlRequest>();

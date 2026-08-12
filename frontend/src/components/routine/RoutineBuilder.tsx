@@ -1,12 +1,14 @@
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
-import { Routine, MachineDefinition, RoutineStorage, RoutineIndex } from '../../schemas/schemas';
-import { getRoutineTypeLabel, RoutineIdentifier } from '../../utils/routineHelpers';
+import { Routine, MachineDefinition, RoutineSummary, RoutineSummaryStorage } from '../../schemas/schemas';
+import { getRoutineTypeLabel, indexFromIdentifier, RoutineIdentifier } from '../../utils/routineHelpers';
 import { RoutineEditor } from './RoutineEditor';
 import { getWebSocketService } from '../../services/websocket';
+import { createRoutine, deleteRoutine, saveRoutine } from '../../api/routines';
+import { invalidateRoutineBody, loadRoutineBody, useRoutineBody } from '../../state/routineBodies';
 
 interface RoutineBuilderProps {
-  routines: RoutineStorage;
+  routines: RoutineSummaryStorage;
   machineDefinition: MachineDefinition | null;
   onRefresh?: () => void;
 }
@@ -30,90 +32,79 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleSave = (routine: Routine) => {
-    const ws = getWebSocketService();
-    if (!ws) {
-      showError('WebSocket not connected');
-      return;
-    }
-
-    if (editingRoutine !== null) {
-      // Update existing routine
-      const routineIndex: RoutineIndex = editingRoutine.type === 'custom'
-        ? { type: 'Custom', value: editingRoutine.index }
-        : editingRoutine.type === 'function'
-        ? { type: 'Function', value: editingRoutine.index }
-        : { type: 'Internal', value: editingRoutine.index };
-      ws.updateRoutine(routineIndex, routine);
-      showSuccess('Routine updated successfully');
-    } else {
-      // Add new routine
-      if (addingType === 'custom') {
-        ws.addRoutine(routine);
+  // Every mutation now awaits a real answer from the machine and reports it. These used
+  // to be fire-and-forget commands on the WebSocket followed by an unconditional success
+  // toast -- which was wrong twice over: the save could not work at all (a routine
+  // exceeds the socket's 256-byte inbound frame), and nothing would have said so if it
+  // had merely failed.
+  //
+  // No `setTimeout` refresh either. The application processor pushes fresh summaries as
+  // soon as a write lands, so waiting a second was a guess in place of an answer.
+  const handleSave = async (routine: Routine) => {
+    try {
+      if (editingRoutine !== null) {
+        await saveRoutine(editingRoutine, routine);
+        // Dropped before the new summaries arrive, so nothing can render the pre-edit
+        // body in the meantime.
+        invalidateRoutineBody(editingRoutine);
+        showSuccess('Routine updated successfully');
+      } else if (addingType === 'custom') {
+        await createRoutine(routine);
         showSuccess('Custom routine added successfully');
       } else {
-        // Function routine - update at specific index
-        const routineIndex: RoutineIndex = { type: 'Function', value: addingFunctionIndex };
-        ws.updateRoutine(routineIndex, routine);
+        const target: RoutineIdentifier = { type: 'function', index: addingFunctionIndex };
+        await saveRoutine(target, routine);
+        invalidateRoutineBody(target);
         showSuccess('Function routine added successfully');
       }
-    }
 
-    setEditingRoutine(null);
-    setIsAdding(false);
-
-    // Trigger refresh after a short delay to allow backend to process
-    setTimeout(() => {
+      setEditingRoutine(null);
+      setIsAdding(false);
       onRefresh?.();
-    }, 1000);
+    } catch (e) {
+      showError(`Could not save routine: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
-  const handleDelete = (identifier: RoutineIdentifier, routineName: string) => {
+  // The editor's `onSave` is synchronous by signature, and saving is now a round trip.
+  // Discarding the promise here is safe because `handleSave` reports both outcomes
+  // itself -- a toast on success, an error banner on failure -- and has nothing to hand
+  // back to the caller.
+  const onSaveRoutine = (routine: Routine) => {
+    void handleSave(routine);
+  };
+
+  const handleDelete = async (identifier: RoutineIdentifier, routineName: string) => {
     if (!confirm(`Delete routine "${routineName}"?`)) {
       return;
     }
 
-    const ws = getWebSocketService();
-    if (!ws) {
-      showError('WebSocket not connected');
-      return;
-    }
-
-    const routineIndex: RoutineIndex = identifier.type === 'custom'
-      ? { type: 'Custom', value: identifier.index }
-      : identifier.type === 'function'
-      ? { type: 'Function', value: identifier.index }
-      : { type: 'Internal', value: identifier.index };
-    ws.removeRoutine(routineIndex);
-    showSuccess('Routine deleted successfully');
-
-    // Trigger refresh after a short delay
-    setTimeout(() => {
+    try {
+      await deleteRoutine(identifier);
+      invalidateRoutineBody(identifier);
+      showSuccess('Routine deleted successfully');
       onRefresh?.();
-    }, 1000);
+    } catch (e) {
+      showError(`Could not delete routine: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
-  const handleDuplicate = (routineProp: Routine) => {
-    const ws = getWebSocketService();
-    if (!ws) {
-      showError('WebSocket not connected');
-      return;
-    }
-
-    // Type assertion needed: Postcard's InferType fails on Routine type
-    const routine = routineProp;
-    const newRoutine: Routine = {
-      ...routine,
-      name: `${routine.name} (copy)`
-    } as Routine;
-
-    ws.addRoutine(newRoutine);
-    showSuccess('Routine duplicated successfully');
-
-    // Trigger refresh after a short delay
-    setTimeout(() => {
+  /**
+   * Duplicating needs the *definition*, which the list no longer carries.
+   *
+   * Normally already prefetched, so this resolves immediately. The `await` matters
+   * anyway: copying a routine whose body had not arrived would previously have spread a
+   * summary and stored a routine with no steps.
+   */
+  const handleDuplicate = async (identifier: RoutineIdentifier) => {
+    try {
+      const routine = await loadRoutineBody(identifier);
+      await createRoutine({ ...routine, name: `${routine.name} (copy)` });
+      showSuccess('Routine duplicated successfully');
       onRefresh?.();
-    }, 1000);
+    } catch (e) {
+      showError(`Could not duplicate routine: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   const handleRun = (identifier: RoutineIdentifier) => {
@@ -123,12 +114,7 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
       return;
     }
 
-    const routineIndex: RoutineIndex = identifier.type === 'custom'
-      ? { type: 'Custom', value: identifier.index }
-      : identifier.type === 'function'
-      ? { type: 'Function', value: identifier.index }
-      : { type: 'Internal', value: identifier.index };
-    ws.runRoutine(routineIndex);
+    ws.runRoutine(indexFromIdentifier(identifier));
     showSuccess('Routine started successfully');
   };
 
@@ -142,10 +128,10 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
     showSuccess('Storage optimized successfully');
   };
 
-  const renderRoutineCard = (routineProp: Routine, identifier: RoutineIdentifier, allowEdit: boolean, allowDelete: boolean) => {
-    // Type assertion needed: Postcard's InferType fails on Routine type
-    const routine = routineProp;
-
+  // Rendered entirely from the summary. The counts below are the reason a summary carries
+  // them rather than deriving them: a card that showed "8 steps" by consulting the
+  // definition would have to fetch every routine on the machine just to draw a list.
+  const renderRoutineCard = (routine: RoutineSummary, identifier: RoutineIdentifier, allowEdit: boolean, allowDelete: boolean) => {
     // For function routines, use the function name from machine definition
     const getRoutineLabel = () => {
       if (identifier.type === 'function' && machineDefinition?.function_routines) {
@@ -176,11 +162,11 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
             {getRoutineLabel()}
           </div>
           <div style={{ fontSize: '0.85rem', color: '#666' }}>
-            {routine.parameters.length} parameter{routine.parameters.length !== 1 ? 's' : ''}
-            {routine.derived_parameters.length > 0 && ` + ${routine.derived_parameters.length} derived`}
+            {routine.parameter_count} parameter{routine.parameter_count !== 1 ? 's' : ''}
+            {routine.derived_parameter_count > 0 && ` + ${routine.derived_parameter_count} derived`}
             {' • '}
-            {routine.steps.length} step{routine.steps.length !== 1 ? 's' : ''}
-            {routine.finally.length > 0 && ` • ${routine.finally.length} finally command${routine.finally.length !== 1 ? 's' : ''}`}
+            {routine.step_count} step{routine.step_count !== 1 ? 's' : ''}
+            {routine.finally_count > 0 && ` • ${routine.finally_count} finally command${routine.finally_count !== 1 ? 's' : ''}`}
           </div>
         </div>
 
@@ -218,7 +204,7 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
           {allowDelete && (
             <>
               <button
-                onClick={() => void handleDuplicate(routine)}
+                onClick={() => void handleDuplicate(identifier)}
                 style={{
                   padding: '0.5rem 1rem',
                   backgroundColor: 'white',
@@ -501,7 +487,7 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
       {isAdding && (
         <RoutineEditor
           routine={null}
-          onSave={handleSave}
+          onSave={onSaveRoutine}
           onCancel={() => setIsAdding(false)}
           functionSlotConfig={addingType === 'function' ? {
             index: addingFunctionIndex,
@@ -513,26 +499,76 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
         />
       )}
 
-      {editingRoutine !== null && (() => {
-        let routine: Routine | undefined;
-        if (editingRoutine.type === 'custom') {
-          routine = routines.custom?.get(editingRoutine.index);
-        } else if (editingRoutine.type === 'function') {
-          routine = routines.function?.get(editingRoutine.index);
-        } else if (editingRoutine.type === 'internal') {
-          routine = routines.internal?.get(editingRoutine.index);
-        }
-
-        return routine ? (
-          <RoutineEditor
-            routine={routine}
-            onSave={handleSave}
-            onCancel={() => setEditingRoutine(null)}
-          />
-        ) : null;
-      })()}
+      {editingRoutine !== null && (
+        <RoutineEditorForRoutine
+          identifier={editingRoutine}
+          onSave={onSaveRoutine}
+          onCancel={() => setEditingRoutine(null)}
+        />
+      )}
     </div>
   );
+};
+
+/**
+ * Open the editor on a routine, once its definition is actually in hand.
+ *
+ * **The editor must never be given a stub**, and this component exists to make that
+ * impossible rather than unlikely. `RoutineEditor` seeds its state with
+ * `routine?.steps || []`, which is right for the create-new case it was written for --
+ * and catastrophic for a half-loaded one: the fallbacks cannot tell "new" from "not
+ * arrived yet", so saving would replace a real routine with an empty one and there would
+ * be no error to see. The definition either exists here or the editor is not rendered.
+ *
+ * Normally there is nothing to wait for. The background walk fetches every definition
+ * shortly after connecting, so this is a cache hit and the editor opens with no request
+ * and no spinner. The loading state is for the two cases that outrun the walk: a routine
+ * near the end of a long list, and one just invalidated by a save.
+ */
+interface RoutineEditorForRoutineProps {
+  identifier: RoutineIdentifier;
+  onSave: (routine: Routine) => void;
+  onCancel: () => void;
+}
+
+const RoutineEditorForRoutine = ({ identifier, onSave, onCancel }: RoutineEditorForRoutineProps) => {
+  const cached = useRoutineBody(identifier);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cached) return;
+
+    let cancelled = false;
+    setLoadError(null);
+    loadRoutineBody(identifier).catch((e) => {
+      if (!cancelled) {
+        setLoadError(e instanceof Error ? e.message : String(e));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // The two fields rather than the object: `identifier` is state held by the parent and
+    // stable in practice, but depending on the object would tie this effect to the
+    // parent's re-render rather than to which routine is being edited.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identifier.type, identifier.index, cached]);
+
+  if (loadError !== null) {
+    return (
+      <div style={{ padding: '1rem', color: '#dc3545' }}>
+        Could not load this routine: {loadError}
+        <button onClick={onCancel} style={{ marginLeft: '1rem' }}>Close</button>
+      </div>
+    );
+  }
+
+  if (!cached) {
+    return <div style={{ padding: '1rem', color: '#666' }}>Loading routine…</div>;
+  }
+
+  return <RoutineEditor routine={cached} onSave={onSave} onCancel={onCancel} />;
 };
 
 export const RoutineBuilder = memo(RoutineBuilderComponent);

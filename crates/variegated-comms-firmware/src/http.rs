@@ -1,6 +1,5 @@
 //! HTTP server functionality
 
-use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Display};
@@ -40,6 +39,31 @@ const SHOT_LOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_se
 /// rather than implying it has the whole card.
 const SHOT_LIST_LIMIT: u16 = 50;
 
+/// How long to wait for one chunk of a routine.
+///
+/// The same five seconds as a shot-log request, and for the same reasons -- this occupies
+/// an HTTP handler slot, and the answer comes from a repository that may be reading flash.
+/// It is per *chunk* rather than per routine, but a routine is at most two chunks.
+const ROUTINE_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(5);
+
+/// How long to wait for a routine write to be stored.
+///
+/// Longer than a read: the application processor has to receive every chunk, decode, and
+/// then write flash, and a flash write behind a contended bus is the slowest thing on
+/// either processor.
+const ROUTINE_WRITE_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(10);
+
+/// The largest routine body this server will read.
+///
+/// `ROUTINE_MAX_ENCODED_LEN` plus slack, because that is the ceiling the far side stores
+/// through -- a larger body could not be saved whatever this said, so reading it would be
+/// work spent on its way to a refusal.
+///
+/// This was 16384, and `read_body` allocates `vec![0u8; max_size]` **up front**: every
+/// routine save took a 16 kB transient off a 56 kB heap shared with Wi-Fi, BLE and the
+/// ESPHome server, to carry at most 2 kB.
+const ROUTINE_BODY_LIMIT: usize = ROUTINE_MAX_ENCODED_LEN + 256;
+
 /// Turn a refusal from the application processor into something worth showing a user.
 ///
 /// Each of these is a different action on the user's part, which is the whole reason
@@ -71,22 +95,26 @@ use edge_nal_embassy::Tcp;
 use embedded_io_async::{Read, Write};
 use embassy_futures::select::{select, Either};
 
+// No `Routine` here, and that is the property this module is meant to have: a routine
+// definition passes through this server as bytes in both directions. The types it does
+// name are the summary (for the listing), the index (for addressing) and the write
+// outcome (for the status code).
 use variegated_controller_types::{
     BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlTargetValuesUpdate,
-    MachineCommand, MachineMode, PidParameterTarget, Routine, RoutineIndex, RoutineList,
-    ScaleSelector, ScheduleItem, Status,
+    MachineCommand, MachineMode, PidParameterTarget, RoutineIndex, RoutineWriteError,
+    RoutineWriteOutcome, ScaleSelector, ScheduleItem, Status, ROUTINE_MAX_ENCODED_LEN,
 };
 use variegated_controller_types::shot_log::{ShotAnnotations, ShotLogId, ShotLogStorageError};
 
 use crate::api_types::{
-    RoutineStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
+    RoutineSummaryStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
     SetGroupControlRequest, SetGroupPumpConfigurationRequest, SetPidParametersRequest,
     SetSteamValveOpennessRequest, SetWaterTapPumpConfigurationRequest,
 };
 use crate::channels::{
-    shot_log_request, ApplicationConfigurationSubscriber, ApplicationStatusSubscriber,
-    MachineCommandSender, ShotLogReply, ShotLogRequest, CONFIG_CACHE, MACHINE_DEFINITION,
-    ROUTINE_CACHE, STATUS_CACHE,
+    routine_request, routine_write, shot_log_request, ApplicationConfigurationSubscriber,
+    ApplicationStatusSubscriber, MachineCommandSender, RoutineReply, ShotLogReply,
+    ShotLogRequest, CONFIG_CACHE, MACHINE_DEFINITION, ROUTINE_CACHE, STATUS_CACHE,
 };
 
 /// HTTP request handler
@@ -292,7 +320,25 @@ impl HttpHandler {
         }
     }
 
+    /// `{type}/{index}` from a routine path, or `None` if either half is not one.
+    ///
+    /// The three type names are the same three the WebSocket and the frontend use, and
+    /// they are the *index kind* -- `RoutineIndex`'s variants -- not `RoutineType`, which
+    /// is a separate axis carried inside the routine itself.
+    fn parse_routine_index(routine_type: &str, index: &str) -> Option<RoutineIndex> {
+        let index: u32 = index.parse().ok()?;
+        match routine_type {
+            "internal" => Some(RoutineIndex::Internal(index)),
+            "function" => Some(RoutineIndex::Function(index)),
+            "custom" => Some(RoutineIndex::Custom(index)),
+            _ => None,
+        }
+    }
+
     // GET /routines
+    //
+    // Summaries only -- names, types and counts. A definition comes from
+    // `GET /routines/{type}/{index}`, one at a time, and is never held on this processor.
     async fn handle_get_routines<T, const N: usize>(
         &self,
         conn: &mut ServerConnection<'_, T, N>,
@@ -303,31 +349,8 @@ impl HttpHandler {
         log_info!("GET /routines");
 
         let routine_list = ROUTINE_CACHE.lock().await;
-        if let Some(ref routines) = *routine_list {
-            // Categorize routines by type
-            let mut internal_map = BTreeMap::new();
-            let mut function_map = BTreeMap::new();
-            let mut custom_map = BTreeMap::new();
-
-            for (routine_index, routine) in routines.routines.iter() {
-                match routine_index {
-                    RoutineIndex::Internal(index) => {
-                        internal_map.insert(*index as u32, routine.clone());
-                    }
-                    RoutineIndex::Function(index) => {
-                        function_map.insert(*index as u32, routine.clone());
-                    }
-                    RoutineIndex::Custom(index) => {
-                        custom_map.insert(*index as u32, routine.clone());
-                    }
-                }
-            }
-
-            let storage = RoutineStorage {
-                internal: internal_map,
-                function: function_map,
-                custom: custom_map,
-            };
+        if let Some(ref summaries) = *routine_list {
+            let storage = RoutineSummaryStorage::from_list(summaries);
 
             match postcard::to_allocvec(&storage) {
                 Ok(binary) => {
@@ -342,6 +365,96 @@ impl HttpHandler {
         } else {
             Self::send_unavailable(conn, "Routines not yet available").await
         }
+    }
+
+    // GET /routines/<type>/<index>
+    //
+    // Streams the routine's postcard encoding, as the application processor stored it.
+    // **Nothing here decodes it.** The bytes arrive from the link in chunks and go
+    // straight onto the socket, so this handler holds one kilobyte at a time rather than
+    // a `Routine` -- which is five to ten allocations per step, on the heap Wi-Fi and BLE
+    // are sharing. It is the same trade `handle_get_shot` makes, for the same reason.
+    async fn handle_get_routine<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+        index: RoutineIndex,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("GET one routine");
+
+        // The first chunk is fetched *before* the response is started, and that ordering
+        // is the whole error-handling story: `initiate_response` commits to a status code,
+        // after which "no such routine" can only be expressed by hanging up mid-body.
+        let first = match routine_request(index, 0, ROUTINE_TIMEOUT).await {
+            Ok(RoutineReply::Chunk { bytes, last, total, .. }) => (bytes, last, total),
+            Ok(RoutineReply::NotFound(_)) => {
+                return Self::send_not_found(conn).await;
+            }
+            Ok(_) => {
+                log_error!("Routine fetch: unexpected reply kind");
+                return Self::send_internal_error(conn, "Unexpected routine reply").await;
+            }
+            Err(_) => {
+                return Self::send_unavailable(conn, "Machine did not answer in time").await;
+            }
+        };
+        let (first_bytes, mut last, total) = first;
+
+        conn.initiate_response(200, Some("OK"), &[("Content-Type", "application/octet-stream")])
+            .await?;
+        conn.write_all(&first_bytes).await?;
+
+        let mut offset = first_bytes.len() as u16;
+        while !last {
+            match routine_request(index, offset, ROUTINE_TIMEOUT).await {
+                Ok(RoutineReply::Chunk {
+                    index: reply_index,
+                    offset: reply_offset,
+                    total: reply_total,
+                    bytes,
+                    last: is_last,
+                }) => {
+                    // The echo check. `ROUTINE_LOCK` should make a mismatch impossible,
+                    // but splicing one routine's bytes into another's body is a corruption
+                    // no client could detect -- postcard is positional, so the result
+                    // would decode into a routine nobody wrote rather than fail.
+                    //
+                    // `total` is compared as well as the address, and that one catches a
+                    // different failure: the lock is held per chunk, not for the whole
+                    // download, so a save landing between two chunks would otherwise
+                    // splice the head of the old routine onto the tail of the new. An
+                    // edit that leaves the encoded length exactly unchanged still slips
+                    // through -- but this client serialises its own writes against its own
+                    // reads, so that needs a second browser editing the same routine
+                    // during the download.
+                    if reply_index != index || reply_offset != offset || reply_total != total {
+                        log_error!("Routine chunk: reply does not match the request");
+                        break;
+                    }
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    conn.write_all(&bytes).await?;
+                    offset += bytes.len() as u16;
+                    last = is_last;
+                }
+                // Past this point the status is already sent, so a failure can only be
+                // expressed by ending the body early. Logged with the offset so a
+                // truncated response is diagnosable from the device.
+                Ok(_) => {
+                    log_error!("Routine download failed at offset {}", offset);
+                    break;
+                }
+                Err(_) => {
+                    log_error!("Routine download timed out at offset {}", offset);
+                    break;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     // POST /schedules - Add new schedule
@@ -455,17 +568,10 @@ impl HttpHandler {
 
         let routine_type = parts[0];
 
-        let body = Self::read_body(conn, 16384).await?;
-
-        let routine: Routine = match postcard::from_bytes(&body) {
-            Ok(item) => item,
-            Err(e) => {
-                log_error!("Failed to deserialize Routine: {:?}", defmt::Debug2Format(&e));
-                return Self::send_bad_request(conn, "Invalid postcard data").await;
-            }
-        };
-
-        let cmd = match routine_type {
+        // The target index is decided before the body is read, so a malformed path costs
+        // nothing. `None` means "let the repository assign one", which is what makes a
+        // custom routine's index come back in the response.
+        let target = match routine_type {
             "custom" => {
                 if parts.len() > 1 {
                     return Self::send_bad_request(
@@ -474,7 +580,7 @@ impl HttpHandler {
                     )
                     .await;
                 }
-                MachineCommand::AddRoutine(routine)
+                None
             }
             "function" => {
                 if parts.len() != 2 {
@@ -490,7 +596,7 @@ impl HttpHandler {
                         return Self::send_bad_request(conn, "Invalid index").await;
                     }
                 };
-                MachineCommand::UpdateRoutine(RoutineIndex::Function(index), routine)
+                Some(RoutineIndex::Function(index))
             }
             "internal" => {
                 return Self::send_bad_request(conn, "Internal routines cannot be created via API")
@@ -505,15 +611,52 @@ impl HttpHandler {
             }
         };
 
-        match self.command_sender.try_send(cmd) {
-            Ok(_) => {
-                log_info!("Routine add command sent");
-                Self::send_text(conn, 201, "Created", "Routine added").await
+        let body = Self::read_body(conn, ROUTINE_BODY_LIMIT).await?;
+        Self::write_routine(conn, target, body).await
+    }
+
+    /// Hand a routine's bytes to the application processor and answer with what happened.
+    ///
+    /// **The bytes are not decoded here.** They came off the socket as postcard and go
+    /// onto the link as postcard; building a `Routine` in between would take it apart and
+    /// put it back together identically, on the processor with the least memory to do it
+    /// on. The far side has the flash, the 2 kB buffer and the room.
+    ///
+    /// The cost of not decoding is that a malformed body is diagnosed one hop later --
+    /// which is why `RoutineWriteError::Malformed` exists and comes back as a 400 rather
+    /// than a generic failure.
+    async fn write_routine<T, const N: usize>(
+        conn: &mut ServerConnection<'_, T, N>,
+        index: Option<RoutineIndex>,
+        body: Vec<u8>,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        match routine_write(index, body, ROUTINE_WRITE_TIMEOUT).await {
+            Ok(RoutineWriteOutcome::Stored(stored)) => {
+                log_info!("Routine stored");
+                // The index comes back in the body because on a create the *repository*
+                // chose it -- a client that posts a new routine has no other way to learn
+                // where it landed.
+                match postcard::to_allocvec(&stored) {
+                    Ok(binary) => Self::send_binary(conn, &binary).await,
+                    Err(_) => Self::send_internal_error(conn, "Failed to serialize routine index").await,
+                }
             }
-            Err(_) => {
-                log_error!("Command channel full");
-                Self::send_unavailable(conn, "Command channel full").await
+            Ok(RoutineWriteOutcome::Failed(RoutineWriteError::Malformed)) => {
+                Self::send_bad_request(conn, "Invalid postcard data").await
             }
+            Ok(RoutineWriteOutcome::Failed(RoutineWriteError::TooLarge)) => {
+                Self::send_bad_request(conn, "Routine is too large to store").await
+            }
+            Ok(RoutineWriteOutcome::Failed(RoutineWriteError::Immutable)) => {
+                Self::send_bad_request(conn, "Internal routines are read-only").await
+            }
+            Ok(RoutineWriteOutcome::Failed(RoutineWriteError::Storage)) => {
+                Self::send_internal_error(conn, "The machine could not store the routine").await
+            }
+            Err(_) => Self::send_unavailable(conn, "Machine did not answer in time").await,
         }
     }
 
@@ -542,27 +685,8 @@ impl HttpHandler {
             }
         };
 
-        let body = Self::read_body(conn, 16384).await?;
-
-        let routine: Routine = match postcard::from_bytes(&body) {
-            Ok(item) => item,
-            Err(e) => {
-                log_error!("Failed to deserialize Routine: {:?}", defmt::Debug2Format(&e));
-                return Self::send_bad_request(conn, "Invalid postcard data").await;
-            }
-        };
-
-        let cmd = MachineCommand::UpdateRoutine(routine_index, routine);
-        match self.command_sender.try_send(cmd) {
-            Ok(_) => {
-                log_info!("Routine update command sent");
-                Self::send_text(conn, 200, "OK", "Routine updated").await
-            }
-            Err(_) => {
-                log_error!("Command channel full");
-                Self::send_unavailable(conn, "Command channel full").await
-            }
-        }
+        let body = Self::read_body(conn, ROUTINE_BODY_LIMIT).await?;
+        Self::write_routine(conn, Some(routine_index), body).await
     }
 
     // DELETE /routines/{type}/{index}
@@ -1546,6 +1670,20 @@ impl Handler for HttpHandler {
             }
 
             // Routine CRUD
+            //
+            // Registered after the exact `GET /routines` above, which it would otherwise
+            // shadow -- the listing and one definition are different resources.
+            (Method::Get, p) if p.starts_with("/routines/") => {
+                let remainder = p.strip_prefix("/routines/").unwrap_or("");
+                let parts: Vec<&str> = remainder.split('/').collect();
+                if parts.len() != 2 {
+                    Self::send_bad_request(conn, "Invalid path format").await
+                } else if let Some(index) = Self::parse_routine_index(parts[0], parts[1]) {
+                    self.handle_get_routine(conn, index).await
+                } else {
+                    Self::send_bad_request(conn, "Invalid routine type or index").await
+                }
+            }
             (Method::Post, p) if p.starts_with("/routines/") => {
                 let remainder = p.strip_prefix("/routines/").unwrap_or("");
                 self.handle_post_routine(conn, remainder).await

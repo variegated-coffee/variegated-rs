@@ -4,7 +4,7 @@ import {
   Status,
   Configuration,
   MachineDefinition,
-  RoutineStorage,
+  RoutineSummaryStorage,
   WsMessage,
   MachineCommand,
   BoilerControlMode,
@@ -14,7 +14,6 @@ import {
   PidParameterTarget,
   PidParameters,
   PumpConfiguration,
-  Routine,
   RoutineIndex,
   ScheduleItem,
   BluetoothPeripheralAssociation
@@ -24,7 +23,7 @@ export interface WebSocketServiceCallbacks {
   onStatusUpdate?: (status: Status) => void;
   onConfigurationUpdate?: (config: Configuration) => void;
   onMachineDefinition?: (def: MachineDefinition) => void;
-  onRoutinesUpdate?: (routines: RoutineStorage) => void;
+  onRoutinesUpdate?: (routines: RoutineSummaryStorage) => void;
   onCommandAck?: (id: number, success: boolean, error?: string) => void;
   onConnect?: () => void;
   onDisconnect?: () => void;
@@ -287,10 +286,7 @@ export class WebSocketService {
     });
   }
 
-  runRoutine(
-    routineIndex: { type: 'Internal'; value: number } | { type: 'Function'; value: number } | { type: 'Custom'; value: number },
-    params?: Map<number, number>
-  ): void {
+  runRoutine(routineIndex: RoutineIndex, params?: Map<number, number>): void {
     this.sendMachineCommand({
       type: 'RunRoutine',
       value: [routineIndex, params ?? null]
@@ -402,27 +398,14 @@ export class WebSocketService {
     });
   }
 
-  // Routine CRUD methods
-  addRoutine(routine: Routine): void {
-    this.sendMachineCommand({
-      type: 'AddRoutine',
-      value: routine
-    });
-  }
-
-  updateRoutine(index: RoutineIndex, routine: Routine): void {
-    this.sendMachineCommand({
-      type: 'UpdateRoutine',
-      value: [index, routine]
-    });
-  }
-
-  removeRoutine(index: RoutineIndex): void {
-    this.sendMachineCommand({
-      type: 'RemoveRoutine',
-      value: index
-    });
-  }
+  // Routine CRUD lives in `api/routines.ts`, over HTTP, and cannot live here.
+  //
+  // `AddRoutine` and `UpdateRoutine` carry a whole definition, which serialises to several
+  // kilobytes; the server's inbound frame buffer is 256 bytes and rejects anything longer
+  // by closing the connection. Every save made this way failed, and took the socket with
+  // it. `RemoveRoutine` would fit -- it is an index -- but it moved too, so that all four
+  // operations answer with whether they actually worked, which a fire-and-forget command
+  // never could.
 
   // Schedule CRUD methods
   addScheduleItem(item: ScheduleItem): void {

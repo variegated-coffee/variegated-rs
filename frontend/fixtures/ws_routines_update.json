@@ -1,0 +1,34 @@
+{
+  "RoutinesUpdate": {
+    "internal": {
+      "0": {
+        "routine_type": "HeatUp",
+        "name": "Heat up",
+        "step_count": 2,
+        "parameter_count": 1,
+        "derived_parameter_count": 0,
+        "finally_count": 0
+      }
+    },
+    "function": {
+      "2": {
+        "routine_type": "HardwareButtonMapped",
+        "name": "Button 2",
+        "step_count": 11,
+        "parameter_count": 4,
+        "derived_parameter_count": 2,
+        "finally_count": 1
+      }
+    },
+    "custom": {
+      "3": {
+        "routine_type": "Cleaning",
+        "name": "Fixture",
+        "step_count": 1,
+        "parameter_count": 1,
+        "derived_parameter_count": 1,
+        "finally_count": 1
+      }
+    }
+  }
+}

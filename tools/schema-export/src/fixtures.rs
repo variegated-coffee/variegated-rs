@@ -38,8 +38,11 @@
 
 use std::path::Path;
 
+use std::collections::BTreeMap;
+
 use heapless::index_map::FnvIndexMap;
 use serde::Serialize;
+use variegated_comms_api_types::api_types::RoutineSummaryStorage;
 use variegated_comms_api_types::ws_types::WsMessage;
 use variegated_control_algorithm::pid::{Limits, PidOut};
 use variegated_controller_types::*;
@@ -774,7 +777,73 @@ pub fn all() -> Vec<Fixture> {
             &WsMessage::RequestRoutines,
         ),
         fixture("shot_log_list", "ShotLogListSchema", &shot_log_list()),
+        // The routine listing, which until now had **no fixture at all**: `roots.rs`
+        // emitted its schema and nothing ever serialised one, so the response every
+        // client depends on had never been round-tripped. It is here now because the
+        // payload changed -- from whole definitions to summaries -- and that is exactly
+        // the kind of change a missing fixture lets through green.
+        fixture(
+            "routine_summaries",
+            "RoutineSummaryStorageSchema",
+            &routine_summaries(),
+        ),
+        fixture(
+            "ws_routines_update",
+            "WsMessageSchema",
+            &WsMessage::RoutinesUpdate(routine_summaries()),
+        ),
+        // One definition, as `GET /routines/{type}/{index}` returns it and as
+        // `PUT` accepts it. `machine_commands` also pins `Routine`'s shape through
+        // `AddRoutine`, but that command is no longer the path the frontend uses -- this
+        // fixture covers the one that is.
+        fixture("routine", "RoutineSchema", &routine()),
     ]
+}
+
+/// A listing as `GET /routines` returns it.
+///
+/// One routine in each of the three index kinds, because the split into three maps is
+/// where a re-keying bug would live -- a client that read all three from one map would
+/// still decode, and would show every routine under one tab.
+///
+/// The counts deliberately differ from each other and from the number of entries, so a
+/// summary built by copying the wrong field cannot pass. `finally_count: 0` on one of
+/// them is the case a UI hides rather than renders, which makes it the one worth pinning.
+fn routine_summaries() -> RoutineSummaryStorage {
+    let mut storage = RoutineSummaryStorage {
+        internal: BTreeMap::new(),
+        function: BTreeMap::new(),
+        custom: BTreeMap::new(),
+    };
+
+    // Derived from the same `routine()` the definition fixture uses, so the two agree by
+    // construction: if `From<&Routine>` ever miscounts, these two fixtures disagree.
+    storage.custom.insert(3, RoutineSummary::from(&routine()));
+
+    storage.internal.insert(
+        0,
+        RoutineSummary {
+            routine_type: RoutineType::HeatUp,
+            name: "Heat up".into(),
+            step_count: 2,
+            parameter_count: 1,
+            derived_parameter_count: 0,
+            finally_count: 0,
+        },
+    );
+    storage.function.insert(
+        2,
+        RoutineSummary {
+            routine_type: RoutineType::HardwareButtonMapped,
+            name: "Button 2".into(),
+            step_count: 11,
+            parameter_count: 4,
+            derived_parameter_count: 2,
+            finally_count: 1,
+        },
+    );
+
+    storage
 }
 // `canonical_shot` is deliberately absent from this list. Everything here is written to
 // `frontend/fixtures/` and named in its `index.json`, which the frontend harness walks,

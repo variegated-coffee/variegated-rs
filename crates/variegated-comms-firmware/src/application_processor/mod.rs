@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_futures::join::join;
 use esp_hal::uart::{UartRx, UartTx};
 use esp_hal::Async;
@@ -27,7 +27,9 @@ use crate::channels::{
     ImprovReport, IMPROV_REPORT_CHANNEL,
     WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
     ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
+    RoutineReply, ROUTINE_REPLY, ROUTINE_REQUEST, ROUTINE_WRITE,
 };
+use variegated_controller_types::ROUTINE_WRITE_CHUNK_LEN;
 use crate::ble::scanner::{ScanReport, SCAN_RESULT_CAPACITY};
 
 /// Start the application processor communication
@@ -184,15 +186,50 @@ pub async fn start(
                                 MACHINE_DEF_RECEIVED.store(true, Ordering::Relaxed);
                                 log_info!("Received machine definition update - stopping periodic requests");
                             }
-                            ApplicationProcessorToCommsProcessorMessage::Routines(routine_list) => {
-                                log_info!("Received {} routines from application processor", routine_list.routines.len());
-                                // Publish to channel for WebSocket clients
-                                routine_publisher.publish_immediate(routine_list.clone());
-                                // Also cache for HTTP/request-response access
-                                {
-                                    let mut guard = ROUTINE_CACHE.lock().await;
-                                    *guard = Some(routine_list);
+                            ApplicationProcessorToCommsProcessorMessage::RoutineSummaries(summaries) => {
+                                // Compared before anything else happens, and that
+                                // comparison is what makes an unconditional
+                                // fifteen-second poll affordable. The list almost never
+                                // changes, so at steady state this arm now costs the
+                                // decode and nothing more: no clone into the pubsub, no
+                                // cache write, and no `RoutinesUpdate` frame serialised
+                                // and pushed to every connected client four times a
+                                // minute forever.
+                                //
+                                // It also makes the unsolicited push the application
+                                // processor sends after a write free when that write
+                                // changed nothing.
+                                let mut guard = ROUTINE_CACHE.lock().await;
+                                if guard.as_ref() != Some(&summaries) {
+                                    log_info!(
+                                        "Received {} routine summaries from application processor",
+                                        summaries.routines.len()
+                                    );
+                                    routine_publisher.publish_immediate(summaries.clone());
+                                    *guard = Some(summaries);
                                 }
+                            }
+                            // The three routine replies, handed to whichever HTTP handler
+                            // is waiting in `routine_request` or `routine_write`. Signalled
+                            // rather than sent, for the same reason the shot-log replies
+                            // below are: this is the UART reader.
+                            ApplicationProcessorToCommsProcessorMessage::RoutineChunk { index, offset, total, last, bytes } => {
+                                ROUTINE_REPLY.signal(RoutineReply::Chunk {
+                                    index,
+                                    offset,
+                                    total,
+                                    last,
+                                    // Onto the heap on the way in. The wire type is a
+                                    // fixed `heapless::Vec`; the signal that carries it
+                                    // onward must not be -- see `RoutineReply`.
+                                    bytes: bytes.to_vec(),
+                                });
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::RoutineNotFound(index) => {
+                                ROUTINE_REPLY.signal(RoutineReply::NotFound(index));
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::RoutineWriteResult(outcome) => {
+                                ROUTINE_REPLY.signal(RoutineReply::WriteResult(outcome));
                             }
                             // The four shot-log replies, handed to whichever HTTP handler
                             // is waiting in `shot_log_request`.
@@ -494,7 +531,19 @@ pub async fn start(
                         // reported again -- whereas a shot-log request has an HTTP client
                         // blocked on it with a timeout, and dropping one turns into a 503
                         // for the user.
-                        select(SHOT_LOG_REQUEST.wait(), scan_result_receiver.receive()),
+                        // Routine traffic sits beside shot-log traffic and above scan
+                        // results, for the same reason and with the same shape: both have
+                        // an HTTP client blocked on a timeout, where a dropped scan result
+                        // costs nothing because the device is still advertising.
+                        //
+                        // The two routine futures are one arm because they share
+                        // `ROUTINE_LOCK` -- only one of them can be signalled at a time,
+                        // so pairing them here costs a nesting level and no fairness.
+                        select3(
+                            SHOT_LOG_REQUEST.wait(),
+                            select(ROUTINE_REQUEST.wait(), ROUTINE_WRITE.wait()),
+                            scan_result_receiver.receive(),
+                        ),
                     ),
                 ),
             ).await {
@@ -546,8 +595,15 @@ pub async fn start(
                         MachineCommand::RemoveScheduleItem(_) => {
                             Some(CommsProcessorToApplicationProcessorMessage::RequestConfiguration)
                         }
-                        MachineCommand::AddRoutine(_) |
-                        MachineCommand::UpdateRoutine(_, _) |
+                        // `AddRoutine` and `UpdateRoutine` are deliberately absent: the
+                        // frontend no longer sends them, because a routine definition is
+                        // too large for the WebSocket's inbound frame and does not belong
+                        // on this processor's heap. They travel as `RoutineWriteChunk`,
+                        // which reports its own result and is followed by an unsolicited
+                        // summary push from the application processor -- both faster and
+                        // more honest than guessing at half a second. Only deletion still
+                        // rides the command channel, since it is an index rather than a
+                        // body.
                         MachineCommand::RemoveRoutine(_) => {
                             Some(CommsProcessorToApplicationProcessorMessage::RequestRoutines)
                         }
@@ -635,7 +691,7 @@ pub async fn start(
                 // and goes out through the command arm above like every other write --
                 // it is the reads that need an answer, and therefore a request/reply
                 // pairing at all.
-                Either4::Fourth(Either::Second(Either::Second(Either::First(request)))) => {
+                Either4::Fourth(Either::Second(Either::Second(Either3::First(request)))) => {
                     let message = match request {
                         ShotLogRequest::List { limit } => {
                             CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit }
@@ -661,7 +717,92 @@ pub async fn start(
                         Err(_) => log_error!("Failed to serialize shot log request"),
                     }
                 }
-                Either4::Fourth(Either::Second(Either::Second(Either::Second(report)))) => {
+                // An HTTP handler wants one routine's definition.
+                Either4::Fourth(Either::Second(Either::Second(Either3::Second(Either::First((index, offset)))))) => {
+                    let message = CommsProcessorToApplicationProcessorMessage::RequestRoutineChunk {
+                        index,
+                        offset,
+                    };
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if tx.write_async(&serialized_message).await.is_err() {
+                                log_error!("Failed to write routine chunk request to UART");
+                            }
+                        }
+                        Err(_) => log_error!("Failed to serialize routine chunk request"),
+                    }
+                }
+                // An HTTP handler is saving a routine.
+                //
+                // The bytes came off a socket as postcard and go onto the link as
+                // postcard; nothing here decodes them. This processor does not know what
+                // a `Routine` is, which is the point -- see `RoutineWrite`.
+                Either4::Fourth(Either::Second(Either::Second(Either3::Second(Either::Second(write))))) => {
+                    let total = write.bytes.len() as u16;
+                    let mut offset = 0usize;
+                    let mut wrote_all = true;
+
+                    // Chunks go out back to back with no acknowledgement between them.
+                    // The far side accepts only a contiguous sequence from offset zero and
+                    // answers once, at the end; `routine_write` holds `ROUTINE_LOCK` for
+                    // the duration, so nothing can interleave into the middle of one.
+                    //
+                    // An empty routine still sends one chunk, so the far side always gets
+                    // a `last` to answer -- otherwise the caller would sit out its whole
+                    // timeout over zero bytes.
+                    loop {
+                        let end = (offset + ROUTINE_WRITE_CHUNK_LEN).min(write.bytes.len());
+                        let last = end >= write.bytes.len();
+
+                        let mut bytes = heapless::Vec::<u8, ROUTINE_WRITE_CHUNK_LEN>::new();
+                        // Cannot fail: the slice is at most the vector's capacity.
+                        let _ = bytes.extend_from_slice(&write.bytes[offset..end]);
+
+                        let message = CommsProcessorToApplicationProcessorMessage::RoutineWriteChunk {
+                            index: write.index,
+                            offset: offset as u16,
+                            total,
+                            last,
+                            bytes,
+                        };
+
+                        match postcard::to_allocvec_cobs(&message) {
+                            Ok(serialized_message) => {
+                                if tx.write_async(&serialized_message).await.is_err() {
+                                    log_error!("Failed to write routine chunk at offset {} to UART", offset);
+                                    wrote_all = false;
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                log_error!("Failed to serialize routine write chunk");
+                                wrote_all = false;
+                                break;
+                            }
+                        }
+
+                        offset = end;
+                        if last {
+                            break;
+                        }
+                    }
+
+                    if wrote_all {
+                        log_info!("Sent routine write, {} bytes", total);
+                    } else {
+                        // The sequence died part-way, so no `last` reached the far side
+                        // and it will never answer. Say so now rather than leaving the
+                        // caller to discover it when its timeout expires -- and the far
+                        // side discards the partial write when the next one starts at
+                        // offset zero.
+                        ROUTINE_REPLY.signal(RoutineReply::WriteResult(
+                            variegated_controller_types::RoutineWriteOutcome::Failed(
+                                variegated_controller_types::RoutineWriteError::Storage,
+                            ),
+                        ));
+                    }
+                }
+                Either4::Fourth(Either::Second(Either::Second(Either3::Third(report)))) => {
                     let message = match report {
                         ScanReport::Discovered(device) => {
                             CommsProcessorToApplicationProcessorMessage::BluetoothPeripheralDiscovered(device)

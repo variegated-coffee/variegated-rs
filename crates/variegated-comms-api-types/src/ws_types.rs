@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use variegated_controller_types::{
     Status, Configuration, MachineDefinition, MachineCommand
 };
-use crate::api_types::RoutineStorage;
+use crate::api_types::RoutineSummaryStorage;
 
 /// WebSocket message envelope for all communication
 #[derive(Serialize, Deserialize)]
@@ -17,8 +17,17 @@ pub enum WsMessage<'a> {
     ConfigurationUpdate(Configuration),
     /// Machine definition (sent on request)
     MachineDefinition(MachineDefinition),
-    /// Routines update (sent on request)
-    RoutinesUpdate(RoutineStorage),
+    /// Routine summaries (sent on request, and pushed whenever the set changes)
+    ///
+    /// **Repurposed in place**: the payload used to be every routine's full definition.
+    /// The variant keeps its position because postcard encodes an enum as its
+    /// declaration-order discriminant, and two hand-copied mirrors of this type live in
+    /// `variegated-cli` with nothing to catch a renumbering.
+    ///
+    /// Definitions are fetched over HTTP, one at a time. They cannot travel this way in
+    /// the other direction anyway -- the client half of this enum has to fit a 256-byte
+    /// frame.
+    RoutinesUpdate(RoutineSummaryStorage),
     /// Acknowledgment of a command
     CommandAck {
         /// Command ID for correlation

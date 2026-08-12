@@ -506,6 +506,15 @@ export const RoutineParameterSchema = struct({
   unit: option(ParameterUnitSchema)
 });
 
+export const RoutineSummarySchema = struct({
+  routine_type: RoutineTypeSchema,
+  name: string(),
+  step_count: u16(),
+  parameter_count: u8(),
+  derived_parameter_count: u8(),
+  finally_count: u8()
+});
+
 export const ScheduleActionSchema = enumType('ScheduleAction', {
   RunRoutine: tupleVariant('RunRoutine', RoutineIndexSchema, option(map(u8(), f32()))),
   CancelRoutine: unitVariant('CancelRoutine'),
@@ -662,6 +671,12 @@ export const RoutineExitConditionSchema = enumType('RoutineExitCondition', {
   AfterDurationRelativeToStart: newtypeVariant('AfterDurationRelativeToStart', ParameterValueSchema),
   StateConditionMet: newtypeVariant('StateConditionMet', StateConditionSchema),
   UserAction: newtypeVariant('UserAction', u8())
+});
+
+export const RoutineSummaryStorageSchema = struct({
+  internal: map(u32(), RoutineSummarySchema),
+  function: map(u32(), RoutineSummarySchema),
+  custom: map(u32(), RoutineSummarySchema)
 });
 
 export const ScheduleItemSchema = struct({
@@ -839,17 +854,11 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   IdentifyMachine: unitVariant('IdentifyMachine')
 });
 
-export const RoutineStorageSchema = struct({
-  internal: map(u32(), RoutineSchema),
-  function: map(u32(), RoutineSchema),
-  custom: map(u32(), RoutineSchema)
-});
-
 export const WsMessageSchema = enumType('WsMessage', {
   StatusUpdate: newtypeVariant('StatusUpdate', StatusSchema),
   ConfigurationUpdate: newtypeVariant('ConfigurationUpdate', ConfigurationSchema),
   MachineDefinition: newtypeVariant('MachineDefinition', MachineDefinitionSchema),
-  RoutinesUpdate: newtypeVariant('RoutinesUpdate', RoutineStorageSchema),
+  RoutinesUpdate: newtypeVariant('RoutinesUpdate', RoutineSummaryStorageSchema),
   CommandAck: structVariant('CommandAck', {
     id: u32(),
     success: bool(),
@@ -864,9 +873,11 @@ export type ShotLogList = InferType<typeof ShotLogListSchema>;
 export type Status = InferType<typeof StatusSchema>;
 export type Configuration = InferType<typeof ConfigurationSchema>;
 export type MachineDefinition = InferType<typeof MachineDefinitionSchema>;
-export type RoutineStorage = InferType<typeof RoutineStorageSchema>;
+export type RoutineSummaryStorage = InferType<typeof RoutineSummaryStorageSchema>;
 export type WsMessage = InferType<typeof WsMessageSchema>;
 export type MachineCommand = InferType<typeof MachineCommandSchema>;
+export type Routine = InferType<typeof RoutineSchema>;
+export type RoutineIndex = InferType<typeof RoutineIndexSchema>;
 export type SetBoilerControlRequest = InferType<typeof SetBoilerControlRequestSchema>;
 export type SetGroupControlRequest = InferType<typeof SetGroupControlRequestSchema>;
 export type SetPidParametersRequest = InferType<typeof SetPidParametersRequestSchema>;
@@ -924,15 +935,14 @@ export type PidParameters = InferType<typeof PidParametersSchema>;
 export type PidTerm = InferType<typeof PidTermSchema>;
 export type PreviousBrewInfo = InferType<typeof PreviousBrewInfoSchema>;
 export type PumpConfiguration = InferType<typeof PumpConfigurationSchema>;
-export type Routine = InferType<typeof RoutineSchema>;
 export type RoutineCommand = InferType<typeof RoutineCommandSchema>;
 export type RoutineExecutionStatus = InferType<typeof RoutineExecutionStatusSchema>;
 export type RoutineExit = InferType<typeof RoutineExitSchema>;
 export type RoutineExitCondition = InferType<typeof RoutineExitConditionSchema>;
-export type RoutineIndex = InferType<typeof RoutineIndexSchema>;
 export type RoutineParameter = InferType<typeof RoutineParameterSchema>;
 export type RoutineStep = InferType<typeof RoutineStepSchema>;
 export type RoutineStepExitType = InferType<typeof RoutineStepExitTypeSchema>;
+export type RoutineSummary = InferType<typeof RoutineSummarySchema>;
 export type RoutineType = InferType<typeof RoutineTypeSchema>;
 export type ScaleSelector = InferType<typeof ScaleSelectorSchema>;
 export type ScheduleAction = InferType<typeof ScheduleActionSchema>;
