@@ -432,7 +432,7 @@ impl LcdDisplayState {
                     if let Some(step) = routine.steps().get(current_step_idx as usize) {
                         // Get first exit condition
                         if let Some(exit) = step.exits().first() {
-                            return self.format_exit_condition_with_value(&exit.condition, &routine_execution);
+                            return self.format_exit_condition_with_value(&exit.condition, Some(routine));
                         }
                     }
                 }
@@ -444,7 +444,7 @@ impl LcdDisplayState {
                         if let Some(step) = routine.steps().get(current_step_idx as usize) {
                             // Get first exit condition
                             if let Some(exit) = step.exits().first() {
-                                return self.format_exit_condition_with_value(&exit.condition, &routine_execution);
+                                return self.format_exit_condition_with_value(&exit.condition, Some(routine));
                             }
                         }
                     }
@@ -454,107 +454,59 @@ impl LcdDisplayState {
         "".to_string()
     }
 
-    /// Helper method to resolve a ParameterValue using resolved parameters from routine execution
-    fn resolve_parameter_value(&self, param_value: &ParameterValue, routine_execution: &variegated_controller_types::RoutineExecutionStatus) -> f32 {
-        match param_value {
-            ParameterValue::Static(value) => *value,
-            ParameterValue::Parameter(index) => {
-                routine_execution.resolved_parameters.get(index).copied().unwrap_or(0.0)
-            }
-            ParameterValue::DerivedParameter(_) => {
-                // For display purposes, derived parameters aren't directly resolved here
-                0.0
-            }
-        }
-    }
-
     /// Format exit condition with current process value (compact for 16 chars)
-    fn format_exit_condition_with_value(&self, condition: &RoutineExitCondition, routine_execution: &variegated_controller_types::RoutineExecutionStatus) -> String {
-        match condition {
-            RoutineExitCondition::StateConditionMet(state_condition) => {
-                match state_condition {
-                    StateCondition::BoilerTemperatureAbove(boiler_idx, target) |
-                    StateCondition::BoilerTemperatureBelow(boiler_idx, target) => {
-                        let current = self.shared_state.status.get_boiler_status(*boiler_idx)
-                            .and_then(|s| s.temperature);
-                        let target_value = self.resolve_parameter_value(target, routine_execution);
-                        current.map(|temp| format!("{:.0}>{:.0}C", temp, target_value))
-                            .unwrap_or_else(|| format!("?>{:.0}C", target_value))
+    ///
+    /// The lookups are `variegated_controller_lib::routine_progress`; the abbreviations are
+    /// this screen's, and it has sixteen columns to say it in. `routine` supplies the
+    /// derived-parameter formulas, which `Status` does not carry -- without it a derived
+    /// target reads as zero, which is what this renderer did for every one of them.
+    fn format_exit_condition_with_value(
+        &self,
+        condition: &RoutineExitCondition,
+        routine: Option<&Routine>,
+    ) -> String {
+        use variegated_controller_types::ParameterUnit;
+
+        // The three conditions with no numeric progress get words rather than a reading.
+        let progress = match variegated_controller_lib::routine_progress::exit_condition_progress(
+            condition,
+            &self.shared_state.status,
+            routine,
+        ) {
+            Some(progress) => progress,
+            None => {
+                return match condition {
+                    RoutineExitCondition::Always => "Ready".to_string(),
+                    RoutineExitCondition::Never => "Manual".to_string(),
+                    RoutineExitCondition::UserAction(_) => "Press button".to_string(),
+                    RoutineExitCondition::StateConditionMet(StateCondition::Brewing(_)) => {
+                        "Start brewing".to_string()
                     }
-                    StateCondition::BoilerPressureAbove(boiler_idx, target) |
-                    StateCondition::BoilerPressureBelow(boiler_idx, target) => {
-                        let current = self.shared_state.status.get_boiler_status(*boiler_idx)
-                            .and_then(|s| s.pressure);
-                        let target_value = self.resolve_parameter_value(target, routine_execution);
-                        current.map(|press| format!("{:.1}>{:.1}b", press, target_value))
-                            .unwrap_or_else(|| format!("?>{:.1}b", target_value))
+                    RoutineExitCondition::StateConditionMet(StateCondition::NotBrewing(_)) => {
+                        "Stop brewing".to_string()
                     }
-                    StateCondition::GroupInputFlowRateAbove(group_idx, target) |
-                    StateCondition::GroupInputFlowRateBelow(group_idx, target) => {
-                        let current = self.shared_state.status.get_group_status(*group_idx)
-                            .and_then(|s| s.input_flow_rate);
-                        let target_value = self.resolve_parameter_value(target, routine_execution);
-                        current.map(|flow| format!("{:.1}>{:.1}ml/s", flow, target_value))
-                            .unwrap_or_else(|| format!("?>{:.1}ml/s", target_value))
-                    }
-                    StateCondition::GroupPressureAbove(group_idx, target) |
-                    StateCondition::GroupPressureBelow(group_idx, target) => {
-                        let current = self.shared_state.status.get_group_status(*group_idx)
-                            .and_then(|s| s.pressure);
-                        let target_value = self.resolve_parameter_value(target, routine_execution);
-                        current.map(|press| format!("{:.1}>{:.1}b", press, target_value))
-                            .unwrap_or_else(|| format!("?>{:.1}b", target_value))
-                    }
-                    StateCondition::OutputWeightAbove(group_idx, target) |
-                    StateCondition::OutputWeightBelow(group_idx, target) => {
-                        let current = self.shared_state.status.get_group_status(*group_idx)
-                            .and_then(|s| s.output_weight);
-                        let target_value = self.resolve_parameter_value(target, routine_execution);
-                        current.map(|weight| format!("{:.1}>{:.1}g", weight, target_value))
-                            .unwrap_or_else(|| format!("?>{:.1}g", target_value))
-                    }
-                    StateCondition::InputVolumeAboveRelativeToStart(group_idx, target) => {
-                        let target_value = self.resolve_parameter_value(target, routine_execution);
-                        if let Some(group_status) = self.shared_state.status.get_group_status(*group_idx) {
-                            if let Some(relative) = group_status.current_brew.as_ref().and_then(|b| b.brew_input_volume) {
-                                format!("{:.1}>{:.1}ml", relative, target_value)
-                            } else {
-                                format!("?>{:.1}ml", target_value)
-                            }
-                        } else {
-                            format!("?>{:.1}ml", target_value)
-                        }
-                    }
-                    StateCondition::Brewing(_) => "Start brewing".to_string(),
-                    StateCondition::NotBrewing(_) => "Stop brewing".to_string(),
-                    _ => "Waiting...".to_string()
-                }
+                    _ => "Waiting...".to_string(),
+                };
             }
-            RoutineExitCondition::After(param_value) => {
-                let target_secs = self.resolve_parameter_value(param_value, routine_execution) as u64;
-                if let Some(step_elapsed) = routine_execution.step_elapsed_time {
-                    let elapsed = step_elapsed.as_secs();
-                    format!("{}>{}", elapsed, target_secs)
-                } else {
-                    format!("Wait {}s", target_secs)
-                }
-            }
-            RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
-                let target_secs = self.resolve_parameter_value(param_value, routine_execution) as u64;
-                if let Some(group_status) = self.shared_state.status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index()) {
-                    if let Some(ref current_brew) = group_status.current_brew {
-                        let elapsed = current_brew.brew_time.as_secs();
-                        format!("{}>{}", elapsed, target_secs)
-                    } else {
-                        format!("Total {}s", target_secs)
-                    }
-                } else {
-                    format!("Total {}s", target_secs)
-                }
-            }
-            RoutineExitCondition::Always => "Ready".to_string(),
-            RoutineExitCondition::Never => "Manual".to_string(),
-            RoutineExitCondition::UserAction(_) => "Press button".to_string(),
+        };
+
+        // Sixteen columns, so temperatures and seconds lose their decimal and the rest keep
+        // one. Bar is "b" rather than "bar" for the same reason.
+        let (unit, decimals) = match progress.unit {
+            ParameterUnit::Seconds => ("", 0),
+            ParameterUnit::Celsius => ("C", 0),
+            ParameterUnit::Bar => ("b", 1),
+            ParameterUnit::MillilitersPerSecond => ("ml/s", 1),
+            ParameterUnit::Grams => ("g", 1),
+            ParameterUnit::Percent => ("%", 0),
+            ParameterUnit::Milliliters => ("ml", 1),
+        };
+
+        match (progress.current, decimals) {
+            (Some(current), 0) => format!("{:.0}>{:.0}{}", current, progress.target, unit),
+            (Some(current), _) => format!("{:.1}>{:.1}{}", current, progress.target, unit),
+            (None, 0) => format!("?>{:.0}{}", progress.target, unit),
+            (None, _) => format!("?>{:.1}{}", progress.target, unit),
         }
     }
 }

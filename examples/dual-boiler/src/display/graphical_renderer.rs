@@ -1038,77 +1038,56 @@ impl GraphicalDisplayState {
         Ok(())
     }
 
-    /// Format an exit condition for display with target value
-    fn format_exit_condition(&self, condition: &RoutineExitCondition, resolved_params: &heapless::index_map::FnvIndexMap<u8, f32, 8>) -> Option<(String, String, f32)> {
-        match condition {
-            RoutineExitCondition::After(pv) => {
-                let duration_secs = self.resolve_parameter_value(pv, resolved_params);
-                Some(("Time".into(), "s".into(), duration_secs))
-            }
-            RoutineExitCondition::StateConditionMet(state_cond) => {
-                match state_cond {
-                    StateCondition::OutputWeightAbove(_, pv) | StateCondition::OutputWeightBelow(_, pv) => {
-                        let target = self.resolve_parameter_value(pv, resolved_params);
-                        Some(("Weight".into(), "g".into(), target))
-                    }
-                    StateCondition::InputVolumeAboveRelativeToStart(_, pv) => {
-                        let target = self.resolve_parameter_value(pv, resolved_params);
-                        Some(("Volume".into(), "ml".into(), target))
-                    }
-                    StateCondition::GroupPressureAbove(_, pv) | StateCondition::GroupPressureBelow(_, pv) => {
-                        let target = self.resolve_parameter_value(pv, resolved_params);
-                        Some(("Pressure".into(), "bar".into(), target))
-                    }
-                    StateCondition::GroupInputFlowRateAbove(_, pv) | StateCondition::GroupInputFlowRateBelow(_, pv) => {
-                        let target = self.resolve_parameter_value(pv, resolved_params);
-                        Some(("Flow".into(), "ml/s".into(), target))
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
+    /// Label, unit and target for an exit condition, or `None` when there is nothing
+    /// numeric to draw.
+    ///
+    /// The lookups are `variegated_controller_lib::routine_progress`; the labels are this
+    /// screen's, which has room for words where the character LCD does not.
+    ///
+    /// `routine` supplies the derived-parameter formulas. Without it a derived target reads
+    /// as zero -- which is still better than what this renderer used to do, which was to
+    /// look a *derived* index up in the *base* parameter map. The two are separate index
+    /// spaces, so that returned zero when the index was absent and an unrelated parameter's
+    /// value when they happened to collide.
+    fn format_exit_condition(
+        &self,
+        condition: &RoutineExitCondition,
+        routine: Option<&Routine>,
+    ) -> Option<(String, String, f32)> {
+        use variegated_controller_types::ParameterUnit;
 
-    /// Resolve a parameter value to f32
-    fn resolve_parameter_value(&self, pv: &ParameterValue, resolved_params: &heapless::index_map::FnvIndexMap<u8, f32, 8>) -> f32 {
-        match pv {
-            ParameterValue::Static(val) => *val,
-            ParameterValue::Parameter(idx) => resolved_params.get(idx).copied().unwrap_or(0.0),
-            ParameterValue::DerivedParameter(idx) => resolved_params.get(idx).copied().unwrap_or(0.0),
-        }
-    }
-
-    /// Get current process value for an exit condition
-    fn get_process_value_for_condition(&self, condition: &RoutineExitCondition, step_elapsed: Option<Duration>) -> Option<f32> {
-        let group_status = self.shared_state.status.get_group_status(
-            variegated_controller_types::SingleGroupControllerGroups::SingleGroup.as_index()
+        let progress = variegated_controller_lib::routine_progress::exit_condition_progress(
+            condition,
+            &self.shared_state.status,
+            routine,
         )?;
 
-        match condition {
-            RoutineExitCondition::After(_) => {
-                step_elapsed.map(|d| d.as_secs_f32())
-            }
-            RoutineExitCondition::StateConditionMet(state_cond) => {
-                match state_cond {
-                    StateCondition::OutputWeightAbove(_, _) | StateCondition::OutputWeightBelow(_, _) => {
-                        group_status.output_weight
-                    }
-                    StateCondition::InputVolumeAboveRelativeToStart(_, _) => {
-                        // Use brew_input_volume (relative to brew start), not input_volume (absolute)
-                        group_status.current_brew.as_ref().and_then(|b| b.brew_input_volume).map(|v| v as f32)
-                    }
-                    StateCondition::GroupPressureAbove(_, _) | StateCondition::GroupPressureBelow(_, _) => {
-                        group_status.pressure
-                    }
-                    StateCondition::GroupInputFlowRateAbove(_, _) | StateCondition::GroupInputFlowRateBelow(_, _) => {
-                        group_status.input_flow_rate
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        let (label, unit) = match progress.unit {
+            ParameterUnit::Seconds => ("Time", "s"),
+            ParameterUnit::Celsius => ("Temp", "C"),
+            ParameterUnit::Bar => ("Pressure", "bar"),
+            ParameterUnit::MillilitersPerSecond => ("Flow", "ml/s"),
+            ParameterUnit::Grams => ("Weight", "g"),
+            ParameterUnit::Percent => ("Level", "%"),
+            ParameterUnit::Milliliters => ("Volume", "ml"),
+        };
+
+        Some((label.into(), unit.into(), progress.target))
+    }
+
+    /// The live value for an exit condition, or `None` when the machine is not reporting
+    /// one.
+    fn get_process_value_for_condition(
+        &self,
+        condition: &RoutineExitCondition,
+        routine: Option<&Routine>,
+    ) -> Option<f32> {
+        variegated_controller_lib::routine_progress::exit_condition_progress(
+            condition,
+            &self.shared_state.status,
+            routine,
+        )?
+        .current
     }
 
     /// Render routine execution mode (2-column layout with exit conditions and brewing metrics)
@@ -1174,8 +1153,8 @@ impl GraphicalDisplayState {
 
                         // Display exit conditions with progress
                         for exit in &step.exits {
-                            if let Some((label, unit, target)) = self.format_exit_condition(&exit.condition, &routine_execution.resolved_parameters) {
-                                if let Some(current) = self.get_process_value_for_condition(&exit.condition, routine_execution.step_elapsed_time) {
+                            if let Some((label, unit, target)) = self.format_exit_condition(&exit.condition, Some(routine)) {
+                                if let Some(current) = self.get_process_value_for_condition(&exit.condition, Some(routine)) {
                                     small_font.render_aligned(
                                         format_args!("{}: {:.1}/{:.1}{}", label, current, target, unit),
                                         Point::new(LEFT_PANEL_X + 5, y_offset),

@@ -972,8 +972,9 @@ impl DisplayController {
                     let visible_exits = step.exits().iter().take(3);
                     
                     for (_, exit) in visible_exits.enumerate() {
-                        let status_text = self.format_exit_status(exit);
-                        let process_value = self.format_exit_condition_process_value(&exit.condition);
+                        let status_text = self.format_exit_status(exit, Some(routine));
+                        let process_value =
+                            self.format_exit_condition_process_value(&exit.condition, Some(routine));
 
                         if !status_text.is_empty() {
                             Text::with_baseline(
@@ -1114,119 +1115,98 @@ impl DisplayController {
         }
     }
 
-    fn format_exit_status(&self, exit: &variegated_controller_lib::routine::RoutineExit) -> alloc::string::String {
+    fn format_exit_status(
+        &self,
+        exit: &variegated_controller_lib::routine::RoutineExit,
+        routine: Option<&variegated_controller_lib::routine::Routine>,
+    ) -> alloc::string::String {
         if let Some(description) = exit.description() {
             // No process value available, just use description
             description.to_string()
         } else {
             // No description, use automatic formatting
-            self.format_exit_condition_status(&exit.condition)
+            self.format_exit_condition_status(&exit.condition, routine)
         }
     }
     
-    /// Helper method to resolve a ParameterValue using resolved parameters from routine execution
-    fn resolve_parameter_value(&self, param_value: &ParameterValue) -> f32 {
-        match param_value {
-            ParameterValue::Static(value) => *value,
-            ParameterValue::Parameter(index) => {
-                if let Some(routine_execution) = &self.status.routine_execution {
-                    routine_execution.resolved_parameters.get(index).copied().unwrap_or(0.0)
-                } else {
-                    0.0 // No routine execution, use fallback
-                }
-            }
-            ParameterValue::DerivedParameter(_) => {
-                // For display purposes, derived parameters aren't directly resolved here
-                // They would be computed on-demand by the routine execution context
-                0.0 
-            }
+    /// Resolve a `ParameterValue` for display.
+    ///
+    /// Delegates to `variegated_controller_lib::routine::resolve_parameter_value`, which is
+    /// the same function the controller resolves *its* values with -- so what a step is
+    /// waiting for and what the screen says it is waiting for cannot disagree. This used to
+    /// be a local copy that returned `0.0` for every derived parameter.
+    ///
+    /// `routine` supplies the formulas, which `Status` does not carry.
+    fn resolve_parameter_value(
+        &self,
+        param_value: &ParameterValue,
+        routine: Option<&variegated_controller_lib::routine::Routine>,
+    ) -> f32 {
+        let empty = variegated_controller_types::RoutineParameters::new();
+        let parameters = self
+            .status
+            .routine_execution
+            .as_ref()
+            .map(|e| &e.resolved_parameters)
+            .unwrap_or(&empty);
+
+        variegated_controller_lib::routine::resolve_parameter_value(
+            param_value,
+            parameters,
+            routine.map(|r| r.derived_parameters.as_slice()).unwrap_or(&[]),
+        )
+    }
+
+    /// "93>95C" -- where the step is against what it is waiting for.
+    ///
+    /// The lookups are `variegated_controller_lib::routine_progress`; only the formatting
+    /// is this screen's. That replaced 145 lines here which, among other things, discarded
+    /// the boiler and group index the condition carried and always read the brew boiler and
+    /// the single group.
+    fn format_exit_condition_process_value(
+        &self,
+        condition: &RoutineExitCondition,
+        routine: Option<&variegated_controller_lib::routine::Routine>,
+    ) -> Option<alloc::string::String> {
+        let progress = variegated_controller_lib::routine_progress::exit_condition_progress(
+            condition,
+            &self.status,
+            routine,
+        )?;
+
+        let unit = match progress.unit {
+            ParameterUnit::Seconds => "s",
+            ParameterUnit::Celsius => "C",
+            ParameterUnit::Bar => "bar",
+            ParameterUnit::MillilitersPerSecond => "ml/s",
+            ParameterUnit::Grams => "g",
+            ParameterUnit::Percent => "%",
+            ParameterUnit::Milliliters => "ml",
+        };
+
+        // No current value means the machine is not reporting one -- an unconnected scale,
+        // a sensor this board does not have. Showing the target alone is more use than
+        // showing nothing, and it is what the old code did for the two timer conditions.
+        match progress.current {
+            Some(current) => Some(format!("{:.0}>{:.0}{}", current, progress.target, unit)),
+            None => Some(format!(">{:.0}{}", progress.target, unit)),
         }
     }
 
-    fn format_exit_condition_process_value(&self, condition: &RoutineExitCondition) -> Option<alloc::string::String> {
-        use variegated_controller_types::{SingleBoilerSingleGroupControllerBoilers::BrewBoiler, SingleGroupControllerGroups::SingleGroup};
-        
-        match condition {
-            RoutineExitCondition::StateConditionMet(state_condition) => {
-                match state_condition {
-                    StateCondition::BoilerTemperatureAbove(_, target) | 
-                    StateCondition::BoilerTemperatureBelow(_, target) => {
-                        let current = self.status.get_boiler_status(BrewBoiler.as_index())
-                            .and_then(|s| s.temperature);
-                        let target_value = self.resolve_parameter_value(target);
-                        current.map(|temp| format!("{:.0}>{:.0}C", temp, target_value))
-                    }
-                    StateCondition::BoilerPressureAbove(_, target) |
-                    StateCondition::BoilerPressureBelow(_, target) => {
-                        let current = self.status.get_boiler_status(BrewBoiler.as_index())
-                            .and_then(|s| s.pressure);
-                        let target_value = self.resolve_parameter_value(target);
-                        current.map(|press| format!("{:.0}>{:.0}bar", press, target_value))
-                    }
-                    StateCondition::GroupInputFlowRateAbove(_, target) |
-                    StateCondition::GroupInputFlowRateBelow(_, target) => {
-                        let current = self.status.get_group_status(SingleGroup.as_index())
-                            .and_then(|s| s.input_flow_rate);
-                        let target_value = self.resolve_parameter_value(target);
-                        current.map(|flow| format!("{:.0}>{:.0}ml/s", flow, target_value))
-                    }
-                    StateCondition::GroupPressureAbove(_, target) |
-                    StateCondition::GroupPressureBelow(_, target) => {
-                        let current = self.status.get_group_status(SingleGroup.as_index())
-                            .and_then(|s| s.pressure);
-                        let target_value = self.resolve_parameter_value(target);
-                        current.map(|press| format!("{:.0}>{:.0}bar", press, target_value))
-                    }
-                    StateCondition::OutputWeightAbove(_, target) |
-                    StateCondition::OutputWeightBelow(_, target) => {
-                        let current = self.status.get_group_status(SingleGroup.as_index())
-                            .and_then(|s| s.output_weight);
-                        let target_value = self.resolve_parameter_value(target);
-                        current.map(|weight| format!("{:.0}>{:.0}g", weight, target_value))
-                    }
-                    _ => None
-                }
-            }
-            RoutineExitCondition::After(param_value) => {
-                let target_secs = self.resolve_parameter_value(param_value) as u64;
-                if let Some(routine_execution) = &self.status.routine_execution {
-                    if let Some(step_elapsed) = routine_execution.step_elapsed_time {
-                        let elapsed = step_elapsed.as_secs();
-                        Some(format!("{}>{}s", elapsed, target_secs))
-                    } else {
-                        Some(format!("{}s", target_secs))
-                    }
-                } else {
-                    Some(format!("{}s", target_secs))
-                }
-            }
-            RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
-                let target_secs = self.resolve_parameter_value(param_value) as u64;
-                if let Some(group_status) = self.status.get_group_status(SingleGroup.as_index()) {
-                    if let Some(ref current_brew) = group_status.current_brew {
-                        let elapsed = current_brew.brew_time.as_secs();
-                        Some(format!("{}>{}s", elapsed, target_secs))
-                    } else {
-                        Some(format!(">{}s", target_secs))
-                    }
-                } else {
-                    Some(format!(">{}s", target_secs))
-                }
-            }
-            _ => None
-        }
-    }
-
-    fn format_exit_condition_status(&self, condition: &RoutineExitCondition) -> alloc::string::String {
+    fn format_exit_condition_status(
+        &self,
+        condition: &RoutineExitCondition,
+        routine: Option<&variegated_controller_lib::routine::Routine>,
+    ) -> alloc::string::String {
         match condition {
             RoutineExitCondition::Always => "Ready to proceed".into(),
             RoutineExitCondition::Never => "Manual intervention needed".into(),
             RoutineExitCondition::After(param_value) => {
-                let target_secs = self.resolve_parameter_value(param_value) as u64;
+                let target_secs = self.resolve_parameter_value(param_value, routine) as u64;
                 format!("Wait: {}s", target_secs)
             }
             RoutineExitCondition::AfterDurationRelativeToStart(param_value) => {
-                let target_secs = self.resolve_parameter_value(param_value) as u64;
+                let target_secs = self.resolve_parameter_value(param_value, routine) as u64;
                 format!("Total: {}s", target_secs)
             }
             RoutineExitCondition::StateConditionMet(state_condition) => {
