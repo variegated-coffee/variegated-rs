@@ -84,11 +84,11 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
             let schedules = store_guard.schedules_triggering_at(now).await;
 
             for schedule in schedules {
-                defmt::info!("Schedule triggered: {:?}", schedule);
+                log_info!("Schedule triggered: {:?}", schedule);
                 for action in &schedule.commands {
                     let command = action.to_machine_command();
                     command_channel.send(command).await;
-                    defmt::info!("Sent scheduled action: {:?}", action);
+                    log_info!("Sent scheduled action: {:?}", action);
                 }
             }
         }

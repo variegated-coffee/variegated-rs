@@ -5,7 +5,6 @@ use alloc::collections::btree_map::BTreeMap;
 use alloc::format;
 use core::{fmt, iter};
 use core::ops::{DerefMut, Range};
-use defmt::Format;
 use variegated_log::log_info;
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -722,7 +721,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
                 }
             }
 
-            defmt::info!("Loaded routine at index {}: {:?}", key, value);
+            log_info!("Loaded routine at index {}: {:?}", key, value);
             if let Some(routine) = value {
                 self.cache.insert(key, routine);
             } else {

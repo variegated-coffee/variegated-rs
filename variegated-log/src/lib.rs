@@ -40,12 +40,48 @@ pub fn emit_event(event: DebugEvent) {
 #[cfg(not(feature = "debug-bus"))]
 pub fn emit_event(_event: DebugEvent) {}
 
+// The defmt half of the dual-emit, split out so it can be switched off.
+//
+// **The `#[cfg]` has to be here rather than inside `log_info!` and friends.** A `#[cfg]`
+// written in a `macro_rules!` body is evaluated where the macro is *expanded* -- in the
+// consumer's crate, against the consumer's features -- so `#[cfg(feature = "defmt")]`
+// inside `log_info!` would silently test whether the *caller* has a feature by that name.
+// Defining a pair of helper macros here, one of which expands to nothing, resolves the
+// condition while this crate is being compiled, which is the only place it means what it
+// says.
+//
+// Why it can be switched off at all: with it on, any host build that expands one of these
+// macros monomorphizes a `defmt::Format` impl, and defmt emits `extern "Rust"` references
+// to `_defmt_acquire`/`_defmt_write`/`_defmt_timestamp` with no provider. The link then
+// fails as "Too many sections!", which mentions neither defmt nor logging. That is what
+// kept `variegated-controller-lib` -- 300-odd `log_*!` call sites -- off the host, and
+// therefore untested.
+//
+// `defmt` is a **default** feature, so every consumer that does not opt out keeps the
+// dual-emit exactly as before. The one consumer that passes `default-features = false` is
+// the comms firmware, and it names `defmt` explicitly: its defmt output goes to
+// `esp-println`, and blinding it was a real bug that took a day to find. See the block
+// beside its dependency line.
+#[cfg(feature = "defmt")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __defmt_emit {
+    ($level:ident, $($arg:tt)*) => { defmt::$level!($($arg)*) };
+}
+
+#[cfg(not(feature = "defmt"))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __defmt_emit {
+    ($level:ident, $($arg:tt)*) => {};
+}
+
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {
         {
             log::error!($($arg)*);
-            defmt::error!($($arg)*);
+            $crate::__defmt_emit!(error, $($arg)*);
         }
     };
 }
@@ -55,7 +91,7 @@ macro_rules! log_warn {
     ($($arg:tt)*) => {
         {
             log::warn!($($arg)*);
-            defmt::warn!($($arg)*);
+            $crate::__defmt_emit!(warn, $($arg)*);
         }
     };
 }
@@ -65,7 +101,7 @@ macro_rules! log_info {
     ($($arg:tt)*) => {
         {
             log::info!($($arg)*);
-            defmt::info!($($arg)*);
+            $crate::__defmt_emit!(info, $($arg)*);
         }
     };
 }
@@ -75,7 +111,7 @@ macro_rules! log_debug {
     ($($arg:tt)*) => {
         {
             log::debug!($($arg)*);
-            defmt::debug!($($arg)*);
+            $crate::__defmt_emit!(debug, $($arg)*);
         }
     };
 }
@@ -85,7 +121,7 @@ macro_rules! log_trace {
     ($($arg:tt)*) => {
         {
             log::trace!($($arg)*);
-            defmt::trace!($($arg)*);
+            $crate::__defmt_emit!(trace, $($arg)*);
         }
     };
 }

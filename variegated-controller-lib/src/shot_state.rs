@@ -2,9 +2,13 @@
 //!
 //! [`ShotState`] names three phases -- the headspace filling, the puck saturating, and
 //! extraction proper once the first drop lands -- and this is what decides when one has
-//! become the next. It lives in this crate rather than in the controller because the
-//! controller crate cannot be built for the host, and this is the kind of code that needs
-//! to be run against recorded shots rather than reasoned about.
+//! become the next.
+//!
+//! It sat in `variegated-controller-types` for a while, which was the wrong crate: this is
+//! a state machine with a threshold policy, not a type. It was there because this crate
+//! could not be built for a host, and this is exactly the kind of code that has to be run
+//! against recorded shots rather than reasoned about -- the previous implementation was
+//! reasoned about, and never fired. Both are true here now.
 //!
 //! # What saturation actually looks like
 //!
@@ -27,8 +31,8 @@
 //! whole excursion so far rather than against one sample interval, and it does not depend
 //! on the sampling rate at all.
 
-use crate::control::group::ShotState;
-use crate::{ECType, FlowRateType, PressureType, WeightType};
+use variegated_controller_types::control::group::ShotState;
+use variegated_controller_types::{ECType, FlowRateType, PressureType, WeightType};
 
 /// How often the state is re-evaluated, in milliseconds.
 ///

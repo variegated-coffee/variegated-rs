@@ -601,7 +601,7 @@ pub struct DualBoilerSingleGroupController<
     // Shot state tracking. The detection itself lives in `variegated-controller-types`
     // rather than here, because this crate cannot be built for the host and the thresholds
     // it uses are only defensible when they can be replayed against recorded shots.
-    shot_state: variegated_controller_types::ShotStateTracker,
+    shot_state: crate::ShotStateTracker,
     input_volume_at_first_drop: Option<InputVolumeType>,
 
     /// Whether the currently open shot log was opened by `start_brewing` rather than by a
@@ -782,7 +782,7 @@ impl<
             contention_strategy_signal,
 
             // Shot state tracking initialization
-            shot_state: variegated_controller_types::ShotStateTracker::new(),
+            shot_state: crate::ShotStateTracker::new(),
             input_volume_at_first_drop: None,
             manual_shot_active: false,
         }
@@ -2568,7 +2568,7 @@ impl<
 
     /// Feed the shot-state tracker this tick's sensor readings.
     ///
-    /// The decision itself is [`variegated_controller_types::ShotStateTracker`]; everything
+    /// The decision itself is [`crate::ShotStateTracker`]; everything
     /// here is gathering inputs and reacting to a transition. `update` does its own rate
     /// limiting, so this can be called on every 100 ms tick.
     fn update_shot_state(&mut self) {
@@ -2583,7 +2583,7 @@ impl<
             self.shot_state.start();
         }
 
-        let inputs = variegated_controller_types::ShotStateInputs {
+        let inputs = crate::ShotStateInputs {
             input_flow_rate: self.group.get_input_flow_rate(),
             pressure: self.group.get_pressure(),
             output_weight: self.group.get_output_weight(),

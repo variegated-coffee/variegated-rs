@@ -17,7 +17,9 @@ pub enum RoutineType {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-#[derive(Clone)]
+// `Debug` alongside the hand-written `defmt::Format` below: the `log_*!` macros dual-emit,
+// and the `log` half formats with `{:?}`. Every field already has it.
+#[derive(Clone, Debug)]
 pub struct Routine {
     pub routine_type: RoutineType,
     pub name: String,

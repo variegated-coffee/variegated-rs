@@ -14,6 +14,32 @@ This is a Cargo workspace with the following key crates:
 - **`variegated-hal`**: Hardware abstraction layer with GPIO-controlled components, ADC interfaces, and espresso machine primitives (boilers, groups, steam wands, water taps)
 - **`variegated-controller-lib`**: High-level machine controllers and brewing routines
 - **`variegated-controller-types`**: Shared types, configuration structures, commands, and status definitions
+
+#### `-types` holds types; `-lib` holds implementations
+
+A struct, an enum, a wire format and the derives that serialize it belong in
+**`variegated-controller-types`**. Anything that *does* something with them — evaluates,
+decides, converts, drives hardware — belongs in **`variegated-controller-lib`**.
+
+This is not tidiness. `-types` is what the schema exporter, `variegated-cli` and the
+ESP32-C6 comms firmware all link against, and it stays cheap to link precisely because it
+does nothing: no embassy, no PAC, no allocator beyond `alloc`. Every implementation that
+leaks into it is weight carried by three consumers that will never call it.
+
+The rule used to be unaffordable — `-lib` could not build for a host, so putting logic
+there meant giving up its tests, and that is how a shot-state machine ended up in `-types`.
+It is affordable now: `-lib`'s `hardware` feature (on by default) gates the two controllers,
+the SD card and the shot-log storage, and everything else compiles and tests on the host:
+
+```bash
+cargo test-aarch64 -p variegated-controller-lib \
+    --no-default-features --features std,serde,double_boiler,single_group
+```
+
+`--no-default-features` is not optional — the default set turns `hardware` on, and
+`hardware` pulls in a Cortex-M PAC. The same applies to the `defmt` feature: a `Format` impl
+monomorphized on a host has no `_defmt_acquire` to link against, and the failure reads
+"Too many sections!", which mentions neither defmt nor logging.
 - **`variegated-control-algorithm`**: PID control algorithms with configurable parameters and limits
 - **`variegated-embassy-*`**: Device drivers for specific hardware (ADS124S08 ADC, FDC1004 capacitive sensor, NAU7802 load cell ADC)
 - **`variegated-adc-tools`**: Utilities for converting ADC values to physical quantities (temperature, pressure)
@@ -100,9 +126,16 @@ cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none
 1. Identify the appropriate crate for your changes based on the architecture above
 2. For hardware-related changes: modify `variegated-hal` or device drivers
 3. For control logic: modify `variegated-control-algorithm` or `variegated-controller-lib`
-4. For types/interfaces: modify `variegated-controller-types`
+4. For types/interfaces: modify `variegated-controller-types` — types only, see the rule above
 5. Test changes using appropriate target platform
 6. Update examples if interface changes affect them
+
+**Before adding code to an example**, check whether it belongs in a crate. The two examples
+had forked badly by 2026-08: 57% of single-boiler's substantive lines appeared verbatim in
+dual-boiler, and the drift had produced real bugs — three implementations of stack
+measurement disagreeing about which linker symbols to read, and four of routine-parameter
+resolution, three of them wrong. Board *configuration* — sensor channels, PT100 vs PT1000,
+pin assignments — belongs in the example. Anything else almost certainly does not.
 
 ### Testing Strategy
 - Because this is an embedded project, testing is primarily done on hardware

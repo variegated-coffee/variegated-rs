@@ -55,7 +55,9 @@ impl defmt::Format for ScheduleTrigger {
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-#[derive(Clone, Default)]
+// `Debug` because the schedule task logs a triggered item through `log_*!`, whose `log`
+// half formats with `{:?}`.
+#[derive(Clone, Default, Debug)]
 pub struct ScheduleItem {
     pub trigger_at: ScheduleTrigger,
     pub commands: Vec<ScheduleAction>,

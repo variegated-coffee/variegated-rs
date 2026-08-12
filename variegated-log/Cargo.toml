@@ -8,7 +8,10 @@ test = false
 bench = false
 
 [dependencies]
-defmt.workspace = true
+# Optional, and on by default -- see the `defmt` feature below and the long note beside
+# `__defmt_emit!` in `lib.rs`. Every consumer that does not pass `default-features = false`
+# is unaffected.
+defmt = { workspace = true, optional = true }
 log.workspace = true
 # All four of these exist for one thing: `logger_task`, the RP2350 USB serial
 # logger, plus the defmt-RTT transport that feeds a probe. They are optional
@@ -43,7 +46,20 @@ portable-atomic = { workspace = true, optional = true }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false }
 
 [features]
-default = []
+default = ["defmt"]
+# The defmt half of the `log_*!` dual-emit.
+#
+# **On by default, and it must stay that way.** Turning it off blinds every `log_*!` call
+# to a probe, and on the comms processor that meant a panic reading exactly `explicit
+# panic` and nothing else -- the assertion text had gone to a defmt logger with no sink.
+# That took a day to diagnose. The default is what keeps a consumer who says nothing from
+# ending up there.
+#
+# It exists so a *host* build can turn it off. defmt emits `extern "Rust"` references to
+# `_defmt_acquire` and friends with no provider, so any host binary that expands one of
+# these macros fails to link -- which is what kept `variegated-controller-lib` off the
+# host and therefore untested. See the note beside `__defmt_emit!`.
+defmt = ["dep:defmt"]
 # The RP-only half of this crate: `logger_task` and the defmt-RTT global logger.
 # Not a feature a consumer selects directly -- naming a chip is what turns it on,
 # which is why nothing downstream had to change when it appeared.

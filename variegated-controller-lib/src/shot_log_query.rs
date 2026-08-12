@@ -31,9 +31,9 @@ use variegated_controller_types::{
 /// send such a request; there is no `Delete`, because nothing offers deletion yet.
 /// Variants get added when something can send them, not in anticipation of it.
 #[derive(Debug, Clone, PartialEq)]
-// Derived unconditionally: this crate depends on defmt outright and has no `defmt`
-// feature, so a `cfg_attr` guard here would simply never fire.
-#[derive(defmt::Format)]
+// Guarded, since this crate gained a `defmt` feature: a host test build turns it off, and
+// a `Format` impl monomorphized there has no `_defmt_acquire` to link against.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ShotLogQuery {
     /// The most recent `limit` shots, newest first.
     List { limit: u16 },
@@ -58,7 +58,7 @@ pub enum ShotLogQuery {
 /// Errors travel as a reply rather than as a `Result`, because the requester is on the
 /// other side of a channel and has no way to observe one.
 #[derive(Debug, Clone, PartialEq)]
-#[derive(defmt::Format)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ShotLogReply {
     List(ShotLogList),
     Chunk {

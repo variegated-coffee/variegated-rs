@@ -1,13 +1,39 @@
 #![no_std]
+//! The machine's behaviour: controllers, routines, schedules, storage codecs.
+//!
+//! # What lives here, and what lives in `variegated-controller-types`
+//!
+//! **`-types` holds types; `-lib` holds implementations.** A struct, an enum, a wire
+//! format and the derives that serialize it go in `-types`. Anything that *does*
+//! something with them -- evaluates, decides, converts, drives hardware -- goes here.
+//!
+//! The rule is not tidiness. `-types` is what the schema exporter, the CLI and the comms
+//! firmware all link against, and it stays cheap to link precisely because it does
+//! nothing: no embassy, no PAC, no allocator beyond `alloc`. Every implementation that
+//! leaks into it is weight carried by three consumers that will never call it.
+//!
+//! The rule used to be unaffordable, which is why it was unwritten and why
+//! `shot_state.rs` was in `-types`: this crate could not build for a host, so putting
+//! logic here meant giving up its tests. That is what the `hardware` feature fixed --
+//! see the note on `[lib]` in `Cargo.toml`.
+//!
+//! # Feature layout
+//!
+//! Everything that cannot exist off-target sits behind `hardware` (on by default): the
+//! two controllers, the SD card, and the shot-log storage on top of it. What remains
+//! compiles for a host and is tested there.
 
 pub mod flash;
 pub mod routine;
 pub mod settings;
+#[cfg(feature = "hardware")]
 pub mod single_boiler_single_group;
+#[cfg(feature = "hardware")]
 pub mod dual_boiler_single_group;
 pub mod schedule;
 pub mod external_sensor_dispatcher;
 mod shot_log;
+pub mod shot_state;
 // Ungated, unlike `shot_log_storage` below, because the controllers name these types in
 // their signatures and the controllers compile in every configuration. See the module's
 // own docs.
@@ -15,16 +41,20 @@ pub mod shot_log_query;
 
 pub use shot_log::{ShotLogger, ShotLoggerConfig};
 pub use shot_log_query::{ShotLogQuery, ShotLogReply};
+pub use shot_state::{ShotStateInputs, ShotStateTracker};
 
 #[cfg(feature = "sd-card-storage")]
 pub mod sd_card;
 #[cfg(feature = "sd-card-storage")]
 pub mod shot_log_storage;
 // The exFAT formatter lives in `variegated-exfat-format`, not here. It is pure logic over
-// a block device, and this crate depends on `embassy-rp`, which cannot build for a host
-// target -- so a test alongside it could never run. Writing a filesystem from scratch
-// without being able to check it against a real implementation is not something worth
-// doing, hence the separate crate.
+// a block device, and writing a filesystem from scratch without being able to check it
+// against a real implementation is not worth doing -- so it wanted host tests.
+//
+// That used to be impossible here, because this crate depended on `embassy-rp`
+// unconditionally. It no longer does; the formatter stays in its own crate anyway,
+// because it is a filesystem rather than an espresso machine and nothing else here
+// depends on it.
 #[cfg(feature = "sd-card-storage")]
 pub use variegated_exfat_format as exfat_format;
 

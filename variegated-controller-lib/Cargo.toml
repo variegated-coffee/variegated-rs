@@ -7,36 +7,59 @@ rust-version.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-test = false
+# `test = true`, which it was not until the `hardware` feature existed.
+#
+# The blocker was never the logic -- most of this crate is pure computation over
+# `variegated-controller-types` -- it was that `embassy-rp`, `variegated-hal` and `defmt`
+# were unconditional dependencies, so nothing here could link on a host and nothing here
+# could be tested. `embassy-rp` turned out to be named in three files and `variegated-hal`
+# in two, all of them controllers; gating those four modules is what freed the rest.
+#
+# Run with `--no-default-features`, which is not optional: the default set turns
+# `hardware` on and `hardware` pulls in a Cortex-M PAC.
+#
+#   cargo test-aarch64 -p variegated-controller-lib \
+#       --no-default-features --features std,serde,double_boiler,single_group
 bench = false
 
 [dependencies]
 heapless.workspace = true
 async-trait.workspace = true
-embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+# The `defmt` flavouring of these five moved onto this crate's own `defmt` feature. Every
+# firmware build names `defmt`, so nothing about them changed there; a host test build does
+# not, which is the whole point -- defmt in the graph is harmless, but a `Format` impl that
+# gets monomorphized on a host has no `_defmt_acquire` to link against.
+embassy-time.workspace = true
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
-embassy-embedded-hal = { workspace = true, features = ["defmt"] }
-embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-embedded-hal.workspace = true
+embassy-sync.workspace = true
 embassy-futures.workspace = true
-embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
+# Optional, behind `hardware`. Named in exactly three files -- `watchdog::Watchdog` in
+# both controllers, `adc::Config` in the dual, `spi::Config` in `sd_card` -- and it is a
+# Cortex-M PAC, so its presence alone is what stopped this crate from building for a host.
+embassy-rp = { workspace = true, optional = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
 num-traits = { workspace = true, features = ["libm"] }
 
 movavg.workspace = true
 
-defmt.workspace = true
+# Optional, behind this crate's own `defmt` feature. It used to be unconditional, which
+# `shot_log_query.rs` records in a comment that is no longer true and has been updated.
+defmt = { workspace = true, optional = true }
 
 serde = { workspace = true, features = ["derive"] }
 postcard = { workspace = true, features = ["alloc", "use-crc"] }
 
 cfg-if.workspace = true
-variegated-hal = { version = "0.1.0", path = "../variegated-hal" }
-variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["defmt", "serde"] }
-variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", features = ["defmt", "serde", "sequential-storage"] }
-variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
+# Optional, behind `hardware`. Named in the two controllers only, and it carries an
+# unconditional `embassy-rp`, so it is the second reason this crate could not reach a host.
+variegated-hal = { version = "0.1.0", path = "../variegated-hal", optional = true }
+variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["serde"] }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "sequential-storage"] }
+variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping" }
 chrono.workspace = true
 
-sequential-storage = { workspace = true, features = ["defmt"] }
+sequential-storage.workspace = true
 embedded-storage-async.workspace = true
 log.workspace = true
 # Supplies the `log_*!` macros, which dual-emit to `defmt` (probe) and the `log`
@@ -45,7 +68,12 @@ log.workspace = true
 # `source-application` / `source-comms` feature is picked, and a debug feature
 # must not impose that on everyone who links this library. `variegated-log`
 # keeps it optional behind its own `debug-bus` feature.
-variegated-log = { version = "0.1.0", path = "../variegated-log" }
+#
+# `default-features = false` so that its `defmt` half follows *this* crate's `defmt`
+# feature rather than being forced on. Without that, every `log_*!` call site here --
+# there are over three hundred -- expands to a `defmt::*!` even on a host, and the test
+# binary fails to link with "Too many sections!", which names neither defmt nor logging.
+variegated-log = { version = "0.1.0", path = "../variegated-log", default-features = false }
 
 crc.workspace = true
 
@@ -64,9 +92,57 @@ variegated-exfat-format = { version = "0.1.0", path = "../variegated-exfat-forma
 block-device-driver = { workspace = true, optional = true }
 
 [features]
-rp2040 = ["embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040"]
-rp235xa = ["embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa"]
-rp235xb = ["embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb"]
+# `hardware` and `defmt` on, matching what every firmware build already asked for. A host
+# test build passes `--no-default-features`.
+default = ["hardware", "defmt"]
+
+# The machine-facing half of this crate: the two controllers, the SD card and the shot-log
+# storage on top of it. Everything they need that cannot exist off-target -- `embassy-rp`,
+# which is a Cortex-M PAC, and `variegated-hal`, which carries one -- hangs off this.
+#
+# What is left when it is off is the logic worth testing: routine execution and parameter
+# resolution, shot-state detection, the schedule evaluator, the settings codec and the
+# shot-log record. None of that touches a peripheral.
+hardware = ["dep:embassy-rp", "dep:variegated-hal"]
+
+# Dual-emit to a probe, and the `Format` derives that make it work. Off for host tests,
+# where a monomorphized `Format` impl has no `_defmt_acquire` to link against.
+defmt = [
+    "dep:defmt",
+    "variegated-log/defmt",
+    "embassy-time/defmt",
+    "embassy-time/defmt-timestamp-uptime",
+    "embassy-embedded-hal/defmt",
+    "embassy-sync/defmt",
+    "sequential-storage/defmt",
+    "variegated-control-algorithm/defmt",
+    "variegated-controller-types/defmt",
+    "variegated-timekeeping/defmt",
+]
+
+std = ["variegated-controller-types/std", "variegated-control-algorithm/std"]
+# `serde` is unconditional in the dependency list -- the settings and shot-log codecs are
+# not optional here -- so this exists only to be nameable on a command line alongside the
+# feature set `variegated-controller-types` wants.
+serde = ["variegated-controller-types/serde"]
+
+# The chip features imply `hardware`: naming a chip is asking for the peripheral half.
+rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040"]
+rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa"]
+rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb"]
 rp235x = []
 pwm-steam-valve = []
-sd-card-storage = ["dep:sdio", "dep:exfat-slim", "dep:aligned", "dep:block-device-driver", "dep:variegated-exfat-format"]
+# Implies `hardware`: the card hangs off a `Spi` and the storage layer names one.
+sd-card-storage = ["hardware", "dep:sdio", "dep:exfat-slim", "dep:aligned", "dep:block-device-driver", "dep:variegated-exfat-format"]
+
+# Forwarded to `variegated-controller-types`, which needs one of them to know which
+# machine's boiler and group enumerations exist.
+double_boiler = ["variegated-controller-types/double_boiler"]
+single_boiler = ["variegated-controller-types/single_boiler"]
+single_group = ["variegated-controller-types/single_group"]
+
+[dev-dependencies]
+# `routine.rs` and `schedule.rs` name `embassy_time::Instant`, which resolves a time driver
+# at *link* time even in a test that never reads the clock. `mock-driver` is that provider;
+# without it the test binary fails with an undefined `_embassy_time_now`.
+embassy-time = { workspace = true, features = ["mock-driver"] }
