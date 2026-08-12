@@ -9,7 +9,7 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupConfiguration, MachineCommand, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupConfiguration, MachineCommand, MachineMode, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuState, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use alloc::string::ToString;
@@ -589,6 +589,30 @@ where
                                 let menu_state = ListMenuState::new();
                                 self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
                             }
+                            // Nothing selected, and the machine is not on: the press turns
+                            // it on.
+                            //
+                            // This is the only way out of "Machine Off" from the front of
+                            // the machine. Without it the mode could be left but never
+                            // returned to without a browser or a debug link, on a screen
+                            // whose entire content is the word "Off" -- and the press was
+                            // doing nothing at all, so there was nothing to discover.
+                            //
+                            // `PowerSaveStandby` is included for the same reason: it renders
+                            // the same kind of dead-end screen, and the same press is the
+                            // obvious way out of it.
+                            IdleSubState::NoMenuItemSelected
+                                if self.current_status.mode != MachineMode::On =>
+                            {
+                                let _ = self
+                                    .command_sender
+                                    .try_send(MachineCommand::SetMachineMode(MachineMode::On));
+                            }
+                            // Nothing selected on a machine that is already on. Left alone
+                            // deliberately: the symmetric "press to turn off" would fire on
+                            // the same press a user makes to dismiss the idle screen, and
+                            // switching a machine off mid-session is not something to do by
+                            // accident. Turning off stays in the settings menu.
                             _ => {}
                         }
                     }
