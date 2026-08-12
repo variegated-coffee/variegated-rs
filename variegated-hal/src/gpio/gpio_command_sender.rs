@@ -8,11 +8,17 @@ use embassy_time::Timer;
 use variegated_instrumentation::async_task_loop;
 use crate::WithTask;
 
+/// Sends one command when a pin goes high and another when it goes low.
+///
+/// Suits a **toggle switch**, whose position means something, as well as a momentary
+/// button. For a switch, see [`Self::with_initial_state`] -- a control that holds its
+/// position has state that edges alone cannot convey.
 pub struct GpioCommandSender<'a, M: RawMutex, CommandT: Clone, const N: usize> {
     input: Input<'a>,
     sender: Sender<'a, M, CommandT, N>,
     rising_edge_command: Option<CommandT>,
     falling_edge_command: Option<CommandT>,
+    emit_initial_state: bool,
 }
 
 impl<'a, M: RawMutex, CommandT: Clone, const N: usize> GpioCommandSender<'a, M, CommandT, N> {
@@ -27,13 +33,50 @@ impl<'a, M: RawMutex, CommandT: Clone, const N: usize> GpioCommandSender<'a, M, 
             sender,
             rising_edge_command,
             falling_edge_command,
+            emit_initial_state: false,
         }
+    }
+
+    /// Announce the pin's level once at startup, before waiting for any edge.
+    ///
+    /// **For a control that holds its position.** Without this, a machine powered on with
+    /// the switch already flipped produces no edge, so the firmware never learns the
+    /// position and sits in the opposite state until someone toggles it and back. That is
+    /// a plausible way to leave a machine -- switch on, power at the wall -- and it fails
+    /// silently, with the front panel and the controller disagreeing.
+    ///
+    /// Opt-in rather than automatic, because the two kinds of control want different
+    /// things. A momentary button's resting level means "not pressed", and announcing that
+    /// at boot is a command nobody asked for. Naming it at the call site is also what
+    /// records that the control in question is a switch.
+    pub fn with_initial_state(mut self) -> Self {
+        self.emit_initial_state = true;
+        self
     }
 }
 
 impl <'a, M: RawMutex, CommandT: Clone, const N: usize> WithTask for GpioCommandSender<'a, M, CommandT, N> {
     async fn task(&mut self) {
         let mut previous_level = self.input.is_high();
+
+        // Before the first `wait_for_any_edge`, because the edge that would have told us
+        // this already happened -- possibly before power was applied.
+        //
+        // The same command the corresponding edge would have sent, so a consumer sees one
+        // vocabulary and cannot tell "was already on" from "was just switched on". It does
+        // not need to: both mean the switch is on now.
+        if self.emit_initial_state {
+            let command = if previous_level {
+                self.rising_edge_command.as_ref()
+            } else {
+                self.falling_edge_command.as_ref()
+            };
+
+            if let Some(command) = command {
+                self.sender.send(command.clone()).await;
+            }
+        }
+
         loop {
             self.input.wait_for_any_edge().await;
             Timer::after_millis(10).await;
