@@ -189,6 +189,78 @@ pub enum MachineCommand {
     IdentifyMachine,
 }
 
+impl MachineCommand {
+    /// The variant's name, and nothing else.
+    ///
+    /// Mirrors [`crate::debug_command::DebugCommand::label`], and exists for the same
+    /// reason: a `&'static str` can go through *both* halves of `variegated_log`'s
+    /// `log_*!` macros, where the hand-written `defmt::Format` below reaches only a probe.
+    /// A controller that drops a command it does not implement can therefore say which one
+    /// on the debug bus, which is where anyone diagnosing the machine is actually looking.
+    ///
+    /// Deliberately no payload. `Format` already renders those where it is useful, and
+    /// several variants carry a whole `Routine` -- which is why `AddRoutine` prints as
+    /// `AddRoutine()` there.
+    ///
+    /// Exhaustive rather than defaulted: adding a variant should be a compile error here,
+    /// not a command that silently reports as "unknown".
+    pub fn label(&self) -> &'static str {
+        match self {
+            MachineCommand::StartBrewing(_) => "StartBrewing",
+            MachineCommand::StopBrewing(_) => "StopBrewing",
+            MachineCommand::StartSteaming(_) => "StartSteaming",
+            MachineCommand::StopSteaming(_) => "StopSteaming",
+            MachineCommand::StartPumpingToWaterTap(_) => "StartPumpingToWaterTap",
+            MachineCommand::StopPumpingToWaterTap(_) => "StopPumpingToWaterTap",
+            MachineCommand::SetSteamValveOpenness(_, _) => "SetSteamValveOpenness",
+            MachineCommand::SetBoilerControlTarget(_, _, _) => "SetBoilerControlTarget",
+            MachineCommand::SetBoilerControlTargetValues(_, _) => "SetBoilerControlTargetValues",
+            MachineCommand::SetGroupBrewControlTarget(_, _, _) => "SetGroupBrewControlTarget",
+            MachineCommand::SetGroupBrewControlTargetValues(_, _) => "SetGroupBrewControlTargetValues",
+            MachineCommand::SetPidParameters(_, _) => "SetPidParameters",
+            MachineCommand::RunRoutine(_, _) => "RunRoutine",
+            MachineCommand::CancelRoutine => "CancelRoutine",
+            MachineCommand::EnableBoiler(_) => "EnableBoiler",
+            MachineCommand::DisableBoiler(_) => "DisableBoiler",
+            MachineCommand::TareGroupScale(_) => "TareGroupScale",
+            MachineCommand::ZeroCalibrateGroupScale(_) => "ZeroCalibrateGroupScale",
+            MachineCommand::CalibrateGroupScale100g(_) => "CalibrateGroupScale100g",
+            MachineCommand::UpdateCommsStatus(_) => "UpdateCommsStatus",
+            MachineCommand::AddScheduleItem(_) => "AddScheduleItem",
+            MachineCommand::RemoveScheduleItem(_) => "RemoveScheduleItem",
+            MachineCommand::UpdateScheduleItem(_, _) => "UpdateScheduleItem",
+            MachineCommand::AddRoutine(_) => "AddRoutine",
+            MachineCommand::RemoveRoutine(_) => "RemoveRoutine",
+            MachineCommand::UpdateRoutine(_, _) => "UpdateRoutine",
+            MachineCommand::SetMachineMode(_) => "SetMachineMode",
+            MachineCommand::OptimizeConfigurationStorage => "OptimizeConfigurationStorage",
+            MachineCommand::OptimizeRoutineStorage => "OptimizeRoutineStorage",
+            MachineCommand::OptimizeScheduleStorage => "OptimizeScheduleStorage",
+            MachineCommand::SetGroupPumpConfiguration(_, _) => "SetGroupPumpConfiguration",
+            MachineCommand::SetWaterTapPumpConfiguration(_, _) => "SetWaterTapPumpConfiguration",
+            MachineCommand::SetFillPumpConfiguration(_, _) => "SetFillPumpConfiguration",
+            MachineCommand::InferGroupPressureIntegral(_, _) => "InferGroupPressureIntegral",
+            MachineCommand::InferGroupFlowRateIntegral(_, _) => "InferGroupFlowRateIntegral",
+            MachineCommand::InferGroupOutputFlowRateIntegral(_, _) => "InferGroupOutputFlowRateIntegral",
+            MachineCommand::SetHeatingElementInterlock(_) => "SetHeatingElementInterlock",
+            MachineCommand::SetHeatingElementContentionStrategy(_) => "SetHeatingElementContentionStrategy",
+            MachineCommand::SetWaterDispersalPumpStrategy(_, _) => "SetWaterDispersalPumpStrategy",
+            MachineCommand::AssociateBluetoothPeripheral(_) => "AssociateBluetoothPeripheral",
+            MachineCommand::RemoveBluetoothPeripheral(_) => "RemoveBluetoothPeripheral",
+            MachineCommand::SetBluetoothPeripheralEnabled(_, _) => "SetBluetoothPeripheralEnabled",
+            MachineCommand::ScanForBluetoothPeripherals => "ScanForBluetoothPeripherals",
+            MachineCommand::UpdateBluetoothScan(_) => "UpdateBluetoothScan",
+            MachineCommand::SetWifiCredentials(_) => "SetWifiCredentials",
+            MachineCommand::OpenWifiProvisioningWindow { .. } => "OpenWifiProvisioningWindow",
+            MachineCommand::CloseWifiProvisioningWindow => "CloseWifiProvisioningWindow",
+            MachineCommand::IdentifyMachine => "IdentifyMachine",
+            MachineCommand::SetShotAnnotations(_, _) => "SetShotAnnotations",
+            MachineCommand::SetPendingShotAnnotations(_) => "SetPendingShotAnnotations",
+            MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
+        }
+    }
+}
+
 #[cfg(feature = "defmt")]
 impl defmt::Format for MachineCommand {
     fn format(&self, f: defmt::Formatter) {
