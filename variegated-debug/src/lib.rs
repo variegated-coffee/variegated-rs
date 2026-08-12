@@ -18,6 +18,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod bus;
+pub mod commands;
 pub mod rate;
 pub mod relay;
 pub mod sampler;
@@ -30,6 +31,14 @@ pub mod suppress;
 // concern.
 #[cfg(any(feature = "rp2040", feature = "rp235xa", feature = "rp235xb"))]
 pub mod stack;
+
+// Reports core 0's stack, so it inherits `stack`'s gate, and it describes the application
+// processor specifically -- `SourceState::Application`.
+#[cfg(all(
+    feature = "source-application",
+    any(feature = "rp2040", feature = "rp235xa", feature = "rp235xb")
+))]
+pub mod snapshot;
 
 #[cfg(feature = "usb-cdc-rp")]
 pub mod usb_cdc;

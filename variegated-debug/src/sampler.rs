@@ -88,6 +88,45 @@ impl<const NC: usize, const NI: usize> Sampler<NC, NI> {
     }
 }
 
+/// Emit counters, indicators and the schema, forever.
+///
+/// A plain `async fn` rather than an `#[embassy_executor::task]`, because a task cannot be
+/// generic and `Sampler` is generic over its metric counts. Each firmware keeps a
+/// two-line task that builds its `Sampler` and awaits this -- the same split
+/// `esp_transceiver_main` uses in `variegated-comms`.
+///
+/// It emits [`DebugEvent::Boot`] first, so the event stream starts with something that
+/// identifies the run.
+///
+/// The schema is re-sent every [`SCHEMA_INTERVAL_MS`] rather than once. There is no
+/// handshake on this link -- emission is always-on and a client may attach at any point --
+/// so periodic re-emission is the only way a late client learns what the metric ids mean.
+pub async fn run<const NC: usize, const NI: usize>(sampler: Sampler<NC, NI>) -> ! {
+    crate::bus::emit_event(variegated_controller_types::debug::DebugEvent::Boot);
+
+    // Starts *at* the interval so the first pass emits the schema immediately, rather than
+    // leaving a client attached at boot without names for the first five seconds.
+    let mut since_schema_ms = SCHEMA_INTERVAL_MS;
+
+    loop {
+        if since_schema_ms >= SCHEMA_INTERVAL_MS {
+            for payload in sampler.schema_payloads() {
+                crate::bus::publish(payload);
+            }
+            since_schema_ms = 0;
+        }
+
+        crate::bus::publish(sampler.counter_payload());
+        crate::bus::publish(sampler.indicator_payload());
+
+        // Re-read every pass rather than caching: `set_sample_interval_ms` is driven by a
+        // debug command, and a cached period would ignore it until the next restart.
+        let interval = sample_interval_ms();
+        embassy_time::Timer::after_millis(interval as u64).await;
+        since_schema_ms = since_schema_ms.saturating_add(interval);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

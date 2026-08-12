@@ -154,10 +154,13 @@ use variegated_hal::scale::ScaleController;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity;
 use variegated_instrumentation::{async_task_loop, instrumented_section, PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
-use variegated_controller_types::debug::{ApplicationState, DebugEvent, DebugPayload, DebugStateSnapshot, SourceState};
+// The snapshot payload types are gone from here: building a `DebugStateSnapshot` is now
+// `variegated_debug::snapshot`'s job, and this binary supplies only the three values it
+// alone knows.
+use variegated_controller_types::debug::DebugEvent;
 use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
 use variegated_debug::bus;
-use variegated_debug::sampler::{sample_interval_ms, set_sample_interval_ms, Sampler, SCHEMA_INTERVAL_MS};
+use variegated_debug::sampler::{set_sample_interval_ms, Sampler};
 use variegated_debug::usb_cdc::{self, DebugUsbResources};
 
 #[global_allocator]
@@ -1773,147 +1776,56 @@ async fn debug_usb_task(
     usb_cdc::run(driver, resources, sink).await;
 }
 
+// A thin wrapper, because `#[embassy_executor::task]` cannot be generic and `Sampler` is
+// generic over its metric counts. Same split as `esp_transceiver_task` below.
 #[embassy_executor::task]
 async fn debug_sampler_task() {
-    let sampler = Sampler::new(
+    variegated_debug::sampler::run(Sampler::new(
         &COUNTERS,
         &INDICATORS,
         CounterId::NAMES,
         IndicatorId::NAMES,
         "dual-boiler",
-    );
-
-    bus::emit_event(DebugEvent::Boot);
-
-    let mut since_schema_ms = SCHEMA_INTERVAL_MS;
-    loop {
-        // Re-emit the schema periodically: with always-on emission there is no
-        // handshake, so this is how a client that attaches later learns names.
-        if since_schema_ms >= SCHEMA_INTERVAL_MS {
-            for payload in sampler.schema_payloads() {
-                bus::publish(payload);
-            }
-            since_schema_ms = 0;
-        }
-
-        bus::publish(sampler.counter_payload());
-        bus::publish(sampler.indicator_payload());
-
-        let interval = sample_interval_ms();
-        Timer::after_millis(interval as u64).await;
-        since_schema_ms = since_schema_ms.saturating_add(interval);
-    }
+    ))
+    .await
 }
 
+// `psram_heap` is a parameter rather than a static because it is decided at boot, by
+// whether the external chip answered; everything else this snapshot needs is read live.
 #[embassy_executor::task]
-async fn debug_snapshot_task(psram_heap: bool, mut status_receiver: StatusSubscriber) {
-    // The last status seen on the channel. Retained across ticks because the channel
-    // holds one message and the controller publishes on its own cadence: without
-    // this, any tick that happened to land between publishes would emit nothing and
-    // the State tab would blink empty.
-    let mut latest: Option<Status> = None;
-
-    // Edge-triggered, so a healthy machine says this once and then goes quiet.
-    //
-    // Level-triggered at 1 Hz would be a line a second forever about a number that only
-    // moves when it gets worse -- and the only thing worth hearing about is that it got
-    // worse. Reported from here rather than from a task of its own because this loop
-    // already ticks on core 0 at the right cadence and costs nothing to extend.
-    let mut worst_stack = 0usize;
-
-    loop {
-        publish_snapshot(psram_heap);
-
-        let high_water = variegated_debug::stack::core0_high_water();
-        if high_water > worst_stack {
-            worst_stack = high_water;
-            log_info!(
-                "core0 stack high-water: {} of {} bytes",
-                high_water,
-                variegated_debug::stack::core0_span()
-            );
-        }
-
-        // Drain rather than await. `try_next_message_pure` is what every other
-        // consumer on this channel uses, and it matters more here: the snapshot task
-        // must never make its 1 Hz cadence depend on the controller's, and must never
-        // hold up a channel the control path publishes to.
-        while let Some(status) = status_receiver.try_next_message_pure() {
-            latest = Some(status);
-        }
-
-        // The gate is upstream of `Box::new` on purpose. The transport's own DTR check
-        // is downstream of it, so without this a machine no host has ever attached to
-        // paid the clone and the allocation described below every second, forever, for
-        // nobody. Do not produce for a host that is not there -- the comms firmware
-        // states the same rule in the same words at its own copy of this line. See
-        // `variegated_debug::status::transport_attached`.
-        if variegated_debug::status::transport_attached() {
-            if let Some(status) = latest.as_ref() {
-                // The allocation is here, on a 1 Hz task, deliberately: `Status` is
-                // 1-2 kB and boxing it is what keeps `DebugFrame` at ~160 bytes for the
-                // 16-slot static bus.
-                //
-                // Not `bus::publish`. `Status` has its own single-slot channel because
-                // a pubsub with more than one subscriber `clone()`s every message it
-                // hands out, inside the bus's `CriticalSectionRawMutex` -- so once the
-                // inter-processor relay became a second subscriber, this line would
-                // have meant a ~1.7 kB first-fit `LlffHeap::alloc` plus a memcpy with
-                // interrupts disabled on both cores, once a second, forever. See
-                // `variegated_debug::status`.
-                //
-                // `status::publish` still never awaits and never back-pressures a
-                // producer. It is not allocator-free either: superseding an undelivered
-                // frame frees a `Box` through `LlffHeap::dealloc`, whose free-list
-                // insert is O(n). That is deliberately done *outside* the signal's
-                // critical section, and with the gate above it only happens when the
-                // transport is attached but stalled -- but it is a real cost and must
-                // not be described as absent.
-                variegated_debug::status::publish(Box::new(status.clone()));
-            }
-        }
-
-        Timer::after_secs(1).await;
-    }
+async fn debug_snapshot_task(psram_heap: bool, status_receiver: StatusSubscriber) {
+    // The loop lives in `variegated_debug::snapshot`. `PSRAM_HEAP` exists because
+    // `snapshot::run` takes a plain `fn` pointer rather than a closure -- an
+    // `#[embassy_executor::task]` future has to be nameable, and a closure capturing
+    // `psram_heap` is not.
+    PSRAM_HEAP.store(psram_heap, core::sync::atomic::Ordering::Relaxed);
+    variegated_debug::snapshot::run(sample_snapshot, status_receiver).await
 }
 
-fn publish_snapshot(psram_heap: bool) {
-    let stats = bus::stats();
+/// Whether the heap ended up in PSRAM, for [`sample_snapshot`] to read.
+static PSRAM_HEAP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// The three things only this binary knows, read fresh every tick.
+fn sample_snapshot() -> variegated_debug::snapshot::ApplicationSnapshot {
     let relay = variegated_comms::debug_relay::relay_stats();
-    bus::publish(DebugPayload::StateSnapshot(DebugStateSnapshot {
+
+    variegated_debug::snapshot::ApplicationSnapshot {
         heap_used: HEAP.used() as u32,
         heap_free: HEAP.free() as u32,
-        frames_emitted: stats.emitted,
-        frames_dropped: stats.dropped,
-        frames_suppressed: stats.suppressed,
-        frames_rate_limited: stats.rate_limited,
-        source_state: SourceState::Application(ApplicationState {
-            // Not plumbed: the watchdog is fed inside variegated-controller-lib's run
-            // loop, which has no handle to this snapshot. `None` renders as "unknown"
-            // rather than a plausible-looking "fed 0 ms ago".
-            watchdog_fed_ms_ago: None,
-            psram_heap,
-            // Not determined: reading it would mean locking the routine repository
-            // from the snapshot path. `None` currently conflates "no routine" with
-            // "not determined" -- acceptable while nothing consumes it.
-            routine_running: None,
-            link_frames_relayed: relay.relayed,
-            link_frames_dropped: relay.dropped,
-            // Core 1's, alongside core 0's below. Both, because they are sized
-            // independently and fail independently: core 1's is the 96 kB
-            // `CORE1_STACK_LENGTH` chosen here, core 0's is whatever the linker script
-            // leaves, and knowing that one of them is close to its edge is useless without
-            // knowing which.
-            core1_stack_high_water: Some(core1_stack_high_water() as u32),
-            core1_stack_size: Some(CORE1_STACK_LENGTH as u32),
-        }),
-        // Core 0's, which is the one that can overflow silently: there is no guard unless
-        // `install_core0_stack_guard()` runs, and this board went an unknown length of time
-        // overflowing it -- the failure surfaced as a HardFault in the timer queue, nowhere
-        // near the cause.
-        stack_high_water: Some(variegated_debug::stack::core0_high_water() as u32),
-        stack_size: Some(variegated_debug::stack::core0_span() as u32),
-    }));
+        psram_heap: PSRAM_HEAP.load(core::sync::atomic::Ordering::Relaxed),
+        link_frames_relayed: relay.relayed,
+        link_frames_dropped: relay.dropped,
+        // Core 1's, alongside core 0's, which the shared snapshot reads itself. Both,
+        // because they are sized independently and fail independently: core 1's is the
+        // 96 kB `CORE1_STACK_LENGTH` chosen here, core 0's is whatever the linker script
+        // leaves, and knowing that one of them is close to its edge is useless without
+        // knowing which.
+        core1_stack: Some((core1_stack_high_water() as u32, CORE1_STACK_LENGTH as u32)),
+    }
+}
+
+fn publish_snapshot(_psram_heap: bool) {
+    variegated_debug::snapshot::publish_application(&sample_snapshot());
 }
 
 #[embassy_executor::task]
@@ -1985,22 +1897,16 @@ async fn debug_command_task(
             }
             #[cfg(feature = "sd-card-storage")]
             DebugCommand::App(AppDebugOp::SdFormatCard { confirm }) => {
-                // The guard, checked here rather than in the storage task so a refused
-                // command never reaches the code that can erase anything.
-                //
-                // It exists because this variant is one discriminant away from
-                // `SdListShots`, which is read-only and run routinely, on a link the SD
-                // work established does corrupt bytes. A flipped bit in the discriminant
-                // of a payload-less command would otherwise wipe the card; with the
-                // guard it arrives with a `confirm` that is not the constant.
-                if confirm == variegated_controller_types::debug_command::SD_FORMAT_CONFIRM {
+                // Guarded here rather than in the storage task, so a refused command never
+                // reaches the code that can erase anything. See
+                // `variegated_debug::commands::confirmed` for why this variant needs one.
+                if variegated_debug::commands::confirmed(
+                    confirm,
+                    variegated_controller_types::debug_command::SD_FORMAT_CONFIRM,
+                    "SD format",
+                ) {
                     log_warn!("SD format requested; the card's contents will be lost");
                     SD_SELF_TEST_REQUEST.signal(SdMaintenance::Format);
-                } else {
-                    log_error!(
-                        "SD format refused: confirmation {:#010x} is not the required value",
-                        confirm
-                    );
                 }
             }
             #[cfg(not(feature = "sd-card-storage"))]
@@ -2008,18 +1914,15 @@ async fn debug_command_task(
                 log_warn!("SD format requested, but this build has no SD storage");
             }
             DebugCommand::App(AppDebugOp::ClearWifiCredentials { confirm }) => {
-                // The guard, checked here rather than in the controller so a refused command
-                // never reaches the code that can forget anything. Same shape as the SD
-                // format guard above, and for the same reason: a payload-free destructive
-                // command, adjacent on the wire to ones run constantly while testing.
-                if confirm == variegated_controller_types::debug_command::WIFI_CLEAR_CONFIRM {
+                // Guarded here rather than in the controller, so a refused command never
+                // reaches the code that can forget anything.
+                if variegated_debug::commands::confirmed(
+                    confirm,
+                    variegated_controller_types::debug_command::WIFI_CLEAR_CONFIRM,
+                    "Wi-Fi credentials clear",
+                ) {
                     log_warn!("Wi-Fi credentials clear requested; the stored network will be forgotten");
                     CLEAR_WIFI_CREDENTIALS_REQUEST.signal(());
-                } else {
-                    log_error!(
-                        "Wi-Fi credentials clear refused: confirmation {:#010x} is not the required value",
-                        confirm
-                    );
                 }
             }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
