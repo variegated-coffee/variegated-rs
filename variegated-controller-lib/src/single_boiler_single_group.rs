@@ -28,6 +28,7 @@ use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
 use variegated_timekeeping::TimeKeeper;
 use crate::settings::SettingsStorage;
+use crate::pump_transfer::{PumpPidEngagement, PumpPidTransfer};
 use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
 };
@@ -229,6 +230,10 @@ pub struct SingleBoilerSingleGroupController<
     state: SingleBoilerSingleGroupControllerState,
     boiler_pid: PidCtrl<f32>,
     pump_pid: PidCtrl<f32>,
+    /// Whether `pump_pid` currently owns the pump, and what the pump is running at. See
+    /// [`crate::pump_transfer`] — without it the PID wound up while open-loop control held
+    /// the output, and took over from a standing start when it got it back.
+    pump_pid_engagement: PumpPidEngagement,
     configuration_store: SettingsStoreT,
     persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration,
     ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration,
@@ -393,6 +398,7 @@ impl<
             state: SingleBoilerSingleGroupControllerState::default(),
             boiler_pid: super::limited_pid(),
             pump_pid: super::limited_pid(),
+            pump_pid_engagement: PumpPidEngagement::new(),
             configuration_store: settings_store,
             persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration::default(),
             ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration::default(),
@@ -690,32 +696,55 @@ impl<
             _ => 0.0,
         };
 
-        let pump_pid_out = self.pump_pid.step(PidIn::new(pump_pv, delta_t));
+        // The PID steps only while it owns the output, and inherits the duty cycle already
+        // being commanded on the way in. Stepping it unconditionally -- which is what this
+        // did -- wound the integral up against the hardcoded `0.0` process value of the
+        // arm above every time the pump was under open-loop control, and left it at zero
+        // for a PID taking over a running pump. See `crate::pump_transfer`.
+        let pump_pid_out = match self.pump_pid_engagement.transfer_for(actual_pump_control_state.mode) {
+            PumpPidTransfer::Hold => None,
+            PumpPidTransfer::Engage { seed_from_duty } => {
+                // Setpoint and gains are already set for this mode by the match above, and
+                // both matter: the seed is `target_output - kp * error`.
+                self.pump_pid.infer_and_set_integral(seed_from_duty as f32, pump_pv);
+                Some(self.pump_pid.step(PidIn::new(pump_pv, delta_t)))
+            }
+            PumpPidTransfer::Continue => Some(self.pump_pid.step(PidIn::new(pump_pv, delta_t))),
+        };
 
-        match actual_pump_control_state.mode {
-            GroupBrewControlMode::Off => {
-                self.group.set_brewing_state(false, 0).await;
-                Output::Off
-            },
-            GroupBrewControlMode::FullOn => {
-                self.group.set_brewing_state(true, 100).await;
-                Output::FixedDutyCycle(100)
-            },
-            GroupBrewControlMode::FixedDutyCycle => {
-                let duty_cycle = actual_pump_control_state.values.duty_cycle;
-                self.group.set_brewing_state(true, duty_cycle).await;
-                Output::FixedDutyCycle(duty_cycle)
+        // `pump_pid_out` is `Some` exactly when the mode is closed-loop, so it -- rather
+        // than a second list of modes that could drift from `is_closed_loop` -- picks the
+        // branch.
+        let output = if let Some(pump_pid_out) = pump_pid_out {
+            self.group.set_brewing_state(true, pump_pid_out.out as u8).await;
+            Output::PidOutput(pump_pid_out)
+        } else {
+            match actual_pump_control_state.mode {
+                GroupBrewControlMode::FullOn => {
+                    self.group.set_brewing_state(true, 100).await;
+                    Output::FixedDutyCycle(100)
+                },
+                GroupBrewControlMode::FixedDutyCycle => {
+                    let duty_cycle = actual_pump_control_state.values.duty_cycle;
+                    self.group.set_brewing_state(true, duty_cycle).await;
+                    Output::FixedDutyCycle(duty_cycle)
+                }
+                GroupBrewControlMode::FixedDutyCycleCurve => {
+                    let target_duty_cycle = actual_pump_control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
+                    self.group.set_brewing_state(true, target_duty_cycle).await;
+                    Output::FixedDutyCycle(target_duty_cycle)
+                }
+                // `Off`, and anything else `is_closed_loop` declines.
+                _ => {
+                    self.group.set_brewing_state(false, 0).await;
+                    Output::Off
+                },
             }
-            GroupBrewControlMode::FixedDutyCycleCurve => {
-                let target_duty_cycle = actual_pump_control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
-                self.group.set_brewing_state(true, target_duty_cycle).await;
-                Output::FixedDutyCycle(target_duty_cycle)
-            }
-            _ => {
-                self.group.set_brewing_state(true, pump_pid_out.out as u8).await;
-                Output::PidOutput(pump_pid_out)
-            },
-        }
+        };
+
+        // What the next `Engage` inherits, which is why it is recorded in every mode.
+        self.pump_pid_engagement.record_commanded_duty(output.duty_cycle());
+        output
     }
 
     async fn update_boiler(&mut self, actual_boiler_control_state: BoilerControlState, delta_t: f32) -> Output {
@@ -1328,8 +1357,11 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
 
-                    // Get current duty cycle from the control state configuration
-                    let current_duty_cycle = self.ephemeral_configuration.group_brew_control_state.values.duty_cycle;
+                    // The duty cycle the pump is actually running at. This used to read
+                    // `values.duty_cycle`, which is the FixedDutyCycle *target* -- correct
+                    // only when transferring out of duty-cycle mode, and otherwise whatever
+                    // was last dialled into that screen.
+                    let current_duty_cycle = self.pump_pid_engagement.last_commanded_duty();
                     let current_pressure = self.group.get_pressure().unwrap_or(0.0);
 
                     // Set up PID for pressure control
@@ -1348,8 +1380,11 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
 
-                    // Get current duty cycle from the control state configuration
-                    let current_duty_cycle = self.ephemeral_configuration.group_brew_control_state.values.duty_cycle;
+                    // The duty cycle the pump is actually running at. This used to read
+                    // `values.duty_cycle`, which is the FixedDutyCycle *target* -- correct
+                    // only when transferring out of duty-cycle mode, and otherwise whatever
+                    // was last dialled into that screen.
+                    let current_duty_cycle = self.pump_pid_engagement.last_commanded_duty();
                     let current_flow_rate = self.group.get_input_flow_rate().unwrap_or(0.0);
 
                     // Set up PID for flow rate control
@@ -1368,8 +1403,11 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
 
-                    // Get current duty cycle from the control state configuration
-                    let current_duty_cycle = self.ephemeral_configuration.group_brew_control_state.values.duty_cycle;
+                    // The duty cycle the pump is actually running at. This used to read
+                    // `values.duty_cycle`, which is the FixedDutyCycle *target* -- correct
+                    // only when transferring out of duty-cycle mode, and otherwise whatever
+                    // was last dialled into that screen.
+                    let current_duty_cycle = self.pump_pid_engagement.last_commanded_duty();
                     let current_output_flow_rate = self.group.get_output_flow_rate().unwrap_or(0.0);
 
                     // Set up PID for output flow rate control
