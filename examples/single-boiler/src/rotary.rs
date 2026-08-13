@@ -266,8 +266,14 @@ impl ManualBrewParameters {
         // Round to nearest 5% increment
         self.duty_cycle = ((current_duty + 2) / 5) * 5; // Integer rounding to 5% increments
         
-        // Update flow rate from current process value (prefer output flow rate, fallback to input)
-        if let Some(flow) = group_status.output_flow_rate.or(group_status.input_flow_rate) {
+        // Update flow rate from the current process value. It must be the *input* flow rate:
+        // `ControlMode::PumpFlowRate` maps to `GroupBrewControlMode::GroupFlowRate`, whose PID
+        // reads `get_input_flow_rate`. Preferring the output flow rate -- which this did --
+        // handed the PID a setpoint measured on the other side of the puck, so the transfer
+        // started with a real error however well the integral was seeded. If there is no
+        // input reading, leave the previous target alone rather than substitute the one the
+        // loop cannot see, exactly as the pressure branch below does.
+        if let Some(flow) = group_status.input_flow_rate {
             // Clamp to valid range (0.0 to 50.0 ml/s) and round to nearest 0.5 increment
             let clamped_flow = flow.max(0.0).min(50.0);
             self.flow_rate = ((clamped_flow + 0.25) / 0.5) as u32 as f32 * 0.5; // Round to 0.5 ml/s increments
