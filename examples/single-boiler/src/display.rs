@@ -1583,6 +1583,7 @@ impl DisplayController {
         // Generate appropriate title and unit based on config type
         let (title, unit) = match config_type {
             ConfigEditType::BoilerTemperature => ("Boiler Temperature", "°C"),
+            ConfigEditType::SteamTemperature => ("Steam Temperature", "°C"),
             ConfigEditType::PidParameter(pid_type, term, component) => {
                 let pid_name = match pid_type {
                     PidConfigType::BoilerTemperature => "Boiler Temp",

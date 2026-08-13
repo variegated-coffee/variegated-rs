@@ -46,6 +46,10 @@ pub enum MenuItemId {
     SettingsManualBrew,
     SettingsDebugInfo,
     SettingsBoilerTemperature,
+    /// The target the single element holds in steam mode — boiler index 1, the virtual
+    /// steam boiler. Nothing on this display could reach it before, which is how it stayed
+    /// at its `Off` default and made the steam switch a no-op.
+    SettingsSteamTemperature,
     SettingsBoilerTemperaturePID,
     SettingsPumpFlowRatePID,
     SettingsPumpOutputFlowRatePID,
@@ -84,6 +88,10 @@ const SETTINGS_MENU_ITEMS: &[SettingsMenuDefinition] = &[
     SettingsMenuDefinition {
         label: "Boiler Temperature",
         id: MenuItemId::SettingsBoilerTemperature,
+    },
+    SettingsMenuDefinition {
+        label: "Steam Temperature",
+        id: MenuItemId::SettingsSteamTemperature,
     },
     SettingsMenuDefinition {
         label: "Boiler Temp PID",

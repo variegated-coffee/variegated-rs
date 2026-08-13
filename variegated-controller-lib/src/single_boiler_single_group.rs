@@ -187,9 +187,16 @@ impl Default for SingleBoilerSingleGroupPersistentConfiguration {
                     target_pressure: 1.0,
                 },
             },
+            // Not a boiler: this is what the single element does once the machine is in
+            // steam mode, so `Off` here means "entering steam mode stops the heating".
+            // See `single_boiler_state::steam_boiler_state_or_default`, which also repairs
+            // the machines that already have the old `Off` in flash.
             steam_boiler_control_state: BoilerControlState {
-                mode: BoilerControlMode::Off,
-                values: BoilerControlTargetValues::default(),
+                mode: BoilerControlMode::Temperature,
+                values: BoilerControlTargetValues {
+                    target_temperature: crate::single_boiler_state::DEFAULT_STEAM_TARGET_TEMPERATURE,
+                    ..BoilerControlTargetValues::default()
+                },
             },
             pid_parameters,
             temperature_sensor_kalman_parameters: None,
@@ -503,6 +510,15 @@ impl<
         loop {
             self.persistent_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
 
+            // Repairs the stored `Off` that made the steam switch change the mode and then
+            // stop the heating. Applied to the loaded value rather than written back: it is
+            // idempotent, and a machine whose owner sets a steam temperature stores
+            // `Temperature` and stops needing it.
+            self.persistent_configuration.steam_boiler_control_state =
+                crate::single_boiler_state::steam_boiler_state_or_default(
+                    self.persistent_configuration.steam_boiler_control_state,
+                );
+
             // Loaded on the first pass rather than in `new`, which is not async. Guarded
             // by a flag rather than reloaded each tick: this is the only reader and
             // writer of the list, so a second load could only return what is in hand.
@@ -776,9 +792,27 @@ impl<
                 Output::Off
             },
             _ => {
+                // Over-temperature interlock. The dual-boiler has had one on each boiler
+                // (`dual_boiler_single_group.rs:1184`, `:1259`); this controller published a
+                // `max_temperature` for both of its virtual boilers and enforced neither, so
+                // the only thing bounding the element was the setpoint itself. One element
+                // serves both roles, so the ceiling comes from the controller state rather
+                // than from a single configured maximum.
+                let max_temperature = crate::single_boiler_state::max_temperature_for(self.state);
+                let too_hot = self.boiler.get_temperature()
+                    .map_or(false, |current| current as f32 >= max_temperature);
+
                 // Dry-run protection: disable heating if water level too low
                 let boiler_level = self.boiler.get_water_level();
-                let duty_cycle = if !Self::is_boiler_level_safe(boiler_level, &self.boiler_config) {
+                let duty_cycle = if too_hot {
+                    // Constant text, for the reason the dual-boiler gives at the same spot:
+                    // an interpolated reading would change with ADC noise on every iteration
+                    // of a 10 Hz loop and defeat the bus sink's duplicate suppression. The
+                    // temperature and the maximum both reach the host in `Status` and
+                    // `Configuration` already.
+                    log_warn!("Boiler heating disabled: temperature at or above configured maximum");
+                    0
+                } else if !Self::is_boiler_level_safe(boiler_level, &self.boiler_config) {
                     log_warn!("Boiler heating disabled: water level below minimum safe level");
                     0
                 } else {
@@ -1933,7 +1967,9 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
             temperature_pid_parameters: config.persistent.pid_parameters.boiler_temperature_params.clone(),
             pressure_pid_parameters: config.persistent.pid_parameters.boiler_pressure_params.clone(),
             control_state: config.persistent.brew_boiler_control_state,
-            max_temperature: Some(100.0),
+            // Same constant the interlock in `update_boiler` enforces, so what the interface
+            // shows and what the machine does cannot part company.
+            max_temperature: Some(crate::single_boiler_state::MAX_BREW_TEMPERATURE),
             max_pressure: Some(15.0),
             // Embedded sensor configuration
             temperature_sensor_kalman_parameters: None,
@@ -1950,7 +1986,7 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
             temperature_pid_parameters: PidParameters::default(), // Virtual steam boiler doesn't have separate PID
             pressure_pid_parameters: PidParameters::default(),
             control_state: config.persistent.steam_boiler_control_state,
-            max_temperature: Some(150.0),
+            max_temperature: Some(crate::single_boiler_state::MAX_STEAM_TEMPERATURE),
             max_pressure: Some(3.0),
             // Embedded sensor configuration
             temperature_sensor_kalman_parameters: None,

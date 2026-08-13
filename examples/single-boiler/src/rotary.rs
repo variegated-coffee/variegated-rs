@@ -17,6 +17,9 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameters, RoutineRepository as RoutineRepositoryTrait};
+use variegated_controller_lib::single_boiler_state::{
+    DEFAULT_STEAM_TARGET_TEMPERATURE, MAX_BREW_TEMPERATURE, MAX_STEAM_TEMPERATURE,
+};
 use alloc::string::String;
 
 #[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
@@ -30,6 +33,9 @@ pub(crate) enum ControlMode {
 #[derive(Debug, Format, Copy, Clone, PartialEq)]
 pub(crate) enum ConfigEditType {
     BoilerTemperature,
+    /// Boiler index 1 — the virtual steam boiler, i.e. what the one element holds while the
+    /// machine is in steam mode.
+    SteamTemperature,
     PidParameter(PidConfigType, PidTermType, PidComponentType),
 }
 
@@ -393,7 +399,7 @@ pub async fn handle_menu_item_activation(
             // as `SettingsBoilerTemperature` below.
             None
         },
-        MenuItemId::SettingsBoilerTemperature => {
+        MenuItemId::SettingsBoilerTemperature | MenuItemId::SettingsSteamTemperature => {
             // This is now handled inline in the match statement to have access to configuration
             None
         },
@@ -559,7 +565,7 @@ where
                     UIState::ConfigValueEdit { config_type, current_value, .. } => {
                         // Adjust configuration value with appropriate increment
                         let increment_size = match config_type {
-                            ConfigEditType::BoilerTemperature => 0.5,
+                            ConfigEditType::BoilerTemperature | ConfigEditType::SteamTemperature => 0.5,
                             ConfigEditType::PidParameter(_, _, component) => match component {
                                 PidComponentType::PositiveScale | PidComponentType::NegativeScale => 0.1,
                                 PidComponentType::UpperLimit | PidComponentType::LowerLimit => 1.0,
@@ -571,8 +577,21 @@ where
                             Direction::Clockwise => false,        // Clockwise decrements
                         };
                         
+                        // The temperatures stop where the controller's interlock would cut
+                        // heating anyway; a target above it can only produce an element that
+                        // runs to the limit and shuts off. PID terms keep the old open-ended
+                        // behaviour -- there is no principled ceiling for a gain.
+                        let upper_bound = match config_type {
+                            ConfigEditType::BoilerTemperature => Some(MAX_BREW_TEMPERATURE),
+                            ConfigEditType::SteamTemperature => Some(MAX_STEAM_TEMPERATURE),
+                            ConfigEditType::PidParameter(..) => None,
+                        };
+
                         if increment {
                             *current_value += increment_size;
+                            if let Some(max) = upper_bound {
+                                *current_value = current_value.min(max);
+                            }
                         } else {
                             *current_value = (*current_value - increment_size).max(-100f32); // Don't go below -100
                         }
@@ -669,6 +688,23 @@ where
                                     
                                     self.status.state = UIState::ConfigValueEdit {
                                         config_type: ConfigEditType::BoilerTemperature,
+                                        current_value: current_temp,
+                                        previous_menu_type: menu_type,
+                                        previous_menu_state: *menu_state,
+                                    };
+                                },
+                                MenuItemId::SettingsSteamTemperature => {
+                                    // Boiler 1 is the virtual steam boiler: the same element
+                                    // under a second control state, selected while the
+                                    // machine is in steam mode.
+                                    let current_temp = self.current_configuration
+                                        .as_ref()
+                                        .and_then(|config| config.get_boiler_configuration(1))
+                                        .map(|bc| bc.control_state.values.target_temperature)
+                                        .unwrap_or(DEFAULT_STEAM_TARGET_TEMPERATURE);
+
+                                    self.status.state = UIState::ConfigValueEdit {
+                                        config_type: ConfigEditType::SteamTemperature,
                                         current_value: current_temp,
                                         previous_menu_type: menu_type,
                                         previous_menu_state: *menu_state,
@@ -892,6 +928,21 @@ where
                                 self.command_sender.send(
                                     MachineCommand::SetBoilerControlTarget(
                                         0, // Boiler index 0 for single boiler
+                                        BoilerControlMode::Temperature,
+                                        Some(BoilerControlTargetValuesUpdate {
+                                            temperature: Some(current_value),
+                                            pressure: None
+                                        })
+                                    )
+                                ).await;
+                            },
+                            ConfigEditType::SteamTemperature => {
+                                // Sends `Temperature` alongside the value, which is what
+                                // clears a stored `Off` for good rather than relying on the
+                                // substitution at load.
+                                self.command_sender.send(
+                                    MachineCommand::SetBoilerControlTarget(
+                                        1, // The virtual steam boiler
                                         BoilerControlMode::Temperature,
                                         Some(BoilerControlTargetValuesUpdate {
                                             temperature: Some(current_value),

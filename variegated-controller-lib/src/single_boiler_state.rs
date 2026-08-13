@@ -13,7 +13,10 @@
 //! [`PowerSave`]: SingleBoilerSingleGroupControllerState::PowerSave
 //! [`BrewModeIdle`]: SingleBoilerSingleGroupControllerState::BrewModeIdle
 
-use variegated_controller_types::{BoilerIndex, SingleBoilerSingleGroupControllerState as State};
+use variegated_controller_types::{
+    BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex,
+    SingleBoilerSingleGroupControllerState as State,
+};
 
 /// The brew boiler. The real one.
 pub const BREW_BOILER: BoilerIndex = 0;
@@ -42,6 +45,77 @@ pub fn boiler_mode_transition(state: State, enable: bool, boiler: BoilerIndex) -
         // is doing something, and changing mode underneath it is not a request worth
         // honouring.
         _ => None,
+    }
+}
+
+/// The target the single element heats to in steam mode when nothing has configured one.
+///
+/// **A placeholder, not a tuned value.** It matches the dual-boiler's steam boiler
+/// (`dual_boiler_single_group.rs:313`) because that is the only steam target in the tree and
+/// it is a conservative one — about 1 bar gauge, which is weak steam for a single-boiler
+/// machine, where 140–150 °C is more usual. It is deliberately the low end: this example
+/// passes `BoilerConfiguration::default()`, whose `max_temperature` is `None`, so nothing
+/// downstream bounds this number. Raise it from the Steam Temperature screen once the
+/// boiler's real limit is known.
+pub const DEFAULT_STEAM_TARGET_TEMPERATURE: f32 = 120.0;
+
+/// Ceiling for the element in brew mode.
+///
+/// Not a new number: this is what `current_configuration` has always published as the brew
+/// boiler's `max_temperature`. It was only ever *advertised*, though — the dual-boiler cuts
+/// heating at its configured maximum (`dual_boiler_single_group.rs:1184`, `:1259`) and the
+/// single-boiler had no such interlock at all, so the figure reached the interface and
+/// bounded nothing. Naming it here gives the publisher and the interlock one source.
+pub const MAX_BREW_TEMPERATURE: f32 = 100.0;
+
+/// Ceiling for the element in steam mode, likewise already published for the virtual steam
+/// boiler. It is what makes [`DEFAULT_STEAM_TARGET_TEMPERATURE`] look conservative — the
+/// machine is declared good for 150 °C.
+pub const MAX_STEAM_TEMPERATURE: f32 = 150.0;
+
+/// The ceiling that applies in `state`, since one element serves both roles.
+///
+/// Brew and steam are the same heater with different limits, so the interlock cannot read a
+/// single `boiler_config.max_temperature` the way the dual-boiler's two do.
+pub fn max_temperature_for(state: State) -> f32 {
+    match state {
+        State::SteamModeIdle => MAX_STEAM_TEMPERATURE,
+        // Brewing, idling in brew mode, dispensing water, or asleep. The brew ceiling is
+        // the lower of the two, so anything not explicitly steam gets the safer one.
+        _ => MAX_BREW_TEMPERATURE,
+    }
+}
+
+/// What the machine should actually heat to in steam mode, given the stored steam state.
+///
+/// `BoilerControlMode::Off` in this slot is treated as *unconfigured* rather than as a
+/// preference, and replaced. On a machine with two real boilers, switching one off is a
+/// sensible thing to ask for. Here there is only one element and this state is not a boiler
+/// at all — it is "what the element does once the machine is already in steam mode", so
+/// `Off` says *entering steam mode shall stop the heating*, which is the one thing steam
+/// mode exists not to do.
+///
+/// It was never asked for, either. The single-boiler default set this to `Off` while the
+/// brew slot got `Temperature`, and no interface could change it: the rotary menu only ever
+/// sends `SetBoilerControlTarget` for boiler 0, so the only route was the web or debug link
+/// aimed at boiler 1 by hand. The stored `Off` on any existing machine is that default,
+/// copied into flash by the first unrelated save.
+///
+/// Self-healing: setting a steam temperature stores `Temperature`, after which this stops
+/// substituting anything. Once every machine has been through that, it can be deleted.
+pub fn steam_boiler_state_or_default(stored: BoilerControlState) -> BoilerControlState {
+    if stored.mode != BoilerControlMode::Off {
+        return stored;
+    }
+
+    BoilerControlState {
+        mode: BoilerControlMode::Temperature,
+        values: BoilerControlTargetValues {
+            // The stored pressure is kept: it is meaningful if the machine is later put
+            // into pressure control, and there is no reason to discard it.
+            target_temperature: DEFAULT_STEAM_TARGET_TEMPERATURE,
+            ..stored.values
+        },
     }
 }
 
@@ -140,5 +214,109 @@ mod tests {
                 assert_eq!(boiler_mode_transition(state, enable, 2), None);
             }
         }
+    }
+
+    /// The reported bug: the switch changed the mode, and the element then went to 0%
+    /// because the state steam mode selects said `Off`.
+    #[test]
+    fn a_stored_off_does_not_leave_steam_mode_unheated() {
+        let stored = BoilerControlState {
+            mode: BoilerControlMode::Off,
+            values: BoilerControlTargetValues::default(),
+        };
+
+        let effective = steam_boiler_state_or_default(stored);
+
+        assert_eq!(effective.mode, BoilerControlMode::Temperature);
+        assert_eq!(
+            effective.values.target_temperature,
+            DEFAULT_STEAM_TARGET_TEMPERATURE
+        );
+    }
+
+    /// The default carries a brew temperature (93 °C), which would heat -- and so look like
+    /// it worked -- while producing no steam at all. Substituting the mode is not enough.
+    #[test]
+    fn the_substituted_target_is_a_steam_temperature() {
+        let stored = BoilerControlState {
+            mode: BoilerControlMode::Off,
+            values: BoilerControlTargetValues::default(),
+        };
+        assert_eq!(stored.values.target_temperature, 93.0);
+
+        let effective = steam_boiler_state_or_default(stored);
+        assert!(
+            effective.values.target_temperature > 100.0,
+            "a steam target has to be above boiling, got {}",
+            effective.values.target_temperature
+        );
+    }
+
+    /// A configured machine is left exactly alone -- including one configured *below* the
+    /// substituted default, which is a legitimate choice and must not be raised.
+    #[test]
+    fn a_configured_steam_state_is_untouched() {
+        for mode in [BoilerControlMode::Temperature, BoilerControlMode::Pressure] {
+            let stored = BoilerControlState {
+                mode,
+                values: BoilerControlTargetValues {
+                    target_temperature: 111.0,
+                    target_pressure: 1.7,
+                },
+            };
+            assert_eq!(steam_boiler_state_or_default(stored), stored);
+        }
+    }
+
+    /// Idempotent, because `task` reloads settings every iteration and runs this on each
+    /// one. A second application must not drift the target.
+    #[test]
+    fn substituting_twice_changes_nothing_further() {
+        let stored = BoilerControlState {
+            mode: BoilerControlMode::Off,
+            values: BoilerControlTargetValues::default(),
+        };
+        let once = steam_boiler_state_or_default(stored);
+        assert_eq!(steam_boiler_state_or_default(once), once);
+    }
+
+    /// Only steam mode gets the high ceiling. Every other state -- including the brewing and
+    /// water-dispensing ones, where the element is under the brew control state -- gets the
+    /// lower one, so a mis-set steam target cannot bleed into a brew.
+    #[test]
+    fn only_steam_mode_gets_the_steam_ceiling() {
+        for state in ALL_STATES {
+            let expected = if state == State::SteamModeIdle {
+                MAX_STEAM_TEMPERATURE
+            } else {
+                MAX_BREW_TEMPERATURE
+            };
+            assert_eq!(max_temperature_for(state), expected, "for {:?}", state);
+        }
+    }
+
+    /// The substituted steam default has to sit under the ceiling that will be enforced
+    /// against it, or the machine would ship heating into its own interlock.
+    #[test]
+    fn the_steam_default_is_below_the_steam_ceiling() {
+        assert!(DEFAULT_STEAM_TARGET_TEMPERATURE < MAX_STEAM_TEMPERATURE);
+        assert!(MAX_BREW_TEMPERATURE < MAX_STEAM_TEMPERATURE);
+    }
+
+    /// The stored pressure survives, so a machine later put into pressure control still has
+    /// the number its owner set.
+    #[test]
+    fn the_stored_pressure_target_is_preserved() {
+        let stored = BoilerControlState {
+            mode: BoilerControlMode::Off,
+            values: BoilerControlTargetValues {
+                target_temperature: 93.0,
+                target_pressure: 1.9,
+            },
+        };
+        assert_eq!(
+            steam_boiler_state_or_default(stored).values.target_pressure,
+            1.9
+        );
     }
 }
