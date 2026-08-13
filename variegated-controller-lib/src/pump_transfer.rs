@@ -29,6 +29,14 @@
 //! module decides. It is pure, and lives here rather than in the controller because the
 //! controllers are behind the `hardware` feature and cannot be host-tested.
 //!
+//! # What this does not fix
+//!
+//! The inherited duty cycle lands in the integral accumulator, which the *next* step clamps
+//! to `ki.limits` — stock `-50..80`. A transfer out of 100% duty therefore opens at 80%, not
+//! 100%. `InferGroup*Integral` has always behaved this way, so dual-boiler routines that
+//! pre-infuse at full duty and hand over to pressure already do it; this is not a regression
+//! and the remedy is a tuning decision about `ki.limits`, not a code change.
+//!
 //! [`Off`]: GroupBrewControlMode::Off
 //! [`FullOn`]: GroupBrewControlMode::FullOn
 //! [`FixedDutyCycle`]: GroupBrewControlMode::FixedDutyCycle
