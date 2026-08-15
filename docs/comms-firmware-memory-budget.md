@@ -1,9 +1,11 @@
-# Comms firmware memory budget — findings and what is left
+# Comms firmware memory budget
 
-Written 2026-08-11, after three days in which this firmware crashed alternately from stack
-overflow and heap exhaustion while bytes were moved between them. Written to survive a
-context compaction, and because the two most expensive mistakes in it were both "a plausible
-mechanism, acted on without measuring".
+How `.stack` and the heap are sized on the ESP32-C6, why they cannot be tuned
+independently, and what is left to reclaim.
+
+Read this before moving bytes between them. The two most expensive mistakes made here were
+both "a plausible mechanism, acted on without measuring" — the figures below are measured,
+and a change to them should be too.
 
 ## The shape of the problem
 

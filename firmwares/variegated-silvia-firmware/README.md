@@ -28,5 +28,5 @@ and functionality moves out of here into the libraries as it stops being machine
 
 **Before adding code here, check whether it belongs in a crate.** Board *configuration* — sensor
 channels, PT100 vs PT1000, pin assignments — belongs in this crate. Almost nothing else does. This
-firmware and `variegated-gs3-firmware` had forked badly by 2026-08, with 57% of this crate's
-substantive lines appearing verbatim in the other, and the drift had produced real bugs.
+firmware and `variegated-gs3-firmware` have forked badly — most of this crate's substantive
+lines also appear verbatim in the other — and the drift has already produced real bugs.

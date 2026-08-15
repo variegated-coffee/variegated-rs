@@ -7,7 +7,7 @@ Branch: `bluetooth-scale` (both `variegated-rs` and `variegated-comms-rs`)
 
 BLE peripheral addresses are compile-time constants in the comms firmware:
 `config::belka_address()` and `config::acaia_address()`
-(`crates/variegated-comms-firmware/src/config.rs:50,85`), passed positionally into
+(`firmwares/variegated-comms-firmware/src/config.rs`), passed positionally into
 `ble_devices_task` at `bin/main.rs:672`. Which driver fills which role is likewise a
 build-time choice, hand-wired as two futures in `ble/devices.rs`. Changing a scale means
 reflashing, and there is no way for a user to pair one.

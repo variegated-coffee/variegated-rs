@@ -35,4 +35,22 @@ numbers, such as temperature and pressure.
 
 ### variegated-soft-pwm
 This crate provides a software PWM implementation for controlling GPIO pins, but for very low PWM frequencies (think 0.1–1Hz).
+
+### variegated-comms
+The application processor's end of the inter-processor link. `firmwares/variegated-comms-firmware`
+is the other end, on an ESP32-C6, and carries Wi-Fi, BLE, HTTP/WebSocket and ESPHome.
+
+### variegated-debug, variegated-debug-codec
+The structured debug bus and its wire format — counters, indicators, events and panic text,
+carried over USB CDC on the application processor and TCP on the comms processor.
+
+### variegated-board-cfg
+The proc macro behind `#[board_cfg(...)]`, which turns a firmware's `board-cfg.toml` into
+peripheral structs. Published to crates.io, and deliberately machine-agnostic.
+
+### variegated-exfat-format
+An exFAT formatter for the shot-log SD card. Pure logic over a block device, so it is
+host-testable.
+
+This is not the full list — see `crates/` and the workspace members in `Cargo.toml`.
 Mainly used for controlling the duty cycle of heating elements, but can be used for other things as well.

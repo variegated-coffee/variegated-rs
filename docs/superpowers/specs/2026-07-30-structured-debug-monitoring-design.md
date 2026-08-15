@@ -193,7 +193,7 @@ device uptime as a column rather than pretending the clocks are shared.
 New:
 - `variegated-rs/variegated-debug-types/` (`Cargo.toml`, `src/lib.rs`, `payload.rs`, `event.rs`, `schema.rs`, `command.rs`, `codec.rs`)
 - `variegated-rs/variegated-debug/` (`Cargo.toml`, `src/lib.rs`, `bus.rs`, `macros.rs`, `sampler.rs`, `usb_cdc_rp.rs`)
-- `variegated-comms-rs/crates/variegated-comms-firmware/src/debug/` (`mod.rs`, `bus.rs`, `usb.rs`, `tcp.rs`, `commands.rs`)
+- `variegated-rs/firmwares/variegated-comms-firmware/src/debug/` (`mod.rs`, `bus.rs`, `usb.rs`, `tcp.rs`, `commands.rs`)
 - `variegated-cli/src/lib.rs` + `src/{transport,decode,schema,model}.rs`, `src/bin/variegated-debug-tui.rs`
 
 Modified:
@@ -202,7 +202,7 @@ Modified:
 - `variegated-rs/variegated-comms/src/lib.rs` (`join4` → `join5`, inbound `DebugCommand`)
 - `variegated-rs/variegated-instrumentation/src/macros.rs`, `src/lib.rs` (name tables)
 - `variegated-rs/examples/dual-boiler/src/main.rs`, `examples/single-boiler/src/main.rs` (USB CDC debug task, schema registration, sampler wiring)
-- `variegated-comms-rs/crates/variegated-comms-firmware/src/{bin/main.rs,channels.rs,config.rs,application_processor/mod.rs,Cargo.toml}`
+- `variegated-rs/firmwares/variegated-comms-firmware/src/{bin/main.rs,channels.rs,config.rs,application_processor/mod.rs,Cargo.toml}`
 - `variegated-cli/Cargo.toml` (`tokio-serial`, `variegated-debug-types`)
 - Both `Cargo.lock`s
 

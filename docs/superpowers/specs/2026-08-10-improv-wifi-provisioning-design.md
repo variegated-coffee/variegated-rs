@@ -8,7 +8,7 @@ Branch: `sd-card-shot-log` (both `variegated-rs` and `variegated-comms-rs`)
 The comms firmware's Wi-Fi credentials are compile-time constants:
 
 ```rust
-// crates/variegated-comms-firmware/src/config.rs:4
+// firmwares/variegated-comms-firmware/src/config.rs
 pub const SSID: &str = env!("SSID");
 pub const PASSWORD: &str = env!("PASSWORD");
 ```
@@ -321,7 +321,7 @@ Each step compiles and runs.
   `tools/schema-export`'s: exclude the crate from the workspace and depend on it by path.
 - Round-trip the codec against `parse_improv_data`/`build_rpc_response`, including a
   deliberately bad checksum and a `len` that disagrees with the packet length.
-- `variegated-rs/scripts/test-host.sh` and `scripts/build-examples.sh` — both dual-boiler and
+- `variegated-rs/scripts/test-host.sh` and `scripts/build-firmware.sh` — both dual-boiler and
   single-boiler must build. `scripts/build-comms-firmware.sh`, checking `.bss`/`.stack` after
   the `CONNS` bump (`main.rs:685-687` records 3 → 5 costing ~576 bytes of stack per slot).
 - On hardware: hold button 6 five seconds → `P` appears within a second → improv-wifi.com in
