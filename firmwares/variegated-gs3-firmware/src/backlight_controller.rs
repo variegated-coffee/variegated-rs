@@ -2,13 +2,14 @@
 //!
 //! The backlight is on, always, driven as a plain GPIO output.
 //!
-//! It has been through two simplifications. It used to run at ~1 kHz PWM to give a dim
-//! (10%) standby level; switching an LED backlight's current at a kilohertz puts a square
-//! wave on the supply next to a shared SPI bus, and on this board that turned out to be
-//! the source of the SD card's CRC errors and timeouts -- removing it removed every one of
-//! them. That left an on/off pin still following machine mode, and now it does not do that
-//! either: a dark panel on an idle machine reads as a broken machine, and the panel draws
-//! little enough that dimming it was never worth the ambiguity.
+//! **Do not dim it with PWM.** Switching an LED backlight's current at a kilohertz puts a
+//! square wave on the supply next to a shared SPI bus, and on this board that is the
+//! source of the SD card's CRC errors and timeouts -- the ~1 kHz standby dimming this
+//! once did accounted for every one of them.
+//!
+//! It does not follow machine mode either, even as a plain on/off: a dark panel on an idle
+//! machine reads as a broken machine, and the panel draws little enough that dimming is
+//! not worth the ambiguity.
 //!
 //! What remains is a pin held high. The task exists only to own the [`Output`] for the
 //! life of the program -- dropping it would release the pin -- so it parks rather than

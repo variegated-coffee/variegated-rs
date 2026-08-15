@@ -332,20 +332,10 @@ async fn handle_websocket_connection(
     }
 }
 
-// Two earlier receive paths used to sit here, along with the `ReceiveState`/`ReceivePhase`
-// machinery the second of them needed: `receive_frame`, which took a whole `TcpSocket`, and
-// `receive_frame_stateful`, which carried partial-frame state across select cancellations so
-// a cancelled read did not lose bytes mid-header.
-//
-// Both went when the receive loop moved to splitting the socket. `receive_frame_rx` below
-// borrows only the `TcpReader` half, so the send side is a separate borrow and the loop no
-// longer selects over a read that owns the whole socket -- which is what the cancellation
-// state existed to survive. Nothing had called either since.
-
-// `send_frame` used to sit here, taking a whole `TcpSocket`. Its only caller was
-// `send_ws_message`, which in turn was only reachable from a client-message handler that
-// nothing had called since the receive loop moved to `ClientRequest::from_ws`. The live
-// path splits the socket and writes through `send_frame_tx` below.
+// The receive loop splits the socket rather than passing a whole `TcpSocket` around:
+// `receive_frame_rx` borrows only the `TcpReader` half, so the send side is an
+// independent borrow. That is also why no partial-frame state has to be carried across
+// select cancellations -- the loop never selects over a read that owns the whole socket.
 
 /// Receive a WebSocket frame using TcpReader
 async fn receive_frame_rx<'a>(

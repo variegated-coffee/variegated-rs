@@ -10,13 +10,14 @@
 //!
 //! # Why this exists at all
 //!
-//! Task 9 set `esp-println` to `no-op`, for two good reasons that both still hold:
-//! the ROM console would otherwise interleave its bytes into the COBS stream, and
-//! `tx_flush` busy-waited with interrupts disabled for ~2.8 ms per 32-byte chunk on a
-//! processor running Wi-Fi and BLE. The cost was that `esp-backtrace`'s only sink went
-//! with it, so a panic here produced *nothing*: no backtrace, no banner, no clue.
+//! `esp-backtrace` writes through `esp-println`, so it has a sink only for as long as
+//! `esp-println` has an output target -- and the `uart` target is not usable here (see
+//! the long note beside that dependency in `Cargo.toml`: it interleaves ROM console
+//! bytes into the stream and busy-waits with interrupts disabled). Leave the backtrace
+//! path depending on that and a panic can produce *nothing*: no backtrace, no banner,
+//! no clue.
 //!
-//! The bus cannot cover for that. Publishing a frame is the easy half; getting it out
+//! The bus cannot cover for that either. Publishing a frame is the easy half; getting it out
 //! needs [`crate::debug::usb`]'s writer task, and by the time a panic handler runs the
 //! executor will never poll anything again. Whatever the panic path emits, it has to
 //! emit itself, synchronously, from inside the handler.

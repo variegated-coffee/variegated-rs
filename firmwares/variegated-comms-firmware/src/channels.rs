@@ -308,13 +308,13 @@ pub static CLIENT_EVENT_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, Cli
 pub const SENSOR_READING_CAPACITY: usize = 16;
 pub static SENSOR_READING_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>> = StaticCell::new();
 
-// The per-peripheral connection flags that used to live here -- one for the Belka
-// portal, one for the group 1 scale -- are now `ble::status`, which keeps a slot table
-// instead. Two named statics could not survive a peripheral set the application
-// processor decides at runtime, and holding the peripheral's identity and its connection
-// state under one lock is what stops a reassignment from being read half-and-half.
+// Per-peripheral connection state is not here: it lives in `ble::status`, as a slot table
+// rather than one named static per peripheral. Named statics cannot survive a peripheral
+// set the application processor decides at runtime, and holding a peripheral's identity
+// and its connection state under one lock is what stops a reassignment from being read
+// half-and-half.
 //
-// What has not changed is why any of it exists: the application processor's
+// Why any of it exists: the application processor's
 // `BluetoothScale` drops every reading until it is told the link is up, so a peripheral
 // missing from `CommsStatus.peripheral_connection_status` streams weights across the
 // UART that are discarded on arrival.

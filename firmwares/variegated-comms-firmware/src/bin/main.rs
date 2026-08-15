@@ -69,10 +69,10 @@ esp_bootloader_esp_idf::esp_app_desc!();
 /// Spawn a task, reporting a failure instead of swallowing it.
 ///
 /// embassy-executor 0.10 moved fallibility from `Spawner::spawn` onto the `#[task]`
-/// function, which returns `Err` when that task's pool is exhausted. Every spawn
-/// site in `main` used to be `if let Ok(t) = f(..) { spawner.spawn(t); }`, i.e. a
-/// missing task produced no panic, no log line and no symptom other than the
-/// machine quietly not doing something (open question #5 in `JULY-UPGRADE-STATUS`).
+/// function, which returns `Err` when that task's pool is exhausted. Written as
+/// `if let Ok(t) = f(..) { spawner.spawn(t); }`, a spawn site swallows that: a missing
+/// task produces no panic, no log line and no symptom other than the machine quietly
+/// not doing something.
 ///
 /// A typed event is the right answer here rather than `unwrap`: this firmware
 /// carries the machine's radios, and halting the whole chip because one task could
@@ -164,10 +164,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// `"Stack overflow detected at 0x..."` for `mcause == 14`. That message never arrives.
 /// esp-hal is built with defmt, so its `panic!` is `defmt::panic!`, which hands the
 /// formatted arguments to the defmt global logger and then calls
-/// `defmt::export::panic()`. Task 9 set `esp-println` to `no-op` for reasons that still
-/// hold, which left defmt with no sink -- so the arguments are discarded and
-/// `__defmt_default_panic` re-panics with the bare string `"explicit panic"`. That is
-/// what `{info}` prints, and it says nothing at all.
+/// `defmt::export::panic()`. Whenever that logger has no sink -- which is what selecting
+/// `esp-println`'s `no-op` output target does -- the arguments are discarded and
+/// `__defmt_default_panic` re-panics with the bare string `"explicit panic"`. `{info}`
+/// then says nothing at all, and this handler is the only thing standing between that
+/// and a silent reboot.
 ///
 /// The registers themselves survive: the panic path takes no further trap, so by the
 /// time this runs they still hold what the exception handler read. Reading them here
@@ -225,8 +226,9 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
     let mut subscriber = status_channel.subscriber().unwrap();
     log_info!("Status listener task is started");
     loop {
-        let _status = subscriber.next_message_pure().await;
-//        info!("Status: {:?}", status);
+        // Drained, not used. A pubsub subscriber that never reads lags and then drops
+        // messages for every other subscriber on the channel.
+        let _ = subscriber.next_message_pure().await;
     }
 }
 
@@ -563,10 +565,9 @@ async fn main(spawner: Spawner) -> ! {
     // chunk buffer in a `Signal` and another across two awaits in the HTTP handler, and the
     // task pool multiplied both; moving those bytes to the heap returned 10240 to `.stack`.
     //
-    // The 40 kB floor that `handle_alloc_error` used to enforce here is gone. It was the
-    // ESPHome entity table needing one contiguous 12000-byte block, and that table is built
-    // in `.bss` now (`esphome/entity_builder.rs`), so what remains is a plain capacity
-    // question rather than a contiguity one.
+    // There is no contiguity floor to respect here any more: the ESPHome entity table,
+    // which needed one unbroken 12000-byte block, is built in `.bss`
+    // (`esphome/entity_builder.rs`). What remains is a plain capacity question.
     //
     // If the heap has to grow again, the bytes are likelier to be found in statics than
     // taken from `.stack`. Every task pool is size 1, so the largest entries in

@@ -190,9 +190,9 @@ pub fn publish_snapshot() {
             wifi_rssi,
             sntp_synced_ms_ago,
             ble_connected,
-            // Zero until Task 11 lands the TCP debug server, which is the only
-            // thing that increments this. Honest either way: it is a count, and
-            // "no clients" and "no server" are both genuinely zero clients.
+            // The TCP debug server is the only thing that increments this, so this
+            // reads zero when it is not compiled in. Honest either way: it is a
+            // count, and "no clients" and "no server" are both genuinely zero.
             tcp_debug_clients: TCP_DEBUG_CLIENTS.load(Ordering::Relaxed),
             wifi_mac,
             bt_address,

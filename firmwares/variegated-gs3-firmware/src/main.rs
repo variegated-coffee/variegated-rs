@@ -218,11 +218,11 @@ pub const GROUP_SCALE_PERIPHERAL_ID: u16 = GRAVITY_PERIPHERAL_ID;
 
 // Embassy task wrapper for ESP transceiver (dual-boiler)
 //
-// One variant, not one per feature. This used to be a `belka` / `not(belka)` pair whose
-// only difference was passing `Some(dispatcher)` versus `None`; with a second comms-fed
-// device that pairing would have become a matrix. `ExternalDeviceDispatcher` is always
-// present and cfg-gates its *fields* instead, so the feature set changes what it routes
-// rather than whether it exists.
+// One variant, not one per feature. A `belka` / `not(belka)` pair differing only in
+// `Some(dispatcher)` versus `None` becomes a matrix as soon as there is a second
+// comms-fed device. `ExternalDeviceDispatcher` is always present and cfg-gates its
+// *fields* instead, so the feature set changes what it routes rather than whether it
+// exists.
 #[embassy_executor::task]
 async fn esp_transceiver_task(
     esp_p: Esp32Peripherals,
@@ -1969,9 +1969,8 @@ async fn main_task(
         let (pump_pwm, _) = pwm::Pwm::new_output_a(pump_p.pwm_speed, pump_p.pin_speed, pwm_config).split();
         let pump_pwm = pump_pwm.unwrap();
 
-        // Tachometer is now handled by PIO pulse counter (see pump_tacho below)
-        // PWM input no longer needed - using PIO instead for better volume tracking
-
+        // Tachometer is handled by the PIO pulse counter, not by PWM input -- see
+        // `pump_tacho` below.
         GpioPwmPump::new(pump_pwm)
     };
 
@@ -2214,7 +2213,6 @@ async fn main_task(
     let wp = NoopOutputPin {};
 
     let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
-    //flash.erase_range_async(0x0008_0000, 0x0010_0000).await.unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
     // Initialize watchdog
@@ -2227,8 +2225,7 @@ async fn main_task(
 
     // All three stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
-    // `variegated_controller_lib::settings::machine_stores`; both boards used to spell them
-    // out separately, three literals each.
+    // `variegated_controller_lib::settings::machine_stores`.
     let (settings_storage, bluetooth_store, wifi_store) =
         variegated_controller_lib::settings::machine_stores::<
             SyncSendRawMutex,
@@ -2239,19 +2236,11 @@ async fn main_task(
 
     // Load initial configuration
     let _configuration = settings_storage_ref.lock().await.load_settings().await.unwrap_or_default();
-//    let configuration = DualBoilerSingleGroupPersistentConfiguration::default();
-//    settings_storage_ref.lock().await.save_settings(&configuration).await.unwrap();
 
     let mut routine_repository: RoutineRepositoryType = SequentialStorageRoutineRepository::new(
         flash,
         0x0008_0000..0x0010_0000
     );
-/*    routine_repository.add_routine(create_volumetric_shot_routine(0, 64.5, None, None, Some("Button 1".into()))).await;
-    routine_repository.add_routine(create_volumetric_shot_routine(0, 84.5, Some(Duration::from_secs(3)), Some(Duration::from_secs(7)), Some("Button 2".into()))).await;
-    routine_repository.add_routine(create_volumetric_shot_routine(0, 68.0, None, None, Some("Button 3".into()))).await;
-    routine_repository.add_routine(create_volumetric_shot_routine(0, 84.5, None, None, Some("Button 4".into()))).await;*/
-    //routine_repository.load_from_flash().await.unwrap();
-
     // Add internal routines (never persisted to flash)
     routine_repository.add_internal_routine(
         RoutineIndex::Internal(0),
@@ -2960,7 +2949,6 @@ async fn main_task(
             Box::pin(scheduler),
         ];
 
-    // Pump RPM/tacho is now handled by PIO pulse counter instead of PWM
     #[cfg(feature = "gear-pump")]
     futures.push(Box::pin(pump_tacho.task()));
 

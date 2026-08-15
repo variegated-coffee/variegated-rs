@@ -35,7 +35,7 @@
 //!
 //! # Never block on a client
 //!
-//! The load-bearing invariant, unchanged since Task 3: nothing on the debug path
+//! The load-bearing invariant: nothing on the debug path
 //! may block or await on a host being attached or keeping up. A TCP socket with a
 //! full transmit buffer is the same hazard as a USB endpoint whose host stopped
 //! draining, and it is defended the same way, in two layers:
@@ -72,9 +72,10 @@
 //! the application processor**. That is a real regression against the USB path,
 //! where the application processor's own attestation reaches the host.
 //!
-//! This task does not fix it -- fixing it means carrying pre-encoded bytes across
-//! the link, which trades this problem for the mixed-source problem Task 18
-//! described. What it does instead is refuse to let the claim pass silently:
+//! This module does not fix it -- fixing it means carrying pre-encoded bytes across
+//! the link, which trades this problem for the mixed-source problem described in
+//! `variegated_comms::debug_relay`. What it does instead is refuse to let the claim
+//! pass silently:
 //! [`ATTESTATION_NOTICE`] is emitted once per accepted connection, so the operator
 //! reading the stream is told what the version byte on this wire does and does not
 //! cover.
@@ -441,7 +442,7 @@ async fn serve(
     };
 
     loop {
-        // Two sources, exactly as the USB CDC transport has since Task 4:
+        // Two sources, exactly as the USB CDC transport has:
         // `DebugPayload::Status` travels on its own single-slot channel rather than
         // the shared bus, because a multi-subscriber pubsub `clone()`s every message
         // it hands out and that one is ~1.7 kB. Both arms yield a fully stamped

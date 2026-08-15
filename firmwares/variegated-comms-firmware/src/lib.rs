@@ -10,9 +10,6 @@ pub mod debug;
 pub mod esphome;
 pub mod http;
 pub mod improv;
-/// Temporary. Counts embassy-net's calls into the Wi-Fi driver so the ten-second
-/// request latency can be attributed to either the wake path or the radio. Delete once
-/// it has answered that.
 pub mod instrumentation;
 pub mod stack;
 pub mod time;

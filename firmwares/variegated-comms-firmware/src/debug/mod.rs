@@ -76,7 +76,7 @@ pub type BusSubscriber = Subscriber<
 
 /// Number of connected TCP debug clients.
 ///
-/// Lives here rather than in [`tcp`] so Task 10's snapshot task can read it whether
+/// Lives here rather than in [`tcp`] so the snapshot task can read it whether
 /// or not the TCP server is compiled in -- and here rather than on `bus`, which is a
 /// re-export of the shared crate and cannot gain members that only one of the two
 /// processors has.

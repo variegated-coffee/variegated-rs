@@ -1,11 +1,10 @@
 //! Configuration constants for the comms firmware
 
-// Wi-Fi credentials used to live here as `env!("SSID")` / `env!("PASSWORD")`, which meant
-// changing network meant reflashing and every checkout carried a working password. They are
-// now held by the application processor and pushed over the inter-processor link, exactly as
-// the Bluetooth peripheral addresses further down this file were. A machine with none stored
-// joins no network until it is provisioned over Improv; see `wifi::connection_task`, which
-// waits on `channels::WIFI_CREDENTIALS` rather than configuring anything at boot.
+// No Wi-Fi credentials here, and none compiled in via `env!`: they are held by the
+// application processor and pushed over the inter-processor link, so changing network does
+// not mean reflashing and no checkout carries a working password. A machine with none
+// stored joins no network until it is provisioned over Improv; see `wifi::connection_task`,
+// which waits on `channels::WIFI_CREDENTIALS` rather than configuring anything at boot.
 
 /// TCP command injection is unauthenticated and unencrypted, so it is compiled in
 /// only when this is set at build time. When unset the inbound half of the TCP
@@ -47,10 +46,9 @@ pub const TCP_COMMANDS_ENABLED: bool = ALLOW_TCP_COMMANDS.is_some();
 pub const NTP_SERVER: &str = "pool.ntp.org";
 pub const USEC_IN_SEC: u64 = 1_000_000;
 
-// BLE device addresses used to live here, one `fn` per peripheral. They are now
-// associations held by the application processor and pushed over the inter-processor
-// link, so this firmware learns what to connect to at runtime and changing a scale no
-// longer means reflashing. See `ble::devices`.
+// No BLE device addresses here either. They are associations held by the application
+// processor and pushed over the inter-processor link, so this firmware learns what to
+// connect to at runtime and changing a scale does not mean reflashing. See `ble::devices`.
 
 // BLE peripheral IDs
 pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;

@@ -32,10 +32,9 @@ pub const OUTPUT_FLOW_RATE_KEY: u32 = 12;
 #[allow(dead_code)]
 pub const OUTPUT_WEIGHT_KEY: u32 = 13;
 
-// A `static DEVICE_CONFIG` used to sit here, hardcoding `name: "GS3 Test"` and leaving every
-// other field empty. `build_device_config` below superseded it -- that one takes the actual
-// `MachineDefinition` and MAC address, so the name follows the machine rather than naming one
-// particular test rig -- and nothing had referenced the static since.
+// The device configuration is built at runtime rather than being a static: `build_device_config`
+// takes the actual `MachineDefinition` and MAC address, so the name follows the machine
+// instead of naming one particular test rig.
 
 /// Build a dynamic device configuration based on machine definition and runtime information
 pub fn build_device_config(

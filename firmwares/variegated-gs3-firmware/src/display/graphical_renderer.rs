@@ -889,14 +889,6 @@ impl GraphicalDisplayState {
             }
 
             // === EXTRACTION INFO (at bottom) ===
-            // Commented out PID display in favor of extraction metrics
-            // if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
-            //     self.render_pid_info(
-            //         pid_out.p, pid_out.i, pid_out.d, pid_out.out,
-            //         pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
-            //         EFFECTIVE_X + 10, EFFECTIVE_Y + 84, display
-            //     ).ok();
-            // }
             self.render_extraction_info(group, EFFECTIVE_X + 10, EFFECTIVE_Y + 84, display).ok();
         }
 
@@ -1197,17 +1189,7 @@ impl GraphicalDisplayState {
                 y_offset += 12;
             }
 
-            // Extraction info (replaces PID info)
-            // Commented out PID display in favor of extraction metrics
-            // if let ControllerOutput::PidOutput(pid_out) = &group.pump_output {
-            //     if y_offset <= EFFECTIVE_Y + 84 {
-            //         self.render_pid_info(
-            //             pid_out.p, pid_out.i, pid_out.d, pid_out.out,
-            //             pid_out.acting_kp, pid_out.acting_ki, pid_out.acting_kd,
-            //             RIGHT_PANEL_X + 5, y_offset + 3, display
-            //         ).ok();
-            //     }
-            // }
+            // Extraction info occupies the slot PID info would have.
             if y_offset <= EFFECTIVE_Y + 84 {
                 self.render_extraction_info(group, RIGHT_PANEL_X + 5, y_offset + 3, display).ok();
             }

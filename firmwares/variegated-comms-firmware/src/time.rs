@@ -145,11 +145,11 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     let mut last_ok: Option<bool> = None;
     // Resolved lazily and kept until something goes wrong, rather than once at boot.
     //
-    // Both DNS failure arms used to `return`, which killed SNTP for the whole power cycle:
-    // a machine that came up before its router's resolver did never got a clock again until
-    // someone power-cycled it, and `SNTP_RESYNC_REQUEST` had no consumer from then on. A
-    // resolved address was also kept forever, so a pool member that went away took SNTP
-    // with it. Both are now retried, on the short interval below.
+    // **Neither DNS failure arm may `return`.** Doing so kills SNTP for the whole power
+    // cycle: a machine that comes up before its router's resolver does never gets a clock
+    // again until someone power-cycles it, and `SNTP_RESYNC_REQUEST` is left with no
+    // consumer. Nor may a resolved address be kept forever, or a pool member that goes
+    // away takes SNTP with it. Both are retried, on the short interval below.
     let mut ntp_addr: Option<IpAddr> = None;
 
     loop {

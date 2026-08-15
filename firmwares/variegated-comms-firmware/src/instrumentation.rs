@@ -1,22 +1,17 @@
 //! Counters and indicators for this firmware, and the sampler that publishes them.
 //!
-//! # Why this exists
+//! # Why these are counters, not log lines
 //!
-//! This started as `net_probe`, a temporary thing that counted what embassy-net asked
-//! the Wi-Fi driver for and printed a line a second, while HTTP responses were taking
-//! ten seconds on a link that was serving the response itself in 0.4 ms. It did its job:
-//! the classification here is what established that inbound unicast reached the driver
-//! normally and that the ~50 frames a second the device was collecting were an unasked-
-//! for multicast flood -- mDNS, LLMNR and IPv6 multicast -- which located the fault in
-//! the network rather than in this firmware.
+//! A text frame per second is the wrong shape for a number sampled over time: it costs a
+//! slot in a 16-entry ring that real events need, it forces the reader to do arithmetic
+//! across timestamps to recover a rate, and it cannot be turned off without deleting
+//! code. The debug protocol already has the right shape for it, and the application
+//! processor uses it for exactly this.
 //!
-//! What it should not have done is *log* any of it. A text frame per second is the wrong
-//! shape for a number sampled over time: it costs a slot in a 16-entry ring that real
-//! events need, it forces the reader to do arithmetic across timestamps to recover a
-//! rate, and it cannot be turned off without deleting code. The debug protocol already
-//! has the right shape for this, and the application processor has been using it all
-//! along -- so these are counters and indicators now, and this module is no longer
-//! temporary.
+//! The classification below earns its keep: it is what distinguishes inbound unicast
+//! reaching the driver normally from an unasked-for multicast flood (mDNS, LLMNR, IPv6
+//! multicast), which is the difference between a fault in this firmware and a fault in
+//! the network it is attached to.
 //!
 //! # Counters vs indicators
 //!

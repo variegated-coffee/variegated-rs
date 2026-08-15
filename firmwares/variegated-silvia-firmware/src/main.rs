@@ -493,8 +493,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
     // All three stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
-    // `variegated_controller_lib::settings::machine_stores`; both boards used to spell them
-    // out separately.
+    // `variegated_controller_lib::settings::machine_stores`.
     let (mut settings_storage, bluetooth_store, wifi_store) =
         variegated_controller_lib::settings::machine_stores::<
             _,
@@ -816,10 +815,10 @@ async fn main_task(spawner: Spawner) -> ! {
     // `steam_boiler_control_state` and presents it to the rest of the system as a separate
     // boiler. `EnableBoiler(1)` on a single-boiler machine reads like a mistake and is not.
     //
-    // This used to send `RunRoutine(RoutineIndex::Internal(2))`, which could not work twice
-    // over: nothing on this board ever registered an internal routine -- `add_internal_routine`
-    // is never called, and `add_routine` only ever assigns `Custom` indices -- and no routine
-    // could have entered steam mode anyway, because `RoutineCommand` has no `EnableBoiler`.
+    // Not `RunRoutine(RoutineIndex::Internal(2))`, which cannot work twice over: nothing on
+    // this board registers an internal routine -- `add_internal_routine` is never called and
+    // `add_routine` only ever assigns `Custom` indices -- and no routine could enter steam
+    // mode anyway, because `RoutineCommand` has no `EnableBoiler`.
     // Flipping the switch logged "Routine not found: Internal(2)" and did nothing.
     //
     // `.with_initial_state()` because a switch has a position at power-on and edges alone
@@ -842,7 +841,6 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let prg = PioEncoderProgram::new(&mut common);
     let rotary = PioEncoder::new(&mut common, sm0, rotary_p.pin_clk, rotary_p.pin_dt, &prg);
-//    let rotary = Rotary::new(Input::new(rotary_p.pin_dt, Pull::Up), Input::new(rotary_p.pin_clk, Pull::Up));
 
     let mut rotary_action = rotary::RotaryController::new(
         rotary,

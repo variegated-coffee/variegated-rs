@@ -412,9 +412,9 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                     // one that can be raised while the machine is otherwise idle.
                     select(WIFI_RECONNECT_REQUEST.wait(), radio_request()),
                     // Filtered, like the retry loop's. Here the cost of an echo waking this
-                    // select is subtler than a panic but no more welcome: the `continue` it
-                    // used to take dropped and recreated `wait_for_disconnect_async`, and a
-                    // disconnect landing in that window is not reported at all.
+                    // select is subtler than a panic but no more welcome: a `continue` drops
+                    // and recreates `wait_for_disconnect_async`, and a disconnect landing in
+                    // that window is not reported at all.
                     credentials_change(&mut credentials_rx, &current),
                 ).await {
                     Either4::First(_) => {
@@ -516,11 +516,9 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
                             // exists to reach exactly this state.
                             //
                             // Back to the parked state rather than falling through to
-                            // `connect_async`. That used to be the behaviour, on the grounds
-                            // that failing against a station with no SSID was honest and rare;
-                            // it is no longer rare, and an unbounded retry loop against an
-                            // empty configuration is precisely the log-spam-that-says-nothing
-                            // this task avoids at boot.
+                            // `connect_async`. Falling through means an unbounded retry loop
+                            // against an empty configuration, which is precisely the
+                            // log-spam-that-says-nothing this task avoids at boot.
                             //
                             // The empty configuration is applied first so the radio genuinely
                             // forgets: without it the station keeps the old SSID and the
@@ -617,11 +615,11 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             // configures anything, so the two cannot overlap -- and `set_wifi_connected`'s
             // `swap` is what keeps the event stream paired if it does complete late.
             //
-            // The verdict is adopted here as well, not discarded. This arm used to drop it,
-            // reasoning that the link was already down so there was no association to
-            // protect -- but if the candidate *succeeded* there now is one, and the next pass
-            // of the outer loop would read a lagging `is_connected()`, find it false, and
-            // reconnect over the top of it. Same fault as the connected arm, one loop later.
+            // The verdict is adopted here as well, not discarded. Dropping it looks safe --
+            // the link was already down, so there is no association to protect -- but if the
+            // candidate *succeeded* there now is one, and the next pass of the outer loop
+            // reads a lagging `is_connected()`, finds it false, and reconnects over the top
+            // of it. Same fault as the connected arm, one loop later.
             Either3::Second(RadioRequest::Candidate(candidate)) => {
                 let (adopted, associated) =
                     try_candidate(&mut controller, candidate, &current).await;

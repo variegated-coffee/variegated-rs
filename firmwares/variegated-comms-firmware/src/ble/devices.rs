@@ -511,7 +511,6 @@ async fn belka_measurement_loop(
         };
 
         if !is_connected {
-            //info!("Belka Portal not connected, waiting...");
             Timer::after(Duration::from_secs(1)).await;
             continue;
         }
@@ -652,7 +651,6 @@ async fn acaia_measurement_loop(
         };
 
         if !is_connected {
-            //info!("ACAIA scale not connected, waiting...");
             status::set_slot_connected(slot, false);
             Timer::after(Duration::from_secs(1)).await;
             continue;
