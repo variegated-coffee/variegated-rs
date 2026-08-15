@@ -1985,8 +1985,18 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
 
         // Add virtual steam boiler configuration
         let steam_boiler_config = BoilerConfiguration {
-            temperature_pid_parameters: PidParameters::default(), // Virtual steam boiler doesn't have separate PID
-            pressure_pid_parameters: PidParameters::default(),
+            // The same parameters as the brew boiler, because there is one element and one
+            // tuning. Publishing `PidParameters::default()` here was not merely
+            // uninformative, it was a way to stop the machine heating: the ESPHome bridge
+            // exposes kP/kI/kD as Home Assistant numbers for every boiler declaring
+            // `TemperaturePid` -- which this one does (`main.rs`) -- and writing one of them
+            // reads back the *published* parameters, changes a single term and returns the
+            // whole struct (`esphome/command_mapper.rs`). `SetPidParameters` then ignores
+            // the boiler index and writes the shared tuning, so nudging "Virtual Steam kP"
+            // replaced a tuned PID with an all-zero one and saved it to flash. The scales
+            // are what did it; the default limits are infinite.
+            temperature_pid_parameters: config.persistent.pid_parameters.boiler_temperature_params.clone(),
+            pressure_pid_parameters: config.persistent.pid_parameters.boiler_pressure_params.clone(),
             control_state: config.persistent.steam_boiler_control_state,
             max_temperature: Some(crate::single_boiler_state::MAX_STEAM_TEMPERATURE),
             max_pressure: Some(3.0),
