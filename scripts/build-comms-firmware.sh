@@ -1,32 +1,43 @@
 #!/usr/bin/env bash
-# Build the ESP32-C6 comms firmware in the sibling `variegated-comms-rs` repo and
-# report its warning/error counts.
+# Build the ESP32-C6 comms firmware and report its warning/error counts.
 #
-# It has to be a script rather than a plain command because the build depends on
-# the *current directory*, not just the manifest: `variegated-comms-rs` carries its
-# own `rust-toolchain.toml` (esp channel) and `.cargo/config.toml` (riscv32 target,
-# runner, unstable flags), and cargo resolves both from cwd. Passing
-# `--manifest-path` from `variegated-rs` silently picks up the wrong toolchain and
-# target.
+# It has to be a script rather than a plain command because the build depends on the
+# *current directory*, not just the manifest. `variegated-comms-firmware/` carries its own
+# `rust-toolchain.toml` (nightly, for `-Z build-std`) and `.cargo/config.toml` (riscv32
+# target, espflash runner, unstable flags), and both cargo and rustup resolve those by
+# walking up from cwd. `cargo build -p variegated-comms-firmware` from the workspace root
+# picks up stable and thumbv8m instead, and fails.
+#
+# `--profile comms-release` rather than `--release`: this crate became a member of the
+# variegated-rs workspace on 2026-08-15, and only the root manifest's profiles are
+# honoured. `release` there is the RP2350's. See `[profile.comms-release]` in the root
+# Cargo.toml for why the two cannot share one.
 #
 # `SSID`/`PASSWORD` are read with `env!` at compile time, so the build fails
 # without them; the values are irrelevant to a compile check. The TCP-command flag
 # is set so Task 12's `option_env!`-gated code is type-checked too.
 #
-# Baseline at the Milestone 2 checkpoint: 8 warnings, 0 errors.
+# Baseline as of the 2026-08-15 merge into this workspace: 44 warnings, 0 errors --
+# 8 from the firmware lib, 9 from its bin, the rest from `variegated-controller-types`
+# and `esphome-device`. (The "8 warnings" this header used to claim was the lib's count
+# alone and had been stale for a while.)
+#
+# Unlike the espresso firmwares, this one is *not* yet held to the zero-warnings rule in
+# CLAUDE.md. Bringing it there is separate work; until then this number is a ratchet, not
+# a target.
 #
 # Usage: scripts/build-comms-firmware.sh [output-dir]
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMS="$REPO/../variegated-comms-rs"
+COMMS="$REPO/variegated-comms-firmware"
 OUT="${1:-$REPO/target/comms-firmware-logs}"
 mkdir -p "$OUT"
 
 LOG="$OUT/comms-firmware.log"
 (
     cd "$COMMS" || exit 1
-    env VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 cargo build --release
+    env VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 cargo build --profile comms-release
 ) >"$LOG" 2>&1
 RC=$?
 

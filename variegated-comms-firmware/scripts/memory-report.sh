@@ -34,8 +34,19 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELF="${1:-$REPO/target/riscv32imac-unknown-none-elf/release/variegated-comms-firmware}"
+# `$REPO/../target` and `comms-release`, not `$REPO/target` and `release`: since this
+# crate became a member of the variegated-rs workspace the build directory is the
+# workspace root's, and the profile is the custom one (see `[profile.comms-release]` in
+# the root Cargo.toml for why this firmware cannot share `release` with the RP2350 side).
+ELF="${1:-$REPO/../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware}"
 TOP="${2:-30}"
+
+# `rust-objdump`/`rust-nm` are resolved through whichever toolchain rustup picks for the
+# *current* directory, and rustup picks it by walking up from cwd. Run from the workspace
+# root that is stable 1.95.0, which does not carry this crate's llvm-tools; run from here
+# it is the nightly in `rust-toolchain.toml`. Nothing below depends on cwd otherwise --
+# `$ELF` is already absolute -- so this exists purely to pin the toolchain.
+cd "$REPO" || exit 1
 
 if [ ! -f "$ELF" ]; then
     echo "no such ELF: $ELF" >&2

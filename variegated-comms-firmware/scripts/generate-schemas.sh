@@ -25,4 +25,8 @@ set -eu
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cd /
-exec cargo run --quiet --manifest-path "$repo/tools/schema-export/Cargo.toml" -- "$@" "$repo"
+# `../variegated-schema-export`, not `tools/schema-export`: the exporter sits at the
+# workspace root because cargo's `exclude` cannot reach a package nested inside a
+# member's directory. `$repo` is still this crate, which is where `frontend/` lives and
+# therefore what the exporter should write into.
+exec cargo run --quiet --manifest-path "$repo/../variegated-schema-export/Cargo.toml" -- "$@" "$repo"

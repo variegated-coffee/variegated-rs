@@ -387,8 +387,8 @@ overflow-checks  = false
 # that embassy's STM32 users exercise, and is not implicated.
 #
 # The fork carries that fix plus regression tests for the word layout. It is a path
-# dependency on a sibling checkout, matching how variegated-comms-rs already consumes
-# variegated-rs, so the two move together without a push.
+# dependency on a sibling checkout in the umbrella directory -- as `esphome-device-rs`
+# still is for the comms firmware -- so the two move together without a push.
 #
 # Known-unfixed there: SPI mode returns from `Card::acquire` before CMD9, so the CSD is
 # never read and `BlockDevice::size()` reports 0. Harmless here -- exfat-slim never

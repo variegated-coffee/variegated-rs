@@ -25,7 +25,10 @@ set -eu
 cd "$(dirname "$0")/.."
 
 MARKER=${1:-"tcp: command injection compiled in (VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS)"}
-BIN=target/riscv32imac-unknown-none-elf/release/variegated-comms-firmware
+# `../target` and `comms-release`: this crate is a member of the variegated-rs workspace,
+# so the build directory is the workspace root's and the profile is the custom one. See
+# `[profile.comms-release]` in the root Cargo.toml.
+BIN=../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware
 
 # `strings -a`, not `strings`: without it the default on some platforms is to scan
 # only the loadable sections it recognises, and .rodata on this target is not always
@@ -37,19 +40,19 @@ marker_count() {
 # Both builds are noisy and neither's warnings are this script's business, so the
 # output is kept and summarised rather than discarded: a failure here is usually a
 # build failure, and swallowing it would leave nothing to look at.
-LOG=target/tcp_command_gate_check.log
+LOG=../target/tcp_command_gate_check.log
 
 echo "=== building with VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS unset ==="
 # `env -u` rather than trusting the caller's environment to be clean: this check is
 # worthless if it inherits the variable from whoever ran it.
-env -u VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS scripts/cargo.sh build --release >"$LOG" 2>&1 \
+env -u VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS scripts/cargo.sh build --profile comms-release >"$LOG" 2>&1 \
     || { tail -40 "$LOG"; exit 1; }
 grep -E "generated .* warnings|^error" "$LOG" || true
 UNSET_COUNT=$(marker_count)
 echo "marker occurrences: $UNSET_COUNT (expected 0)"
 
 echo "=== building with VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 ==="
-env VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 scripts/cargo.sh build --release >"$LOG" 2>&1 \
+env VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS=1 scripts/cargo.sh build --profile comms-release >"$LOG" 2>&1 \
     || { tail -40 "$LOG"; exit 1; }
 grep -E "generated .* warnings|^error" "$LOG" || true
 SET_COUNT=$(marker_count)

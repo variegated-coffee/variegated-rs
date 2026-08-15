@@ -2,7 +2,7 @@
 # Run the host-testable suites in this workspace and print their results.
 #
 # It has to be a script because the invocation is not one anyone retypes correctly.
-# This repo's `.cargo/config.toml` defaults the target to riscv32imac and sets
+# This directory's `.cargo/config.toml` defaults the target to riscv32imac and sets
 # `build-std = ["alloc", "core"]` -- which omits `std` and `test`, so a plain
 # `cargo test --target aarch64-apple-darwin` fails to link the test harness. The
 # `-Z build-std=std,panic_abort,test` override is what makes a host build possible

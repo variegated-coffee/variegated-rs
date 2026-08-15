@@ -15,6 +15,23 @@ This is a Cargo workspace with the following key crates:
 - **`variegated-controller-lib`**: High-level machine controllers and brewing routines
 - **`variegated-controller-types`**: Shared types, configuration structures, commands, and status definitions
 
+#### The two ends of the machine
+
+Both processors' firmware lives here, and the names are close enough to misread:
+
+| crate | runs on | is |
+|---|---|---|
+| `variegated-silvia-firmware` | RP2350 | Rancilio Silvia — single boiler, single group |
+| `variegated-gs3-firmware` | RP2350 | La Marzocco GS3 carrier — dual boiler, single group |
+| `variegated-comms` | RP2350 | the **application** end of the inter-processor link |
+| `variegated-comms-firmware` | ESP32-C6 | the **comms** end: Wi-Fi, BLE, HTTP/WebSocket, ESPHome |
+
+`variegated-comms` and `variegated-comms-firmware` are the two sides of one wire, not a
+typo. The BLE crates (`variegated-trouble-connection-manager`,
+`variegated-belka-portal-trouble-driver`, `variegated-scale-trouble-driver`,
+`variegated-improv-trouble`) and `variegated-comms-api-types` belong to the ESP32-C6 side
+but are portable no_std and would build for either target.
+
 #### `-types` holds types; `-lib` holds implementations
 
 A struct, an enum, a wire format and the derives that serialize it belong in
@@ -74,11 +91,13 @@ If the runner doesn't have `thumbv8m.main-none-eabihf` installed, it should be i
 cargo check --target thumbv8m.main-none-eabihf
 cargo build --target thumbv8m.main-none-eabihf
 
-# The two firmwares. Each is its own crate whose `default` features are its machine's
-# configuration, so neither needs `--features`, and both build in one invocation:
+# The two espresso firmwares. Each is its own crate whose `default` features are its
+# machine's configuration, so neither needs `--features`:
 cargo build -p variegated-silvia-firmware --target thumbv8m.main-none-eabihf
 cargo build -p variegated-gs3-firmware --target thumbv8m.main-none-eabihf
-cargo build --workspace --target thumbv8m.main-none-eabihf
+
+# Everything RP2350, via `default-members`. NOT `--workspace` -- see below.
+cargo build --target thumbv8m.main-none-eabihf
 
 # The full gate, with warning counts per configuration:
 scripts/build-firmware.sh [output-dir]
@@ -86,13 +105,73 @@ scripts/build-firmware.sh [output-dir]
 # A firmware crate's own warnings, separated from its dependencies':
 cargo build -p <crate> --target thumbv8m.main-none-eabihf --message-format=json > w.json
 scripts/warning-report.py <crate> w.json
+
+# The ESP32-C6 comms firmware. Must be built by `cd`-ing in; see below.
+cd variegated-comms-firmware && cargo build --profile comms-release
+scripts/build-comms-firmware.sh [output-dir]
 ```
+
+### This workspace spans two architectures
+
+Since 2026-08-15 it holds both the RP2350 espresso firmwares (`thumbv8m.main-none-eabihf`,
+stable 1.95.0) and the ESP32-C6 comms firmware (`riscv32imac-unknown-none-elf`, pinned
+nightly), merged in from what used to be the separate `variegated-comms-rs` repo. Three
+consequences, all of which have already caught someone out:
+
+**`cargo build --workspace` is not a command you use here.** It would try to build
+`esp-hal` for thumbv8m and fail with a wall of errors naming nothing relevant. `cargo
+build` on its own is the one you want: `default-members` in the root manifest lists the
+RP2350 crates, so bare builds mean what they have always meant. All six comms crates are
+excluded from it — including the five portable ones, because resolver 2 would otherwise
+unify `variegated-controller-types/serde` in from `variegated-comms-api-types` and change
+what the espresso binaries contain.
+
+**The comms firmware can only be built from its own directory.** Both cargo and rustup
+resolve `.cargo/config.toml` and `rust-toolchain.toml` by walking up from the *current
+working directory*, not from `--manifest-path`. `variegated-comms-firmware/` carries both:
+the riscv target, `-Z build-std`, `force-frame-pointers`, and the nightly the last two
+need. `cargo build -p variegated-comms-firmware` from the root silently gets stable and
+thumbv8m, and fails. Use `scripts/build-comms-firmware.sh`, or that crate's
+`scripts/cargo.sh`, which exists solely to enforce the `cd`.
+
+**Never put an `[unstable]` table in the root `.cargo/config.toml`.** Cargo merges config
+*arrays* additively and a nested file cannot un-set them. The comms build gets `-Z
+build-std` because it declares it in its own directory and the root declares nothing; add
+it at the root and every RP2350 build inherits it and dies with `duplicate lang item in
+crate core`, which names neither the cause nor the file.
+
+Profiles are the one thing directory nesting cannot solve — only the root manifest's are
+honoured. The comms firmware therefore uses a custom `[profile.comms-release]` rather than
+sharing `release`, because RP2350 needs `opt-level = 3` for stack-frame correctness while
+ESP32-C6 needs `"s"` and fat LTO for flash. Per-package overrides do not work for this:
+they do not reach `esp-hal` or `smoltcp`, and `lto` is not a per-package key.
+
+#### Finding pre-merge comms history
+
+The 125 commits from `variegated-comms-rs` are ancestors of `main` and fully reachable, but
+`git log --follow` on a comms file **will not** reach them. The import was a `merge -s ours`
+plus `read-tree`, which records the files as additions in the merge commit rather than as
+renames, so there is no rename chain for `--follow` to walk. Name a pre-merge commit and the
+old path instead — the tree there was `crates/<crate>/`, with `frontend/` and
+`tools/schema-export/` at its root:
+
+```bash
+git log <pre-merge-sha> -- crates/variegated-comms-firmware/src/bin/main.rs
+git log --all -- crates/variegated-comms-firmware/src/http.rs
+```
+
+`bd878e1` is the last commit made in the old repo and a convenient starting point.
 
 ### Zero warnings is part of the definition of done
 
 **A firmware crate must build with zero warnings of its own, in every feature
 configuration the gate builds.** Not "no new warnings", not "the count did not go up" —
 zero. A change that adds one is not finished.
+
+This applies to the two **espresso** firmwares, which are at zero. The comms firmware is
+not yet — it carries 8 in its lib and 9 in its bin, recorded in
+`scripts/build-comms-firmware.sh`. Until someone does for it what was done for the other
+two, that number is a ratchet rather than a target: do not let it rise.
 
 This is enforceable because it is currently true, and it was made true deliberately: both
 firmwares carried 69 and 59 warnings until 2026-08-15, and roughly 70% of that was unused

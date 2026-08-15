@@ -2,7 +2,7 @@
 
 //! A description of a Rust type's *serde data model*, recovered at compile time.
 //!
-//! This exists so `variegated-comms-rs`'s `frontend/src/schemas/schemas.ts` can be
+//! This exists so `variegated-comms-firmware/frontend/src/schemas/schemas.ts` can be
 //! generated rather than hand-maintained. That file holds runtime postcard schema
 //! descriptors, and postcard is a non-self-describing format: the decoder is told
 //! nothing by the bytes, so a field in the wrong order or a variant with the wrong
