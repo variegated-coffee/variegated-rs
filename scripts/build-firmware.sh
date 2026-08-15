@@ -2,8 +2,17 @@
 # Build the firmware configurations that gate this branch and report the warning/error
 # counts for each. Compare two runs with `scripts/compare-warnings.sh`.
 #
-# Baselines as of 2026-08-15: gs3 121, gs3+pwm-steam-valve 121, silvia 100,
-# gs3+optional-peripherals 121, 0 errors throughout.
+# Baselines as of 2026-08-15: gs3 120, gs3+pwm-steam-valve 120, silvia 98,
+# gs3+optional-peripherals 120, 0 errors throughout.
+#
+# Down from 121/121/100/121 earlier the same day, when `variegated-board-cfg` moved into
+# this workspace and its one dead-field warning was fixed. Note the asymmetry: -1 on the
+# gs3 configurations and -2 on silvia, for one warning. These totals are `grep -c '^warning'`
+# over the log, and cargo renders a *replayed* (cached) diagnostic as a single
+# `path:line:col: warning: ...` line, which does not match, where a freshly compiled one
+# gets the full multi-line form whose first line does. So a crate's contribution to these
+# numbers depends on whether it was rebuilt in that particular run. Per-crate counts are
+# what to compare; these are a smoke signal.
 #
 # **Every one of those is a dependency's.** Both firmware bins emit zero warnings of their
 # own in every configuration built here, and per CLAUDE.md that is the definition of done,

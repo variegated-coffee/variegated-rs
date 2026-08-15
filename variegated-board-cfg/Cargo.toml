@@ -1,20 +1,33 @@
 [package]
 name = "variegated-board-cfg"
 license = "MIT OR Apache-2.0"
-version = "0.2.1"
+# 0.3.0, not 0.2.2. Three commits landed after 0.2.1 was published and never got a
+# release; two of them change what the macro emits, which is breaking for a 0.x crate:
+# `board_cfg` now names its generated `macro_rules!` after the board-cfg.toml section
+# rather than the snake-cased struct ident, exports it with `#[macro_export]`, and gives
+# struct fields the `Peri<'static, Alias>` shape instead of the bare alias.
+version = "0.3.0"
 edition = "2021"
 description = "Store pin and other HAL configurations for your embedded project in a TOML file."
-repository = "https://github.com/variegated-coffee/variegated-board-cfg"
-readme = "../README.md"
+# This crate lived in its own repository until 2026-08-15. It still publishes to
+# crates.io under this name -- it is a general-purpose macro with nothing
+# espresso-specific in it -- but it is developed here now.
+repository = "https://github.com/variegated-coffee/variegated-rs"
+readme = "README.md"
 
 [dependencies]
-Inflector = "0.11.4"
-proc-macro2 = "1.0.78"
-quote = "1.0.35"
-syn = { version = "2.0.48", features = ["full"] }
-toml = "0.8.19"
-serde = { version = "1.0.210", features = ["derive"] }
-either = "1.13.0"
+Inflector.workspace = true
+either.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+# `full` for `Type`/`ItemStruct`/`ItemType` parsing, and `std` + `derive` on serde for
+# the `Deserialize` on the board-cfg.toml schema. These are feature choices rather than
+# versions, so they belong here and not in the workspace table. serde's workspace entry
+# is `default-features = false` for the firmwares' sake; a proc macro runs on the host
+# and needs std back.
+syn = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive", "std"] }
+toml.workspace = true
 
 [lib]
 proc-macro = true

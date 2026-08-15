@@ -28,7 +28,9 @@ struct PeripheralField {
 //    original_type: Type,
 //    altered_type: Type,
     alias: ItemType,
-    inner_type: Type,
+    /// The type the struct field is given. Not the same thing as the type the alias
+    /// points at: for a `Peri<'static, _>` field this is the whole `Peri<'static, Alias>`
+    /// and the alias names only the inner peripheral.
     field_type: Type,
     impls: Option<Punctuated<TypeParamBound, Token![+]>>,
     field_value: Either<Ident, toml::Value>,
@@ -132,7 +134,6 @@ impl PeripheralField {
         PeripheralField {
             ident,
             alias,
-            inner_type,
             field_type,
             impls,
             field_value,

@@ -28,6 +28,13 @@ members = [
     "variegated-postcard-schema",
     "variegated-postcard-schema-derive",
 
+    # The `#[board_cfg(...)]` / `aliased_bind_interrupts!` macro, merged in from its own
+    # repository on 2026-08-15. It is still published to crates.io from here. Both it and
+    # its fixture crate are deliberately absent from `default-members` below -- see the
+    # note there, the reasons are not the same.
+    "variegated-board-cfg",
+    "variegated-board-cfg-tests",
+
     # The ESP32-C6 comms side, merged in from variegated-comms-rs on 2026-08-15. The
     # first five are portable no_std and would build for either architecture; only
     # `variegated-comms-firmware` is riscv32-only, and it is the reason for
@@ -84,6 +91,18 @@ default-members = [
     "variegated-debug",
     "variegated-postcard-schema",
     "variegated-postcard-schema-derive",
+    # Neither `variegated-board-cfg` nor its fixture crate is here, for two different
+    # reasons.
+    #
+    # The fixture is an ordinary std crate; a bare `cargo build` would compile it for
+    # thumbv8m. Run it with `cargo test-aarch64 -p variegated-board-cfg-tests`.
+    #
+    # The macro is a proc macro, and "cargo builds proc macros for the host" holds only
+    # while it is a *dependency*. Name the package explicitly -- which membership of this
+    # list does -- and cargo builds it for `--target` like anything else, so `serde_core`
+    # and `either` get compiled for thumbv8m and produce thousands of errors. It is
+    # covered anyway: every firmware build compiles it as a host dependency, which is
+    # where its warnings surfaced before it moved into this workspace.
 ]
 
 # A std host tool that declares its own `[workspace]`. Without this exclusion cargo
@@ -239,6 +258,17 @@ syn = "2.0"
 # UI tests for the derive's serde-attribute rejection. That rejection is the whole
 # anti-drift guarantee, so it is tested like one.
 trybuild = "1.0"
+
+# `variegated-board-cfg`'s own three. Host-side only -- they reach no firmware binary,
+# since a proc macro's dependencies are compiled for the build host.
+#
+# Inflector supplies the case conversions that turn a board-cfg.toml key into a type
+# alias ident. 0.11.4 is the newest release there is and has been for years; `heck` is
+# the maintained equivalent and a swap is a self-contained afternoon, noted here rather
+# than done as a side effect of moving the crate in.
+Inflector = "0.11.4"
+either = "1.13.0"
+toml = "0.8.19"
 
 # ---------------------------------------------------------------------------------
 # ESP32-C6 comms side. Merged from variegated-comms-rs on 2026-08-15; every entry the

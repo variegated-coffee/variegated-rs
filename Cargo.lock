@@ -4844,7 +4844,7 @@ dependencies = [
 
 [[package]]
 name = "variegated-board-cfg"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "Inflector",
  "either",
@@ -4853,6 +4853,13 @@ dependencies = [
  "serde",
  "syn 2.0.119",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "variegated-board-cfg-tests"
+version = "0.1.0"
+dependencies = [
+ "variegated-board-cfg",
 ]
 
 [[package]]

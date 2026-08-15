@@ -60,6 +60,7 @@ monomorphized on a host has no `_defmt_acquire` to link against, and the failure
 - **`variegated-control-algorithm`**: PID control algorithms with configurable parameters and limits
 - **`variegated-embassy-*`**: Device drivers for specific hardware (ADS124S08 ADC, FDC1004 capacitive sensor, NAU7802 load cell ADC)
 - **`variegated-adc-tools`**: Utilities for converting ADC values to physical quantities (temperature, pressure)
+- **`variegated-board-cfg`**: The proc macro that turns each firmware's `board-cfg.toml` into peripheral structs — published to crates.io, and deliberately machine-agnostic; see below
 - **`variegated-soft-pwm`**: Software PWM for very low frequencies (0.1-1Hz), primarily for heating element control
 
 ### Physical Quantity Types
@@ -162,6 +163,54 @@ git log --all -- crates/variegated-comms-firmware/src/http.rs
 
 `bd878e1` is the last commit made in the old repo and a convenient starting point.
 
+### `variegated-board-cfg` is published to crates.io from here
+
+The macro behind `#[board_cfg(...)]`, `aliased_bind_interrupts!` and `type_aliases!` had its
+own repository until 2026-08-15, when it was merged in the same way the comms tree was (so
+`git log --follow` will not reach its 9 pre-merge commits either; its old path was
+`variegated-board-cfg/src/lib.rs`, unchanged). Two things follow from it being a **public,
+general-purpose crate** rather than an internal one:
+
+- **It is still released to crates.io**, so its `[dependencies]` and MSRV are downstream
+  users' problem too, and the version number has to mean something. It sat at a published
+  0.2.1 for three commits' worth of unreleased breaking change, which is what made
+  `version = "0.2.1", path = "..."` in both firmwares satisfiable only by the path override
+  — build either from the registry alone and you get a macro that binds one handler per
+  interrupt, which neither firmware's DMA setup can express. It is 0.3.0 now.
+- **Nothing espresso-specific may go into it.** It maps a TOML file onto peripheral structs;
+  it knows nothing about boilers, and the moment it does it stops being publishable.
+
+Releasing it needs the host target named explicitly, for the same reason it is not a
+default member (below):
+
+```bash
+cargo package -p variegated-board-cfg --target aarch64-apple-darwin
+cargo publish -p variegated-board-cfg --target aarch64-apple-darwin
+```
+
+**"Cargo builds proc macros for the host" only holds while the macro is a *dependency*.**
+Name the package explicitly — `-p variegated-board-cfg`, or by listing it in
+`default-members` — and cargo builds it for `--target` like any other crate, at which point
+`serde_core` and `either` are compiled for thumbv8m and emit several thousand errors. So it
+is a member but not a default member, and `scripts/warning-report.py` cannot be pointed at
+it the way it can at a firmware. Its warnings are covered regardless: every firmware build
+compiles it as a host dependency, which is where its one dead-field warning showed up before
+the move. `variegated-postcard-schema-derive` *is* a default member and is fine there only
+because syn, quote and proc-macro2 happen to compile for a bare-metal target.
+
+Its fixture crate `variegated-board-cfg-tests` is out of `default-members` for the simpler
+reason that it is an ordinary std crate. It runs as
+
+```bash
+cargo test-aarch64 -p variegated-board-cfg-tests
+```
+
+That fixture needs its `build.rs`. The macro finds `board-cfg.toml` through `BOARD_CFG_PATH`
+or, failing that, by walking rustc's `--out-dir` up to `target` and popping once. As a
+standalone repo that fallback landed on the crate root; as a workspace member it lands on
+the workspace root, where there is no `board-cfg.toml`. Both espresso firmwares set the same
+variable from their own build scripts for the same reason.
+
 ### Zero warnings is part of the definition of done
 
 **A firmware crate must build with zero warnings of its own, in every feature
@@ -169,7 +218,8 @@ configuration the gate builds.** Not "no new warnings", not "the count did not g
 zero. A change that adds one is not finished.
 
 This applies to **all three firmwares** — both espresso ones and the comms one — and to the
-five supporting comms crates. All eight are at zero.
+five supporting comms crates, plus `variegated-board-cfg` and its fixture. All ten are at
+zero.
 
 What is *not* yet at zero is the library crates: `variegated-controller-types` and friends
 still account for the 121/100/25 totals the gate scripts report. Those totals are a
@@ -290,6 +340,15 @@ Since this project contains embedded code that targets `thumbv8m.main-none-eabih
   cargo test --target aarch64-apple-darwin -p variegated-rp235x-bootrom-block
   ```
 - This allows the test code (which includes file I/O for reading test data) to run on the host platform while testing the embedded parsing logic
+- **`variegated-board-cfg`**'s tests live in the separate `variegated-board-cfg-tests` crate,
+  because a proc-macro crate cannot invoke its own macros:
+  ```bash
+  cargo test-aarch64 -p variegated-board-cfg-tests
+  ```
+  The one test there is worth more than its size suggests — it covers alias generation,
+  attribute passthrough, `Peri<'static, _>` rewriting and the `impl Trait` bound, and the
+  bound is genuinely enforced (point `p2` at a type that does not implement `Pin` and the
+  crate stops compiling).
 
 ### Code Style
 - Use descriptive type aliases for physical quantities

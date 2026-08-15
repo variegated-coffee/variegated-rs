@@ -38,7 +38,7 @@ panic-probe = { workspace = true, features = ["print-defmt"] }
 
 num-traits = { workspace = true, features = ["libm"] }
 
-variegated-board-cfg = { version = "0.2.1", path = "../../variegated-board/variegated-board-cfg" }
+variegated-board-cfg = { version = "0.3.0", path = "../variegated-board-cfg" }
 
 variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb", "atomic-mutex"] }
 

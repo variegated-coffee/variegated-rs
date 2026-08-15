@@ -1,9 +1,14 @@
 [package]
-name = "tests"
+name = "variegated-board-cfg-tests"
 version = "0.1.0"
 edition = "2021"
+# A fixture, not a library anyone should depend on.
+publish = false
 
 [dev-dependencies]
+# A separate crate rather than `variegated-board-cfg/tests/`: a proc-macro crate cannot
+# invoke its own macros, and putting the fixture inside the published package would drag
+# a build script (see build.rs) into every downstream consumer's build.
 variegated-board-cfg = { path = "../variegated-board-cfg" }
 
 [lints.rust]
