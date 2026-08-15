@@ -464,6 +464,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             CloseWifiProvisioningWindow => {}
             SetWifiCredentials(_) => {}
             IdentifyMachine => {}
+            RequestConfiguration => {}
         }
     }
 
@@ -609,6 +610,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             password: heapless::String::try_from("correct horse battery staple \u{00e9}").unwrap(),
         }),
         IdentifyMachine,
+        RequestConfiguration,
     ]
 }
 

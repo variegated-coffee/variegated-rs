@@ -531,5 +531,6 @@
       "password": "correct horse battery staple é"
     }
   },
-  "IdentifyMachine"
+  "IdentifyMachine",
+  "RequestConfiguration"
 ]
