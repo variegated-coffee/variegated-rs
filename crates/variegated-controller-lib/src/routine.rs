@@ -1224,7 +1224,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
         },
     ];
 
-    if let (Some(bloom_after), Some(_bloom_time)) = (bloom_after, bloom_time) {
+    if let (Some(bloom_after), Some(bloom_time)) = (bloom_after, bloom_time) {
         steps.push(RoutineStep {
             entry_command: vec![],
             exits: vec![RoutineExit::new(
@@ -1236,7 +1236,11 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
         steps.push(RoutineStep {
             entry_command: vec![RoutineCommand::SetGroupOff(group)],
             exits: vec![RoutineExit::with_description(
-                RoutineExitCondition::After(ParameterValue::Static(bloom_after.as_millis() as f32 / 1000.0)),
+                // `bloom_time`, not `bloom_after`. This step is the bloom itself -- the
+                // group is off and the puck is soaking -- so it lasts for as long as the
+                // caller asked the bloom to last. `bloom_after` belongs to the step above,
+                // which is the fill that precedes it.
+                RoutineExitCondition::After(ParameterValue::Static(bloom_time.as_millis() as f32 / 1000.0)),
                 RoutineStepExitType::NextStep,
                 "Blooming".try_into().unwrap()
             )],
