@@ -140,6 +140,13 @@ pub fn resolve_derived_parameter(
     }
 }
 
+// `routine_index`, `saved_state` and `saved_configuration` are read by the two machine
+// controllers -- `handle_routine_start` restores `saved_configuration` when a routine ends,
+// and the status publisher reports `routine_index` -- and those live behind the `hardware`
+// feature. A host test build turns `hardware` off, compiles this struct anyway because the
+// routine engine is exactly what those tests exercise, and then nothing reads the three.
+// Hence the conditional allow: unconditional, it would hide a real regression on target.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
 pub struct RoutineExecutionContext<StateT, ConfigurationT> {
     pub(crate) routine_index: RoutineIndex,
     pub(crate) routine: Routine,

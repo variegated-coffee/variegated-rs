@@ -1,6 +1,12 @@
 use crate::*;
 use alloc::vec::Vec;
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{NaiveDate, Weekday};
+// `Datelike` only for the hand-written `defmt::Format` impl below, which calls
+// `year()`/`month()`/`day()`, so it carries the same gate the impl does -- unconditional,
+// it is an unused import in every host build. `communication.rs` has the same arrangement
+// for the same reason.
+#[cfg(feature = "defmt")]
+use chrono::Datelike;
 use heapless::index_set::FnvIndexSet;
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
