@@ -2608,11 +2608,9 @@ name = "variegated-gs3-firmware"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "chrono-tz",
  "cortex-m-rt",
  "defmt 1.1.1",
  "defmt-rtt",
- "display-interface",
  "display-interface-spi",
  "ds3231",
  "embassy-embedded-hal",
@@ -2650,7 +2648,6 @@ dependencies = [
  "variegated-instrumentation",
  "variegated-log",
  "variegated-mcp23017",
- "variegated-mcp9600",
  "variegated-nv3007",
  "variegated-rp235x-atomic-raw-mutex",
  "variegated-timekeeping",
@@ -2818,13 +2815,10 @@ name = "variegated-silvia-firmware"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "chrono-tz",
  "cortex-m-rt",
  "defmt 1.1.1",
  "defmt-rtt",
- "display-interface",
  "display-interface-spi",
- "ds3231",
  "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
@@ -2844,7 +2838,6 @@ dependencies = [
  "panic-probe",
  "postcard",
  "rotary-encoder-hal",
- "serde",
  "static_cell",
  "variegated-adc-tools",
  "variegated-ads124s08",
@@ -2858,11 +2851,8 @@ dependencies = [
  "variegated-hal",
  "variegated-instrumentation",
  "variegated-log",
- "variegated-mcp23017",
  "variegated-mcp9600",
- "variegated-rp235x-atomic-raw-mutex",
  "variegated-timekeeping",
- "variegated-tlc59108",
  "w25q32jv",
 ]
 

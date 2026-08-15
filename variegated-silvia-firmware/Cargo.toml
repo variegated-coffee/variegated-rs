@@ -29,7 +29,6 @@ defmt-rtt.workspace = true
 log.workspace = true
 
 embedded-alloc.workspace = true
-ds3231 = { version = "0.3.0", features = ["async"] }
 
 static_cell.workspace = true
 
@@ -51,20 +50,16 @@ variegated-controller-lib = { version = "0.1.0", path = "../variegated-controlle
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation", features = ["instrumentation"] }
 variegated-debug = { version = "0.1.0", path = "../variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt", "source-application", "rp235xb"] }
-variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
-variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
 variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
 # `debug-bus` installs the `log` -> debug bus bridge; see `bus_sink::init()` in main.
 variegated-log = { version = "0.1.0", path = "../variegated-log", features = ["debug-bus", "rp235xb"] }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
-variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal.workspace = true
 embedded-hal-async.workspace = true
 embedded-graphics.workspace = true
 embedded-graphics-core.workspace = true
-display-interface.workspace = true
 # Not optional here, unlike on the GS3 where it arrives via `tft-display`: the SSD1309 is
 # the only display this machine has.
 display-interface-spi = { workspace = true }
@@ -72,9 +67,7 @@ oled_async = { version = "0.2.1" }
 heapless.workspace = true
 
 chrono = { workspace = true, features = ["alloc"] }
-chrono-tz.workspace = true
 
-serde = { workspace = true, features = ["derive"] }
 postcard = { workspace = true, features = ["alloc"] }
 
 futures = { version = "0.3.33", default-features = false, features = ["alloc"] }

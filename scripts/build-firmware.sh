@@ -2,14 +2,21 @@
 # Build the firmware configurations that gate this branch and report the warning/error
 # counts for each. Compare two runs with `scripts/compare-warnings.sh`.
 #
-# Baselines as of the 2026-08-15 crate split: gs3 191, gs3+pwm-steam-valve 189, silvia 178,
+# Baselines as of the 2026-08-15 crate split: gs3 191, gs3+pwm-steam-valve 189, silvia 160,
 # gs3+optional-peripherals 196, 0 errors throughout.
 #
-# Each is exactly one lower than the run immediately before the split (192/190/179/197), and
-# the one that went is `profiles for the non root package will be ignored` -- the two
-# firmwares' `[profile.dev]`/`[profile.release]` blocks were inert (only the workspace root's
-# count) and were dropped rather than carried into two new manifests. The per-bin counts
-# underneath did not move at all: 69, 67, 59, 74 before and after.
+# Two things moved these off the 192/190/179/197 of the run immediately before the split,
+# and neither is a code change:
+#
+#   * -1 everywhere: `profiles for the non root package will be ignored`. The two firmwares'
+#     `[profile.dev]`/`[profile.release]` blocks were inert (only the workspace root's
+#     count) and were dropped rather than carried into two new manifests.
+#   * -18 on silvia alone: dependencies that machine does not use are no longer compiled
+#     for it (`ds3231`, `variegated-mcp23017`, `variegated-tlc59108` and friends), so their
+#     warnings are no longer in its log.
+#
+# The counts that matter -- the firmware bins' own -- did not move through any of it:
+# 69, 67, 59, 74 before the split, after the split, and after the pruning.
 #
 # (The numbers this header carried before that -- 83/81/71, from Task 16 -- had gone stale
 # long beforehand and were not re-measured when they drifted. Re-measure and update these
