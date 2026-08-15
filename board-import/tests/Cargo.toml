@@ -1,0 +1,10 @@
+[package]
+name = "tests"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+variegated-board-cfg = { path = "../variegated-board-cfg" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(bogus_flag)'] }

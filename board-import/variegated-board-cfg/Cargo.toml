@@ -1,0 +1,20 @@
+[package]
+name = "variegated-board-cfg"
+license = "MIT OR Apache-2.0"
+version = "0.2.1"
+edition = "2021"
+description = "Store pin and other HAL configurations for your embedded project in a TOML file."
+repository = "https://github.com/variegated-coffee/variegated-board-cfg"
+readme = "../README.md"
+
+[dependencies]
+Inflector = "0.11.4"
+proc-macro2 = "1.0.78"
+quote = "1.0.35"
+syn = { version = "2.0.48", features = ["full"] }
+toml = "0.8.19"
+serde = { version = "1.0.210", features = ["derive"] }
+either = "1.13.0"
+
+[lib]
+proc-macro = true

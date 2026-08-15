@@ -1,0 +1,9 @@
+[resources1]
+u1 = "UART1"
+t0 = 255
+p2 = "PIN_2"
+
+[resources2]
+p0 = "peripherals::PIN_0"
+p1 = "PIN_1"
+u0 = "UART0"
