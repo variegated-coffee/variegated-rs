@@ -520,7 +520,29 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             //let mut buf = [0u8; 1024];
             let mut buf = [0u8; 8];
             loop {
-                let res = uart_rx.read(&mut buf).await;
+                // The result used to be bound and dropped. `read` either fills `buf`
+                // completely or fails -- its signature is `Result<(), Error>`, not a byte
+                // count -- so on failure what is sitting in the buffer is whatever the
+                // aborted transfer left there, and the old code fed exactly that to a COBS
+                // accumulator that may be mid-frame. A UART error therefore corrupted the
+                // *next* message as well as losing its own, and did it silently: overrun,
+                // framing, parity and break all arrived with no log line and no counter.
+                //
+                // Reported on the same edge latch as the decode errors below, and with the
+                // same event. `OverFull` already shares that latch on the grounds that both
+                // mean "a message arrived on this link and we could not read it", which
+                // describes a UART error exactly; and these arrive in bursts from the same
+                // causes, so per-occurrence reporting would turn the 16-slot ring over on
+                // its own. A distinct `DebugEvent` variant would say it better, but that is
+                // a wire-format change and this is a warnings pass.
+                if let Err(e) = uart_rx.read(&mut buf).await {
+                    if link_healthy {
+                        link_healthy = false;
+                        error!("UART read error on the ESP32 link: {:?}", e);
+                        bus::emit_event(DebugEvent::LinkDecodeError);
+                    }
+                    continue;
+                }
 
                 let mut window = &buf[..];
 
