@@ -30,7 +30,7 @@
 //! # Consumers
 //!
 //! Exactly one per firmware: the local transport (USB CDC on the application
-//! processor, and Task 11's TCP server on the comms processor).
+//! processor, the TCP server on the comms processor).
 //!
 //! **A second concurrent [`wait`] is worse than a lost wakeup -- it is a busy-loop.**
 //! `Signal` holds a single waker, and `poll_wait` on a waker that does not match the

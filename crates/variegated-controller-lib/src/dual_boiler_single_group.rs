@@ -452,16 +452,13 @@ pub struct DualBoilerSingleGroupController<
     // Configuration and storage
     configuration_store: &'static Mutex<StorageM, SettingsStoreT>,
     configuration: DualBoilerSingleGroupConfiguration,
-//    persistent_configuration: DualBoilerSingleGroupPersistentConfiguration,
-//    ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration,
     machine_config: MachineConfiguration,
     tank_config: TankConfiguration,
-    // `group_config` and `water_tap_config` used to sit here, cloned out of the default
-    // persistent configuration at construction and then never read. The live values live in
+    // No `group_config` or `water_tap_config` field. The live values are in
     // `self.configuration` and reach the rest of the system through
-    // `insert_group_configuration` / `insert_water_tap_configuration`; these were snapshots
-    // frozen at boot. Removed rather than kept, because a stale copy of a configuration is
-    // worse than no copy -- it reads like the real thing.
+    // `insert_group_configuration` / `insert_water_tap_configuration`. A copy cloned out at
+    // construction would be a snapshot frozen at boot, and a stale copy of a configuration
+    // is worse than no copy -- it reads like the real thing.
     brew_boiler_config: BoilerConfiguration,
     steam_boiler_config: BoilerConfiguration,
 
@@ -1095,10 +1092,9 @@ impl<
 
             self.send_status(brew_boiler_output, steam_boiler_output, pump_output).await;
 
-            // The 1 Hz `Status: {:?}` dump that used to live here is gone: status
-            // now travels verbatim as `DebugPayload::Status`, also at 1 Hz, so the
-            // text form carried nothing the structured payload does not -- and it
-            // truncated to 96 characters on the bus, so it did not even carry that.
+            // No text dump of the status here: it travels verbatim as
+            // `DebugPayload::Status` at 1 Hz, and a formatted copy would only truncate
+            // to 96 characters on the bus.
             let now = Instant::now();
 
             // Publish configuration every 10 seconds regardless of changes
@@ -1386,14 +1382,11 @@ impl<
             GroupBrewControlMode::FixedDutyCycle => {
                 let duty_cycle = self.apply_pump_configuration_limits(control_state.values.duty_cycle, false);
                 self.group.set_brewing_state(true, duty_cycle).await;
-                //info!("Fixed duty cycle target: {}", duty_cycle);
                 Output::FixedDutyCycle(duty_cycle)
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
                 let target_duty_cycle = control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
                 let duty_cycle = self.apply_pump_configuration_limits(target_duty_cycle, false);
-                //info!("Fixed duty cycle curve target: {}", duty_cycle);
-                //info!("Curve start: {:?} elapsed time: {} seconds", self.curve_start_time, elapsed_seconds);
                 self.group.set_brewing_state(true, duty_cycle).await;
                 Output::FixedDutyCycle(duty_cycle)
             }

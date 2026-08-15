@@ -107,7 +107,6 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                         raw_value.externally_referenced_voltage(0.0, v)
                     }
                     MeasurementType::RatiometricLowSide(_, _, _, _, _, _, _, ref_r) => {
-                        //info!("ADS124S08 Measurement: {} ohms", raw_value.ratiometric_resistance(ref_r));
 
                         raw_value.ratiometric_resistance(ref_r)
                     }

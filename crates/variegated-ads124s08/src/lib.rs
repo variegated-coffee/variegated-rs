@@ -375,7 +375,6 @@ impl<SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs> ADS124S08<SpiDe
         config = self.swap_all_configuration_registers(config).await?;
 
         self.start_conversion().await?;
-//        let res = self.read_n_sample_average(10).await;
         let res = self.start_wait_for_drdy_read_and_stop().await;
 
         self.swap_all_configuration_registers(config).await?;

@@ -145,7 +145,6 @@ impl<'a, M: RawMutex, const N: usize> Boiler<'a, M, N> {
     }
 
     pub async fn set_heating_element_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType) {
-        //info!("Setting heating element duty cycle to {}%", duty_cycle_percent);
 
         self.heating_element.set_duty_cycle(duty_cycle_percent).await;
     }

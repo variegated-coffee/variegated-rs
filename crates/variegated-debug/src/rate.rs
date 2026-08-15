@@ -4,7 +4,7 @@
 //! two cases this has to tell apart are **burst** and **sustained**, and a fixed
 //! window cannot express the difference. This module *was* a fixed window, and it
 //! reintroduced -- one layer below -- the exact defect `crate::suppress` was
-//! rewritten to fix in Task 16: 300 bytes per 100 ms bounded the sustained rate
+//! rewritten to fix: 300 bytes per 100 ms bounded the sustained rate
 //! correctly while admitting only 12 of the boot log's ~21 distinct lines. That is
 //! information destroyed, not repetition collapsed, and it also threw away the
 //! suppressor's own 32-token burst capacity, which was sized specifically to let
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn the_sustained_bound_survives_the_burst_capacity() {
-        // The pairing Task 16 learned it takes: a burst test alone cannot tell a
+        // Half of a necessary pairing: a burst test alone cannot tell a
         // generous bucket from an unbounded one. Drive far past the budget for ten
         // seconds and confirm throughput settles at the refill rate plus the
         // one-time capacity, not at the offered rate.

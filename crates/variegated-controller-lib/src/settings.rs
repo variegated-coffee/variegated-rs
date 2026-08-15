@@ -208,14 +208,9 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
             Cache::new_uncached(),
         );
 
-//        let mut serialization_buffer = [0u8; 1024];
         let mut data_buffer = vec![0u8; 40*1024];
 
         log_info!("Setting settings");
-
-  //      let s = to_slice(settings, &mut serialization_buffer).map_err(|_| "Serialization failed")?;
-
-    //    info!("Storing settings to flash, actual len = {}", s.len());
 
         storage.store_item(
             &mut data_buffer,

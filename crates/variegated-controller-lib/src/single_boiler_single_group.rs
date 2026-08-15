@@ -1429,10 +1429,9 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
 
-                    // The duty cycle the pump is actually running at. This used to read
-                    // `values.duty_cycle`, which is the FixedDutyCycle *target* -- correct
-                    // only when transferring out of duty-cycle mode, and otherwise whatever
-                    // was last dialled into that screen.
+                    // The duty cycle the pump is actually running at, not the
+                    // `FixedDutyCycle` target -- see `last_commanded_duty` for why those
+                    // are not interchangeable.
                     let current_duty_cycle = self.pump_pid_engagement.last_commanded_duty();
                     let current_pressure = self.group.get_pressure().unwrap_or(0.0);
 
@@ -1452,10 +1451,9 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
 
-                    // The duty cycle the pump is actually running at. This used to read
-                    // `values.duty_cycle`, which is the FixedDutyCycle *target* -- correct
-                    // only when transferring out of duty-cycle mode, and otherwise whatever
-                    // was last dialled into that screen.
+                    // The duty cycle the pump is actually running at, not the
+                    // `FixedDutyCycle` target -- see `last_commanded_duty` for why those
+                    // are not interchangeable.
                     let current_duty_cycle = self.pump_pid_engagement.last_commanded_duty();
                     let current_flow_rate = self.group.get_input_flow_rate().unwrap_or(0.0);
 
@@ -1475,10 +1473,9 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
 
-                    // The duty cycle the pump is actually running at. This used to read
-                    // `values.duty_cycle`, which is the FixedDutyCycle *target* -- correct
-                    // only when transferring out of duty-cycle mode, and otherwise whatever
-                    // was last dialled into that screen.
+                    // The duty cycle the pump is actually running at, not the
+                    // `FixedDutyCycle` target -- see `last_commanded_duty` for why those
+                    // are not interchangeable.
                     let current_duty_cycle = self.pump_pid_engagement.last_commanded_duty();
                     let current_output_flow_rate = self.group.get_output_flow_rate().unwrap_or(0.0);
 
@@ -1867,7 +1864,6 @@ impl<
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
         if self.current_routine.is_some() {
-            //warn!("Cannot run routine, already executing a routine");
             return;
         }
 

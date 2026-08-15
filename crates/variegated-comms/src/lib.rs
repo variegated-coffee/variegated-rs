@@ -517,7 +517,6 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             // after a message that decoded -- says the same thing without the flood.
             let mut link_healthy = true;
 
-            //let mut buf = [0u8; 1024];
             let mut buf = [0u8; 8];
             loop {
                 // The result used to be bound and dropped. `read` either fills `buf`
@@ -588,7 +587,6 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
                             let message = data;
 
-                            //info!("Received message, {:?}", message);
 
                             match message {
                                 CommsProcessorToApplicationProcessorMessage::CommsStatus(status) => {
@@ -599,12 +597,11 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         // than "it is 1970". Ignore those instead of dragging
                                         // our clock back to the epoch.
                                         //
-                                        // This also used to compute
-                                        // `now_unix - Instant::now().as_secs()` into a discarded
-                                        // binding, which panicked on underflow whenever the comms
-                                        // processor rebooted (reflash, brownout, watchdog) while
-                                        // this processor kept running -- its uptime then exceeds
-                                        // the freshly-booted RTC. The value was never used.
+                                        // Do not subtract `Instant::now().as_secs()` from
+                                        // `now_unix`: whenever the comms processor reboots
+                                        // (reflash, brownout, watchdog) while this one keeps
+                                        // running, this processor's uptime exceeds the
+                                        // freshly-booted RTC and the subtraction underflows.
                                         //
                                         // The `defmt` calls stay alongside the typed
                                         // events throughout this file, by design: the
@@ -898,7 +895,6 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     );
                                 }
                                 CommsProcessorToApplicationProcessorMessage::ExternalPeripheralSensorReading(reading) => {
-                                    //info!("External peripheral sensor reading: {:?}", reading);
                                     if let Some(dispatcher) = external_sensor_dispatcher {
                                         dispatcher.dispatch_reading(&reading);
                                     }

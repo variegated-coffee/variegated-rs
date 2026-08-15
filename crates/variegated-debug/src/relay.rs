@@ -21,7 +21,7 @@ use variegated_controller_types::debug::DebugPayload;
 /// the link cost of the machine's largest message -- 1722 bytes COBS-encoded in the
 /// worst case, several hundred in the ordinary one, once a second -- for no new
 /// information. On `variegated-silvia-firmware`'s 115 200 baud link that alone would exceed the
-/// entire debug budget. Task 11's TCP server injects the comms processor's own copy
+/// entire debug budget. The comms processor's TCP server injects that processor's own copy
 /// into the debug stream instead, so a TCP client still sees machine state; it just
 /// does not cross the link twice.
 ///
@@ -71,9 +71,8 @@ mod tests {
     /// Everything the application processor puts on the bus, one of each.
     fn every_other_payload() -> std::vec::Vec<DebugPayload> {
         // Capacity named rather than spelled: these are `DebugPayload`'s own sample
-        // vectors, so the literal has to track `MAX_SAMPLES`. It did not -- the 16 -> 24
-        // bump that became debug wire 0x85 left these two at 16, and this suite has not
-        // compiled since.
+        // vectors, so a literal here would have to be kept in step with `MAX_SAMPLES`
+        // by hand, and a bump to it would break this suite rather than these vectors.
         let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
         for i in 0..4u64 {
             let _ = samples.push(i * 1_000_000);
@@ -162,9 +161,8 @@ mod tests {
         }
 
         // Capacity named rather than spelled: these are `DebugPayload`'s own sample
-        // vectors, so the literal has to track `MAX_SAMPLES`. It did not -- the 16 -> 24
-        // bump that became debug wire 0x85 left these two at 16, and this suite has not
-        // compiled since.
+        // vectors, so a literal here would have to be kept in step with `MAX_SAMPLES`
+        // by hand, and a bump to it would break this suite rather than these vectors.
         let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
         // Four counters and four indicators in the GS3 firmware, at values large enough
         // that postcard's varints are not artificially short.
@@ -221,8 +219,8 @@ mod tests {
             "steady-state relay traffic {per_second} B/s exceeds the {DEBUG_RELAY_BYTES_PER_SEC} B/s budget"
         );
 
-        // The same traffic has to fit `variegated-silvia-firmware`'s much slower link too, since
-        // Task 14 gives that example the sampler and the log bridge. It is the
+        // The same traffic has to fit `variegated-silvia-firmware`'s much slower link too,
+        // since that firmware also carries the sampler and the log bridge. It is the
         // binding case and it is the one nobody would think to check.
         let slow_budget = bytes_per_sec_for_baud(SLOW_BAUD) as usize;
         std::println!("  against the 115200-baud link: {per_second} B/s of {slow_budget} B/s");
@@ -257,24 +255,23 @@ mod tests {
     /// This is what [`BURST_BYTES`] is sized against, and it is the test that failed
     /// before the fixed window became a bucket: at 300 bytes per 100 ms only 12 of
     /// the 21 lines got through on the fast link, which is information destroyed
-    /// rather than repetition collapsed. `crate::suppress` learned exactly this in
-    /// Task 16 and gave its own cap burst capacity for the same reason -- the relay
-    /// then re-throttled the very lines that capacity existed to pass.
+    /// rather than repetition collapsed. `crate::suppress` gives its own cap burst
+    /// capacity for exactly this reason, and a fixed window here re-throttles the very
+    /// lines that capacity exists to pass.
     ///
     /// Every line is measured at the maximum `TEXT_LEN` width, which is the worst
     /// case rather than the typical one, and the slow link is included because it
     /// refills only ~170 bytes across the whole burst -- nearly all of it has to come
     /// out of capacity there.
     ///
-    /// Paired with `rate::the_sustained_bound_survives_the_burst_capacity`. Task 16's
-    /// closing lesson was that neither test suffices alone: a burst test cannot tell
-    /// a generous bucket from an unbounded one, and a sustained test cannot tell a
-    /// bucket from a fixed window.
+    /// Paired with `rate::the_sustained_bound_survives_the_burst_capacity`, because
+    /// neither test suffices alone: a burst test cannot tell a generous bucket from an
+    /// unbounded one, and a sustained test cannot tell a bucket from a fixed window.
     #[test]
     fn the_boot_burst_crosses_both_links() {
         use variegated_controller_types::ApplicationProcessorToCommsProcessorMessage as Msg;
 
-        // `suppress::BOOT_BURST_LINES`, spaced the 15 ms apart Task 16 measured.
+        // `suppress::BOOT_BURST_LINES`, at the measured 15 ms spacing.
         const LINES: u32 = 21;
         const SPACING_MS: u64 = 15;
 

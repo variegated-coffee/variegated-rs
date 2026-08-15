@@ -2,11 +2,10 @@ use std::env;
 
 /// Point the macro at this crate's `board-cfg.toml`.
 ///
-/// This build script is new as of the move into the variegated-rs workspace, and it is
-/// required rather than tidy. `get_cfg_path()` reads `BOARD_CFG_PATH` and, failing that,
+/// Required rather than tidy. `get_cfg_path()` reads `BOARD_CFG_PATH` and, failing that,
 /// falls back to `find_root_path()`, which walks rustc's `--out-dir` upwards to the
-/// first component named `target` and pops one more. Standalone, that landed on the
-/// crate root, where `board-cfg.toml` sits. As a workspace member the out-dir is
+/// first component named `target` and pops one more. For a standalone crate that lands on
+/// the crate root, where `board-cfg.toml` sits; for a workspace member the out-dir is
 /// `variegated-rs/target/...`, so the fallback resolves to the workspace root instead
 /// and the macro panics with "Board config for field ... missing".
 ///

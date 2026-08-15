@@ -70,9 +70,6 @@ pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: 
     // on either -- but dropping them would stop the state machine and free the channel for
     // something else to claim while it is still transferring into `counter_ptr`. An
     // `#[allow]` rather than a deletion, because deletion is a hardware change.
-    //
-    // `pio_num` and `sm_num` used to sit here too. Those were genuinely dead: they are read
-    // during construction to pick the counter and wrap-count slots, and never again.
     #[allow(dead_code)]
     sm: StateMachine<'d, P, SM>,
     irq: Irq<'d, P, IRQ>,

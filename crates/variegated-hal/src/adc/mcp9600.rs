@@ -49,7 +49,6 @@ impl<'a, M: RawMutex, I2cDevT: I2c, const N: usize> WithTask for Mcp9600Sensor<'
                     };
 
                     self.signal.send(sensor_reading);
-                    //defmt::info!("Read value: {}", transformed_val);
                 } else {
                     log_error!("Failed to read value from MCP9600: {:?}", res);
                 }

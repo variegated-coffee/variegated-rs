@@ -83,13 +83,6 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
                 embassy_futures::select::Either::First(_) => {
                     // GPIO edge detected - increment pulse count
                     self.total_pulses += 1;
-
-                    // The 100 ms window counter that used to live here existed only
-                    // to feed a "high pulse rate detected" log line. That was a flow
-                    // rate, which reaches the host as `GroupStatus::input_flow_rate`,
-                    // and it fired every 100 ms for the whole of any brew. Counter
-                    // and line both removed; `total_pulses` below is what the
-                    // measurement actually uses.
                 }
                 embassy_futures::select::Either::Second(_) => {
                     // Timeout - time to do measurement and reporting

@@ -4,7 +4,6 @@ use num_traits::{float::FloatCore};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-// #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Display, Default)]
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum PidError {
     LimitOutBound,

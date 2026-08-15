@@ -131,8 +131,8 @@ fn command_dropped_reason(total: u32) -> Name {
 /// Record a command that could not be handed to whoever executes it, and say whether
 /// this one should be reported.
 ///
-/// **Always counts; reports only on an edge.** The tension is real and was recorded
-/// during Task 12: an event per drop lets an unauthenticated TCP peer turn a command
+/// **Always counts; reports only on an edge.** The tension is real: an event per drop
+/// lets an unauthenticated TCP peer turn a command
 /// flood into a frame flood on a 16-slot bus, evicting the very frames an operator
 /// needs to see what is happening. A counter cannot be flooded and an edge-triggered
 /// event cannot be repeated, so this does both and neither can be used against the
@@ -333,8 +333,8 @@ mod tests {
     /// away, and nothing calls [`note_dropped`] on that path. So `frames_emitted` in
     /// a snapshot counts frames that were never deliverable, `frames_dropped` stays
     /// at zero, and the difference between them cannot reveal a subscriberless
-    /// publish. Whether that is worth changing is Task 9's accounting to decide;
-    /// this test only makes sure nobody changes it without noticing.
+    /// publish. Whether that is worth changing is an open question; this test only
+    /// makes sure nobody changes it without noticing.
     #[test]
     fn a_discarded_frame_is_still_counted_as_emitted() {
         let _serialised = COUNTER_DELTA_LOCK.lock();

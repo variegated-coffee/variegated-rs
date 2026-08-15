@@ -18,15 +18,15 @@
 //! processor re-encodes it with its *own* version when it serves it over TCP.
 //!
 //! That matters because the corroborating version watch in the codec keys its
-//! mismatch run per link, and Task 18 recorded a worry that one link carrying two
-//! processors would break that: a healthy processor's good frames would clear a
-//! stale processor's mismatch run and no banner would ever appear. It does not
-//! happen on this path. Every frame on the TCP link -- relayed or locally produced
-//! -- is stamped by one encoder with one version, so a link still carries exactly
-//! one version and per-link keying stays correct.
+//! mismatch run per link, and one link carrying two processors would break that: a
+//! healthy processor's good frames would clear a stale processor's mismatch run and
+//! no banner would ever appear. It does not happen on this path. Every frame on the
+//! TCP link -- relayed or locally produced -- is stamped by one encoder with one
+//! version, so a link still carries exactly one version and per-link keying stays
+//! correct.
 //!
 //! **The hazard does not vanish, though: it moves, to a layer with less detection
-//! than it had before. Task 11 must not read the paragraph above as "solved".**
+//! than it had before. Do not read the paragraph above as "solved".**
 //!
 //! Three consequences, and they are the reason this section is long:
 //!
@@ -36,7 +36,7 @@
 //!    *shape*. The comms processor postcard-decodes `Debug(DebugFrame)` with its own
 //!    types, gets a deserialize error, and drops it. From the host's seat:
 //!    application frames simply stop arriving while comms frames keep coming, with no
-//!    banner and no counter — that is Task 18's scenario with the diagnostic removed
+//!    banner and no counter — the mixed-source scenario with the diagnostic removed
 //!    rather than relocated. Worse, this side counts those frames as *relayed*,
 //!    because they were handed to the TX queue successfully, so
 //!    `link_frames_relayed` keeps climbing and `link_frames_dropped` stays at zero.
@@ -47,11 +47,12 @@
 //!    cannot verify, so `VersionVerdict::Healthy` on a TCP link says nothing about
 //!    the application processor. That is a real regression against the USB path,
 //!    which carries the application processor's own attestation for the same frames.
-//!    Task 11 must not present relayed frames to a host as version-verified.
+//!    A relayed frame must never be presented to a host as version-verified.
 //!
 //! 3. **The detector belongs on the comms side**, because that is the only party that
-//!    can tell a relayed frame from a local one. It cannot be built here, and there
-//!    is no debug bus on that processor until Task 9. Recorded as work for Task 9/10.
+//!    can tell a relayed frame from a local one. It cannot be built here.
+//!    TODO: build it there; nothing detects a version-skewed application processor
+//!    on the TCP path today.
 //!
 //! The neighbouring exposure is older than this relay and belongs to a different
 //! protocol: an application processor and a comms processor built from different

@@ -721,7 +721,6 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
 
     async fn load_from_flash(&mut self) -> Result<(), &'static str> {
         if self.cache_initialized {
-            //info!("Cache already initialized, skipping load");
             return Ok(());
         }
 
@@ -799,7 +798,6 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
-        //info!("Adding new routine");
         self.load_from_flash().await?;
 
         // Find first available Custom index
@@ -857,7 +855,6 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
-        //info!("Updating routine at index {:?}", index);
 
         // Prevent updating Internal routines (they are read-only)
         if matches!(index, RoutineIndex::Internal(_)) {
@@ -875,7 +872,6 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn iterate_routines(&mut self) -> impl Iterator<Item = &Routine> {
-        //info!("Iterating over all routines");
         let res = self.load_from_flash().await;
         if res.is_err() {
             log_info!("Error loading routines from flash: {:?}", res.err());
@@ -885,7 +881,6 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn iterate_routines_with_indices(&mut self) -> impl Iterator<Item = (RoutineIndex, &Routine)> {
-        //info!("Iterating over all routines with indices");
         let res = self.load_from_flash().await;
         if res.is_err() {
             log_info!("Error loading routines from flash: {:?}", res.err());
@@ -897,7 +892,6 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn get_routine_count(&mut self) -> usize {
-        //info!("Getting routine count");
         if let Err(e) = self.load_from_flash().await {
             log_info!("Error loading routines from flash: {:?}", e);
             return 0;

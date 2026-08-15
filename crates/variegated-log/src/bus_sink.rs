@@ -47,10 +47,8 @@ use variegated_debug::suppress::{Admission, Suppressor};
 ///
 /// The policy and its constants live in `variegated_debug::suppress`, which is
 /// host-testable; this crate sets `test = false`, so nothing here can be exercised
-/// off-target regardless. (The `embassy-rp` dependency that used to make that
-/// unavoidable is optional now -- the ESP32-C6 firmware depends on this crate with
-/// no chip feature at all -- but the reason still stands.) Keeping the decision
-/// logic there means it is covered by real unit tests rather than by inspection.
+/// off-target. Keeping the decision logic there means it is covered by real unit tests
+/// rather than by inspection.
 static SUPPRESSOR: Suppressor = Suppressor::new();
 
 /// A `core::fmt::Write` adapter that truncates rather than failing.

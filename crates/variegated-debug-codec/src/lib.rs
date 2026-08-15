@@ -668,7 +668,7 @@ pub type CommandDecoder = Decoder<DebugCommand, MAX_FRAME, COMMAND_CORROBORATION
 mod tests {
     use super::*;
     // This crate is `#![no_std]`, but the test harness links std anyway -- see the
-    // `extern crate std` in lib.rs (Step 8).
+    // `extern crate std` in lib.rs.
     use std::boxed::Box;
     use std::vec;
     use std::vec::Vec;
@@ -781,7 +781,7 @@ mod tests {
         assert_eq!(decoder.version_mismatches, 0);
     }
 
-    /// The failure this task exists for. A frame from a device built one bump ahead
+    /// The failure the version byte exists for. A frame from a device built one bump ahead
     /// must be **refused**, not deserialised into whatever the current layout makes
     /// of its bytes -- and refused with a diagnosis the host can act on, not folded
     /// into the generic framing-error count where it reads as line noise.
@@ -1206,7 +1206,7 @@ mod tests {
         (frames, runs)
     }
 
-    /// The whole point of Task 19: a panic backtrace written straight onto the wire
+    /// The whole point of the text/frame split: a panic backtrace written straight onto the wire
     /// reaches the consumer instead of being counted as line noise and binned.
     ///
     /// The leading and trailing `0x00` are what the firmware's panic handler writes
@@ -1283,8 +1283,8 @@ mod tests {
     /// The two must land in different buckets. The half-frame is a framing error, on
     /// the nose, because that is what it is; the panic text is text. Getting this
     /// wrong in either direction is the failure mode: a half-frame shown as text is a
-    /// fabricated log line, and a backtrace counted as a framing error is the bug
-    /// this task exists to fix.
+    /// fabricated log line, and a backtrace counted as a framing error is a panic
+    /// report silently binned.
     #[test]
     fn a_half_frame_followed_by_panic_text_splits_into_corruption_and_text() {
         let good = frame(7, DebugPayload::Status(Box::new(Status::new())));
@@ -1438,8 +1438,8 @@ mod tests {
         assert_eq!(decoder.decode_errors, 0);
     }
 
-    /// The resynchronisation property Task 18 verified, restated with text in the
-    /// middle: text between two frames must cost neither of them.
+    /// The resynchronisation property of `resynchronises_after_garbage`, restated with
+    /// text in the middle: text between two frames must cost neither of them.
     #[test]
     fn text_between_two_frames_costs_neither_of_them() {
         let a = frame(1, DebugPayload::Event(DebugEvent::Boot));

@@ -472,7 +472,6 @@ where
 
         for _ in 0..33 {
             let m = self.measure_channel(channel, capdac).await?;
-            //info!("Measured raw value: {}, CAPDAC: {}", i32::from(m.clone()), capdac);
             if m < i24::max_value() && m > i24::min_value() {
                 return Ok(SuccessfulMeasurement::MeasurementInRange(MeasuredCapacitance::new(m, capdac)));
             }

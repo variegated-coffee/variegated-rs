@@ -55,12 +55,8 @@ pub mod sd_card;
 pub mod shot_log_storage;
 // The exFAT formatter lives in `variegated-exfat-format`, not here. It is pure logic over
 // a block device, and writing a filesystem from scratch without being able to check it
-// against a real implementation is not worth doing -- so it wanted host tests.
-//
-// That used to be impossible here, because this crate depended on `embassy-rp`
-// unconditionally. It no longer does; the formatter stays in its own crate anyway,
-// because it is a filesystem rather than an espresso machine and nothing else here
-// depends on it.
+// against a real implementation is not worth doing -- so it wants host tests. It is also a
+// filesystem rather than an espresso machine, and nothing else here depends on it.
 #[cfg(feature = "sd-card-storage")]
 pub use variegated_exfat_format as exfat_format;
 
