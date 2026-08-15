@@ -7,8 +7,13 @@
 //! one copy is the point -- two lists of the same twelve pins would drift, and the
 //! failure would be a display that half works or a line left floating.
 
+// Only `park_low` needs these, and it is gated to the no-LCD build. The pin map below is
+// needed either way and pulls in nothing.
+#[cfg(not(feature = "character-display"))]
 use embedded_hal_async::delay::DelayNs;
+#[cfg(not(feature = "character-display"))]
 use embedded_hal_async::i2c::I2c as AsyncI2c;
+#[cfg(not(feature = "character-display"))]
 use variegated_mcp23017::{Error, Mcp23017, PinDirection};
 
 /// HD44780 control and data pins on the LCD MCP23017 (I2C address 0x21).
@@ -62,6 +67,10 @@ pub mod pins {
 /// already holds zero and the pin never briefly drives a stale value. Doing it the other
 /// way round would flip the direction first and drive whatever the latch happened to
 /// contain.
+/// Gated to match its only caller. With `character-display` on, the driver owns these
+/// lines and parking them would be wrong; compiling this function anyway just makes it
+/// dead code in that build.
+#[cfg(not(feature = "character-display"))]
 pub async fn park_low<I2C, D>(mcp: &mut Mcp23017<I2C, D>) -> Result<(), Error<I2C::Error>>
 where
     I2C: AsyncI2c,

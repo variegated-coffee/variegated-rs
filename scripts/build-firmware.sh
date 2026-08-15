@@ -2,21 +2,21 @@
 # Build the firmware configurations that gate this branch and report the warning/error
 # counts for each. Compare two runs with `scripts/compare-warnings.sh`.
 #
-# Baselines as of the 2026-08-15 crate split: gs3 191, gs3+pwm-steam-valve 189, silvia 160,
-# gs3+optional-peripherals 196, 0 errors throughout.
+# Baselines as of 2026-08-15: gs3 121, gs3+pwm-steam-valve 121, silvia 100,
+# gs3+optional-peripherals 121, 0 errors throughout.
 #
-# Two things moved these off the 192/190/179/197 of the run immediately before the split,
-# and neither is a code change:
+# **Every one of those is a dependency's.** Both firmware bins emit zero warnings of their
+# own in every configuration built here, and per CLAUDE.md that is the definition of done,
+# not an achievement to be spent. If a total below rises, find out whose it is before
+# touching this header: `scripts/warning-report.py` reports a crate's own count, which is
+# the one that must stay at zero. A dependency upgrade moving these numbers is ordinary; a
+# firmware contributing to them is a regression.
 #
-#   * -1 everywhere: `profiles for the non root package will be ignored`. The two firmwares'
-#     `[profile.dev]`/`[profile.release]` blocks were inert (only the workspace root's
-#     count) and were dropped rather than carried into two new manifests.
-#   * -18 on silvia alone: dependencies that machine does not use are no longer compiled
-#     for it (`ds3231`, `variegated-mcp23017`, `variegated-tlc59108` and friends), so their
-#     warnings are no longer in its log.
-#
-# The counts that matter -- the firmware bins' own -- did not move through any of it:
-# 69, 67, 59, 74 before the split, after the split, and after the pruning.
+# For reference, the totals came down in three steps, only the last of which was code:
+# 192/190/179/197 before the two firmwares moved out of the `examples` package, then -1
+# everywhere for the inert `[profile.*]` blocks that went with the split, then -18 on silvia
+# for dependencies it never used, and finally -70/-60 as the firmwares' own 69/67/59/74
+# went to zero.
 #
 # (The numbers this header carried before that -- 83/81/71, from Task 16 -- had gone stale
 # long beforehand and were not re-measured when they drifted. Re-measure and update these

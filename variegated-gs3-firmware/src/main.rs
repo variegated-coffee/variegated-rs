@@ -2,27 +2,23 @@
 #![no_main]
 
 use crate::alloc::string::ToString;
-use num_traits::float::FloatCore;
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::{format, vec};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::pin::Pin;
-use chrono::{FixedOffset, NaiveDateTime};
+use chrono::FixedOffset;
 use defmt::unwrap;
 use variegated_log::{log_error, log_info, log_warn};
 use heapless::index_map::FnvIndexMap;
 
-#[cfg(feature = "tft-display")]
-use display_interface_spi::SPIInterface;
 use ds3231::{Config, InterruptControl, Oscillator, SquareWaveFrequency, TimeRepresentation, DS3231};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{SPI0, SPI1};
-use embassy_rp::{adc, dma, i2c, pio, pwm, spi, uart, usb, watchdog, Peri, Peripherals};
+use embassy_rp::{adc, dma, i2c, pio, pwm, spi, uart, usb, watchdog, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::LlffHeap as Heap;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
@@ -32,49 +28,37 @@ use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
 use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank, SensorReading};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embassy_futures::join::{join, join3, join4, join5, join_array};
-use embassy_futures::select::Either::{First, Second};
-use embassy_futures::select::select;
 use embassy_futures::select::{select4, Either4};
-use embassy_rp::adc::{Adc, Channel as AdcChannel};
-use embassy_rp::pwm::InputMode;
 use embassy_rp::uart::Uart;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
 use embassy_time::{Delay, Duration, Instant, Timer};
-use rotary_encoder_hal::Rotary;
-use variegated_adc_tools::{ConversionParameters, ResistorDividerPosition};
+use variegated_adc_tools::ConversionParameters;
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
-use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
-use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
+use variegated_hal::adc::ads124s08::MeasurementType::{RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::{DualBoilerBrewMechanism, DualBoilerWaterTapMechanism, DualBoilerMechanism, DualBoilerConfig, DualBoilerFillMechanism};
 use variegated_timekeeping::TimeKeeper;
 use embassy_rp::bind_interrupts;
-use embassy_rp::i2c::I2c;
 use embassy_rp::multicore::{spawn_core1, Stack};
 use embassy_rp::pio::Pio;
-use embassy_rp::qmi_cs1::QmiCs1;
-use embassy_sync::priority_channel::Min;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
-use embedded_hal::pwm::SetDutyCycle;
 use futures::future::join_all;
 
-#[cfg(feature = "tft-display")]
-use variegated_nv3007::{prelude::*, displays::nv3007::Nv3007_168_428};
-
-use postcard::{to_allocvec, to_allocvec_cobs};
-use serde::Serialize;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, Configuration, DutyCycleType, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupConfiguration, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PidParameters, PidTerm, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TankConfiguration, TemperatureType, WaterLevelType, WaterTapConfiguration, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, ScheduleItem, ScheduleTrigger, WeightType, SteamWandDefinition, ShotLog};
+use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog};
+// Only the PWM steam valve build declares a steam wand or drives a solenoid through one.
+// These stay on their own `use` lines rather than joining the lists above precisely so the
+// cfg can be attached -- a name folded into an ungated list becomes an unused import in a
+// default build, and `cargo fix` deletes it and breaks `--features=pwm-steam-valve`.
+#[cfg(feature = "pwm-steam-valve")]
+use variegated_controller_types::SteamWandDefinition;
+#[cfg(feature = "pwm-steam-valve")]
+use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
 use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
-use variegated_hal::gpio::gpio_command_sender::GpioCommandSender;
-use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
-use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
-use variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump;
 use variegated_hal::gpio::coordinated_dual_heating_element::{CoordinatedDualHeatingElementControl, CoordinatedDualHeatingElementDevice};
 use variegated_mcp23017::{Mcp23017, Mcp23017Config};
 use w25q32jv::W25q32jv;
@@ -121,14 +105,11 @@ use backlight_controller::{backlight_task, BacklightPeripherals};
 use ads_measurement_coordinator::Ads124S08MeasurementCoordinator;
 use variegated_hal::SyncSendRawMutex;
 use variegated_controller_lib::dual_boiler_single_group::{DualBoilerSingleGroupController, DualBoilerSingleGroupPersistentConfiguration};
-use variegated_controller_lib::routine::{create_backflush_routine, create_heatup_routine, create_shot_routine, create_volumetric_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository, SequentialStorageRoutineRepository};
-use variegated_controller_lib::settings::{key, SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
+use variegated_controller_lib::routine::{create_backflush_routine, RoutineRepository, SequentialStorageRoutineRepository};
+use variegated_controller_lib::settings::{SequentialStorageSettingsStorage, SettingsStorage};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_fdc1004::Channel::{CIN3, CIN4};
 use variegated_hal::cap_adc::fdc1004::Fdc1004Sensor;
-use variegated_hal::gpio::gpio_binary_pump::GpioBinaryPump;
-use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use variegated_hal::noop::NoopOutputPin;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
@@ -145,15 +126,14 @@ use variegated_tlc59108::{GroupMode, IrefConfig, Tlc59108Config};
 use variegated_tlc59108::LedState;
 use variegated_comms::esp_transceiver_main;
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
-use variegated_controller_lib::schedule::{run_schedule, InMemoryScheduleStore, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
+use variegated_controller_lib::schedule::{run_schedule, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
 #[cfg(feature = "gravity")]
 use variegated_gravity_driver::Gravity;
 use variegated_hal::gpio::gpio_pio_pulse_counter::GpioPioTransformingPulseCounter;
-use variegated_hal::gpio::gpio_pulse_counter::GpioTransformingPulseCounter;
 use variegated_hal::scale::ScaleController;
 #[cfg(feature = "gravity")]
 use variegated_hal::scale::gravity;
-use variegated_instrumentation::{async_task_loop, instrumented_section, PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
+use variegated_instrumentation::{PerformanceCounters, PerformanceIndicators, define_counters, define_indicators};
 // The snapshot payload types are gone from here: building a `DebugStateSnapshot` is now
 // `variegated_debug::snapshot`'s job, and this binary supplies only the three values it
 // alone knows.
@@ -265,7 +245,7 @@ async fn esp_transceiver_task(
     let mut config = uart::Config::default();
     config.baudrate = baudrate;
 
-    let mut uart = Uart::new_with_rtscts(
+    let uart = Uart::new_with_rtscts(
         esp_p.uart,
         esp_p.tx_pin,
         esp_p.rx_pin,
@@ -344,6 +324,12 @@ struct Ads124S08Peripherals {
 struct PumpPeripherals {
     pwm_speed: Peri<'static, ()>,
     pin_speed: Peri<'static, ()>,
+    // PWM_SLICE4 per board-cfg.toml. Claimed but not driven: the tacho is counted through
+    // PIO (`pin_tacho_out` + `dma_tacho`) rather than a PWM slice's input mode, which is
+    // what this was for. Kept rather than deleted because declaring it here is what *takes*
+    // the slice out of `Peripherals` -- removing the field silently hands SLICE4 to whatever
+    // asks next, and that is a resource decision, not a warning fix.
+    #[allow(dead_code)]
     pwm_tacho_out: Peri<'static, ()>,
     pin_tacho_out: Peri<'static, ()>,
     pin_dir: Peri<'static, ()>,
@@ -357,6 +343,10 @@ struct PulseCounterPioPeripherals {
 
 #[variegated_board_cfg::board_cfg("flow_meter_peripherals")]
 struct FlowMeterPeripherals {
+    // PWM_SLICE3 per board-cfg.toml. Claimed but not driven, for the same reason as
+    // `PumpPeripherals::pwm_tacho_out`: the flow meter is pulse-counted through PIO, and
+    // the field is what reserves the slice.
+    #[allow(dead_code)]
     pwm_flow_meter: Peri<'static, ()>,
     pin_flow_meter: Peri<'static, ()>,
     dma: Peri<'static, ()>,
@@ -391,12 +381,6 @@ struct Esp32Peripherals {
 struct SdCardPeripherals {
     pin_cs: Peri<'static, ()>,
     pin_det: Peri<'static, ()>,
-}
-
-#[variegated_board_cfg::board_cfg("potentiometer_peripherals")]
-struct LinearEncoderPeripherals {
-    adc: Peri<'static, ()>,
-    pin_linear_encoder_a: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("settings_flash_peripherals")]
@@ -459,10 +443,6 @@ type GravityMutex = Mutex<NoopRawMutex, Gravity<QwiicI2CDevice>>;
 // Display type aliases (feature-gated)
 #[cfg(feature = "tft-display")]
 type DisplayBus = Mutex<NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>>;
-#[cfg(feature = "tft-display")]
-type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, DisplayPeripheralsSpi, spi::Async>, Output<'static>>, Output<'static>>;
-#[cfg(feature = "tft-display")]
-type Display<'a> = GraphicsMode<'a, Nv3007_168_428, DisplayInterface>;
 
 // Seven consumers exist: TFT display, backlight, LCD, button controller, LED
 // controller, ESP transceiver, and the debug snapshot task. The eighth slot is
@@ -927,7 +907,6 @@ static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<Wate
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
-static PUMP_TACHO_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static PUMP_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 // Shared by both scale implementations -- whichever one is compiled in publishes here
 // and `Group.output_weight_sensor` reads from it, so the controller above never learns
@@ -1597,7 +1576,7 @@ async fn handle_shot_log_query(card: &mut SdStorage, query: ShotLogQuery) -> Sho
 /// This task processes optimize commands without blocking the main control loop
 #[embassy_executor::task]
 async fn storage_task(
-    mut storage_command_receiver: Receiver<'static, SyncSendRawMutex, StorageCommand, 4>,
+    storage_command_receiver: Receiver<'static, SyncSendRawMutex, StorageCommand, 4>,
     routine_repository: &'static Mutex<SyncSendRawMutex, RoutineRepositoryType>,
     schedule_store: &'static Mutex<SyncSendRawMutex, ScheduleStoreType>,
     configuration_store: &'static Mutex<SyncSendRawMutex, SettingsStorageType>,
@@ -1944,7 +1923,7 @@ async fn main_task(
     spi_config.phase = Phase::CaptureOnSecondTransition;
     spi_config.polarity = Polarity::IdleLow;
 
-    let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, Irqs, spi_config);
+    let spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, Irqs, spi_config);
     let spi_bus = INTERNAL_SPI_BUS.init(Mutex::new(spi));
     let spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
@@ -1969,7 +1948,7 @@ async fn main_task(
 
     log_info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
 
-    let mut water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
+    let water = Output::new(mechanism_p.pin_water_dispersal_solenoid, Low);
 
     // Create pump and solenoids for dual boiler mechanism
     #[cfg(not(feature = "gear-pump"))]
@@ -2016,7 +1995,7 @@ async fn main_task(
     #[cfg(feature = "pwm-steam-valve")]
     let steam_wand = variegated_hal::SteamWand::new(Some(steam_solenoid));
     #[cfg(not(feature = "pwm-steam-valve"))]
-    let steam_wand = variegated_hal::SteamWand::new(None);
+    let _steam_wand = variegated_hal::SteamWand::new(None);
 
     let internal_i2c_bus = embassy_rp::i2c::I2c::new_async(internal_i2c_p.i2c, internal_i2c_p.scl_pin, internal_i2c_p.sda_pin, Irqs, i2c::Config::default());
     let internal_i2c_bus = INTERNAL_I2C_BUS.init(Mutex::new(internal_i2c_bus));
@@ -2037,7 +2016,9 @@ async fn main_task(
 
     // Initialize TimeKeeper with timezone
     //TimeKeeper::init(Tz::Europe__Stockholm);
-    TimeKeeper::init(FixedOffset::east(0));
+    // `east_opt` rather than the deprecated `east`: it returns `None` for out-of-range
+    // offsets instead of panicking, and zero is trivially in range.
+    TimeKeeper::init(FixedOffset::east_opt(0).expect("zero is a valid UTC offset"));
 
     // Seed the clock from the DS3231 before anything else can ask what time it is.
     //
@@ -2141,8 +2122,8 @@ async fn main_task(
     #[cfg(feature = "belka")]
     log_info!("Belka Portal device initialized");
 
-    let mut fdc1004_dev = I2cDevice::new(internal_i2c_bus);
-    let mut fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
+    let fdc1004_dev = I2cDevice::new(internal_i2c_bus);
+    let fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
 
     let fdc1004 = FDC_MUTEX.init(Mutex::new(fdc1004));
 
@@ -2150,7 +2131,7 @@ async fn main_task(
     let button_interrupt = Input::new(button_mux_p.pin_interrupt, Pull::Up);
 
     // Initialize MCP23017 for button control
-    let mut mcp23017_dev = I2cDevice::new(internal_i2c_bus);
+    let mcp23017_dev = I2cDevice::new(internal_i2c_bus);
     let btn_mcp23017_config = Mcp23017Config {
         address: 0x20, // Default MCP23017 address
         sequential_operation: true,
@@ -2168,7 +2149,7 @@ async fn main_task(
     btn_mcp23017.set_pin_pullup(4, true).await.unwrap();
     btn_mcp23017.set_pin_pullup(5, true).await.unwrap();
 
-    let mut tlc_dev = I2cDevice::new(internal_i2c_bus);
+    let tlc_dev = I2cDevice::new(internal_i2c_bus);
 
     let iref_config = IrefConfig {
         current_multiplier: false,
@@ -2200,7 +2181,7 @@ async fn main_task(
         .unwrap();
 
     // Initialize MCP23017 for LCD control
-    let mut mcp23017_dev = I2cDevice::new(internal_i2c_bus);
+    let mcp23017_dev = I2cDevice::new(internal_i2c_bus);
     let lcd_mcp23017_config = Mcp23017Config {
         address: 0x21, // LCD MCP23017 address
         sequential_operation: true,
@@ -2215,7 +2196,7 @@ async fn main_task(
     // is plugged into it, and `init` leaves all sixteen pins as inputs. What differs is
     // what happens to the twelve the display would use.
     #[cfg(feature = "character-display")]
-    let mut lcd_device = {
+    let lcd_device = {
         let mut device = Mcp23017HD44780Device::new(lcd_mcp23017);
         device.init_pins().await.unwrap();
         device
@@ -2232,7 +2213,7 @@ async fn main_task(
     let hold = NoopOutputPin {};
     let wp = NoopOutputPin {};
 
-    let mut flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
+    let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     //flash.erase_range_async(0x0008_0000, 0x0010_0000).await.unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
@@ -2257,7 +2238,7 @@ async fn main_task(
     let settings_storage_ref = SETTINGS_STORAGE.init(Mutex::new(settings_storage));
 
     // Load initial configuration
-    let configuration = settings_storage_ref.lock().await.load_settings().await.unwrap_or_default();
+    let _configuration = settings_storage_ref.lock().await.load_settings().await.unwrap_or_default();
 //    let configuration = DualBoilerSingleGroupPersistentConfiguration::default();
 //    settings_storage_ref.lock().await.save_settings(&configuration).await.unwrap();
 
@@ -2433,7 +2414,7 @@ async fn main_task(
     let brew_he_control = CoordinatedDualHeatingElementControl::new(brew_duty_signal);
     let steam_he_control = CoordinatedDualHeatingElementControl::new(steam_duty_signal);
 
-    let mut coordinated_heating_device = CoordinatedDualHeatingElementDevice::new(
+    let coordinated_heating_device = CoordinatedDualHeatingElementDevice::new(
         Output::new(mechanism_p.pin_brew_he, Level::Low),
         Output::new(mechanism_p.pin_service_he, Level::Low),
         Duration::from_secs(3),
@@ -2478,7 +2459,7 @@ async fn main_task(
 
     let mechanism_mutex = MECHANISM_MUTEX.init(Mutex::new(dual_boiler_mechanism));
     let brew_mechanism = DualBoilerBrewMechanism::new(mechanism_mutex);
-    let mut fill_mechanism = DualBoilerFillMechanism::new(mechanism_mutex);
+    let fill_mechanism = DualBoilerFillMechanism::new(mechanism_mutex);
 
     log_info!("Dual boiler mechanism initialized");
 

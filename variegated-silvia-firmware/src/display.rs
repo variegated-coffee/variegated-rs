@@ -1,17 +1,15 @@
-use alloc::vec;
 use alloc::{format, vec::Vec};
 use alloc::string::{String, ToString};
 use core::cmp::PartialEq;
-use defmt::info;
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::spi::{Async, Spi};
+use embassy_rp::spi::Spi;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Receiver;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Duration, Instant};
-use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, RoundedRectangle, StyledDrawable};
+use embedded_graphics::primitives::{Line, PrimitiveStyleBuilder, RoundedRectangle};
 use embedded_graphics_core::primitives::Rectangle;
 use embedded_graphics_core::prelude::*;
 use embedded_graphics::{
@@ -21,10 +19,10 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_7X13};
-use embedded_graphics::text::{Alignment, TextStyle, TextStyleBuilder};
+use embedded_graphics::text::{Alignment, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
-use variegated_controller_types::{BoilerControlMode, BoilerControlState, GroupBrewControlMode, GroupBrewControlState, MachineMode, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
+use variegated_controller_types::{BoilerControlMode, GroupBrewControlMode, MachineMode, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::single_boiler_state;
@@ -485,12 +483,6 @@ impl DisplayController {
             .build())
             .draw(&mut self.display)
             .unwrap();
-    }
-
-    fn is_routine_shown(routine: RoutineIndex, scroll_offset: usize) -> bool {
-        // This function is no longer meaningful with non-contiguous RoutineIndex
-        // We'll always return true for now
-        true
     }
 
     async fn render_idle_state(&mut self, substate: IdleSubState) {
@@ -1717,7 +1709,7 @@ pub async fn display_task(
     identify_receiver: IdentifyReceiver,
 ) {
     let spi_config = embassy_rp::spi::Config::default();
-    let mut spi = Spi::new(
+    let spi = Spi::new(
         disp_p.spi,
         disp_p.sclk_pin,
         disp_p.mosi_pin,

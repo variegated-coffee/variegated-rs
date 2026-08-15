@@ -114,6 +114,21 @@ const SETTINGS_MENU_ITEMS: &[SettingsMenuDefinition] = &[
 #[derive(Debug, Clone)]
 pub struct ListMenuItem {
     pub label: String,
+    /// **Currently never read, and that is a bug rather than dead weight.**
+    ///
+    /// Activation in `rotary.rs` resolves the selected row through
+    /// [`ListMenuType::get_menu_item_id`], which maps a position to an id from static
+    /// tables. That works for every menu except `Routines`, whose ids carry a
+    /// `RoutineIndex` that cannot be recovered from a row number -- so it returns `None`
+    /// there and the caller bails with a bare `return`. The effect is that **selecting a
+    /// routine from the Routines menu does nothing at all.**
+    ///
+    /// This field, together with the `Option<Vec<ListMenuItem>>` in `UIState::ListMenu`,
+    /// is the mechanism that was meant to close that gap -- `get_menu_item_id`'s own
+    /// comment says "caller should use cached menu items instead". Neither half was ever
+    /// wired up. Kept, and deliberately not deleted, because deleting them would remove
+    /// the only trace of the intended fix and leave the dead menu looking intentional.
+    #[allow(dead_code)]
     pub id: MenuItemId,
 }
 

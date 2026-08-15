@@ -82,7 +82,39 @@ cargo build --workspace --target thumbv8m.main-none-eabihf
 
 # The full gate, with warning counts per configuration:
 scripts/build-firmware.sh [output-dir]
+
+# A firmware crate's own warnings, separated from its dependencies':
+cargo build -p <crate> --target thumbv8m.main-none-eabihf --message-format=json > w.json
+scripts/warning-report.py <crate> w.json
 ```
+
+### Zero warnings is part of the definition of done
+
+**A firmware crate must build with zero warnings of its own, in every feature
+configuration the gate builds.** Not "no new warnings", not "the count did not go up" —
+zero. A change that adds one is not finished.
+
+This is enforceable because it is currently true, and it was made true deliberately: both
+firmwares carried 69 and 59 warnings until 2026-08-15, and roughly 70% of that was unused
+imports that had accumulated across refactors. The cost of the backlog was not the noise
+itself but what the noise hid — a dropped `Result` that silently discarded an operator's
+edit, and a documented pin-parking routine that nothing ever called. Neither was findable
+in a list of 69.
+
+Two things this rule has to survive, both of which have already bitten:
+
+- **`cargo fix` only sees the features you give it.** Run under the default set it will
+  delete an import that only `--features=character-display` uses, and the default build
+  stays green while the optional one breaks. After any `cargo fix`, build *every*
+  configuration in `scripts/build-firmware.sh`. Keep the `#[cfg]` on the narrowest
+  scope that uses a name, so the import is never unused in a build that compiles it.
+- **A crate's own count is not its log's count.** The gate totals every crate in the
+  graph, so the number moves when a dependency changes — pruning unused dependencies took
+  the Silvia's total from 178 to 160 without touching a line of its code. Use
+  `scripts/warning-report.py` for the count this rule is about.
+
+Where a warning is wrong rather than the code, silence it narrowly — `#[allow(dead_code)]`
+on the item with a comment saying why it is kept — never a crate-level `#![allow]`.
 
 ### Configuration
 - Each firmware crate has its own `.cargo/config.toml` for embedded target configuration,

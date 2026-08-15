@@ -22,8 +22,6 @@ use hd44780_controller::device::{Device, AsyncDevice, RegisterSelectMode, RWMode
 pub enum HD44780Error<E> {
     /// MCP23017 communication error
     Mcp23017(variegated_mcp23017::Error<E>),
-    /// Invalid operation or parameter
-    InvalidOperation,
 }
 
 impl<E> From<variegated_mcp23017::Error<E>> for HD44780Error<E> {

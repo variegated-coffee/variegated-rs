@@ -18,9 +18,14 @@ use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_rp::i2c::{Async, I2c};
 #[cfg(feature = "character-display")]
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-// Both display tasks pace themselves with these.
+// Both display tasks pace themselves with `Duration`; only the LCD one sleeps on `Timer`
+// directly, so its cfg is the narrower of the two. Keep them separate -- widening `Timer`'s
+// cfg to match `Duration`'s makes it an unused import in a default build, and `cargo fix`
+// will then delete it and break `--features=character-display`.
 #[cfg(any(feature = "character-display", feature = "tft-display"))]
-use embassy_time::{Duration, Timer};
+use embassy_time::Duration;
+#[cfg(feature = "character-display")]
+use embassy_time::Timer;
 #[cfg(feature = "character-display")]
 use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
 #[cfg(feature = "character-display")]
@@ -37,11 +42,7 @@ use display_interface_spi::SPIInterface;
 #[cfg(feature = "tft-display")]
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDeviceWithConfig;
 #[cfg(feature = "tft-display")]
-use embassy_rp::gpio::{Level, Output};
-#[cfg(feature = "tft-display")]
-use embassy_rp::spi::{Phase, Polarity, Spi};
-#[cfg(feature = "tft-display")]
-use embassy_sync::mutex::Mutex;
+use embassy_rp::gpio::Output;
 #[cfg(feature = "tft-display")]
 use variegated_instrumentation::async_task_loop;
 #[cfg(feature = "tft-display")]

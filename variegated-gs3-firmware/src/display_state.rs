@@ -39,6 +39,11 @@ pub struct DisplayState {
     /// Track previous brewing state to detect transitions
     was_brewing: bool,
     /// Last display update time for rate limiting
+    ///
+    /// Read only by `should_update`, which only the character LCD task calls -- the TFT
+    /// renderer paces itself. `cfg_attr` rather than a bare `allow` so this still reports
+    /// as dead if the LCD stops using it too.
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     last_update: Instant,
 }
 
@@ -54,6 +59,11 @@ impl DisplayState {
     }
 
     /// Check if an update is needed (1Hz rate limiting)
+    ///
+    /// The five `format_*` helpers below and this one are the character LCD's; the TFT
+    /// renderer formats its own values and paces itself. See the note on `last_update`
+    /// for why these are `cfg_attr`-silenced rather than deleted or bare-`allow`ed.
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn should_update(&mut self) -> bool {
         let now = Instant::now();
         if now.saturating_duration_since(self.last_update).as_millis() >= 100 {
@@ -129,6 +139,7 @@ impl DisplayState {
     }
 
     /// Format temperature as "XXX.XC" (6 chars)
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn format_temperature(&self, temp: Option<f32>) -> String {
         match temp {
             Some(t) => format!("{:5.1}C", t),
@@ -137,6 +148,7 @@ impl DisplayState {
     }
 
     /// Format pressure as "X.Xb" (4 chars)
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn format_pressure(&self, pressure: Option<f32>) -> String {
         match pressure {
             Some(p) => format!("{:3.1}b", p),
@@ -145,6 +157,7 @@ impl DisplayState {
     }
 
     /// Format flow rate as "X.Xml/s" (7 chars)
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn format_flow_rate(&self, flow: Option<f32>) -> String {
         match flow {
             Some(f) => format!("{:3.1}ml/s", f),
@@ -153,6 +166,7 @@ impl DisplayState {
     }
 
     /// Format weight as "XX.Xg" (5 chars)
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn format_weight(&self, weight: Option<f32>) -> String {
         match weight {
             Some(w) => format!("{:4.1}g", w),
@@ -161,6 +175,7 @@ impl DisplayState {
     }
 
     /// Format brew time as seconds "XXs" (3 chars max)
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn format_brew_time(&self, brew_time: Option<Duration>) -> String {
         match brew_time {
             Some(duration) => {

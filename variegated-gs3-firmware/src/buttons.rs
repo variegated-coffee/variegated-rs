@@ -37,10 +37,8 @@
 //! - State tracking via status subscription for toggle behavior
 //! - Integration with the machine command system
 
-use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::time::Duration;
 use defmt;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_futures::select::{select, Either};
@@ -85,17 +83,11 @@ const PRESS_AND_HOLD_THRESHOLD_MS: u64 = 500; // Time to distinguish press from 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
 pub struct ButtonSet(u8);
 
+// Deliberately narrow: a `ButtonSet` is only ever built from a GPIO sample and then
+// queried. Constructors and mutators for building one up by hand (`new`, `from_bits`,
+// `insert`, `remove`) existed and were never called, so they are gone rather than
+// carried as dead weight -- add them back if something ever needs to synthesize a set.
 impl ButtonSet {
-    /// Create an empty button set
-    pub const fn new() -> Self {
-        Self(0)
-    }
-
-    /// Create a button set from raw bits
-    pub const fn from_bits(bits: u8) -> Self {
-        Self(bits & 0xFF) // Mask to 8 buttons
-    }
-
     /// Create a button set from raw GPIO state (active low)
     pub const fn from_gpio_state(state: u8) -> Self {
         // Invert bits since buttons are active low, then mask to 6 buttons
@@ -110,28 +102,9 @@ impl ButtonSet {
         (self.0 & (1 << button_index)) != 0
     }
 
-    /// Add a button to the set
-    pub fn insert(&mut self, button_index: usize) {
-        if button_index < NUM_BUTTONS {
-            self.0 |= 1 << button_index;
-        }
-    }
-
-    /// Remove a button from the set
-    pub fn remove(&mut self, button_index: usize) {
-        if button_index < NUM_BUTTONS {
-            self.0 &= !(1 << button_index);
-        }
-    }
-
     /// Check if the set is empty
     pub const fn is_empty(&self) -> bool {
         self.0 == 0
-    }
-
-    /// Get the raw bits
-    pub const fn bits(&self) -> u8 {
-        self.0
     }
 
     /// Count the number of buttons in the set

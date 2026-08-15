@@ -24,7 +24,7 @@ use u8g2_fonts::{
     types::{FontColor, HorizontalAlignment, VerticalPosition}
 };
 
-use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, Output as ControllerOutput, ScheduleItem, Routine, RoutineExitCondition, StateCondition, ParameterValue, ShotState, COMMS_STATUS_STALE_AFTER};
+use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupControllerBoilers, GroupStatus, ScheduleItem, Routine, RoutineExitCondition, ShotState, COMMS_STATUS_STALE_AFTER};
 use variegated_controller_types::wifi::ImprovState;
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
@@ -33,12 +33,7 @@ use crate::GROUP_SCALE_PERIPHERAL_ID;
 #[cfg(feature = "belka")]
 use crate::BELKA_PERIPHERAL_ID;
 use variegated_timekeeping::DateTimeInZone;
-use core::time::Duration;
 use embassy_time::Instant;
-
-// Display dimensions in landscape mode
-const DISPLAY_WIDTH: i32 = 428;
-const DISPLAY_HEIGHT: i32 = 168;
 
 // Effective display area (accounting for bezel)
 const EFFECTIVE_X: i32 = 25;
@@ -152,24 +147,6 @@ impl GraphicalDisplayState {
             Some(ShotState::Saturation) => ("SATURATION", Rgb565::CSS_ORANGE),
             Some(ShotState::PostFirstDrop) => ("POST FIRST DROP", Rgb565::CSS_GREEN),
             None => ("READY", Rgb565::WHITE),
-        }
-    }
-
-    /// Format a value to 2 significant figures
-    fn format_sig_figs(value: f32) -> String {
-        if value == 0.0 {
-            return String::from("0");
-        }
-
-        let abs_value = if value < 0.0 { -value } else { value };
-
-        // Determine precision based on magnitude for ~2 significant figures
-        if abs_value >= 10.0 {
-            format!("{:.0}", value)  // 12.3 -> "12"
-        } else if abs_value >= 1.0 {
-            format!("{:.1}", value)  // 1.23 -> "1.2"
-        } else {
-            format!("{:.2}", value)  // 0.123 -> "0.12", 0.0123 -> "0.01"
         }
     }
 
@@ -469,51 +446,6 @@ impl GraphicalDisplayState {
                 display
             ).ok();
         }
-
-        Ok(())
-    }
-
-    /// Render PID information (P, I, D, output, and acting kP, kI, kD)
-    fn render_pid_info<D>(&self, p: f32, i: f32, d: f32, out: f32, acting_kp: f32, acting_ki: f32, acting_kd: f32, x: i32, y: i32, display: &mut D) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = Rgb565>,
-    {
-        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
-
-        // Line 1: P, I, D, Output values
-        let line1 = format!(
-            "P:{} I:{} D:{} O:{}",
-            Self::format_sig_figs(p),
-            Self::format_sig_figs(i),
-            Self::format_sig_figs(d),
-            Self::format_sig_figs(out)
-        );
-
-        small_font.render_aligned(
-            format_args!("{}", line1),
-            Point::new(x, y),
-            VerticalPosition::Top,
-            HorizontalAlignment::Left,
-            FontColor::Transparent(Rgb565::CSS_CYAN),
-            display
-        ).ok();
-
-        // Line 2: Acting kP, kI, kD values
-        let line2 = format!(
-            "kP:{} kI:{} kD:{}",
-            Self::format_sig_figs(acting_kp),
-            Self::format_sig_figs(acting_ki),
-            Self::format_sig_figs(acting_kd)
-        );
-
-        small_font.render_aligned(
-            format_args!("{}", line2),
-            Point::new(x, y + 14),
-            VerticalPosition::Top,
-            HorizontalAlignment::Left,
-            FontColor::Transparent(Rgb565::CSS_YELLOW),
-            display
-        ).ok();
 
         Ok(())
     }
@@ -979,7 +911,7 @@ impl GraphicalDisplayState {
         self.render_time_date(display)?;
         self.render_status_icons(display)?;
 
-        let small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+        let _small_font = FontRenderer::new::<u8g2_font_helvB12_tr>();
         let medium_font = FontRenderer::new::<u8g2_font_logisoso18_tr>();
         let large_font = FontRenderer::new::<u8g2_font_logisoso32_tr>();
 

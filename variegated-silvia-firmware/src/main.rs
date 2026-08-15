@@ -5,22 +5,19 @@ mod rotary;
 mod display;
 mod list_menu;
 
-use num_traits::float::FloatCore;
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::{format, vec};
+use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt::{Debug, Formatter};
-use core::ops::Deref;
+use core::fmt::Debug;
 use core::pin::Pin;
-use defmt::{error, info, unwrap, warn};
+use defmt::{info, unwrap, warn};
 use heapless::index_map::FnvIndexMap;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::gpio::Level::{High, Low};
-use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{PIO0, SPI0, SPI1};
+use embassy_rp::gpio::{Input, Output, Pull};
 use embassy_rp::{dma, i2c, pio, pwm, spi, uart, usb, watchdog, Peri};
 use embassy_rp::spi::{Async, Phase, Polarity, Spi};
 use embedded_alloc::LlffHeap as Heap;
@@ -33,55 +30,38 @@ use variegated_hal::{Boiler, Group, WithTask, PeripheralRegistry, SensorReading}
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use variegated_hal::noop::NoopOutputPin;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embassy_futures::join::{join, join3, join4, join5, join_array};
-use embassy_futures::select::Either::{First, Second};
-use embassy_futures::select::select;
 use embassy_rp::pwm::InputMode;
 use embassy_rp::uart::Uart;
-use embassy_sync::channel::{Channel, Receiver};
+use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
 use embassy_time::{Delay, Duration, Timer};
-use rotary_encoder_hal::Rotary;
 use variegated_adc_tools::ConversionParameters;
-use variegated_controller_lib::single_boiler_single_group::{SingleBoilerSingleGroupPersistentConfiguration, SingleBoilerSingleGroupController, SingleBoilerSingleGroupPidParameters};
+use variegated_controller_lib::single_boiler_single_group::{SingleBoilerSingleGroupPersistentConfiguration, SingleBoilerSingleGroupController};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
-use variegated_ads124s08::registers::SystemMonitorConfiguration::DvddBy4Measurement;
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
-use variegated_hal::adc::ads124s08::MeasurementType::{AvddBy4, DvddBy4, RatiometricLowSide, SingleEnded};
+use variegated_hal::adc::ads124s08::MeasurementType::{RatiometricLowSide, SingleEnded};
 use variegated_hal::machine_mechanism::single_boiler_mechanism::{SingleBoilerBrewMechanism, SingleBoilerMechanism};
 use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::I2c;
-use embassy_rp::pac::otp_data_raw::vals::Cs0size::NONE;
 use embassy_rp::pio::Pio;
 use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
-use embassy_rp::qmi_cs1::QmiCs1;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
-use embedded_hal::digital::{Error, ErrorKind, ErrorType, OutputPin};
-use embedded_hal::pwm::SetDutyCycle;
 use futures::future::join_all;
-use postcard::{to_allocvec, to_allocvec_cobs};
 use w25q32jv::W25q32jv;
 use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
-use variegated_controller_lib::settings::{key, SequentialStorageSettingsStorage, SettingsStorage};
-use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, GroupConfiguration, MachineCommand, MachineConfiguration, MachineDefinition, PidLimits, PidParameters, PidTerm, PressureType, RPMType, Status, TankConfiguration, TemperatureType, Output as ControllerOutput, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
+use variegated_controller_lib::settings::SettingsStorage;
+use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, GroupConfiguration, MachineCommand, MachineConfiguration, MachineDefinition, PressureType, RPMType, Status, TankConfiguration, TemperatureType, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
-use variegated_fdc1004::{OutputRate, FDC1004};
 use variegated_gravity_driver::{Gravity, Channel as GravityChannel};
-use variegated_hal::adc::mcp9600::Mcp9600Sensor;
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
 use variegated_hal::gpio::gpio_pwm_frequency_counter::GpioTransformingFrequencyCounter;
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
 use variegated_hal::scale::{gravity, ScaleController};
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
-use variegated_instrumentation::{async_task_loop, define_counters, define_indicators, PerformanceCounters, PerformanceIndicators};
-use variegated_mcp9600::{DeviceAddr, FilterCoefficient, ThermocoupleType, MCP9600};
-use variegated_mcp9600::Register::SensorConfiguration;
+use variegated_instrumentation::{define_counters, define_indicators, PerformanceCounters, PerformanceIndicators};
 use variegated_comms::esp_transceiver_main;
-use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
-use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId};
-use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 // The snapshot payload types are gone from here: building a `DebugStateSnapshot` is now
 // `variegated_debug::snapshot`'s job, and this binary supplies only the three values it
@@ -147,7 +127,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
 
     // Argument order is tx, rx, **rts, cts** -- the pair is easy to transpose, and doing so
     // deadlocks the link rather than failing to build.
-    let mut uart = Uart::new_with_rtscts(
+    let uart = Uart::new_with_rtscts(
         esp_p.uart,
         esp_p.tx_pin,
         esp_p.rx_pin,
@@ -221,6 +201,12 @@ struct Ads124S08Peripherals {
 #[variegated_board_cfg::board_cfg("button_peripherals")]
 struct ButtonPeripherals {
     pin_brew: Peri<'static, ()>,
+    // PIN_14 per board-cfg.toml: the hot-water button exists on the panel but nothing
+    // reads it yet, so the machine has no water-dispense trigger of its own. Kept rather
+    // than deleted because declaring the field is what takes PIN_14 out of `Peripherals`;
+    // dropping it silently frees the pin, which is a hardware decision and not a warning
+    // fix. Compare `UIState::DispensingWater`, unreachable for the same reason.
+    #[allow(dead_code)]
     pin_water: Peri<'static, ()>,
     pin_steam: Peri<'static, ()>,
 }
@@ -326,7 +312,6 @@ static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static GRAVITY: StaticCell<GravityMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
 static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
-static EXTERNAL_TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
 static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
 static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
 static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
@@ -402,7 +387,11 @@ async fn main_task(spawner: Spawner) -> ! {
     // that arrives late and no clock at all.
     //
     // UTC, matching the dual-boiler. Neither board has a timezone in its configuration yet.
-    variegated_timekeeping::TimeKeeper::init(chrono::FixedOffset::east(0));
+    // `east_opt` rather than the deprecated `east`: it returns `None` for out-of-range
+    // offsets instead of panicking, and zero is trivially in range.
+    variegated_timekeeping::TimeKeeper::init(
+        chrono::FixedOffset::east_opt(0).expect("zero is a valid UTC offset"),
+    );
 
     defmt::info!("Starting!");
 
@@ -479,7 +468,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let spi_p = internal_spi_bus_peripherals!(p);
     let ads_p = ads124s08_peripherals!(p);
 
-    let mut spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, Irqs, spi_config);
+    let spi = Spi::new(spi_p.spi, spi_p.sclk_pin, spi_p.mosi_pin, spi_p.miso_pin, spi_p.dma_tx, spi_p.dma_rx, Irqs, spi_config);
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
     let ads_spi_dev = SpiDevice::new(spi_bus, Output::new(ads_p.pin_cs, High));
     
@@ -512,7 +501,7 @@ async fn main_task(spawner: Spawner) -> ! {
             _,
             SingleBoilerSingleGroupPersistentConfiguration,
         >(flash);
-    let configuration = settings_storage.load_settings().await.unwrap_or_default();
+    let _configuration = settings_storage.load_settings().await.unwrap_or_default();
 
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
@@ -566,7 +555,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let pump_p = pump_peripherals!(p);
 
-    let pump_dir = Output::new(pump_p.pin_dir, Low);
+    let _pump_dir = Output::new(pump_p.pin_dir, Low);
 
     info!("System clock: {:?}", embassy_rp::clocks::clk_sys_freq());
 
@@ -575,7 +564,7 @@ async fn main_task(spawner: Spawner) -> ! {
     pwm_config.divider = 1.into();
     pwm_config.top = 14999;
     let (pump_pwm, _) = pwm::Pwm::new_output_a(pump_p.pwm_speed, pump_p.pin_speed, pwm_config).split();
-    let mut pump_pwm = pump_pwm.unwrap();
+    let pump_pwm = pump_pwm.unwrap();
 
     let mut pwm_input_config = pwm::Config::default();
     pwm_input_config.divider = 1.into();
@@ -847,7 +836,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let ui_status_channel: &'static Channel<_, _, 10> = UI_STATUS_CHANNEL.init(Channel::new());
 
     let Pio {
-        mut common, sm0, sm1, ..
+        mut common, sm0, sm1: _, ..
     } = Pio::new(rotary_p.pio, Irqs);
 
     info!("Creating PIO encoder program");

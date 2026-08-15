@@ -1,15 +1,13 @@
-use core::cmp::{max, min};
 use defmt::{info, warn, Format};
-use embassy_futures::select::Either::{First, Second};
-use embassy_futures::select::{select, select3, select4, Either3, Either4};
+use embassy_futures::select::{select4, Either4};
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder};
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupConfiguration, MachineCommand, MachineMode, PidLimits, PidParameters, PidParameterTarget, PidTerm, RoutineIndex, TemperatureType, Status};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuState, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use alloc::string::ToString;
@@ -126,11 +124,25 @@ impl ScaleSettingsSubState {
 #[derive(Debug, Clone)]
 pub(crate) enum UIState {
     Idle(IdleSubState),
+    /// Never constructed: steaming and hot-water dispensing are shown through
+    /// `Idle(IdleSubState)` and the machine's own mode rather than by entering a
+    /// dedicated UI state. Kept because they name real machine activities and the screens
+    /// may yet want their own state; nothing transitions into them today.
+    #[allow(dead_code)]
     Steaming,
     ManualBrew(ControlMode),
+    #[allow(dead_code)]
     DispensingWater,
     RoutineExecution,
-    ListMenu(ListMenuType, ListMenuState, Option<Box<(ListMenuType, ListMenuState)>>, Option<Vec<ListMenuItem>>),
+    /// The fourth field is the cached item list. It is `None` at every construction site
+    /// and `_` at every read site, which is why it reports as dead -- see the note on
+    /// [`ListMenuItem::id`] for what it was for and which bug its absence causes.
+    ListMenu(
+        ListMenuType,
+        ListMenuState,
+        Option<Box<(ListMenuType, ListMenuState)>>,
+        #[allow(dead_code)] Option<Vec<ListMenuItem>>,
+    ),
     SettingsInformation,
     SettingsDebugInfo,
     /// The Improv provisioning window: opened on entry, closed on exit.
@@ -913,7 +925,24 @@ where
                         
                         // Use the preserved edit state and update only the current parameter
                         let mut preserved_edit_state = edit_state.clone();
-                        preserved_edit_state.parameter_values.insert(param_index, current_value);
+                        // `parameter_values` is a `FnvIndexMap<_, _, 8>`, and this key was
+                        // seeded with the routine's default by `RoutineParameterEditState::new`,
+                        // so this replaces rather than grows and cannot fail -- unless the
+                        // routine carries more than the eight parameters `RoutineDefinition`
+                        // documents as its maximum, in which case `new` already dropped this
+                        // one and the edit has nowhere to land. Say so rather than discarding
+                        // it silently: the symptom is otherwise just a value the operator
+                        // edited quietly reverting on the way back to the list.
+                        if preserved_edit_state
+                            .parameter_values
+                            .insert(param_index, current_value)
+                            .is_err()
+                        {
+                            warn!(
+                                "Parameter {} does not fit the 8-entry edit map; edit discarded",
+                                param_index
+                            );
+                        }
                         
                         self.status.state = UIState::RoutineParameters(routine_index, preserved_edit_state);
                     }
@@ -953,7 +982,7 @@ where
                             },
                             ConfigEditType::PidParameter(pid_type, term, component) => {
                                 use crate::list_menu::{PidConfigType, PidTermType, PidComponentType};
-                                use variegated_controller_types::{PidParameterTarget, GroupIndex, BoilerIndex};
+                                use variegated_controller_types::PidParameterTarget;
                                 
                                 // Get current PID parameters from configuration
                                 let mut updated_params = if let Some(ref config) = self.current_configuration {

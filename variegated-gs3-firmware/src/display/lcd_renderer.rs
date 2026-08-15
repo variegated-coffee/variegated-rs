@@ -5,11 +5,9 @@
 
 use alloc::string::{String, ToString};
 use alloc::format;
-use chrono::Timelike;
-use core::time::Duration;
 use embassy_time::Instant;
 use hd44780_controller::controller::{Controller, state::Init};
-use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, ParameterValue, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, COMMS_STATUS_STALE_AFTER};
+use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, COMMS_STATUS_STALE_AFTER};
 use variegated_controller_types::wifi::ImprovState;
 use variegated_timekeeping::TimeKeeper;
 use variegated_controller_lib::routine::RoutineRepository;
@@ -183,7 +181,7 @@ impl LcdDisplayState {
                     lcd.set_cursor_position(row as u8, col as u8).await?;
 
                     // Write consecutive changed characters to minimize cursor movements
-                    let start_col = col;
+                    let _start_col = col;
                     while col < 16 && self.display_buffer[row][col] != new_content[row][col] {
                         lcd.write_char(new_content[row][col]).await?;
                         self.display_buffer[row][col] = new_content[row][col];
@@ -228,21 +226,6 @@ impl LcdDisplayState {
             format!("{:02}:{:02}", now.hour(), now.minute())
         } else {
             "--:--".to_string()
-        }
-    }
-
-    /// Format last brew time as "L:XXs" (5 chars max)
-    fn format_last_brew_time(&self) -> String {
-        match self.shared_state.last_brew_time {
-            Some(duration) => {
-                let secs = duration.as_secs();
-                if secs < 100 {
-                    format!("L:{}s", secs)
-                } else {
-                    "L:99s".to_string() // Cap at 99s for display
-                }
-            }
-            None => "L:--s".to_string(),
         }
     }
 
