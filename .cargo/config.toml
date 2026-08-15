@@ -6,7 +6,13 @@
 #runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E6633861A3554938"
 #runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E66430A64B3D6822"
 #runner = "probe-rs run --chip RP235x --protocol swd --probe 2e8a:000c:E66430A64B5D2F27"
-runner = "./examples/probe-runner.sh"
+# Cargo resolves `.cargo/config.toml` by walking up from the *current working directory*,
+# not from the manifest, so this file is what you get when you run from the repo root and
+# the two firmware crates' own copies are what you get when you `cd` into one. Running from
+# a crate directory is the intended path -- there each `runner` is `./probe-runner.sh` and
+# there is no ambiguity. This entry only has to name one of them, and names the GS3 because
+# that is the machine the old `default-run = "dual_boiler"` pointed at.
+runner = "./variegated-gs3-firmware/probe-runner.sh"
 #runner = "elf2uf2-rs"
 
 # flip-link does NOT work on this target. Tried 2026-08-10 while chasing a HardFault, and
@@ -22,7 +28,7 @@ runner = "./examples/probe-runner.sh"
 #
 # Left as a note rather than a commented-out flag, because "someone should try flip-link"
 # is an idea that will recur and this is the record of what happened when it was tried.
-# Use the stack painting in `examples/dual-boiler` instead: it measures the same thing
+# Use the stack painting in `variegated-gs3-firmware` instead: it measures the same thing
 # without touching the memory layout.
 
 [target.'cfg(test)']
@@ -59,4 +65,9 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "debug"
-EMBASSY_EXECUTOR_TASK_ARENA_SIZE="131072"
+# 262144, not the 131072 this file used to carry. That was never the value real builds
+# used: the documented procedure was `cd examples && cargo build`, which picked up
+# `examples/.cargo/config.toml` and its 262144 instead, so the smaller number here only
+# ever applied to builds run from the repo root -- silently giving those half the arena.
+# The two firmware crates' own configs also say 262144, so all three now agree.
+EMBASSY_EXECUTOR_TASK_ARENA_SIZE="262144"

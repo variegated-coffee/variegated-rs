@@ -48,15 +48,17 @@ If the runner doesn't have `thumbv8m.main-none-eabihf` installed, it should be i
 cargo check --target thumbv8m.main-none-eabihf
 cargo build --target thumbv8m.main-none-eabihf
 
-# Try building the examples:
-cd examples 
-cargo build --bin single_boiler --features=single-boiler --target thumbv8m.main-none-eabihf
-cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none-eabihf
+# The two firmwares. Each is its own crate whose `default` features are its machine's
+# configuration, so neither needs `--features`, and both build in one invocation:
+cargo build -p variegated-silvia-firmware --target thumbv8m.main-none-eabihf
+cargo build -p variegated-gs3-firmware --target thumbv8m.main-none-eabihf
+cargo build --workspace --target thumbv8m.main-none-eabihf
 
 ```
 
 ### Configuration
-- Uses `.cargo/config.toml` in `examples/` directory for embedded target configuration
+- Each firmware crate has its own `.cargo/config.toml`, as does the repo root; cargo picks
+  by current working directory, not by manifest
 - Embassy executor configuration via `EMBASSY_EXECUTOR_TASK_ARENA_SIZE` environment variable
 - Board-specific configuration files (`board-cfg.toml`) in example directories
 
@@ -82,12 +84,14 @@ cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none
 - Result-based error propagation
 - Hardware-specific error conditions
 
-## Key Files & Examples
+## Key Files & Firmware
 
-### Examples
-- **`examples/single-boiler/`**: Complete single-boiler espresso machine implementation
-- **`examples/dual-boiler/`**: Dual-boiler machine implementation
+### Firmware crates
+- **`variegated-silvia-firmware/`**: the Rancilio Silvia dev rig — single boiler, single group
+- **`variegated-gs3-firmware/`**: the La Marzocco GS3 carrier — dual boiler, single group
 - Both include board configuration files and hardware-specific implementations
+- These are shipping firmwares, not examples, despite having lived in a package named
+  `examples` until 2026-08-15
 
 ### Important Source Files
 - **`variegated-hal/src/lib.rs`**: Core hardware abstractions
@@ -102,7 +106,7 @@ cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none
 3. For control logic: modify `variegated-control-algorithm` or `variegated-controller-lib`
 4. For types/interfaces: modify `variegated-controller-types`
 5. Test changes using appropriate target platform
-6. Update examples if interface changes affect them
+6. Update the firmware crates if interface changes affect them
 
 ### Testing Strategy
 - Because this is an embedded project, testing is primarily done on hardware

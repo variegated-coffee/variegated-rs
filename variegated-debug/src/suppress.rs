@@ -577,7 +577,7 @@ mod tests {
     /// Distinct log lines a normal dual-boiler boot emits in a burst.
     ///
     /// Enumerated from the boot path, not estimated: 19 in
-    /// `examples/dual-boiler/src/main.rs` -- 5 in `main`, 1 in `storage_task`,
+    /// `variegated-gs3-firmware/src/main.rs` -- 5 in `main`, 1 in `storage_task`,
     /// 13 in `main_task` -- plus 2 config-apply lines in
     /// `variegated-hal/src/gpio/coordinated_dual_heating_element.rs`.
     /// Mutually-exclusive branches count once (PSRAM ok *or* failed, never both)

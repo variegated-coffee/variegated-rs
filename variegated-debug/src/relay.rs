@@ -20,7 +20,7 @@ use variegated_controller_types::debug::DebugPayload;
 /// WebSocket and ESPHome paths. Relaying it again under a debug wrapper would double
 /// the link cost of the machine's largest message -- 1722 bytes COBS-encoded in the
 /// worst case, several hundred in the ordinary one, once a second -- for no new
-/// information. On `single-boiler`'s 115 200 baud link that alone would exceed the
+/// information. On `variegated-silvia-firmware`'s 115 200 baud link that alone would exceed the
 /// entire debug budget. Task 11's TCP server injects the comms processor's own copy
 /// into the debug stream instead, so a TCP client still sees machine state; it just
 /// does not cross the link twice.
@@ -60,7 +60,7 @@ mod tests {
         REFERENCE_BAUD,
     };
 
-    /// `single-boiler`'s link: five times slower than the reference, and with no
+    /// `variegated-silvia-firmware`'s link: five times slower than the reference, and with no
     /// hardware flow control. It is the binding case for anything sized in bytes.
     const SLOW_BAUD: u32 = 115_200;
 
@@ -88,7 +88,7 @@ mod tests {
                 id: 0,
                 label: name("ControllerLoops"),
             },
-            DebugPayload::FirmwareInfo { firmware: name("dual-boiler"), counters: 4, indicators: 4 },
+            DebugPayload::FirmwareInfo { firmware: name("variegated-gs3-firmware"), counters: 4, indicators: 4 },
         ]
     }
 
@@ -143,7 +143,7 @@ mod tests {
     /// processor's steady-state debug output, wrapped exactly as the relay wraps it,
     /// against the budget.
     ///
-    /// Steady state for `examples/dual-boiler` is, per second: two sample frames per
+    /// Steady state for `variegated-gs3-firmware` is, per second: two sample frames per
     /// `DEFAULT_SAMPLE_INTERVAL_MS` (500 ms, so four), one `StateSnapshot`, and one
     /// fifth of a schema burst (`SCHEMA_INTERVAL_MS` is 5 s, and the burst is
     /// `FirmwareInfo` plus one `MetricName` per metric). Text frames are excluded:
@@ -166,7 +166,7 @@ mod tests {
         // bump that became debug wire 0x85 left these two at 16, and this suite has not
         // compiled since.
         let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
-        // Four counters and four indicators in dual-boiler, at values large enough
+        // Four counters and four indicators in the GS3 firmware, at values large enough
         // that postcard's varints are not artificially short.
         for _ in 0..4 {
             let _ = samples.push(u32::MAX as u64);
@@ -195,7 +195,7 @@ mod tests {
         }));
 
         let mut schema = wrapped_len(DebugPayload::FirmwareInfo {
-            firmware: name("dual-boiler"),
+            firmware: name("variegated-gs3-firmware"),
             counters: 4,
             indicators: 4,
         });
@@ -221,7 +221,7 @@ mod tests {
             "steady-state relay traffic {per_second} B/s exceeds the {DEBUG_RELAY_BYTES_PER_SEC} B/s budget"
         );
 
-        // The same traffic has to fit `single-boiler`'s much slower link too, since
+        // The same traffic has to fit `variegated-silvia-firmware`'s much slower link too, since
         // Task 14 gives that example the sampler and the log bridge. It is the
         // binding case and it is the one nobody would think to check.
         let slow_budget = bytes_per_sec_for_baud(SLOW_BAUD) as usize;

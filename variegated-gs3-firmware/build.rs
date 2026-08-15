@@ -22,7 +22,7 @@ fn main() {
         .write_all(include_bytes!("memory.x"))
         .unwrap();
     println!("cargo:rustc-link-search={}", out.display());
-    
+
     // By default, Cargo will re-run a build script whenever
     // any file in the project changes. By specifying `memory.x`
     // here, we ensure the build script is only re-run when
@@ -33,12 +33,20 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 
+    // One crate, one machine, one board config -- so this is an unconditional
+    // statement of fact rather than a decision.
+    //
+    // It used to be a decision, and one a build script is not capable of making: while both
+    // firmwares lived in a single `examples` package, this dispatched on
+    // `CARGO_FEATURE_DUAL_BOILER` / `CARGO_FEATURE_SINGLE_BOILER` under a comment claiming
+    // to "get the name of the binary being built". A build script runs once per package, not
+    // once per bin, and cannot see which bin it is for. Asking for both features therefore
+    // compiled both machines' `main.rs` against the *dual* board config.
+    //
+    // The path has to be spelled out even though `board-cfg.toml` sits right next to this
+    // file, because `variegated-board-cfg`'s fallback resolves `OUT_DIR` up to the
+    // *workspace* root rather than the crate root.
+    println!("cargo:rerun-if-changed=board-cfg.toml");
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    
-    // Get the name of the binary being built
-    if let Ok(_) = env::var("CARGO_FEATURE_DUAL_BOILER") {
-        println!("cargo:rustc-env=BOARD_CFG_PATH={}/dual-boiler/board-cfg.toml", manifest_dir);
-    } else if let Ok(_) = env::var("CARGO_FEATURE_SINGLE_BOILER") {
-        println!("cargo:rustc-env=BOARD_CFG_PATH={}/single-boiler/board-cfg.toml", manifest_dir);
-    }
+    println!("cargo:rustc-env=BOARD_CFG_PATH={manifest_dir}/board-cfg.toml");
 }

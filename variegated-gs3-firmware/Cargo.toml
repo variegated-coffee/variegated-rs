@@ -1,0 +1,127 @@
+[package]
+name = "variegated-gs3-firmware"
+version = "0.1.0"
+edition = "2024"
+
+# Spelled out rather than left to auto-detection, so `test`/`bench` can be turned off:
+# an auto-detected bin defaults to `test = true`, and building a test harness for a
+# `no_std` binary does not end well.
+[[bin]]
+name = "variegated-gs3-firmware"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+embassy-embedded-hal = { workspace = true, features = ["defmt", "time"] }
+embassy-time = { workspace = true, features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-futures.workspace = true
+
+w25q32jv = { version = "0.5.1", features = ["defmt", "async", "megabits64"] }
+
+defmt.workspace = true
+defmt-rtt.workspace = true
+# `log_*!` expands to a `log::*!` call as well as a `defmt::*!` one, so the facade
+# has to be nameable from this crate.
+log.workspace = true
+
+embedded-alloc.workspace = true
+ds3231 = { version = "0.3.0", features = ["async"] }
+
+static_cell.workspace = true
+
+cortex-m-rt = { workspace = true, features = ["paint-stack"] }
+panic-probe = { workspace = true, features = ["print-defmt"] }
+
+num-traits = { workspace = true, features = ["libm"] }
+
+variegated-board-cfg = { version = "0.2.1", path = "../../variegated-board/variegated-board-cfg" }
+
+variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb", "atomic-mutex"] }
+
+variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08", features = ["defmt"] }
+variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
+variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", features = ["defmt"] }
+variegated-gravity-driver = { version = "0.1.0", path = "../variegated-gravity-driver", features = ["defmt"], optional = true }
+variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
+variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
+variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation", features = ["instrumentation"] }
+variegated-debug = { version = "0.1.0", path = "../variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt", "source-application", "rp235xb"] }
+variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
+variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
+variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics", "delta-updates"], optional = true, default-features = false }
+variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
+# `debug-bus` installs the `log` -> debug bus bridge; see `bus_sink::init()` in main.
+variegated-log = { version = "0.1.0", path = "../variegated-log", features = ["debug-bus", "rp235xb"] }
+variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
+variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
+
+rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-graphics.workspace = true
+embedded-graphics-core.workspace = true
+display-interface.workspace = true
+display-interface-spi = { workspace = true, optional = true }
+u8g2-fonts = { version = "0.8.0", optional = true }
+hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"], optional = true }
+heapless.workspace = true
+
+chrono = { workspace = true, features = ["alloc"] }
+chrono-tz.workspace = true
+
+serde = { workspace = true, features = ["derive"] }
+postcard = { workspace = true, features = ["alloc"] }
+
+futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
+
+
+[features]
+# One crate, one machine: `default` *is* this machine's configuration, so a plain
+# `cargo build` produces the firmware. There is no `dual-boiler` umbrella feature any
+# more -- it existed only to pick this bin out of a package that held two. The bundle it
+# used to name is now spelled out here instead.
+#
+# `belka`, `gear-pump`, `bluetooth-group-1-scale` and `sd-card-storage` survive as
+# default-on marker features rather than being folded away, because folding them away
+# means stripping `#[cfg(feature = ...)]` from a great many sites in a 3000-line
+# `main.rs` -- a code change, and this was a packaging change.
+default = ["rp235xb", "tft-display", "gear-pump", "belka", "bluetooth-group-1-scale", "sd-card-storage"]
+rp2040 = ["embassy-rp/rp2040"]
+rp235xa = ["embassy-rp/rp235xa"]
+rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
+tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
+# The 2x16 HD44780 character LCD on the LCD MCP23017 (I2C 0x21).
+#
+# Deliberately *not* part of the default set: not every machine has the LCD fitted, and
+# the panel is optional hardware in a way the TFT is not. Without it the expander is still
+# brought up, and its twelve LCD lines are driven low rather than left as the floating
+# inputs `Mcp23017::init` leaves behind -- see `lcd_pins::park_low`.
+character-display = ["dep:hd44780-controller"]
+# The breathing front-panel LEDs on the TLC59108 (I2C 0x40).
+#
+# Off by default, like `character-display`, and for the same kind of reason: the driver is
+# on the board regardless, but whether anything should be lit by it is a per-machine
+# decision. Without the feature the TLC59108 is still configured and then told to drive
+# all eight channels off, so the LEDs are dark rather than left in whatever state the
+# chip powered up in.
+pwm-leds = []
+# Off by default and build-coverage only: this machine takes its weight from
+# `bluetooth-group-1-scale` instead. Kept so the Gravity paths still get compiled.
+gravity = ["dep:variegated-gravity-driver"]
+belka = []
+# A Bluetooth scale under group 1, reached through the comms processor rather than
+# over I2C. Mutually exclusive with `gravity`: both publish to the group's weight
+# watch. Cargo features are additive and cannot express that, so this crate enforces
+# it with a `compile_error!` instead -- see the note at the top of `main.rs`.
+bluetooth-group-1-scale = []
+gear-pump = []
+pwm-steam-valve = ["variegated-controller-lib/pwm-steam-valve"]
+# The SD stack itself is not a direct dependency of this crate: the whole
+# `SpiBus -> sdio -> exfat-slim` tower is named once by `variegated_controller_lib`'s
+# `SdShotLogStorage` alias, so this crate only spells out its own SPI and pin types.
+sd-card-storage = ["variegated-controller-lib/sd-card-storage"]

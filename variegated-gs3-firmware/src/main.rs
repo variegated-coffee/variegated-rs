@@ -611,9 +611,9 @@ static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
 /// * `UNALIGNED` (24), `UNDEFINSTR` (16), `INVSTATE` (17) -- corrupted control flow or a
 ///   bad pointer dereferenced as code.
 // Core 0's stack span and high-water mark are `variegated_debug::stack`. They were here,
-// and a second, differently-symbolled copy was in `single-boiler` -- the `paint-stack`
-// feature this depends on is still enabled in `examples/Cargo.toml`, which is the one part
-// that cannot move into a library.
+// and a second, differently-symbolled copy was in the Silvia firmware -- the `paint-stack`
+// feature this depends on is still enabled in this crate's `Cargo.toml`, which is the one
+// part that cannot move into a library.
 
 /// Fault registers, written before any lock is taken. See the handler.
 ///
@@ -1760,7 +1760,7 @@ async fn debug_sampler_task() {
         &INDICATORS,
         CounterId::NAMES,
         IndicatorId::NAMES,
-        "dual-boiler",
+        "variegated-gs3-firmware",
     ))
     .await
 }

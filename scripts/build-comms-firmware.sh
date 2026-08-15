@@ -42,7 +42,7 @@ echo "comms-firmware: exit=$RC warnings=$WARNS errors=$ERRS log=$LOG"
 # only ever appeared to work because the known-good build emits 8 warnings.
 grep -E 'generated [0-9]+ warning|^error' "$LOG" || true
 
-# Both conditions, for the reason `build-examples.sh` gives: cargo can fail without a
+# Both conditions, for the reason `build-firmware.sh` gives: cargo can fail without a
 # `^error` line, and a log with `^error` lines is a failed build whatever cargo said.
 if [ "$RC" -ne 0 ] || [ "$ERRS" -ne 0 ]; then
     exit 1

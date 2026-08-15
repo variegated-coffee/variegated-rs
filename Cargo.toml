@@ -1,6 +1,7 @@
 [workspace]
 members = [
-    "examples",
+    "variegated-silvia-firmware",
+    "variegated-gs3-firmware",
     "variegated-adc-tools",
     "variegated-controller-lib",
     "variegated-controller-types",
@@ -173,7 +174,7 @@ debug = true              # Enable debug info
 # Cargo only honours the profile in the workspace **root** manifest. `examples/Cargo.toml`
 # has said `opt-level = 3` for a long time and it has been silently ignored, so everything
 # built at 1 -- which does not coalesce async state-machine locals and inflates poll frames
-# enormously. `CORE1_STACK_LENGTH` in `examples/dual-boiler` already documents that effect
+# enormously. `CORE1_STACK_LENGTH` in `variegated-gs3-firmware` already documents that effect
 # as the reason core 1 needs 96 kB.
 #
 # The cost of the gap: core 0's stack (192,452 bytes) was being exhausted by a single

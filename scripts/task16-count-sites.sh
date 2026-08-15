@@ -22,7 +22,13 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # anything else lands on the branch -- as it already has.
 BASE_REF="${1:-1dba280}"
 
-PATHS="variegated-controller-lib/src variegated-hal/src examples/dual-boiler/src/main.rs"
+# Two lists, because the GS3 firmware's main.rs moved: it was `examples/dual-boiler/` at
+# the baseline revision and is `variegated-gs3-firmware/` now. Using one list for both
+# sides would either make `git archive` extract nothing from the baseline or make the
+# working-tree grep miss the file entirely -- and both failures look like a plausible
+# count rather than an error.
+BASE_PATHS="variegated-controller-lib/src variegated-hal/src examples/dual-boiler/src/main.rs"
+PATHS="variegated-controller-lib/src variegated-hal/src variegated-gs3-firmware/src/main.rs"
 
 # Any log-macro invocation, in every form this tree uses: `defmt::info!`,
 # `variegated_log::log_info!`, bare `log_info!`, bare `info!`. Commented-out lines
@@ -43,9 +49,10 @@ count_tree() {
 echo "== baseline ($BASE_REF)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-git archive "$BASE_REF" -- variegated-controller-lib/src variegated-hal/src examples/dual-boiler/src/main.rs | tar -x -C "$tmp"
 # shellcheck disable=SC2086
-base_total=$(cd "$tmp" && grep -rhoE "$ANY" --include='*.rs' $PATHS | wc -l | tr -d ' ')
+git archive "$BASE_REF" -- $BASE_PATHS | tar -x -C "$tmp"
+# shellcheck disable=SC2086
+base_total=$(cd "$tmp" && grep -rhoE "$ANY" --include='*.rs' $BASE_PATHS | wc -l | tr -d ' ')
 echo "  total log call sites: $base_total"
 
 echo "== working tree"

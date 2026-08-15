@@ -781,8 +781,9 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(wifi_provisioning_channel.sender()),
         Some(wifi_credentials_watch.sender()),
         Some(watchdog),
-        // shot_log_sender: this board has no SD card -- `single-boiler` does not enable
-        // `sd-card-storage`, so there is no storage task to send completed logs to.
+        // shot_log_sender: this board has no SD card -- this crate has no
+        // `sd-card-storage` feature at all, so there is no storage task to send
+        // completed logs to.
         None,
         // sd_card_present: `None`, for the same reason. This is what makes
         // `Status::sd_card_present` report "this build has no SD storage" rather than
@@ -950,7 +951,7 @@ async fn debug_sampler_task() {
         &INDICATORS,
         CounterId::NAMES,
         IndicatorId::NAMES,
-        "single-boiler",
+        "variegated-silvia-firmware",
     ))
     .await
 }
@@ -1018,8 +1019,8 @@ async fn debug_command_task(
                 bus::emit_event(DebugEvent::CountersReset);
             }
             DebugCommand::App(AppDebugOp::Ping) => {}
-            // This board has no card reader: `single-boiler` does not enable
-            // `sd-card-storage`. Answered rather than ignored, so an operator who runs
+            // This board has no card reader: this crate has no `sd-card-storage`
+            // feature at all. Answered rather than ignored, so an operator who runs
             // the self-test against the wrong machine gets told why nothing happened.
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
                 warn!("SD self-test requested, but this board has no SD card");

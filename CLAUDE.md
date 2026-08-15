@@ -74,17 +74,26 @@ If the runner doesn't have `thumbv8m.main-none-eabihf` installed, it should be i
 cargo check --target thumbv8m.main-none-eabihf
 cargo build --target thumbv8m.main-none-eabihf
 
-# Try building the examples:
-cd examples 
-cargo build --bin single_boiler --features=single-boiler --target thumbv8m.main-none-eabihf
-cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none-eabihf
+# The two firmwares. Each is its own crate whose `default` features are its machine's
+# configuration, so neither needs `--features`, and both build in one invocation:
+cargo build -p variegated-silvia-firmware --target thumbv8m.main-none-eabihf
+cargo build -p variegated-gs3-firmware --target thumbv8m.main-none-eabihf
+cargo build --workspace --target thumbv8m.main-none-eabihf
 
+# The full gate, with warning counts per configuration:
+scripts/build-firmware.sh [output-dir]
 ```
 
 ### Configuration
-- Uses `.cargo/config.toml` in `examples/` directory for embedded target configuration
+- Each firmware crate has its own `.cargo/config.toml` for embedded target configuration,
+  and there is one at the repo root. Cargo picks by **current working directory**, not by
+  manifest, so `cd variegated-gs3-firmware && cargo run` and `cargo run -p ...` from the
+  root read different files. They are kept in agreement deliberately; if you change one,
+  change all three.
 - Embassy executor configuration via `EMBASSY_EXECUTOR_TASK_ARENA_SIZE` environment variable
-- Board-specific configuration files (`board-cfg.toml`) in example directories
+  (262144 in all three configs)
+- Board-specific configuration files (`board-cfg.toml`) at each firmware crate's root, wired
+  in by that crate's `build.rs` via `BOARD_CFG_PATH`
 
 ## Common Patterns & Conventions
 
@@ -110,10 +119,15 @@ cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none
 
 ## Key Files & Examples
 
-### Examples
-- **`examples/single-boiler/`**: Complete single-boiler espresso machine implementation
-- **`examples/dual-boiler/`**: Dual-boiler machine implementation
+### Firmware crates
+- **`variegated-silvia-firmware/`**: the Rancilio Silvia dev rig — single boiler, single group
+- **`variegated-gs3-firmware/`**: the La Marzocco GS3 carrier — dual boiler, single group
 - Both include board configuration files and hardware-specific implementations
+
+These are the shipping firmwares, not examples. They lived in a package literally named
+`examples` until 2026-08-15; the name outlived the truth by a long way, and it cost real
+things — one `build.rs` picking a board config off a cargo *feature* meant the two could
+not be built in a single cargo invocation, and a plain `cargo build` built neither.
 
 ### Important Source Files
 - **`variegated-hal/src/lib.rs`**: Core hardware abstractions
@@ -128,20 +142,23 @@ cargo build --bin dual_boiler --features=dual-boiler --target thumbv8m.main-none
 3. For control logic: modify `variegated-control-algorithm` or `variegated-controller-lib`
 4. For types/interfaces: modify `variegated-controller-types` — types only, see the rule above
 5. Test changes using appropriate target platform
-6. Update examples if interface changes affect them
+6. Update the firmware crates if interface changes affect them
 
-**Before adding code to an example**, check whether it belongs in a crate. The two examples
-had forked badly by 2026-08: 57% of single-boiler's substantive lines appeared verbatim in
-dual-boiler, and the drift had produced real bugs — three implementations of stack
+**Before adding code to a firmware crate**, check whether it belongs in a library crate. The
+two firmwares had forked badly by 2026-08: 57% of the Silvia's substantive lines appeared
+verbatim in the GS3, and the drift had produced real bugs — three implementations of stack
 measurement disagreeing about which linker symbols to read, and four of routine-parameter
 resolution, three of them wrong. Board *configuration* — sensor channels, PT100 vs PT1000,
-pin assignments — belongs in the example. Anything else almost certainly does not.
+pin assignments — belongs in the firmware crate. Anything else almost certainly does not.
+
+Splitting them into separate crates did not fix that duplication; it froze it in place.
+Extracting the shared code is still outstanding.
 
 ### Testing Strategy
 - Because this is an embedded project, testing is primarily done on hardware
 - Always ensure that the project compiles, but make sure to use the correct target - `thumbv8m.main-none-eabihf`
 - Hardware abstraction: Requires embedded testing or mocking
-- Integration: Test with example implementations
+- Integration: Test with the two firmware crates
 
 #### Testing Embedded Code
 Since this project contains embedded code that targets `thumbv8m.main-none-eabihf`, some crates require special provisions to run tests:
@@ -180,5 +197,5 @@ Since this project contains embedded code that targets `thumbv8m.main-none-eabih
 - GPIO-controlled heating elements, pumps, and solenoids
 
 This project is in active development with unstable APIs (< 1.0.0). Breaking changes occur between minor versions but not patch versions.
-- If checking or building a particular crate doesn't work, you should try to build the examples.
-- You're not done until both the dual-boiler and single-boiler examples compile
+- If checking or building a particular crate doesn't work, you should try to build the firmware crates.
+- You're not done until both firmwares compile — `cargo build --workspace --target thumbv8m.main-none-eabihf` covers both in one go.

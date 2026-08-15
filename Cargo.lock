@@ -915,62 +915,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "examples"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "chrono-tz",
- "cortex-m-rt",
- "defmt 1.1.1",
- "defmt-rtt",
- "display-interface",
- "display-interface-spi",
- "ds3231",
- "embassy-embedded-hal",
- "embassy-executor",
- "embassy-futures",
- "embassy-rp",
- "embassy-sync",
- "embassy-time",
- "embedded-alloc",
- "embedded-graphics",
- "embedded-graphics-core",
- "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "futures",
- "hd44780-controller",
- "heapless 0.9.3",
- "log",
- "num-traits",
- "oled_async",
- "panic-probe",
- "postcard",
- "rotary-encoder-hal",
- "serde",
- "static_cell",
- "u8g2-fonts",
- "variegated-adc-tools",
- "variegated-ads124s08",
- "variegated-board-cfg",
- "variegated-comms",
- "variegated-controller-lib",
- "variegated-controller-types",
- "variegated-debug",
- "variegated-fdc1004",
- "variegated-gravity-driver",
- "variegated-hal",
- "variegated-instrumentation",
- "variegated-log",
- "variegated-mcp23017",
- "variegated-mcp9600",
- "variegated-nv3007",
- "variegated-rp235x-atomic-raw-mutex",
- "variegated-timekeeping",
- "variegated-tlc59108",
- "w25q32jv",
-]
-
-[[package]]
 name = "exfat-slim"
 version = "0.6.0"
 dependencies = [
@@ -2660,6 +2604,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-gs3-firmware"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "cortex-m-rt",
+ "defmt 1.1.1",
+ "defmt-rtt",
+ "display-interface",
+ "display-interface-spi",
+ "ds3231",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-alloc",
+ "embedded-graphics",
+ "embedded-graphics-core",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures",
+ "hd44780-controller",
+ "heapless 0.9.3",
+ "log",
+ "num-traits",
+ "panic-probe",
+ "postcard",
+ "rotary-encoder-hal",
+ "serde",
+ "static_cell",
+ "u8g2-fonts",
+ "variegated-adc-tools",
+ "variegated-ads124s08",
+ "variegated-board-cfg",
+ "variegated-comms",
+ "variegated-controller-lib",
+ "variegated-controller-types",
+ "variegated-debug",
+ "variegated-fdc1004",
+ "variegated-gravity-driver",
+ "variegated-hal",
+ "variegated-instrumentation",
+ "variegated-log",
+ "variegated-mcp23017",
+ "variegated-mcp9600",
+ "variegated-nv3007",
+ "variegated-rp235x-atomic-raw-mutex",
+ "variegated-timekeeping",
+ "variegated-tlc59108",
+ "w25q32jv",
+]
+
+[[package]]
 name = "variegated-hal"
 version = "0.1.0"
 dependencies = [
@@ -2812,6 +2811,59 @@ name = "variegated-rp235x-atomic-raw-mutex"
 version = "0.1.0"
 dependencies = [
  "embassy-sync",
+]
+
+[[package]]
+name = "variegated-silvia-firmware"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "cortex-m-rt",
+ "defmt 1.1.1",
+ "defmt-rtt",
+ "display-interface",
+ "display-interface-spi",
+ "ds3231",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-alloc",
+ "embedded-graphics",
+ "embedded-graphics-core",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "futures",
+ "heapless 0.9.3",
+ "log",
+ "num-traits",
+ "oled_async",
+ "panic-probe",
+ "postcard",
+ "rotary-encoder-hal",
+ "serde",
+ "static_cell",
+ "variegated-adc-tools",
+ "variegated-ads124s08",
+ "variegated-board-cfg",
+ "variegated-comms",
+ "variegated-controller-lib",
+ "variegated-controller-types",
+ "variegated-debug",
+ "variegated-fdc1004",
+ "variegated-gravity-driver",
+ "variegated-hal",
+ "variegated-instrumentation",
+ "variegated-log",
+ "variegated-mcp23017",
+ "variegated-mcp9600",
+ "variegated-rp235x-atomic-raw-mutex",
+ "variegated-timekeeping",
+ "variegated-tlc59108",
+ "w25q32jv",
 ]
 
 [[package]]

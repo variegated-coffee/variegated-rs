@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compare two runs of scripts/build-examples.sh and report whether the warnings
+# Compare two runs of scripts/build-firmware.sh and report whether the warnings
 # changed. Exists so the comparison is a single literal command rather than a
 # pile of shell process substitution at the call site.
 #
@@ -18,7 +18,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 status=0
 
-for build in dual_boiler dual_boiler_pwm_steam_valve single_boiler; do
+# All four builds `build-firmware.sh` produces. The optional-peripherals build used to be
+# missing from this list while still being built, so its warnings were the one set nothing
+# ever compared.
+for build in gs3 gs3_pwm_steam_valve silvia gs3_optional_peripherals; do
     echo "=== $build"
     # A comparison that cannot be made is a failed comparison, not a passed one. This
     # used to `continue` without touching `status`, so pointing the script at an empty
