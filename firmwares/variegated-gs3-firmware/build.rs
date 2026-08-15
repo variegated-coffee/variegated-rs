@@ -33,15 +33,10 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
 
-    // One crate, one machine, one board config -- so this is an unconditional
-    // statement of fact rather than a decision.
-    //
-    // It used to be a decision, and one a build script is not capable of making: while both
-    // firmwares lived in a single `examples` package, this dispatched on
-    // `CARGO_FEATURE_DUAL_BOILER` / `CARGO_FEATURE_SINGLE_BOILER` under a comment claiming
-    // to "get the name of the binary being built". A build script runs once per package, not
-    // once per bin, and cannot see which bin it is for. Asking for both features therefore
-    // compiled both machines' `main.rs` against the *dual* board config.
+    // One crate, one machine, one board config -- so this is an unconditional statement of
+    // fact, and must stay one. A build script runs once per *package*, not once per bin,
+    // and cannot see which bin it is for, so it cannot pick a board config off a cargo
+    // feature however much the code might look like it can.
     //
     // The path has to be spelled out even though `board-cfg.toml` sits right next to this
     // file, because `variegated-board-cfg`'s fallback resolves `OUT_DIR` up to the

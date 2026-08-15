@@ -112,13 +112,11 @@ fn generate_schemas(repo_root: Option<&std::path::Path>) {
     // Everything below goes to stderr. Anything on a build script's stdout starting with
     // `cargo:` is a directive, and modern cargo errors on ones it does not recognize.
     match variegated_schema_export::write_if_changed(repo_root) {
-        // No `cargo::warning` on the `Written` arm any more. It used to say "frontend/dist
-        // is now stale, run npm run build" -- correct, and useless: a warning among the
-        // dozens this build emits is trivially filtered out or scrolled past, and the
-        // failure it predicts (the firmware encoding a field the embedded bundle's decoder
-        // does not know about, which mis-decodes every field after it) does not surface
-        // until the UI is open. `build_frontend` now does the rebuild instead of asking
-        // for it.
+        // No `cargo::warning` on the `Written` arm: `build_frontend` does the rebuild
+        // rather than asking for one. A warning saying "frontend/dist is stale" is
+        // trivially scrolled past, and the failure it predicts -- the firmware encoding a
+        // field the embedded bundle's decoder does not know about, which mis-decodes every
+        // field after it -- does not surface until the UI is open.
         Ok(variegated_schema_export::Outcome::Unchanged) => {}
         Ok(variegated_schema_export::Outcome::Written) => {
             eprintln!("variegated-schema-export: schemas.ts regenerated");

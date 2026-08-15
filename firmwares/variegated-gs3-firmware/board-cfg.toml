@@ -88,8 +88,8 @@ pin_cs = "embassy_rp::peripherals::PIN_27"
 watchdog = "embassy_rp::peripherals::WATCHDOG"
 
 [backlight_peripherals]
-# PWM_SLICE0 was here when the backlight was dimmed by PWM; it is driven as a plain GPIO
-# now, so the slice is free for anything else that wants it.
+# The backlight is a plain GPIO, not PWM -- see `backlight_controller.rs` for why. No PWM
+# slice is claimed here.
 pin = "embassy_rp::peripherals::PIN_1"
 
 [usb_debug_peripherals]

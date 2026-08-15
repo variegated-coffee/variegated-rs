@@ -1,10 +1,8 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-# Choose a default "cargo run" tool (see README for more info)
-# - `probe-rs` provides flashing and defmt via a hardware debugger, and stack unwind on panic
-# - elf2uf2-rs loads firmware over USB when the rp2040 is in boot mode
-#runner = "probe-rs run --chip RP2040 --protocol swd --probe 1366:0105"
+# `probe-runner.sh` wraps probe-rs, which flashes over SWD and gives defmt output and a
+# stack unwind on panic. The link args this target needs are emitted by `build.rs` as
+# `cargo:rustc-link-arg-bins`, not set here.
 runner = "./probe-runner.sh"
-#runner = "elf2uf2-rs -d"
 
 [target.'cfg(test)']
 rustflags = ["--cfg", "test"]
@@ -12,16 +10,11 @@ rustflags = ["--cfg", "test"]
 [alias]
 test-aarch64 = "test --target aarch64-apple-darwin"  # Run tests with this target
 
+# NOTE: this `rustflags` key is inside the `[alias]` table above, so cargo reads it as an
+# alias named `rustflags` and these two flags are NOT applied to any build. Moving it under
+# a `[build]` or `[target.…]` table would change codegen for this firmware, so it is left
+# as-is pending a deliberate decision rather than silently switched on.
 rustflags = [
-#    "-C", "linker=flip-link",
-#    "-C", "link-arg=--nmagic",
-#    "-C", "link-arg=-Tlink.x",
-#    "-C", "link-arg=-Tdefmt.x",
-
-    # Code-size optimizations.
-    #   trap unreachable can save a lot of space, but requires nightly compiler.
-    #   uncomment the next line if you wish to enable it
-    # "-Z", "trap-unreachable=no",
     "-C", "inline-threshold=5",
     "-C", "no-vectorize-loops",
 ]

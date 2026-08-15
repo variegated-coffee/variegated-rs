@@ -75,8 +75,7 @@ futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 
 [features]
 # One crate, one machine: `default` *is* this machine's configuration, so a plain
-# `cargo build` produces the firmware. There is no `single-boiler` umbrella feature any
-# more -- it existed only to pick this bin out of a package that held two.
+# `cargo build` produces the firmware. There is no umbrella feature selecting the machine.
 default = ["rp235xb", "gravity"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]

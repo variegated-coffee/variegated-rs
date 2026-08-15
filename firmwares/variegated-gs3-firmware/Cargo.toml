@@ -79,9 +79,8 @@ futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 
 [features]
 # One crate, one machine: `default` *is* this machine's configuration, so a plain
-# `cargo build` produces the firmware. There is no `dual-boiler` umbrella feature any
-# more -- it existed only to pick this bin out of a package that held two. The bundle it
-# used to name is now spelled out here instead.
+# `cargo build` produces the firmware. There is no umbrella feature selecting the machine;
+# the whole bundle is spelled out here.
 #
 # `belka`, `gear-pump`, `bluetooth-group-1-scale` and `sd-card-storage` survive as
 # default-on marker features rather than being folded away, because folding them away

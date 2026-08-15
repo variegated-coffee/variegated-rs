@@ -24,8 +24,8 @@ VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS = "1"
 ESP_RADIO_CONFIG_WIFI_MAX_BURST_SIZE = "0"
 
 [build]
+# `-Tlinkall.x` is not set here: `build.rs` emits it as a `rustc-link-arg`.
 rustflags = [
-#  "-C", "link-arg=-Tlinkall.x",
   "-C", "force-frame-pointers",
 ]
 

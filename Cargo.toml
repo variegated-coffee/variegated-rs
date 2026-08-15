@@ -1,8 +1,8 @@
 [workspace]
-# Layout, as of 2026-08-15: a crate that produces a flashable binary lives in
-# `firmwares/`, everything else in `crates/`. Sibling path dependencies inside `crates/`
-# are unaffected by that split -- `../variegated-hal` from `crates/variegated-controller-lib`
-# still resolves -- which is why only the three firmware manifests carry `../../crates/`.
+# Layout: a crate that produces a flashable binary lives in `firmwares/`, everything else
+# in `crates/`. Sibling path dependencies inside `crates/` are plain -- `../variegated-hal`
+# from `crates/variegated-controller-lib` resolves -- which is why only the three firmware
+# manifests carry `../../crates/`.
 members = [
     "firmwares/variegated-silvia-firmware",
     "firmwares/variegated-gs3-firmware",
@@ -34,17 +34,15 @@ members = [
     "crates/variegated-postcard-schema",
     "crates/variegated-postcard-schema-derive",
 
-    # The `#[board_cfg(...)]` / `aliased_bind_interrupts!` macro, merged in from its own
-    # repository on 2026-08-15. It is still published to crates.io from here. Both it and
-    # its fixture crate are deliberately absent from `default-members` below -- see the
-    # note there, the reasons are not the same.
+    # The `#[board_cfg(...)]` / `aliased_bind_interrupts!` macro. It is published to
+    # crates.io from here. Both it and its fixture crate are deliberately absent from
+    # `default-members` below -- see the note there, the reasons are not the same.
     "crates/variegated-board-cfg",
     "crates/variegated-board-cfg-tests",
 
-    # The ESP32-C6 comms side, merged in from variegated-comms-rs on 2026-08-15. The
-    # first five are portable no_std and would build for either architecture; only
-    # `variegated-comms-firmware` is riscv32-only, and it is the reason for
-    # `default-members` below.
+    # The ESP32-C6 comms side. The first five are portable no_std and would build for
+    # either architecture; only `variegated-comms-firmware` is riscv32-only, and it is the
+    # reason for `default-members` below.
     "crates/variegated-comms-api-types",
     "crates/variegated-trouble-connection-manager",
     "crates/variegated-belka-portal-trouble-driver",
@@ -108,7 +106,7 @@ default-members = [
     # list does -- and cargo builds it for `--target` like anything else, so `serde_core`
     # and `either` get compiled for thumbv8m and produce thousands of errors. It is
     # covered anyway: every firmware build compiles it as a host dependency, which is
-    # where its warnings surfaced before it moved into this workspace.
+    # where its warnings surface.
 ]
 
 # A std host tool that declares its own `[workspace]`. Without this exclusion cargo
@@ -121,7 +119,7 @@ default-members = [
 # would be more obviously "that firmware's build input": `exclude` does not reach a
 # package nested inside a *member's* directory, and cargo fails with "multiple workspace
 # roots found in the same workspace". `crates/` is not itself a package, so excluding a
-# directory inside it works exactly as excluding one at the root did.
+# directory inside it works.
 exclude = [
     "crates/variegated-schema-export",
 ]
@@ -278,9 +276,7 @@ either = "1.13.0"
 toml = "0.8.19"
 
 # ---------------------------------------------------------------------------------
-# ESP32-C6 comms side. Merged from variegated-comms-rs on 2026-08-15; every entry the
-# two workspaces shared was already at an identical version, so nothing below had to be
-# arbitrated. Only `variegated-comms-firmware` and the BLE crates use these.
+# ESP32-C6 comms side. Only `variegated-comms-firmware` and the BLE crates use these.
 # ---------------------------------------------------------------------------------
 
 # BLE. trouble-host is held at 0.6.0, NOT 0.7.0: esp-radio 0.18 depends on bt-hci 0.8,
@@ -333,26 +329,23 @@ sntpc = { version = "0.11.0", default-features = false }
 jiff = { version = "0.2.35", default-features = false }
 
 [profile.dev]
-debug = true              # Enable debug info
-# `opt-level = 3`, raised from 1 on 2026-08-10, and this is a *correctness* setting on this
-# firmware rather than a performance one.
+debug = true
+# `opt-level = 3` is a *correctness* setting on this firmware, not a performance one, and
+# cargo only honours the profile in the workspace **root** manifest -- a copy in a member's
+# manifest is silently ignored.
 #
-# Cargo only honours the profile in the workspace **root** manifest. `examples/Cargo.toml`
-# has said `opt-level = 3` for a long time and it has been silently ignored, so everything
-# built at 1 -- which does not coalesce async state-machine locals and inflates poll frames
-# enormously. `CORE1_STACK_LENGTH` in `variegated-gs3-firmware` already documents that effect
-# as the reason core 1 needs 96 kB.
-#
-# The cost of the gap: core 0's stack (192,452 bytes) was being exhausted by a single
-# `Join5::poll` in `esp_transceiver_main`, silently overwriting `.bss` -- the executor's
-# task arena and the embassy timer queue live there -- and the machine then died in
+# At opt-level 1 rustc does not coalesce async state-machine locals, which inflates poll
+# frames enormously. `CORE1_STACK_LENGTH` in `variegated-gs3-firmware` documents that
+# effect as the reason core 1 needs 96 kB. On core 0 it was worse: a single `Join5::poll`
+# in `esp_transceiver_main` exhausted the 192,452-byte stack and silently overwrote `.bss`,
+# where the executor's task arena and the embassy timer queue live, so the machine died in
 # `Queue::next_expiration` chasing a pointer that had been overwritten with painted stack.
-# It took a stack guard and a fault-register dump to find, because nothing traps by default.
+# Nothing traps by default; it took a stack guard and a fault-register dump to find.
 #
-# Set here, at the root, so it actually applies. If debugging ever needs opt-level 1 back,
-# expect the stack margin to vanish with it, and check `core0_stack_high_water()` first.
+# If debugging ever needs opt-level 1 back, expect the stack margin to vanish with it, and
+# check `core0_stack_high_water()` first.
 opt-level = 3
-lto = true              # Disable link-time optimization
+lto = true
 
 [profile.release]
 debug = true             # Keep debug info in release builds too
@@ -372,8 +365,7 @@ debug = true             # Keep debug info in release builds too
 # key at all.
 #
 # Built with `cargo build --profile comms-release` from `variegated-comms-firmware/`;
-# artifacts land in `target/riscv32imac-unknown-none-elf/comms-release/`. Values carried
-# over verbatim from variegated-comms-rs's `[profile.release]`.
+# artifacts land in `target/riscv32imac-unknown-none-elf/comms-release/`.
 [profile.comms-release]
 inherits         = "release"
 codegen-units    = 1     # LLVM can perform better optimizations using a single thread
@@ -405,13 +397,6 @@ overflow-checks  = false
 # embassy-embedded-hal itself, so no type crosses between the two versions.
 # The cost is compiling one small extra crate. Revisit if upstream publishes a
 # fixed embassy-embedded-hal.
-#
-# NOTE: the embassy-rp [patch.crates-io] fork (variegated-coffee/embassy, branch
-# psram-0.8.0) was removed here. It existed only because `psram`/`qmi_cs1` were
-# merged upstream but not yet published; its single commit just stripped
-# `path = "../..."` from embassy-rp's dependencies so the crate could be consumed
-# as a standalone git dep. There were no functional changes to carry over.
-# Both modules ship in released embassy-rp since 0.9.0.
 
 # sdio's SPI transport does not work as published, and does not work on its master
 # either. `read_response_words` packs the R1 status byte into `words[0]`, where
@@ -456,7 +441,8 @@ overflow-checks  = false
 #
 # The same commit fixes multi-cluster *reads* and mid-cluster seeks, which is a plausible
 # explanation for the `FileNotFound`-masked-by-diagnostics episode recorded in
-# SD_LOG_PROGRESS.md -- worth re-checking that open question against this version.
+# `SD_LOG_PROGRESS.md` at the umbrella root (not in this repo) -- worth re-checking that
+# open question against this version.
 [patch.crates-io]
 sdio = { path = "../sdio" }
 exfat-slim = { path = "../exfat-slim" }

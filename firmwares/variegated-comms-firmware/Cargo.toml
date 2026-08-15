@@ -29,8 +29,8 @@ variegated-schema-export = { path = "../../crates/variegated-schema-export" }
 # `derive` is what `#[gatt_service]`/`#[gatt_server]` live behind. Those macros are
 # invoked in `variegated-improv-trouble`, not here -- see that crate's manifest for the
 # embassy-sync version reason -- and cargo would unify the feature in from there anyway.
-# It is named here because this is the binary that needs it and a feature list that omits
-# it reads as "this firmware has no GATT server", which stopped being true.
+# It is named here because this is the binary that needs it, and a feature list that omits
+# it would read as "this firmware has no GATT server".
 trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
 # Improv Wi-Fi provisioning. `ble` brings in the GATT service and the run loop; without it
 # this crate is just the packet codec, which is how its host tests stay runnable.
@@ -120,25 +120,22 @@ esp-alloc.workspace = true
 esp-backtrace = { workspace = true, features = ["defmt"] }
 esp-bootloader-esp-idf.workspace = true
 esp-hal = { workspace = true, features = ["defmt", "unstable"] }
-# `jtag-serial`: defmt output goes to the USB-Serial-JTAG.
+# `jtag-serial`: defmt output goes to the USB-Serial-JTAG. This is what makes
+# `defmt::unwrap!`/`assert!`/`panic!` text visible at all -- handed to a logger with no
+# sink, a failing assertion surfaces only as `core::panic!()` from
+# `__defmt_default_panic`, i.e. the string `explicit panic` and nothing else.
 #
-# **This was `no-op` until 2026-08-11, and the reason it could change is that the
-# structured debug stream moved off this peripheral onto UART0** (see
-# `config::DEBUG_UART_BAUD`, "unlike the USB-Serial-JTAG this replaced"). The rejection
-# of every output target rested on contention with that stream; with the stream gone
-# from here, so is the contention.
-#
-# What the old note got right, and still applies to the targets NOT chosen:
+# The two targets NOT chosen, and why:
 #
 #   * `auto` probes for USB-Serial-JTAG at runtime, watching the peripheral's SOF
-#     interrupt flag. Now harmless, but there is nothing left to probe *for* -- this
-#     firmware knows which peripheral it wants, so name it.
+#     interrupt flag. There is nothing to probe *for* -- this firmware knows which
+#     peripheral it wants, so it names it.
 #   * `uart` does not write to a UART peripheral. On the C6 it calls ROM `tx_one_char`
 #     and flushes via `tx_flush(get_channel())`, i.e. the *ROM console channel*, which
 #     on a chip attached over native USB is the USB-Serial-JTAG anyway. Worse, it
 #     flushes every 32 bytes while holding `esp_sync::RawMutex` -- ~2.8 ms of busy-wait
-#     per chunk at 115200 **with interrupts disabled**, on a processor running WiFi and
-#     BLE, with no timeout. Still rejected, and for the stronger of the two reasons.
+#     per chunk at 115200 **with interrupts disabled**, on a processor running Wi-Fi and
+#     BLE, with no timeout.
 #
 # `jtag-serial` is bounded where `uart` is not. `wait_for_flush` spins at most
 # `TIMEOUT_ITERATIONS = 50_000` and then latches a sticky `TIMED_OUT`, after which every
@@ -146,45 +143,29 @@ esp-hal = { workspace = true, features = ["defmt", "unstable"] }
 # attached decays to nothing, and the worst case with one attached is a bounded spin
 # only when the FIFO is genuinely full.
 #
-# WHAT THIS BUYS: `defmt::unwrap!`/`assert!`/`panic!` messages become visible. They were
-# not. A panic on this processor printed `explicit panic` and nothing else -- that string
-# is `core::panic!()` from `__defmt_default_panic`, reached because the real assertion
-# text had been handed to a defmt logger with no sink. Diagnosing anything behind a defmt
-# assertion was impossible.
+# The cost of having an output target at all: `variegated-log`'s `log_*!` macros
+# dual-emit to defmt and to the `log` facade, so normal logging reaches *both* the debug
+# bus and this wire. If that duplication becomes a problem, make the dual-emit
+# conditional rather than blinding defmt again.
 #
-# WHAT IT COSTS: `variegated-log`'s `log_*!` macros dual-emit to defmt and to the `log`
-# facade, so normal logging now reaches *both* the debug bus and this wire. That is
-# duplication, and with a host attached it is real traffic on a busy processor. If it
-# becomes a problem the fix is to make the dual-emit conditional, not to blind defmt
-# again.
-#
-# **`critical-section` is not a nicety here, it is the load-bearing half of this line,
-# and dropping it was a data race for as long as it was dropped.**
-#
+# **`critical-section` is not a nicety here, it is the load-bearing half of this line.**
 # In `esp-println/src/defmt.rs` the lock, the `TAKEN` re-entrancy check and `CS_RESTORE`
 # are all `#[cfg(feature = "critical-section")]`. The line after them is not:
 #
 #     unsafe { ENCODER.start_frame(do_write) }
 #
 # `ENCODER` is a single `static mut defmt::Encoder`. Without the feature, every
-# `defmt::*!` call from any task or interrupt mutates it with no mutual exclusion.
+# `defmt::*!` call from any task or interrupt mutates it with no mutual exclusion. The
+# symptom is a panic reading exactly `explicit panic`, at random moments under logging
+# load, when the corrupted encoder trips one of defmt's internal assertions -- and the
+# assertion text then goes to the same broken logger and vanishes.
 #
-# `no-op` did not save us from that: it only makes `do_write` empty. `acquire()` still
-# ran and still drove the encoder, so the race was live while the output was being
-# discarded -- all of the hazard, none of the benefit.
+# Selecting the `no-op` output target does **not** save you from that: it only makes
+# `do_write` empty, while `acquire()` still runs and still drives the encoder. All of the
+# hazard, none of the benefit. So if this firmware ever goes back to `no-op`, **keep
+# `critical-section`**. The output target is a choice; the lock is not.
 #
-# The symptom was a panic reading exactly `explicit panic` and nothing else, at random
-# moments under logging load. That is `core::panic!()` from `__defmt_default_panic`,
-# reached when the corrupted encoder tripped one of defmt's internal assertions; the
-# assertion text then went to the same broken logger and vanished. It was diagnosed on
-# 2026-08-11 after being mistaken for a Wi-Fi provisioning bug, because it happened to
-# fire during a credential write.
-#
-# So: if this firmware ever goes back to `no-op`, **keep `critical-section`**. The output
-# target is a choice; the lock is not.
-#
-# `timestamp` is kept as before, so `_esp_println_timestamp` in main.rs stays a live
-# export.
+# `timestamp` keeps `_esp_println_timestamp` in main.rs a live export.
 esp-println = { workspace = true, default-features = false, features = ["jtag-serial", "critical-section", "defmt-espflash", "timestamp", "esp32c6"] }
 # The `log_*!` macros and the `log` -> debug-bus sink, the same crate and the same
 # `debug-bus` feature the application processor uses. `bus_sink` formats each
@@ -198,14 +179,14 @@ esp-println = { workspace = true, default-features = false, features = ["jtag-se
 #
 # `defmt` **is** named, and must stay named. It is a default feature of that crate, and
 # this line passes `default-features = false` -- so dropping it would silently switch the
-# defmt half of every `log_*!` back off, which is exactly the state the block above
-# describes as having cost a day to diagnose. It became a feature so that *host* test
-# builds can turn it off; nothing about this firmware changed.
+# defmt half of every `log_*!` back off, leaving assertions invisible exactly as the
+# esp-println block above describes. It is a feature at all so that *host* test builds
+# can turn it off.
 variegated-log = { path = "../../crates/variegated-log", default-features = false, features = ["debug-bus", "defmt"] }
 esp-rtos = { workspace = true, features = ["esp-radio", "defmt", "embassy"] }
 static_cell.workspace = true
-# 0.18 removed the `smoltcp` feature entirely -- the blocking smoltcp path is
-# gone and embassy-net/async is the only option now, which is what we already use.
+# No `smoltcp` feature: esp-radio offers no blocking smoltcp path, and embassy-net/async
+# is what this firmware uses regardless.
 esp-radio = { workspace = true, features = [
   "ble",
   "coex",
@@ -224,15 +205,12 @@ smoltcp = { workspace = true, features = [
   "socket-udp",
 ] }
 defmt.workspace = true
-# 0.11 dropped the bundled embassy socket integration; `NtpUdpSocket` is now
-# implemented on our side, see src/time.rs.
+# sntpc bundles no embassy socket integration, so `NtpUdpSocket` is implemented on our
+# side -- see src/time.rs.
 sntpc = { workspace = true, features = ["defmt"] }
 jiff = { workspace = true, features = ["static"] }
 log.workspace = true
 esphome-device = { path = "../../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
-
-#[patch."https://github.com/vpetrigo/sntpc"]
-#sntpc = { git = "https://github.com/vpetrigo/sntpc", branch = "master" }
 
 [features]
 default = [
