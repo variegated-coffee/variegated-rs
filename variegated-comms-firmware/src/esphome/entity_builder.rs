@@ -896,7 +896,7 @@ fn build_boiler_entities(
 
 fn build_group_entities(
     group_index: GroupIndex,
-    config: &GroupConfiguration,
+    _config: &GroupConfiguration,
     machine_def: &MachineDefinition,
     _status: Option<&Status>
 ) -> Vec<EntityConfig<'static>> {

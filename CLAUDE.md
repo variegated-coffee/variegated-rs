@@ -168,10 +168,21 @@ git log --all -- crates/variegated-comms-firmware/src/http.rs
 configuration the gate builds.** Not "no new warnings", not "the count did not go up" —
 zero. A change that adds one is not finished.
 
-This applies to the two **espresso** firmwares, which are at zero. The comms firmware is
-not yet — it carries 8 in its lib and 9 in its bin, recorded in
-`scripts/build-comms-firmware.sh`. Until someone does for it what was done for the other
-two, that number is a ratchet rather than a target: do not let it rise.
+This applies to **all three firmwares** — both espresso ones and the comms one — and to the
+five supporting comms crates. All eight are at zero.
+
+What is *not* yet at zero is the library crates: `variegated-controller-types` and friends
+still account for the 121/100/25 totals the gate scripts report. Those totals are a
+dependency-side number; the rule above is about a crate's own diagnostics, which is what
+`scripts/warning-report.py` measures. Extending the rule to the libraries is the remaining
+work before this can be a genuinely repo-wide policy.
+
+One trap when clearing warnings in a `no_std` firmware: **an unused import may be the only
+thing linking a crate in.** `cargo fix` removed `use esp_println::println;` from the comms
+firmware and the build died at link time with `undefined symbol: _defmt_write`, because
+esp-println carries the `#[defmt::global_logger]` and an extern crate nothing names is one
+`--gc-sections` discards. The fix is `use esp_println as _;`, not deletion. The same applies
+to panic handlers and allocators.
 
 This is enforceable because it is currently true, and it was made true deliberately: both
 firmwares carried 69 and 59 warnings until 2026-08-15, and roughly 70% of that was unused

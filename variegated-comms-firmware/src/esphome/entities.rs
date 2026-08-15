@@ -32,26 +32,10 @@ pub const OUTPUT_FLOW_RATE_KEY: u32 = 12;
 #[allow(dead_code)]
 pub const OUTPUT_WEIGHT_KEY: u32 = 13;
 
-pub static DEVICE_CONFIG: &DeviceConfig = &DeviceConfig {
-    name: "GS3 Test",
-    password: None,
-    mac_address: "",
-    esphome_version: "",
-    compilation_time: "",
-    model: "",
-    has_deep_sleep: false,
-    project_name: "",
-    project_version: "",
-    webserver_port: 0,
-    legacy_bluetooth_proxy_version: 0,
-    bluetooth_proxy_feature_flags: 0,
-    manufacturer: "",
-    friendly_name: "",
-    legacy_voice_assistant_version: 0,
-    voice_assistant_feature_flags: 0,
-    suggested_area: "",
-    bluetooth_mac_address: "",
-};
+// A `static DEVICE_CONFIG` used to sit here, hardcoding `name: "GS3 Test"` and leaving every
+// other field empty. `build_device_config` below superseded it -- that one takes the actual
+// `MachineDefinition` and MAC address, so the name follows the machine rather than naming one
+// particular test rig -- and nothing had referenced the static since.
 
 /// Build a dynamic device configuration based on machine definition and runtime information
 pub fn build_device_config(

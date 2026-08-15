@@ -17,14 +17,14 @@
 # without them; the values are irrelevant to a compile check. The TCP-command flag
 # is set so Task 12's `option_env!`-gated code is type-checked too.
 #
-# Baseline as of the 2026-08-15 merge into this workspace: 44 warnings, 0 errors --
-# 8 from the firmware lib, 9 from its bin, the rest from `variegated-controller-types`
-# and `esphome-device`. (The "8 warnings" this header used to claim was the lib's count
-# alone and had been stale for a while.)
+# Baseline as of 2026-08-15: 25 warnings, 0 errors -- and **none of them are this
+# firmware's**. All 25 come from `variegated-controller-types` (a workspace library, still
+# to be cleaned) and `esphome-device` (a separate repo, not fixable from here).
 #
-# Unlike the espresso firmwares, this one is *not* yet held to the zero-warnings rule in
-# CLAUDE.md. Bringing it there is separate work; until then this number is a ratchet, not
-# a target.
+# `variegated-comms-firmware` now holds to the same rule as the espresso firmwares: zero
+# warnings of its own. Check that with `scripts/warning-report.py`, which counts a crate's
+# own diagnostics rather than its log's total; the number below moves whenever a dependency
+# changes and is not the thing under the rule.
 #
 # Usage: scripts/build-comms-firmware.sh [output-dir]
 set -u

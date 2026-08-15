@@ -104,9 +104,9 @@ use embassy_futures::select::{select, Either};
 // name are the summary (for the listing), the index (for addressing) and the write
 // outcome (for the status code).
 use variegated_controller_types::{
-    BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlTargetValuesUpdate,
+    BoilerControlTargetValuesUpdate, GroupBrewControlTargetValuesUpdate,
     MachineCommand, MachineMode, PidParameterTarget, RoutineIndex, RoutineWriteError,
-    RoutineWriteOutcome, ScaleSelector, ScheduleItem, Status, ROUTINE_MAX_ENCODED_LEN,
+    RoutineWriteOutcome, ScaleSelector, ScheduleItem, ROUTINE_MAX_ENCODED_LEN,
 };
 use variegated_controller_types::shot_log::{ShotAnnotations, ShotLogId, ShotLogStorageError};
 

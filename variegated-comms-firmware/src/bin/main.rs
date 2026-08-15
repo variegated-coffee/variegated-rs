@@ -8,17 +8,13 @@
 #![no_main]
 
 use core::fmt::Write as _;
-use core::net::{Ipv4Addr, SocketAddr};
 
 use bt_hci::controller::ExternalController;
 use variegated_log::log_info;
-use edge_http::io::client::Connection;
-use edge_http::Method;
 use edge_nal_embassy::{Tcp, TcpBuffers};
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
 use embassy_time::{Duration, Timer};
-use embedded_io_async::Read;
 use esp_alloc as _;
 use esp_backtrace::Backtrace;
 use esp_hal::{
@@ -29,7 +25,16 @@ use esp_hal::{
     rtc_cntl::Rtc,
     timer::timg::{MwdtStage, TimerGroup},
 };
-use esp_println::println;
+// `as _`, and it must stay. Nothing here calls into esp-println, but the crate carries the
+// `#[defmt::global_logger]` this firmware logs through, and an extern crate that is never
+// named is an extern crate the linker discards -- `--gc-sections` then takes the logger
+// with it and the build fails with `undefined symbol: _defmt_write`, which names neither
+// esp-println nor defmt's global_logger.
+//
+// This was `use esp_println::println;` and `cargo fix` deleted it as an unused import,
+// correctly by its own lights and fatally by ours. Same idiom as `esp_alloc as _` above,
+// for the same reason.
+use esp_println as _;
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
 
@@ -40,8 +45,7 @@ use variegated_comms_firmware::{
     channels::{
         ApplicationConfigurationChannel, ApplicationStatusChannel, ApplicationRoutineChannel,
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
-        MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL,
-        StateChangeChannel, CLIENT_EVENT_CAPACITY, SENSOR_READING_CHANNEL,
+        MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL, SENSOR_READING_CHANNEL,
         DEBUG_COMMAND_CHANNEL,
     },
     config::{debug_uart_config, uart_config},
@@ -56,7 +60,6 @@ use variegated_comms_firmware::{
     websocket_server_task,
     wifi::{connection_task, net_task},
 };
-use esphome_device::ClientEvent;
 use variegated_controller_types::bluetooth::MAX_BLUETOOTH_PERIPHERALS;
 use variegated_controller_types::debug::{name, text, DebugEvent, Severity};
 use variegated_trouble_connection_manager::BleConnectionManager;
@@ -222,7 +225,7 @@ async fn status_listener_task(status_channel: &'static ApplicationStatusChannel)
     let mut subscriber = status_channel.subscriber().unwrap();
     log_info!("Status listener task is started");
     loop {
-        let status = subscriber.next_message_pure().await;
+        let _status = subscriber.next_message_pure().await;
 //        info!("Status: {:?}", status);
     }
 }
@@ -243,7 +246,7 @@ async fn comms_status_signaller_task(
     use variegated_comms_firmware::ble;
     use variegated_comms_firmware::channels::{COMMS_STATUS_SIGNAL, NO_IPV4, SNTP_SYNC_SEQ, TIME_SYNCED, WIFI_CONNECTED, WIFI_IPV4, WIFI_RSSI_SIGNAL};
     use variegated_comms_firmware::config::USEC_IN_SEC;
-    use variegated_controller_types::{CommsStatus, WirelessConnectionStatus};
+    use variegated_controller_types::CommsStatus;
     use heapless::index_map::FnvIndexMap;
     use portable_atomic::Ordering;
 
