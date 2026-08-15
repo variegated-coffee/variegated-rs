@@ -1,4 +1,4 @@
-# Variegated.rs Copilot Instructions
+# Variegated.rs Instructions
 
 ## Project Overview
 
@@ -27,6 +27,11 @@ The key crates:
 - **`variegated-hal`**: Hardware abstraction layer with GPIO-controlled components, ADC interfaces, and espresso machine primitives (boilers, groups, steam wands, water taps)
 - **`variegated-controller-lib`**: High-level machine controllers and brewing routines
 - **`variegated-controller-types`**: Shared types, configuration structures, commands, and status definitions
+- **`variegated-control-algorithm`**: PID control algorithms with configurable parameters and limits
+- **`variegated-embassy-*`**: Device drivers for specific hardware (ADS124S08 ADC, FDC1004 capacitive sensor, NAU7802 load cell ADC)
+- **`variegated-adc-tools`**: Utilities for converting ADC values to physical quantities (temperature, pressure)
+- **`variegated-board-cfg`**: The proc macro that turns each firmware's `board-cfg.toml` into peripheral structs — published to crates.io, and deliberately machine-agnostic; see below
+- **`variegated-soft-pwm`**: Software PWM for very low frequencies (0.1-1Hz), primarily for heating element control
 
 #### The two ends of the machine
 
@@ -56,10 +61,8 @@ ESP32-C6 comms firmware all link against, and it stays cheap to link precisely b
 does nothing: no embassy, no PAC, no allocator beyond `alloc`. Every implementation that
 leaks into it is weight carried by three consumers that will never call it.
 
-The rule used to be unaffordable — `-lib` could not build for a host, so putting logic
-there meant giving up its tests, and that is how a shot-state machine ended up in `-types`.
-It is affordable now: `-lib`'s `hardware` feature (on by default) gates the two controllers,
-the SD card and the shot-log storage, and everything else compiles and tests on the host:
+`-lib`'s `hardware` feature (on by default) gates the two controllers, the SD card and the
+shot-log storage; everything else compiles and tests on the host:
 
 ```bash
 cargo test-aarch64 -p variegated-controller-lib \
@@ -70,17 +73,13 @@ cargo test-aarch64 -p variegated-controller-lib \
 `hardware` pulls in a Cortex-M PAC. The same applies to the `defmt` feature: a `Format` impl
 monomorphized on a host has no `_defmt_acquire` to link against, and the failure reads
 "Too many sections!", which mentions neither defmt nor logging.
-- **`variegated-control-algorithm`**: PID control algorithms with configurable parameters and limits
-- **`variegated-embassy-*`**: Device drivers for specific hardware (ADS124S08 ADC, FDC1004 capacitive sensor, NAU7802 load cell ADC)
-- **`variegated-adc-tools`**: Utilities for converting ADC values to physical quantities (temperature, pressure)
-- **`variegated-board-cfg`**: The proc macro that turns each firmware's `board-cfg.toml` into peripheral structs — published to crates.io, and deliberately machine-agnostic; see below
-- **`variegated-soft-pwm`**: Software PWM for very low frequencies (0.1-1Hz), primarily for heating element control
 
 ### Physical Quantity Types
-The codebase uses type aliases for real-world measurements to improve readability:
-- `Temperature`, `Pressure`, `FlowRateType`, `WeightType`
-- `Frequency`, `RPM`, `DutyCycle`
-- `ValveOpenness`, `MixingProportions`
+
+Real-world measurements go through type aliases rather than bare `f32`/`u8`. They all carry
+a `Type` suffix — `TemperatureType`, `PressureType`, `FlowRateType`, `ValveOpenType` and so
+on. The list is in `crates/variegated-controller-types/src/lib.rs`; read it there rather
+than from a copy here, which will drift.
 
 ### Key Traits
 - **`WithTask`**: For types that run background async tasks
@@ -94,8 +93,8 @@ The codebase uses type aliases for real-world measurements to improve readabilit
 ## Build System & Development
 
 ### Target Platforms
-- **Primary**: `thumbv8m.main-none-eabihf` (ARM Cortex-M8 embedded, specifically the RP2350)
-- **Secondary**: `riscv32imac-esp-espidf` as some components can run on ESP32-C6 devices
+- **Primary**: `thumbv8m.main-none-eabihf` (the RP2350's Cortex-M33 cores)
+- **Secondary**: `riscv32imac-unknown-none-elf`, for the ESP32-C6 comms firmware
 
 If the runner doesn't have `thumbv8m.main-none-eabihf` installed, it should be installed using rustup.
 
@@ -127,9 +126,8 @@ scripts/build-comms-firmware.sh [output-dir]
 
 ### This workspace spans two architectures
 
-Since 2026-08-15 it holds both the RP2350 espresso firmwares (`thumbv8m.main-none-eabihf`,
-stable 1.95.0) and the ESP32-C6 comms firmware (`riscv32imac-unknown-none-elf`, pinned
-nightly), merged in from what used to be the separate `variegated-comms-rs` repo. Three
+It holds both the RP2350 espresso firmwares (`thumbv8m.main-none-eabihf`, stable 1.95.0)
+and the ESP32-C6 comms firmware (`riscv32imac-unknown-none-elf`, pinned nightly). Three
 consequences, all of which have already caught someone out:
 
 **`cargo build --workspace` is not a command you use here.** It would try to build
@@ -181,18 +179,17 @@ git log --all -- crates/variegated-comms-firmware/src/http.rs
 
 ### `variegated-board-cfg` is published to crates.io from here
 
-The macro behind `#[board_cfg(...)]`, `aliased_bind_interrupts!` and `type_aliases!` had its
-own repository until 2026-08-15, when it was merged in the same way the comms tree was (so
-`git log --follow` will not reach its 9 pre-merge commits either; its old path was
-`variegated-board-cfg/src/lib.rs`, without today's `crates/` prefix). Two things follow from it being a **public,
-general-purpose crate** rather than an internal one:
+The macro behind `#[board_cfg(...)]`, `aliased_bind_interrupts!` and `type_aliases!` was
+merged in the same way the comms tree was, so `git log --follow` will not reach its 9
+pre-merge commits either; its old path was `variegated-board-cfg/src/lib.rs`, without
+today's `crates/` prefix. Two things follow from it being a **public, general-purpose
+crate** rather than an internal one:
 
 - **It is still released to crates.io**, so its `[dependencies]` and MSRV are downstream
-  users' problem too, and the version number has to mean something. It sat at a published
-  0.2.1 for three commits' worth of unreleased breaking change, which is what made
-  `version = "0.2.1", path = "..."` in both firmwares satisfiable only by the path override
-  — build either from the registry alone and you get a macro that binds one handler per
-  interrupt, which neither firmware's DMA setup can express. It is 0.3.0 now.
+  users' problem too, and the version number has to mean something. Bump it in the same
+  commit as the breaking change: leave it behind and `version = "x.y.z", path = "..."` in
+  the firmwares stays satisfiable only via the path override, so a build from the registry
+  alone silently gets a different macro.
 - **Nothing espresso-specific may go into it.** It maps a TOML file onto peripheral structs;
   it knows nothing about boilers, and the moment it does it stops being publishable.
 
@@ -210,9 +207,9 @@ Name the package explicitly — `-p variegated-board-cfg`, or by listing it in
 `serde_core` and `either` are compiled for thumbv8m and emit several thousand errors. So it
 is a member but not a default member, and `scripts/warning-report.py` cannot be pointed at
 it the way it can at a firmware. Its warnings are covered regardless: every firmware build
-compiles it as a host dependency, which is where its one dead-field warning showed up before
-the move. `variegated-postcard-schema-derive` *is* a default member and is fine there only
-because syn, quote and proc-macro2 happen to compile for a bare-metal target.
+compiles it as a host dependency. `variegated-postcard-schema-derive` *is* a default member
+and is fine there only because syn, quote and proc-macro2 happen to compile for a bare-metal
+target.
 
 Its fixture crate `variegated-board-cfg-tests` is out of `default-members` for the simpler
 reason that it is an ordinary std crate. It runs as
@@ -222,10 +219,9 @@ cargo test-aarch64 -p variegated-board-cfg-tests
 ```
 
 That fixture needs its `build.rs`. The macro finds `board-cfg.toml` through `BOARD_CFG_PATH`
-or, failing that, by walking rustc's `--out-dir` up to `target` and popping once. As a
-standalone repo that fallback landed on the crate root; as a workspace member it lands on
-the workspace root, where there is no `board-cfg.toml`. Both espresso firmwares set the same
-variable from their own build scripts for the same reason.
+or, failing that, by walking rustc's `--out-dir` up to `target` and popping once — which in
+a workspace lands on the workspace root, where there is no `board-cfg.toml`. Both espresso
+firmwares set the same variable from their own build scripts for the same reason.
 
 ### Zero warnings is part of the definition of done
 
@@ -233,14 +229,13 @@ variable from their own build scripts for the same reason.
 that is built.** Not "no new warnings", not "the count did not go up" — zero. A change that
 adds one is not finished.
 
-This is now literal rather than aspirational: the four gate configurations report
-**0/0/0/0**, and the comms firmware's 8 are entirely `esphome-device`'s, which lives in the
-sibling `esphome-device-rs` repository and cannot be fixed from here. That is the only
-number in this repo that is not zero, and it is a dependency's.
+The one exception is the comms firmware's 8, which belong entirely to `esphome-device` —
+a sibling repository that cannot be fixed from here.
 
-**Five configurations, not four.** The gate covers gs3, gs3+`pwm-steam-valve`, silvia and
-gs3+`character-display,pwm-leds`. Two more can only be reached by hand, and both have hidden
-warnings before:
+**Six configurations, and the gate script only covers four of them.**
+`scripts/build-firmware.sh` builds gs3, gs3+`pwm-steam-valve`, silvia and
+gs3+`character-display,pwm-leds`. The other two can only be reached by hand, and both have
+hidden warnings before:
 
 ```bash
 cd firmwares/variegated-comms-firmware && cargo build --profile comms-release
@@ -258,11 +253,9 @@ so a real regression on target still gets reported.
 **A driver crate for an IC keeps its whole register map.** These are general drivers, not
 drivers for the one way this firmware happens to use a chip, so a constant with no method
 behind it yet is not dead code — and the fix is `pub mod registers;`, not
-`#[allow(dead_code)]`. `variegated-ads124s08` has always done it that way;
-`variegated-tlc59108` and `variegated-mcp23017` had private register modules, which is
-precisely why the compiler called their datasheet transcriptions unreachable. Note the
-knock-on: making the module public brings its items under the crate's
-`#![warn(missing_docs)]`, so they need doc comments.
+`#[allow(dead_code)]`. A private register module is exactly what makes the compiler call a
+datasheet transcription unreachable. Note the knock-on: making the module public brings its
+items under the crate's `#![warn(missing_docs)]`, so they need doc comments.
 
 One trap when clearing warnings in a `no_std` firmware: **an unused import may be the only
 thing linking a crate in.** `cargo fix` removed `use esp_println::println;` from the comms
@@ -271,27 +264,15 @@ esp-println carries the `#[defmt::global_logger]` and an extern crate nothing na
 `--gc-sections` discards. The fix is `use esp_println as _;`, not deletion. The same applies
 to panic handlers and allocators.
 
-This is enforceable because it is currently true, and it was made true deliberately: the
-firmwares carried 69 and 59 warnings and the libraries another 123 until 2026-08-15, and
-roughly half of all of it was unused imports accumulated across refactors. The cost was
-never the noise itself but what the noise hid. Every pass has found something:
+The cost of a non-zero count is never the noise itself but what the noise hides. Every pass
+over this repo's warnings has turned up a real defect — a dropped `Result` that discarded an
+operator's edit, a brew step running off the wrong field, a config struct stored and never
+read — and none of them were findable in a list of a hundred.
 
-- a dropped `Result` that silently discarded an operator's parameter edit
-- a documented pin-parking routine that nothing ever called
-- **a UART read whose `Result` was bound and dropped**, so an aborted transfer's buffer was
-  fed to a COBS decoder mid-frame — one error cost two messages, and reported neither
-- **a bloom step that ran for `bloom_after` instead of `bloom_time`**, so a routine asking
-  to bloom for 7 s bloomed for 3
-- **a `GroupConfiguration` accepted by a controller's constructor, stored, and never read**
-- a `while let` on an irrefutable pattern that only looked like it terminated
-- 34 lines of PIO assembly assembled into a binding nothing loaded, duplicating the block
-  immediately below it
-
-None of those were findable in a list of 123. Note what they have in common: **the fix that
-silences the warning and the fix that repairs the defect are different edits, and the cheap
-one is usually wrong.** `cargo fix` will offer to rename a dropped `Result` to `_res` and a
-misused `bloom_time` to `_bloom_time`. Both offers make the bug permanent. Read what the
-compiler is pointing at before accepting a suggestion.
+Note what those have in common: **the fix that silences the warning and the fix that repairs
+the defect are different edits, and the cheap one is usually wrong.** `cargo fix` will offer
+to rename a dropped `Result` to `_res` and a misused field binding to `_field`. Both offers
+make the bug permanent. Read what the compiler is pointing at before accepting a suggestion.
 
 Two things this rule has to survive, both of which have already bitten:
 
@@ -301,8 +282,8 @@ Two things this rule has to survive, both of which have already bitten:
   configuration in `scripts/build-firmware.sh`. Keep the `#[cfg]` on the narrowest
   scope that uses a name, so the import is never unused in a build that compiles it.
 - **A crate's own count is not its log's count.** The gate totals every crate in the
-  graph, so the number moves when a dependency changes — pruning unused dependencies took
-  the Silvia's total from 178 to 160 without touching a line of its code. Use
+  graph, so the number moves when a dependency changes — pruning unused dependencies can
+  shift a firmware's total without touching a line of its code. Use
   `scripts/warning-report.py` for the count this rule is about.
 
 Where a warning is wrong rather than the code, silence it narrowly — `#[allow(dead_code)]`
@@ -348,15 +329,12 @@ on the item with a comment saying why it is kept — never a crate-level `#![all
 - **`firmwares/variegated-gs3-firmware/`**: the La Marzocco GS3 carrier — dual boiler, single group
 - Both include board configuration files and hardware-specific implementations
 
-These are the shipping firmwares, not examples. They lived in a package literally named
-`examples` until 2026-08-15; the name outlived the truth by a long way, and it cost real
-things — one `build.rs` picking a board config off a cargo *feature* meant the two could
-not be built in a single cargo invocation, and a plain `cargo build` built neither.
+These are the shipping firmwares, not examples.
 
 ### Important Source Files
-- **`variegated-hal/src/lib.rs`**: Core hardware abstractions
-- **`variegated-controller-types/src/lib.rs`**: Type definitions and machine commands
-- **`variegated-control-algorithm/src/pid.rs`**: PID control implementation
+- **`crates/variegated-hal/src/lib.rs`**: Core hardware abstractions
+- **`crates/variegated-controller-types/src/lib.rs`**: Type definitions and machine commands
+- **`crates/variegated-control-algorithm/src/pid.rs`**: PID control implementation
 
 ## Development Workflow
 
@@ -368,15 +346,16 @@ not be built in a single cargo invocation, and a plain `cargo build` built neith
 5. Test changes using appropriate target platform
 6. Update the firmware crates if interface changes affect them
 
-**Before adding code to a firmware crate**, check whether it belongs in a library crate. The
-two firmwares had forked badly by 2026-08: 57% of the Silvia's substantive lines appeared
-verbatim in the GS3, and the drift had produced real bugs — three implementations of stack
-measurement disagreeing about which linker symbols to read, and four of routine-parameter
-resolution, three of them wrong. Board *configuration* — sensor channels, PT100 vs PT1000,
-pin assignments — belongs in the firmware crate. Anything else almost certainly does not.
+**Before adding code to a firmware crate**, check whether it belongs in a library crate.
+Board *configuration* — sensor channels, PT100 vs PT1000, pin assignments — belongs in the
+firmware crate. Anything else almost certainly does not.
 
-Splitting them into separate crates did not fix that duplication; it froze it in place.
-Extracting the shared code is still outstanding.
+The two firmwares have forked badly: most of the Silvia's substantive lines also appear
+verbatim in the GS3, and that drift has already produced real bugs — several implementations
+of stack measurement disagreeing about which linker symbols to read, and several of
+routine-parameter resolution, most of them wrong. Splitting them into separate crates did
+not fix the duplication; it froze it in place. **Extracting the shared code is still
+outstanding**, so do not add to it.
 
 ### Testing Strategy
 - Because this is an embedded project, testing is primarily done on hardware
@@ -387,11 +366,8 @@ Extracting the shared code is still outstanding.
 #### Testing Embedded Code
 Since this project contains embedded code that targets `thumbv8m.main-none-eabihf`, some crates require special provisions to run tests:
 
-- For **`variegated-rp235x-bootrom-block`** tests, use:
-  ```bash
-  cargo test --target aarch64-apple-darwin -p variegated-rp235x-bootrom-block
-  ```
-- This allows the test code (which includes file I/O for reading test data) to run on the host platform while testing the embedded parsing logic
+- Everything host-testable is in `scripts/test-host.sh`; run that rather than assembling the
+  target and feature flags by hand. A suite that is not in it does not get run.
 - **`variegated-board-cfg`**'s tests live in the separate `variegated-board-cfg-tests` crate,
   because a proc-macro crate cannot invoke its own macros:
   ```bash
@@ -430,5 +406,8 @@ Since this project contains embedded code that targets `thumbv8m.main-none-eabih
 - GPIO-controlled heating elements, pumps, and solenoids
 
 This project is in active development with unstable APIs (< 1.0.0). Breaking changes occur between minor versions but not patch versions.
-- If checking or building a particular crate doesn't work, you should try to build the firmware crates.
-- You're not done until both firmwares compile — `cargo build --workspace --target thumbv8m.main-none-eabihf` covers both in one go.
+
+If checking or building a particular crate doesn't work, try building the firmware crates.
+**You're not done until both RP2350 firmwares compile** — a bare `cargo build --target
+thumbv8m.main-none-eabihf` covers both, via `default-members`. Not `--workspace`; see "This
+workspace spans two architectures" above for why that one cannot work here.
