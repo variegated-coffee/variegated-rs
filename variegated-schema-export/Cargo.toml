@@ -5,11 +5,12 @@ edition = "2024"
 
 # Its own workspace root, deliberately.
 #
-# This package lives inside variegated-comms-rs but must never be built as part of it.
-# It is a std host tool, while every member of that workspace targets
-# riscv32imac-unknown-none-elf -- `cargo check --workspace` would try to build this for
-# a target with no std and fail. An empty `[workspace]` table stops cargo from
-# adopting it as a member when the firmware path-depends on it.
+# This is a std host tool sitting inside a workspace whose members are all bare-metal --
+# thumbv8m.main-none-eabihf for the espresso firmwares, riscv32imac-unknown-none-elf for
+# the comms one. Adopted as a member it would be built for whichever of those is current
+# and fail for want of std. An empty `[workspace]` table stops cargo adopting it when
+# `variegated-comms-firmware` path-depends on it, and being a *build*-dependency is what
+# then gets it compiled as a host unit with std. Both halves are needed.
 [workspace]
 
 [lib]
@@ -20,12 +21,12 @@ name = "variegated-schema-export"
 path = "src/main.rs"
 
 [dependencies]
-variegated-postcard-schema = { path = "../../variegated-rs/variegated-postcard-schema", features = ["heapless", "chrono"] }
-variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["schema", "std"] }
-variegated-comms-api-types = { path = "../../crates/variegated-comms-api-types", features = ["schema"] }
+variegated-postcard-schema = { path = "../variegated-postcard-schema", features = ["heapless", "chrono"] }
+variegated-controller-types = { path = "../variegated-controller-types", default-features = false, features = ["schema", "std"] }
+variegated-comms-api-types = { path = "../variegated-comms-api-types", features = ["schema"] }
 # For the fixtures only: `PidOut`'s fields and `Limits::new_with_limits`, which the
 # controller-types aliases do not re-export.
-variegated-control-algorithm = { path = "../../variegated-rs/variegated-control-algorithm", features = ["serde"] }
+variegated-control-algorithm = { path = "../variegated-control-algorithm", features = ["serde"] }
 # Fixtures are serialized both ways: postcard for the bytes the decoder must reproduce,
 # and JSON as the independent reference for field names and structure.
 # `use-crc` is for the shot log fixture only. A stored shot is

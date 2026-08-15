@@ -5,9 +5,13 @@ use alloc::vec::Vec;
 use core::fmt::{Debug, Display};
 use core::net::SocketAddr;
 
-// Embedded frontend files
-static INDEX_HTML: &[u8] = include_bytes!("../../../frontend/dist/index.html");
-static APP_JS_GZ: &[u8] = include_bytes!("../../../frontend/dist/assets/index.js.gz");
+// Embedded frontend files. `../frontend`, not `../../../frontend`: this crate used to be
+// `crates/variegated-comms-firmware` in a repo whose root held `frontend/`, and it is now
+// a workspace member sitting beside its own copy. `build.rs` runs `npm run build` to
+// produce these, so a failure here usually means that step was skipped
+// (`VARIEGATED_FRONTEND_SKIP`) or `npm ci` has never been run in `frontend/`.
+static INDEX_HTML: &[u8] = include_bytes!("../frontend/dist/index.html");
+static APP_JS_GZ: &[u8] = include_bytes!("../frontend/dist/assets/index.js.gz");
 
 // No `log_warn`: this file's only `warn!` site is the one at line ~1293 that had to
 // stay on `defmt`, because `defmt::Debug2Format` implements `Debug` but not

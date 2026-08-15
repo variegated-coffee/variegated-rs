@@ -27,9 +27,83 @@ members = [
     "variegated-debug",
     "variegated-postcard-schema",
     "variegated-postcard-schema-derive",
+
+    # The ESP32-C6 comms side, merged in from variegated-comms-rs on 2026-08-15. The
+    # first five are portable no_std and would build for either architecture; only
+    # `variegated-comms-firmware` is riscv32-only, and it is the reason for
+    # `default-members` below.
+    "variegated-comms-api-types",
+    "variegated-trouble-connection-manager",
+    "variegated-belka-portal-trouble-driver",
+    "variegated-scale-trouble-driver",
+    "variegated-improv-trouble",
+    "variegated-comms-firmware",
 ]
+
+# This workspace spans two architectures, so `--workspace` is not a usable command here:
+# it would try to build `esp-hal` for thumbv8m and fail with a wall of errors that name
+# nothing relevant. `default-members` is what keeps a bare `cargo build` meaning "the
+# RP2350 side", which is what it has always meant.
+#
+# The six comms crates are deliberately *all* absent from this list, not just the
+# riscv-only firmware. Including the five portable ones would compile the whole BLE stack
+# for thumbv8m on every build, and -- less obviously -- resolver 2 unifies features across
+# one invocation's graph, so `variegated-comms-api-types` asking for
+# `variegated-controller-types/serde` would newly enable serde inside the espresso
+# firmwares. They still get compile coverage: every comms firmware build compiles them.
+#
+# Build the comms firmware with `cd variegated-comms-firmware && cargo build`, or
+# `scripts/build-comms-firmware.sh`. It cannot be built from here -- see that directory's
+# `.cargo/config.toml` and `rust-toolchain.toml`.
+default-members = [
+    "variegated-silvia-firmware",
+    "variegated-gs3-firmware",
+    "variegated-adc-tools",
+    "variegated-controller-lib",
+    "variegated-controller-types",
+    "variegated-control-algorithm",
+    "variegated-ads124s08",
+    "variegated-embassy-dual-c595-shift-register",
+    "variegated-fdc1004",
+    "variegated-gravity-driver",
+    "variegated-mcp9600",
+    "variegated-nau7802",
+    "variegated-tlc59108",
+    "variegated-embassy-rp-frequency-counter",
+    "variegated-hal",
+    "variegated-log",
+    "variegated-soft-pwm",
+    "variegated-instrumentation",
+    "variegated-mcp23017",
+    "variegated-nv3007",
+    "variegated-comms",
+    "variegated-exfat-format",
+    "variegated-timekeeping",
+    "variegated-rp235x-atomic-raw-mutex",
+    "variegated-debug-codec",
+    "variegated-debug",
+    "variegated-postcard-schema",
+    "variegated-postcard-schema-derive",
+]
+
+# A std host tool that declares its own `[workspace]`. Without this exclusion cargo
+# reports "multiple workspace roots found in the same workspace"; with it, but without
+# that nested table, cargo would try to build it for a bare-metal target where it has no
+# std. Both halves are needed. It reaches the comms firmware as a build-dependency, which
+# cargo compiles as a host unit regardless.
+#
+# It sits at the workspace root rather than under `variegated-comms-firmware/`, where it
+# would be more obviously "that firmware's build input": `exclude` does not reach a
+# package nested inside a *member's* directory, and cargo fails with "multiple workspace
+# roots found in the same workspace". A sibling is the arrangement that works.
+exclude = [
+    "variegated-schema-export",
+]
+
 resolver = "2"
-package = { rust-version = "1.88" }
+# `edition` is here for the comms crates, which inherit it with `edition.workspace = true`.
+# The RP2350 crates all state their own and are unaffected.
+package = { rust-version = "1.88", edition = "2024" }
 
 # Single source of truth for dependency versions.
 #
@@ -166,6 +240,61 @@ syn = "2.0"
 # anti-drift guarantee, so it is tested like one.
 trybuild = "1.0"
 
+# ---------------------------------------------------------------------------------
+# ESP32-C6 comms side. Merged from variegated-comms-rs on 2026-08-15; every entry the
+# two workspaces shared was already at an identical version, so nothing below had to be
+# arbitrated. Only `variegated-comms-firmware` and the BLE crates use these.
+# ---------------------------------------------------------------------------------
+
+# BLE. trouble-host is held at 0.6.0, NOT 0.7.0: esp-radio 0.18 depends on bt-hci 0.8,
+# while trouble-host 0.7 requires bt-hci ^0.9. Only esp-hal `main` (unreleased) is on
+# bt-hci 0.9. 0.6.0 is a strict superset of the git revision this used to pin (53e34022,
+# 2025-11-14, between v0.5.0 and v0.5.1), so the multi-peripheral fix that motivated the
+# pin is included.
+#
+# Note trouble-host 0.6.0 asks for embassy-sync ^0.7 while esp-hal/esp-radio need ^0.8,
+# so two embassy-sync versions coexist in the lockfile. That is harmless -- the
+# esp-radio <-> trouble interface is bt-hci's `Controller` trait, not an embassy-sync
+# type. Just don't pass a channel across that boundary. `variegated-improv-trouble`
+# pins its own `embassy-sync = "0.7"` for this reason and must not be "tidied" to
+# `workspace = true`.
+trouble-host = "0.6.0"
+bt-hci = "0.8"
+
+embassy-net = "0.9.1"
+
+# esp-hal family. These move as a set.
+# `internal-heap-stats` for `HeapStats::max_usage`. The heap here is sized against a peak
+# occupancy figure, and until this was enabled that figure came from a one-off measurement
+# recorded in a comment -- which is how the machine ended up panicking on a 128-byte
+# allocation with no way to tell a slow leak from a high-water mark nobody had ever looked
+# at. The feature costs one comparison per allocation.
+esp-alloc = { version = "0.10.0", features = ["internal-heap-stats"] }
+esp-backtrace = "0.19.0"
+esp-bootloader-esp-idf = "0.5.0"
+esp-hal = "1.1.1"
+# `default-features = false` has to live here rather than on the member: cargo refuses
+# `default-features = false` on an inherited dependency whose workspace entry does not
+# already carry it. What is being dropped is the `auto` output target, which probes for
+# USB-Serial-JTAG at runtime and would contend with the structured debug stream. The
+# member then selects `no-op` -- no output target at all -- and explains the trade;
+# `uart` was tried in between and rejected.
+esp-println = { version = "0.17.0", default-features = false }
+esp-radio = "0.18.0"
+esp-rtos = "0.3.0"
+
+# Networking
+edge-http = "0.8.0"
+edge-nal = "0.7.0"
+edge-nal-embassy = "0.9.0"
+edge-net = "0.14.0"
+edge-ws = { version = "0.8.0", default-features = false }
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
+smoltcp = { version = "0.13.1", default-features = false }
+sntpc = { version = "0.11.0", default-features = false }
+jiff = { version = "0.2.35", default-features = false }
+
 [profile.dev]
 debug = true              # Enable debug info
 # `opt-level = 3`, raised from 1 on 2026-08-10, and this is a *correctness* setting on this
@@ -190,6 +319,33 @@ lto = true              # Disable link-time optimization
 
 [profile.release]
 debug = true             # Keep debug info in release builds too
+
+# The comms firmware's release settings, as a profile of its own rather than edits to
+# `release` above.
+#
+# The two architectures in this workspace want opposite things and only the root
+# manifest's profiles are honoured, so there is no way to give them each their own `dev`
+# and `release`. RP2350 needs `opt-level = 3` for stack-frame *correctness* -- see the
+# long note on `[profile.dev]` -- while the ESP32-C6 build needs `opt-level = "s"` and
+# fat LTO to fit its flash budget.
+#
+# Per-package overrides (`[profile.release.package.variegated-comms-firmware]`) do not
+# solve this. They reach only that package's own code, not `esp-hal`, `smoltcp` or
+# `trouble-host`, which is where the size actually is -- and `lto` is not a per-package
+# key at all.
+#
+# Built with `cargo build --profile comms-release` from `variegated-comms-firmware/`;
+# artifacts land in `target/riscv32imac-unknown-none-elf/comms-release/`. Values carried
+# over verbatim from variegated-comms-rs's `[profile.release]`.
+[profile.comms-release]
+inherits         = "release"
+codegen-units    = 1     # LLVM can perform better optimizations using a single thread
+debug            = 2
+debug-assertions = false
+incremental      = false
+lto              = "fat"
+opt-level        = "s"
+overflow-checks  = false
 
 # NOTE: the graph contains embassy-hal-internal 0.4.0 and 0.5.0 side by side.
 # This is an upstream packaging bug: the *published* embassy-embedded-hal 0.6.0

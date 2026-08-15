@@ -23,7 +23,7 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 # stays `no_std`. Under resolver 1 those would unify and `std` would leak into the
 # firmware.
 [build-dependencies]
-variegated-schema-export = { path = "../../tools/schema-export" }
+variegated-schema-export = { path = "../variegated-schema-export" }
 
 [dependencies]
 # `derive` is what `#[gatt_service]`/`#[gatt_server]` live behind. Those macros are
@@ -39,7 +39,7 @@ variegated-comms-api-types = { path = "../variegated-comms-api-types" }
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
 variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }
-variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
+variegated-controller-types = { path = "../variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
 # The *same* crate the application processor uses, not a second bus. Both
 # workspaces declare `embassy-sync = "0.8.0"` and `embassy-time = "0.5.1"`, so
 # `variegated_debug::bus`'s channel types are the same types on both processors
@@ -57,19 +57,19 @@ variegated-controller-types = { path = "../../variegated-rs/variegated-controlle
 # `variegated-instrumentation/instrumentation`, and cargo unifies that with the
 # direct dependency below, so the two cannot end up disagreeing about which
 # implementation is linked.
-variegated-debug = { path = "../../variegated-rs/variegated-debug", default-features = false, features = ["source-comms", "defmt", "instrumentation"] }
-variegated-debug-codec = { path = "../../variegated-rs/variegated-debug-codec", default-features = false, features = ["defmt"] }
+variegated-debug = { path = "../variegated-debug", default-features = false, features = ["source-comms", "defmt", "instrumentation"] }
+variegated-debug-codec = { path = "../variegated-debug-codec", default-features = false, features = ["defmt"] }
 # Direct, rather than leaning on the re-export path through `variegated-debug`:
 # `define_counters!`/`define_indicators!` expand to `$crate::…` paths that only
 # resolve if the crate is nameable here.
-variegated-instrumentation = { path = "../../variegated-rs/variegated-instrumentation", features = ["instrumentation"] }
+variegated-instrumentation = { path = "../variegated-instrumentation", features = ["instrumentation"] }
 # For `ConversionParameters`' median and Kalman filters, which smooth the gravimetric
 # flow rate derived in `ble::devices`. Nothing here converts an ADC count -- the crate
 # is named for its main use on the application processor, but the filters are the
 # portable part of it: `#![no_std]`, `micromath` + `heapless` only, no embassy and
 # nothing RP2350-specific. Both workspaces pin `heapless 0.9.3`, so it unifies; this is
 # what pulls `micromath` into this graph for the first time.
-variegated-adc-tools = { path = "../../variegated-rs/variegated-adc-tools" }
+variegated-adc-tools = { path = "../variegated-adc-tools" }
 bt-hci.workspace = true
 postcard = { workspace = true, features = ["alloc", "use-crc"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
@@ -201,7 +201,7 @@ esp-println = { workspace = true, default-features = false, features = ["jtag-se
 # defmt half of every `log_*!` back off, which is exactly the state the block above
 # describes as having cost a day to diagnose. It became a feature so that *host* test
 # builds can turn it off; nothing about this firmware changed.
-variegated-log = { path = "../../variegated-rs/variegated-log", default-features = false, features = ["debug-bus", "defmt"] }
+variegated-log = { path = "../variegated-log", default-features = false, features = ["debug-bus", "defmt"] }
 esp-rtos = { workspace = true, features = ["esp-radio", "defmt", "embassy"] }
 static_cell.workspace = true
 # 0.18 removed the `smoltcp` feature entirely -- the blocking smoltcp path is
@@ -229,7 +229,7 @@ defmt.workspace = true
 sntpc = { workspace = true, features = ["defmt"] }
 jiff = { workspace = true, features = ["static"] }
 log.workspace = true
-esphome-device = { path = "../../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
+esphome-device = { path = "../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
 
 #[patch."https://github.com/vpetrigo/sntpc"]
 #sntpc = { git = "https://github.com/vpetrigo/sntpc", branch = "master" }
