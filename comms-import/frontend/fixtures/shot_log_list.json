@@ -1,0 +1,69 @@
+{
+  "entries": [
+    {
+      "id": {
+        "day": 20260809,
+        "time": 16423349
+      },
+      "size_bytes": 51291,
+      "annotations": {
+        "entries": [
+          {
+            "key": "DoseWeight",
+            "value": {
+              "Number": 18.0
+            }
+          },
+          {
+            "key": "Beans",
+            "value": {
+              "Text": "Koppi / Ethiopia Guji"
+            }
+          },
+          {
+            "key": "GrindSize",
+            "value": {
+              "Text": "4.2"
+            }
+          },
+          {
+            "key": {
+              "Other": "water"
+            },
+            "value": {
+              "Text": "ZeroWater"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": {
+        "day": 20260809,
+        "time": 15495678
+      },
+      "size_bytes": 5847,
+      "annotations": {
+        "entries": [
+          {
+            "key": "Beans",
+            "value": {
+              "Text": "Morgon / Sisters"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": {
+        "day": null,
+        "time": 42
+      },
+      "size_bytes": 1024,
+      "annotations": {
+        "entries": []
+      }
+    }
+  ],
+  "truncated": true
+}

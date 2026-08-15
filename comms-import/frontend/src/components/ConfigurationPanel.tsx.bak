@@ -1,0 +1,889 @@
+import { useState } from 'preact/hooks';
+import { memo } from 'preact/compat';
+import {
+  Configuration,
+  BoilerConfiguration,
+  GroupConfiguration,
+  WaterTapConfiguration,
+  SteamWandConfiguration,
+  TankConfiguration,
+  SetBoilerControlRequest,
+  SetBoilerControlRequestSchema,
+  SetGroupControlRequest,
+  SetGroupControlRequestSchema,
+  SetPidParametersRequest,
+  SetPidParametersRequestSchema
+} from '../schemas/schemas';
+import { useMachine } from '../contexts/MachineContext';
+import { ConfigurationCard } from './ConfigurationCard';
+import { BoilerConfigurationDetail } from './BoilerConfigurationDetail';
+import { GroupConfigurationDetail } from './GroupConfigurationDetail';
+import { WaterTapConfigurationDetail } from './WaterTapConfigurationDetail';
+import { SteamWandConfigurationDetail } from './SteamWandConfigurationDetail';
+import { TankConfigurationDetail } from './TankConfigurationDetail';
+import { PidParametersEditor } from './PidParametersEditor';
+import { KalmanFilterEditor } from './KalmanFilterEditor';
+import { PumpConfigurationEditor } from './PumpConfigurationEditor';
+import { ControlCurveEditor } from './ControlCurveEditor';
+import { BoilerControlEditor } from './BoilerControlEditor';
+import { GroupControlEditor } from './GroupControlEditor';
+import { postPostcard } from '../utils/postcard';
+
+interface ConfigurationPanelProps {
+  configuration: Configuration;
+}
+
+type EntityType = 'boilers' | 'groups' | 'water_taps' | 'steam_wands' | 'tanks' | 'machine';
+type NavigationLevel = 1 | 2 | 3;
+
+interface NavigationState {
+  level: NavigationLevel;
+  entityType: EntityType | null;
+  entityKey: string | null;
+  parameterCategory: string | null;
+}
+
+const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps) => {
+  const { getBoilerEntries, getGroupEntries, getWaterTapEntries } = useMachine();
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [navigation, setNavigation] = useState<NavigationState>({
+    level: 1,
+    entityType: null,
+    entityKey: null,
+    parameterCategory: null
+  });
+  const [optimizeMessage, setOptimizeMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+
+  // Navigate to entity detail (level 2)
+  const navigateToEntity = (type: EntityType, key: string) => {
+    setNavigation({
+      level: 2,
+      entityType: type,
+      entityKey: key,
+      parameterCategory: null
+    });
+  };
+
+  // Navigate to parameter editor (level 3)
+  const navigateToParameter = (category: string) => {
+    setNavigation({
+      ...navigation,
+      level: 3,
+      parameterCategory: category
+    });
+  };
+
+  // Go back one level
+  const goBack = () => {
+    if (navigation.level === 3) {
+      setNavigation({
+        ...navigation,
+        level: 2,
+        parameterCategory: null
+      });
+    } else if (navigation.level === 2) {
+      setNavigation({
+        level: 1,
+        entityType: null,
+        entityKey: null,
+        parameterCategory: null
+      });
+    }
+  };
+
+  // Optimize storage handler
+  const handleOptimizeStorage = async () => {
+    setOptimizeMessage(null);
+    try {
+      const response = await fetch('/command/optimize-configuration-storage', {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to optimize storage: ${response.statusText}`);
+      }
+
+      setOptimizeMessage({ type: 'success', text: 'Storage optimized successfully' });
+      setTimeout(() => setOptimizeMessage(null), 2000);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to optimize storage';
+      setOptimizeMessage({ type: 'error', text: errorMsg });
+      setTimeout(() => setOptimizeMessage(null), 4000);
+    }
+  };
+
+  // Breadcrumb display
+  const renderBreadcrumb = () => {
+    const parts: string[] = ['Configuration'];
+
+    if (navigation.entityType && navigation.entityKey) {
+      const typeNames: Record<EntityType, string> = {
+        boilers: 'Boilers',
+        groups: 'Groups',
+        water_taps: 'Water Taps',
+        steam_wands: 'Steam Wands',
+        tanks: 'Tanks',
+        machine: 'Machine'
+      };
+      parts.push(typeNames[navigation.entityType]);
+
+      // Get entity name
+      let entityName = navigation.entityKey;
+      if (navigation.entityType === 'boilers') {
+        const boilerDef = getBoilerEntries().find(([key]) => key === navigation.entityKey);
+        if (boilerDef) entityName = boilerDef[1].name;
+      } else if (navigation.entityType === 'groups') {
+        const groupDef = getGroupEntries().find(([key]) => key === navigation.entityKey);
+        if (groupDef) entityName = groupDef[1].name;
+      } else if (navigation.entityType === 'water_taps') {
+        const tapDef = getWaterTapEntries().find(([key]) => key === navigation.entityKey);
+        if (tapDef) entityName = tapDef[1].name;
+      }
+
+      parts.push(entityName);
+
+      if (navigation.parameterCategory) {
+        const categoryNames: Record<string, string> = {
+          temperature_pid: 'Temperature PID',
+          pressure_pid: 'Pressure PID',
+          flow_rate_pid: 'Flow Rate PID',
+          output_flow_rate_pid: 'Output Flow Rate PID',
+          temperature_kalman: 'Temperature Kalman Filter',
+          pressure_kalman: 'Pressure Kalman Filter',
+          water_level_kalman: 'Water Level Kalman Filter',
+          pump_config: 'Pump Configuration',
+          fill_pump_config: 'Fill Pump Configuration',
+          pressure_curve: 'Pressure Curve',
+          flow_rate_curve: 'Flow Rate Curve',
+          output_flow_rate_curve: 'Output Flow Rate Curve',
+          duty_cycle_curve: 'Duty Cycle Curve',
+          boiler_control: 'Boiler Control',
+          group_control: 'Group Control'
+        };
+        parts.push(categoryNames[navigation.parameterCategory] || navigation.parameterCategory);
+      }
+    }
+
+    return (
+      <div style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
+        {parts.join(' > ')}
+      </div>
+    );
+  };
+
+  // Level 1: Dashboard with all entities
+  const renderLevel1 = () => {
+    const boilerEntries = getBoilerEntries();
+    const groupEntries = getGroupEntries();
+    const waterTapEntries = getWaterTapEntries();
+    const steamWandEntries = Object.entries(config.steam_wand_configurations);
+    const tankEntries = Object.entries(config.tank_configurations);
+
+    return (
+      <div>
+        {/* Machine Configuration Summary */}
+        <div
+          style={{
+            marginBottom: '1.5rem',
+            padding: '1rem',
+            backgroundColor: '#f8f9fa',
+            borderRadius: '8px',
+            border: '1px solid #ddd'
+          }}
+        >
+          <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem' }}>Machine Configuration</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
+            <label style={{ fontWeight: '500' }}>Heating Element Interlock:</label>
+            <span
+              style={{
+                padding: '0.25rem 0.75rem',
+                backgroundColor: config.machine_config.heating_element_interlock ? '#28a745' : '#6c757d',
+                color: 'white',
+                borderRadius: '12px',
+                fontSize: '0.75rem',
+                fontWeight: '500'
+              }}
+            >
+              {config.machine_config.heating_element_interlock ? 'Enabled' : 'Disabled'}
+            </span>
+          </div>
+        </div>
+
+        {/* Boilers */}
+        {boilerEntries.length > 0 && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+              Boilers ({boilerEntries.length})
+            </h3>
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              {boilerEntries.map(([key, def]) => (
+                <ConfigurationCard
+                  key={key}
+                  name={def.name}
+                  entityType="boiler"
+                  configuration={entityConfig.boiler_configurations[key]}
+                  onConfigure={() => navigateToEntity('boilers', key)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Groups */}
+        {groupEntries.length > 0 && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+              Groups ({groupEntries.length})
+            </h3>
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              {groupEntries.map(([key, def]) => (
+                <ConfigurationCard
+                  key={key}
+                  name={def.name}
+                  entityType="group"
+                  configuration={entityConfig.group_configurations[key]}
+                  onConfigure={() => navigateToEntity('groups', key)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Water Taps */}
+        {waterTapEntries.length > 0 && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+              Water Taps ({waterTapEntries.length})
+            </h3>
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              {waterTapEntries.map(([key, def]) => (
+                <ConfigurationCard
+                  key={key}
+                  name={def.name}
+                  entityType="water_tap"
+                  configuration={entityConfig.water_tap_configurations[key]}
+                  onConfigure={() => navigateToEntity('water_taps', key)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Steam Wands */}
+        {steamWandEntries.length > 0 && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+              Steam Wands ({steamWandEntries.length})
+            </h3>
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              {steamWandEntries.map(([key, config]) => (
+                <ConfigurationCard
+                  key={key}
+                  name={key}
+                  entityType="steam_wand"
+                  configuration={config}
+                  onConfigure={() => navigateToEntity('steam_wands', key)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Tanks */}
+        {tankEntries.length > 0 && (
+          <div style={{ marginBottom: '1.5rem' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+              Tanks ({tankEntries.length})
+            </h3>
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              {tankEntries.map(([key, config]) => (
+                <ConfigurationCard
+                  key={key}
+                  name={key}
+                  entityType="tank"
+                  configuration={config}
+                  onConfigure={() => navigateToEntity('tanks', key)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Level 2: Entity Detail
+  const renderLevel2 = () => {
+    if (!navigation.entityType || !navigation.entityKey) return null;
+
+    let entityName = navigation.entityKey;
+    let detailView = null;
+
+    switch (navigation.entityType) {
+      case 'boilers': {
+        const boilerDef = getBoilerEntries().find(([key]) => key === navigation.entityKey);
+        if (boilerDef) entityName = boilerDef[1].name;
+        const entityConfig = config.boiler_configurations as unknown as BoilerConfiguration[navigation.entityKey];
+        if (config) {
+          detailView = (
+            <BoilerConfigurationDetail
+              entityKey={navigation.entityKey}
+              name={entityName}
+              configuration={config}
+              onNavigateToParameter={navigateToParameter}
+            />
+          );
+        }
+        break;
+      }
+      case 'groups': {
+        const groupDef = getGroupEntries().find(([key]) => key === navigation.entityKey);
+        if (groupDef) entityName = groupDef[1].name;
+        const entityConfig = config.group_configurations as unknown as GroupConfiguration[navigation.entityKey];
+        if (config) {
+          detailView = (
+            <GroupConfigurationDetail
+              entityKey={navigation.entityKey}
+              name={entityName}
+              configuration={config}
+              onNavigateToParameter={navigateToParameter}
+            />
+          );
+        }
+        break;
+      }
+      case 'water_taps': {
+        const tapDef = getWaterTapEntries().find(([key]) => key === navigation.entityKey);
+        if (tapDef) entityName = tapDef[1].name;
+        const entityConfig = config.water_tap_configurations as unknown as WaterTapConfiguration[navigation.entityKey];
+        if (config) {
+          detailView = (
+            <WaterTapConfigurationDetail
+              entityKey={navigation.entityKey}
+              name={entityName}
+              configuration={config}
+              onNavigateToParameter={navigateToParameter}
+            />
+          );
+        }
+        break;
+      }
+      case 'steam_wands': {
+        const entityConfig = config.steam_wand_configurations as unknown as SteamWandConfiguration[navigation.entityKey];
+        if (config) {
+          detailView = (
+            <SteamWandConfigurationDetail
+              entityKey={navigation.entityKey}
+              name={entityName}
+              configuration={config}
+            />
+          );
+        }
+        break;
+      }
+      case 'tanks': {
+        const entityConfig = config.tank_configurations as unknown as TankConfiguration[navigation.entityKey];
+        if (config) {
+          detailView = (
+            <TankConfigurationDetail
+              entityKey={navigation.entityKey}
+              name={entityName}
+              configuration={config}
+              onNavigateToParameter={navigateToParameter}
+            />
+          );
+        }
+        break;
+      }
+    }
+
+    return (
+      <div>
+        <button
+          onClick={goBack}
+          style={{
+            padding: '0.5rem 1rem',
+            backgroundColor: 'white',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            marginBottom: '1rem',
+            fontSize: '0.9rem'
+          }}
+        >
+          ← Back
+        </button>
+        {detailView}
+      </div>
+    );
+  };
+
+  // Level 3: Parameter Editor
+  const renderLevel3 = () => {
+    if (!navigation.entityType || !navigation.entityKey || !navigation.parameterCategory) return null;
+
+    const handleSave = async (data: any) => {
+      // Handle special cases for boiler and group control
+      if (navigation.parameterCategory === 'boiler_control' && navigation.entityType === 'boilers' && navigation.entityKey) {
+        try {
+          const request: SetBoilerControlRequest = {
+            boiler_index: parseInt(navigation.entityKey),
+            ...data
+          };
+          await postPostcard('/command/set-boiler-control', request, SetBoilerControlRequestSchema);
+          alert('Boiler control updated successfully!');
+          goBack();
+        } catch (err) {
+          alert(err instanceof Error ? err.message : 'Failed to update boiler control');
+        }
+        return;
+      }
+
+      if (navigation.parameterCategory === 'group_control' && navigation.entityType === 'groups' && navigation.entityKey) {
+        try {
+          const request: SetGroupControlRequest = {
+            group_index: parseInt(navigation.entityKey),
+            ...data
+          };
+          await postPostcard('/command/set-group-control', request, SetGroupControlRequestSchema);
+          alert('Group control updated successfully!');
+          goBack();
+        } catch (err) {
+          alert(err instanceof Error ? err.message : 'Failed to update group control');
+        }
+        return;
+      }
+
+      // Handle PID parameter saves
+      if (navigation.parameterCategory?.endsWith('_pid') && navigation.entityKey) {
+        try {
+          let targetType: string;
+
+          if (navigation.entityType === 'boilers') {
+            targetType = navigation.parameterCategory === 'temperature_pid'
+              ? 'BoilerTemperature'
+              : 'BoilerPressure';
+          } else if (navigation.entityType === 'groups') {
+            if (navigation.parameterCategory === 'flow_rate_pid') {
+              targetType = 'GroupFlowRate';
+            } else if (navigation.parameterCategory === 'output_flow_rate_pid') {
+              targetType = 'GroupOutputFlowRate';
+            } else {
+              targetType = 'GroupPressure';
+            }
+          } else {
+            throw new Error('Invalid entity type for PID parameters');
+          }
+
+          const request: SetPidParametersRequest = {
+            target_type: targetType,
+            index: parseInt(navigation.entityKey),
+            pid_parameters: data
+          };
+          await postPostcard('/command/set-pid-parameters', request, SetPidParametersRequestSchema);
+          alert('PID parameters updated successfully!');
+          goBack();
+        } catch (err) {
+          alert(err instanceof Error ? err.message : 'Failed to update PID parameters');
+        }
+        return;
+      }
+
+      // TODO: Implement actual save via API for other parameter types
+      console.log('Saving configuration:', {
+        entityType: navigation.entityType,
+        entityKey: navigation.entityKey,
+        parameterCategory: navigation.parameterCategory,
+        data
+      });
+      alert('Configuration saved! (Backend integration needed)');
+      goBack();
+    };
+
+    const handleCancel = () => {
+      goBack();
+    };
+
+    let editor = null;
+
+    // Get configuration based on entity type and parameter category
+    switch (navigation.entityType) {
+      case 'boilers': {
+        const entityConfig = config.boiler_configurations as unknown as BoilerConfiguration[navigation.entityKey];
+        if (!config) break;
+
+        switch (navigation.parameterCategory) {
+          case 'temperature_pid':
+            editor = (
+              <PidParametersEditor
+                title="Temperature PID Parameters"
+                parameters={config.temperature_pid_parameters}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'pressure_pid':
+            editor = (
+              <PidParametersEditor
+                title="Pressure PID Parameters"
+                parameters={config.pressure_pid_parameters}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'temperature_kalman':
+            editor = (
+              <KalmanFilterEditor
+                title="Temperature Kalman Filter"
+                parameters={config.temperature_sensor_kalman_parameters ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'pressure_kalman':
+            editor = (
+              <KalmanFilterEditor
+                title="Pressure Kalman Filter"
+                parameters={config.pressure_sensor_kalman_parameters ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'fill_pump_config':
+            editor = (
+              <PumpConfigurationEditor
+                title="Fill Pump Configuration"
+                configuration={entityConfig.fill_config?.pump_configuration ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'boiler_control': {
+            const boilerDef = getBoilerEntries().find(([key]) => key === navigation.entityKey);
+            const entityName = boilerDef ? boilerDef[1].name : navigation.entityKey;
+            editor = (
+              <BoilerControlEditor
+                name={entityName}
+                currentMode={config.control_state.mode}
+                currentTargetTemperature={config.control_state.values.target_temperature}
+                currentTargetPressure={config.control_state.values.target_pressure}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          }
+        }
+        break;
+      }
+      case 'groups': {
+        const entityConfig = config.group_configurations as unknown as GroupConfiguration[navigation.entityKey];
+        if (!config) break;
+
+        switch (navigation.parameterCategory) {
+          case 'flow_rate_pid':
+            editor = (
+              <PidParametersEditor
+                title="Flow Rate PID Parameters"
+                parameters={config.flow_rate_pid_parameters}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'output_flow_rate_pid':
+            editor = (
+              <PidParametersEditor
+                title="Output Flow Rate PID Parameters"
+                parameters={config.output_flow_rate_pid_parameters}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'pressure_pid':
+            editor = (
+              <PidParametersEditor
+                title="Pressure PID Parameters"
+                parameters={config.pressure_pid_parameters}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'pressure_kalman':
+            editor = (
+              <KalmanFilterEditor
+                title="Pressure Kalman Filter"
+                parameters={config.pressure_sensor_kalman_parameters ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'pump_config':
+            editor = (
+              <PumpConfigurationEditor
+                title="Pump Configuration"
+                configuration={entityConfig.pump_configuration ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'pressure_curve':
+            editor = (
+              <ControlCurveEditor
+                title="Pressure Curve"
+                curve={config.brew_control_state.values.pressure_curve}
+                unit="bar"
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'flow_rate_curve':
+            editor = (
+              <ControlCurveEditor
+                title="Flow Rate Curve"
+                curve={config.brew_control_state.values.flow_rate_curve}
+                unit="mL/s"
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'output_flow_rate_curve':
+            editor = (
+              <ControlCurveEditor
+                title="Output Flow Rate Curve"
+                curve={config.brew_control_state.values.output_flow_rate_curve}
+                unit="mL/s"
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'duty_cycle_curve':
+            editor = (
+              <ControlCurveEditor
+                title="Duty Cycle Curve"
+                curve={config.brew_control_state.values.duty_cycle_curve}
+                unit="%"
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          case 'group_control': {
+            const groupDef = getGroupEntries().find(([key]) => key === navigation.entityKey);
+            const entityName = groupDef ? groupDef[1].name : navigation.entityKey;
+            editor = (
+              <GroupControlEditor
+                name={entityName}
+                currentMode={config.brew_control_state.mode}
+                currentValues={config.brew_control_state.values}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+          }
+        }
+        break;
+      }
+      case 'water_taps': {
+        const entityConfig = config.water_tap_configurations as unknown as WaterTapConfiguration[navigation.entityKey];
+        if (!config) break;
+
+        switch (navigation.parameterCategory) {
+          case 'pump_config':
+            editor = (
+              <PumpConfigurationEditor
+                title="Pump Configuration"
+                configuration={entityConfig.pump_configuration ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+        }
+        break;
+      }
+      case 'tanks': {
+        const entityConfig = config.tank_configurations as unknown as TankConfiguration[navigation.entityKey];
+        if (!config) break;
+
+        switch (navigation.parameterCategory) {
+          case 'water_level_kalman':
+            editor = (
+              <KalmanFilterEditor
+                title="Water Level Kalman Filter"
+                parameters={config.water_level_sensor_kalman_parameters ?? null}
+                onSave={handleSave}
+                onCancel={handleCancel}
+              />
+            );
+            break;
+        }
+        break;
+      }
+    }
+
+    return (
+      <div>
+        <button
+          onClick={goBack}
+          style={{
+            padding: '0.5rem 1rem',
+            backgroundColor: 'white',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            marginBottom: '1rem',
+            fontSize: '0.9rem'
+          }}
+        >
+          ← Back
+        </button>
+        {editor || (
+          <div
+            style={{
+              padding: '1.5rem',
+              backgroundColor: '#f8f9fa',
+              borderRadius: '8px',
+              border: '1px solid #ddd'
+            }}
+          >
+            <p>Parameter editor not found for: {navigation.parameterCategory}</p>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (!isExpanded) {
+    return (
+      <div
+        style={{
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          padding: '1.5rem',
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+          marginTop: '1.5rem'
+        }}
+      >
+        <button
+          onClick={() => setIsExpanded(true)}
+          style={{
+            width: '100%',
+            padding: '0.75rem',
+            backgroundColor: '#f8f9fa',
+            border: '1px solid #ddd',
+            borderRadius: '6px',
+            cursor: 'pointer',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            fontSize: '1.1rem',
+            fontWeight: '500'
+          }}
+        >
+          <span>Configuration</span>
+          <span style={{ fontSize: '1.2rem' }}>▶</span>
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        backgroundColor: 'white',
+        borderRadius: '8px',
+        padding: '1.5rem',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+        marginTop: '1.5rem'
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <h2 style={{ margin: 0 }}>Configuration</h2>
+        <button
+          onClick={() => {
+            setIsExpanded(false);
+            setNavigation({ level: 1, entityType: null, entityKey: null, parameterCategory: null });
+          }}
+          style={{
+            padding: '0.5rem 1rem',
+            backgroundColor: 'white',
+            border: '1px solid #ccc',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            fontSize: '0.9rem'
+          }}
+        >
+          Collapse
+        </button>
+      </div>
+
+      {renderBreadcrumb()}
+
+      {/* Success/Error Message */}
+      {optimizeMessage && (
+        <div style={{
+          padding: '0.75rem',
+          marginTop: '1rem',
+          backgroundColor: optimizeMessage.type === 'success' ? '#d4edda' : '#f8d7da',
+          color: optimizeMessage.type === 'success' ? '#155724' : '#721c24',
+          border: `1px solid ${optimizeMessage.type === 'success' ? '#c3e6cb' : '#f5c6cb'}`,
+          borderRadius: '4px',
+          fontSize: '0.9rem'
+        }}>
+          {optimizeMessage.type === 'success' ? '✅' : '❌'} {optimizeMessage.text}
+        </div>
+      )}
+
+      {navigation.level === 1 && renderLevel1()}
+      {navigation.level === 2 && renderLevel2()}
+      {navigation.level === 3 && renderLevel3()}
+
+      {/* Storage Optimization - Housekeeping */}
+      {isExpanded && navigation.level === 1 && (
+        <div style={{
+          marginTop: '1.5rem',
+          paddingTop: '1rem',
+          borderTop: '1px solid #eee',
+          display: 'flex',
+          justifyContent: 'flex-end'
+        }}>
+          <button
+            onClick={handleOptimizeStorage}
+            style={{
+              padding: '0.5rem 0.75rem',
+              fontSize: '0.8rem',
+              color: '#666',
+              backgroundColor: 'transparent',
+              border: '1px solid #ddd',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem'
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f5f5f5'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
+          >
+            🗜️ Optimize Storage
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const ConfigurationPanel = memo(ConfigurationPanelComponent);

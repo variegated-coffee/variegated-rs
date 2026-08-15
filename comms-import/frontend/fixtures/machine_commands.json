@@ -1,0 +1,536 @@
+[
+  {
+    "StartBrewing": 0
+  },
+  {
+    "StopBrewing": 1
+  },
+  {
+    "StartPumpingToWaterTap": 0
+  },
+  {
+    "StopPumpingToWaterTap": 1
+  },
+  {
+    "StartSteaming": 0
+  },
+  {
+    "StopSteaming": 1
+  },
+  {
+    "SetSteamValveOpenness": [
+      0,
+      50
+    ]
+  },
+  {
+    "SetBoilerControlTarget": [
+      0,
+      "Temperature",
+      {
+        "temperature": 93.0,
+        "pressure": 9.0
+      }
+    ]
+  },
+  {
+    "SetBoilerControlTargetValues": [
+      1,
+      {
+        "temperature": null,
+        "pressure": 1.5
+      }
+    ]
+  },
+  {
+    "SetGroupBrewControlTarget": [
+      0,
+      "FixedDutyCycle",
+      {
+        "flow_rate": 2.5,
+        "flow_rate_curve": {
+          "a": 0.5,
+          "b": 1.5,
+          "c": 2.0,
+          "min": 0.0,
+          "max": 9.0
+        },
+        "pressure": 9.0,
+        "pressure_curve": {
+          "a": 0.5,
+          "b": 1.5,
+          "c": 2.0,
+          "min": 0.0,
+          "max": 9.0
+        },
+        "output_flow_rate": 1.5,
+        "output_flow_rate_curve": {
+          "a": 0.5,
+          "b": 1.5,
+          "c": 2.0,
+          "min": 0.0,
+          "max": 9.0
+        },
+        "duty_cycle": 60,
+        "duty_cycle_curve": {
+          "a": 0.5,
+          "b": 1.5,
+          "c": 2.0,
+          "min": 0.0,
+          "max": 9.0
+        }
+      }
+    ]
+  },
+  {
+    "SetGroupBrewControlTargetValues": [
+      1,
+      {
+        "flow_rate": null,
+        "flow_rate_curve": null,
+        "pressure": 6.0,
+        "pressure_curve": null,
+        "output_flow_rate": null,
+        "output_flow_rate_curve": null,
+        "duty_cycle": null,
+        "duty_cycle_curve": null
+      }
+    ]
+  },
+  {
+    "SetPidParameters": [
+      {
+        "GroupPressure": 0
+      },
+      {
+        "kp": {
+          "positive_scale": 2.0,
+          "negative_scale": 1.5,
+          "limits": {
+            "lower": -100.0,
+            "upper": 100.0
+          }
+        },
+        "ki": {
+          "positive_scale": 0.5,
+          "negative_scale": 0.25,
+          "limits": {
+            "lower": -100.0,
+            "upper": 100.0
+          }
+        },
+        "kd": {
+          "positive_scale": 0.125,
+          "negative_scale": 0.0625,
+          "limits": {
+            "lower": -100.0,
+            "upper": 100.0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "RunRoutine": [
+      {
+        "Function": 2
+      },
+      {
+        "0": 18.0,
+        "1": 36.0
+      }
+    ]
+  },
+  "CancelRoutine",
+  {
+    "EnableBoiler": 0
+  },
+  {
+    "DisableBoiler": 1
+  },
+  {
+    "TareGroupScale": 0
+  },
+  {
+    "ZeroCalibrateGroupScale": 0
+  },
+  {
+    "CalibrateGroupScale100g": 0
+  },
+  {
+    "UpdateCommsStatus": {
+      "timestamp": 1700000001,
+      "wifi_connected": true,
+      "wifi_rssi": -60,
+      "peripheral_connection_status": {
+        "61441": {
+          "connected": false,
+          "rssi": null
+        },
+        "61442": {
+          "connected": true,
+          "rssi": -61
+        }
+      },
+      "improv": "Authorized",
+      "sntp_sync_seq": 12
+    }
+  },
+  {
+    "AddScheduleItem": {
+      "trigger_at": {
+        "on_minute": 30,
+        "on_hour": 6,
+        "on_days": [
+          "Mon",
+          "Wed"
+        ],
+        "on_date": "2026-08-07",
+        "enabled": true,
+        "once": false
+      },
+      "commands": [
+        {
+          "SetMachineMode": "On"
+        }
+      ]
+    }
+  },
+  {
+    "RemoveScheduleItem": 3
+  },
+  {
+    "UpdateScheduleItem": [
+      4,
+      {
+        "trigger_at": {
+          "on_minute": 30,
+          "on_hour": 6,
+          "on_days": [
+            "Mon",
+            "Wed"
+          ],
+          "on_date": "2026-08-07",
+          "enabled": true,
+          "once": false
+        },
+        "commands": [
+          {
+            "SetMachineMode": "On"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "AddRoutine": {
+      "routine_type": "Cleaning",
+      "name": "Fixture",
+      "parameters": [
+        {
+          "index": 0,
+          "name": "Dose",
+          "default": 18.0,
+          "unit": "Grams"
+        }
+      ],
+      "derived_parameters": [
+        {
+          "index": 1,
+          "name": "Yield",
+          "unit": "Grams",
+          "formula": {
+            "Linear": {
+              "base_param": 0,
+              "multiplier": 2.0,
+              "offset": 0.0
+            }
+          }
+        }
+      ],
+      "steps": [
+        {
+          "entry_command": [
+            {
+              "StartBrewing": 0
+            }
+          ],
+          "exits": [
+            {
+              "condition": {
+                "StateConditionMet": {
+                  "GroupPressureAbove": [
+                    0,
+                    {
+                      "Static": 9.0
+                    }
+                  ]
+                }
+              },
+              "then": {
+                "JumpToStep": 2
+              },
+              "description": "Reached pressure"
+            }
+          ],
+          "description": "Brew"
+        }
+      ],
+      "finally": [
+        {
+          "StopBrewing": 0
+        }
+      ]
+    }
+  },
+  {
+    "RemoveRoutine": {
+      "Custom": 1
+    }
+  },
+  {
+    "UpdateRoutine": [
+      {
+        "Internal": 0
+      },
+      {
+        "routine_type": "Cleaning",
+        "name": "Fixture",
+        "parameters": [
+          {
+            "index": 0,
+            "name": "Dose",
+            "default": 18.0,
+            "unit": "Grams"
+          }
+        ],
+        "derived_parameters": [
+          {
+            "index": 1,
+            "name": "Yield",
+            "unit": "Grams",
+            "formula": {
+              "Linear": {
+                "base_param": 0,
+                "multiplier": 2.0,
+                "offset": 0.0
+              }
+            }
+          }
+        ],
+        "steps": [
+          {
+            "entry_command": [
+              {
+                "StartBrewing": 0
+              }
+            ],
+            "exits": [
+              {
+                "condition": {
+                  "StateConditionMet": {
+                    "GroupPressureAbove": [
+                      0,
+                      {
+                        "Static": 9.0
+                      }
+                    ]
+                  }
+                },
+                "then": {
+                  "JumpToStep": 2
+                },
+                "description": "Reached pressure"
+              }
+            ],
+            "description": "Brew"
+          }
+        ],
+        "finally": [
+          {
+            "StopBrewing": 0
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "SetMachineMode": "PowerSaveStandby"
+  },
+  "OptimizeConfigurationStorage",
+  "OptimizeRoutineStorage",
+  "OptimizeScheduleStorage",
+  {
+    "SetGroupPumpConfiguration": [
+      0,
+      {
+        "tacho_pulses_per_liter": 1000.0,
+        "max_duty_cycle": 100,
+        "min_duty_cycle": 10,
+        "ramp_up_time_ms": 500,
+        "ramp_down_time_ms": 250
+      }
+    ]
+  },
+  {
+    "SetWaterTapPumpConfiguration": [
+      0,
+      {
+        "tacho_pulses_per_liter": 1000.0,
+        "max_duty_cycle": 100,
+        "min_duty_cycle": 10,
+        "ramp_up_time_ms": 500,
+        "ramp_down_time_ms": 250
+      }
+    ]
+  },
+  {
+    "SetFillPumpConfiguration": [
+      0,
+      {
+        "tacho_pulses_per_liter": 1000.0,
+        "max_duty_cycle": 100,
+        "min_duty_cycle": 10,
+        "ramp_up_time_ms": 500,
+        "ramp_down_time_ms": 250
+      }
+    ]
+  },
+  {
+    "InferGroupPressureIntegral": [
+      0,
+      9.0
+    ]
+  },
+  {
+    "InferGroupFlowRateIntegral": [
+      0,
+      2.5
+    ]
+  },
+  {
+    "InferGroupOutputFlowRateIntegral": [
+      0,
+      1.5
+    ]
+  },
+  {
+    "SetHeatingElementInterlock": true
+  },
+  {
+    "SetHeatingElementContentionStrategy": "Proportional"
+  },
+  {
+    "SetWaterDispersalPumpStrategy": [
+      0,
+      "NoPump"
+    ]
+  },
+  {
+    "AssociateBluetoothPeripheral": {
+      "id": 46528,
+      "address": [
+        47,
+        160,
+        26,
+        151,
+        28,
+        0
+      ],
+      "address_random": true,
+      "driver": "AcaiaOld",
+      "enabled": true,
+      "name": "Group 1 scale"
+    }
+  },
+  {
+    "RemoveBluetoothPeripheral": 46544
+  },
+  {
+    "SetBluetoothPeripheralEnabled": [
+      45514,
+      false
+    ]
+  },
+  "ScanForBluetoothPeripherals",
+  {
+    "UpdateBluetoothScan": {
+      "Discovered": {
+        "address": [
+          62,
+          96,
+          235,
+          60,
+          28,
+          120
+        ],
+        "address_random": false,
+        "name": "",
+        "rssi": -78,
+        "suggested_driver": "BelkaPortal"
+      }
+    }
+  },
+  {
+    "SetShotAnnotations": [
+      {
+        "day": 20260809,
+        "time": 14320512
+      },
+      {
+        "entries": [
+          {
+            "key": "DoseWeight",
+            "value": {
+              "Number": 18.0
+            }
+          },
+          {
+            "key": "Beans",
+            "value": {
+              "Text": "Koppi / Ethiopia Guji"
+            }
+          },
+          {
+            "key": "GrindSize",
+            "value": {
+              "Text": "4.2"
+            }
+          },
+          {
+            "key": {
+              "Other": "water"
+            },
+            "value": {
+              "Text": "ZeroWater"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "SetPendingShotAnnotations": {
+      "entries": []
+    }
+  },
+  {
+    "TagDoseFromScale": {
+      "GroupScale": 0
+    }
+  },
+  {
+    "OpenWifiProvisioningWindow": {
+      "duration_ms": 300000
+    }
+  },
+  "CloseWifiProvisioningWindow",
+  {
+    "SetWifiCredentials": {
+      "ssid": "Café Réseau",
+      "password": "correct horse battery staple é"
+    }
+  },
+  "IdentifyMachine",
+  "RequestConfiguration"
+]

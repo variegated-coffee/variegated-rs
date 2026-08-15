@@ -1,0 +1,19 @@
+[package]
+name = "variegated-belka-portal-trouble-driver"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[dependencies]
+variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
+trouble-host = { workspace = true, features = ["defmt"] }
+defmt.workspace = true
+embassy-time = { workspace = true, features = ["defmt"] }
+
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+
+[features]
+default = ["defmt"]
+defmt = []

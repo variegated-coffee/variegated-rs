@@ -1,0 +1,22 @@
+[package]
+name = "variegated-trouble-connection-manager"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[dependencies]
+trouble-host = { workspace = true, features = ["default-packet-pool", "central", "scan", "defmt"] }
+bt-hci.workspace = true
+embassy-sync.workspace = true
+embassy-time = { workspace = true, features = ["defmt"] }
+embassy-futures.workspace = true
+defmt.workspace = true
+heapless.workspace = true
+static_cell.workspace = true
+
+[features]
+default = ["defmt"]
+defmt = []

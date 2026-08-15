@@ -1,0 +1,245 @@
+[package]
+edition      = "2024"
+name         = "variegated-comms-firmware"
+rust-version = "1.88"
+version      = "0.1.0"
+
+[[bin]]
+name = "variegated-comms-firmware"
+path = "./src/bin/main.rs"
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+# Generates frontend/src/schemas/schemas.ts during the build, so it cannot drift from
+# the Rust types.
+#
+# A build-dependency, not a normal one. Cargo compiles build dependencies as *host*
+# units, so this gets std and escapes the riscv default target and `-Z build-std` that
+# `.cargo/config.toml` imposes on everything else here. Resolver 2 (see the workspace
+# manifest) is what keeps the two feature universes apart: this pulls
+# variegated-controller-types with `std` + `schema`, while the normal dependency below
+# stays `no_std`. Under resolver 1 those would unify and `std` would leak into the
+# firmware.
+[build-dependencies]
+variegated-schema-export = { path = "../../tools/schema-export" }
+
+[dependencies]
+# `derive` is what `#[gatt_service]`/`#[gatt_server]` live behind. Those macros are
+# invoked in `variegated-improv-trouble`, not here -- see that crate's manifest for the
+# embassy-sync version reason -- and cargo would unify the feature in from there anyway.
+# It is named here because this is the binary that needs it and a feature list that omits
+# it reads as "this firmware has no GATT server", which stopped being true.
+trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
+# Improv Wi-Fi provisioning. `ble` brings in the GATT service and the run loop; without it
+# this crate is just the packet codec, which is how its host tests stay runnable.
+variegated-improv-trouble = { path = "../variegated-improv-trouble", features = ["ble"] }
+variegated-comms-api-types = { path = "../variegated-comms-api-types" }
+variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
+variegated-belka-portal-trouble-driver = { path = "../variegated-belka-portal-trouble-driver" }
+variegated-scale-trouble-driver = { path = "../variegated-scale-trouble-driver" }
+variegated-controller-types = { path = "../../variegated-rs/variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
+# The *same* crate the application processor uses, not a second bus. Both
+# workspaces declare `embassy-sync = "0.8.0"` and `embassy-time = "0.5.1"`, so
+# `variegated_debug::bus`'s channel types are the same types on both processors
+# and the sequence numbering, drop accounting and non-blocking publish contract
+# cannot drift apart.
+#
+# `source-comms` stamps every frame this firmware emits with `DebugSource::Comms`;
+# enabling both source features, or neither, is a `compile_error!`. `usb-cdc-rp`
+# stays off: that transport is embassy-rp and RP2350-only, and embassy-rp cannot
+# build for riscv32 at all.
+#
+# `instrumentation` is what makes `variegated_debug::sampler` carry real values:
+# without it `PerformanceCounters`/`PerformanceIndicators` resolve to the no-op
+# implementations and every sample publishes zero. It forwards to
+# `variegated-instrumentation/instrumentation`, and cargo unifies that with the
+# direct dependency below, so the two cannot end up disagreeing about which
+# implementation is linked.
+variegated-debug = { path = "../../variegated-rs/variegated-debug", default-features = false, features = ["source-comms", "defmt", "instrumentation"] }
+variegated-debug-codec = { path = "../../variegated-rs/variegated-debug-codec", default-features = false, features = ["defmt"] }
+# Direct, rather than leaning on the re-export path through `variegated-debug`:
+# `define_counters!`/`define_indicators!` expand to `$crate::…` paths that only
+# resolve if the crate is nameable here.
+variegated-instrumentation = { path = "../../variegated-rs/variegated-instrumentation", features = ["instrumentation"] }
+# For `ConversionParameters`' median and Kalman filters, which smooth the gravimetric
+# flow rate derived in `ble::devices`. Nothing here converts an ADC count -- the crate
+# is named for its main use on the application processor, but the filters are the
+# portable part of it: `#![no_std]`, `micromath` + `heapless` only, no embassy and
+# nothing RP2350-specific. Both workspaces pin `heapless 0.9.3`, so it unifies; this is
+# what pulls `micromath` into this graph for the first time.
+variegated-adc-tools = { path = "../../variegated-rs/variegated-adc-tools" }
+bt-hci.workspace = true
+postcard = { workspace = true, features = ["alloc", "use-crc"] }
+serde = { workspace = true, features = ["derive", "alloc"] }
+embassy-sync = { workspace = true, features = ["defmt"] }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+heapless.workspace = true
+embassy-futures.workspace = true
+embassy-executor = { workspace = true, features = ["defmt"] }
+embassy-net = { workspace = true, features = [
+  "defmt",
+  "dhcpv4",
+  "dns",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+] }
+embassy-time = { workspace = true, features = ["defmt"] }
+# For `net_probe`'s counting wrapper around the Wi-Fi driver. Pinned to the version
+# embassy-net 0.9 itself depends on -- the wrapper has to implement the *same* `Driver`
+# trait embassy-net consumes, so a second copy of the crate would not type-check.
+embassy-net-driver = "0.2.0"
+edge-net = { workspace = true, features = ["embassy", "defmt", "io"] }
+edge-http.workspace = true
+edge-ws.workspace = true
+edge-nal.workspace = true
+edge-nal-embassy = { workspace = true, features = ["tcp"] }
+embedded-io.workspace = true
+embedded-io-async.workspace = true
+esp-alloc.workspace = true
+# No `panic-handler`, and no `println`: this crate is used for `Backtrace::capture()`
+# and nothing else. Its own handler routes every line through `esp_println::println!`,
+# which is `no-op` in this build (see below), so keeping it would have meant a panic
+# handler that formats a backtrace and writes it to a function with an empty body.
+# `main.rs` has the `#[panic_handler]` instead, and `debug/panic_console.rs` writes
+# the bytes; that is the only way the backtrace reaches a wire while esp-println has
+# no output target.
+#
+# `defmt` is not a choice, it is a tax: esp-backtrace's build script refuses to build
+# with neither `defmt` nor `println`, even though both only feed macros that live
+# behind `panic-handler`. `defmt` is the harmless one of the two -- it expands to a
+# `use defmt as _;` in a build that already links defmt, where `println` would drag in
+# an `esp-println` whose output target this firmware has deliberately removed.
+#
+# The default `colors` comes along and is likewise inert: its only use site is behind
+# `all(feature = "colors", feature = "println")`. Just as well -- the escape sequences
+# it emits are exactly what the host's text classifier refuses, so a build that used
+# them would make the panic path unreadable in the name of making it prettier.
+esp-backtrace = { workspace = true, features = ["defmt"] }
+esp-bootloader-esp-idf.workspace = true
+esp-hal = { workspace = true, features = ["defmt", "unstable"] }
+# `jtag-serial`: defmt output goes to the USB-Serial-JTAG.
+#
+# **This was `no-op` until 2026-08-11, and the reason it could change is that the
+# structured debug stream moved off this peripheral onto UART0** (see
+# `config::DEBUG_UART_BAUD`, "unlike the USB-Serial-JTAG this replaced"). The rejection
+# of every output target rested on contention with that stream; with the stream gone
+# from here, so is the contention.
+#
+# What the old note got right, and still applies to the targets NOT chosen:
+#
+#   * `auto` probes for USB-Serial-JTAG at runtime, watching the peripheral's SOF
+#     interrupt flag. Now harmless, but there is nothing left to probe *for* -- this
+#     firmware knows which peripheral it wants, so name it.
+#   * `uart` does not write to a UART peripheral. On the C6 it calls ROM `tx_one_char`
+#     and flushes via `tx_flush(get_channel())`, i.e. the *ROM console channel*, which
+#     on a chip attached over native USB is the USB-Serial-JTAG anyway. Worse, it
+#     flushes every 32 bytes while holding `esp_sync::RawMutex` -- ~2.8 ms of busy-wait
+#     per chunk at 115200 **with interrupts disabled**, on a processor running WiFi and
+#     BLE, with no timeout. Still rejected, and for the stronger of the two reasons.
+#
+# `jtag-serial` is bounded where `uart` is not. `wait_for_flush` spins at most
+# `TIMEOUT_ITERATIONS = 50_000` and then latches a sticky `TIMED_OUT`, after which every
+# further write returns immediately without touching the FIFO. So the cost with no host
+# attached decays to nothing, and the worst case with one attached is a bounded spin
+# only when the FIFO is genuinely full.
+#
+# WHAT THIS BUYS: `defmt::unwrap!`/`assert!`/`panic!` messages become visible. They were
+# not. A panic on this processor printed `explicit panic` and nothing else -- that string
+# is `core::panic!()` from `__defmt_default_panic`, reached because the real assertion
+# text had been handed to a defmt logger with no sink. Diagnosing anything behind a defmt
+# assertion was impossible.
+#
+# WHAT IT COSTS: `variegated-log`'s `log_*!` macros dual-emit to defmt and to the `log`
+# facade, so normal logging now reaches *both* the debug bus and this wire. That is
+# duplication, and with a host attached it is real traffic on a busy processor. If it
+# becomes a problem the fix is to make the dual-emit conditional, not to blind defmt
+# again.
+#
+# **`critical-section` is not a nicety here, it is the load-bearing half of this line,
+# and dropping it was a data race for as long as it was dropped.**
+#
+# In `esp-println/src/defmt.rs` the lock, the `TAKEN` re-entrancy check and `CS_RESTORE`
+# are all `#[cfg(feature = "critical-section")]`. The line after them is not:
+#
+#     unsafe { ENCODER.start_frame(do_write) }
+#
+# `ENCODER` is a single `static mut defmt::Encoder`. Without the feature, every
+# `defmt::*!` call from any task or interrupt mutates it with no mutual exclusion.
+#
+# `no-op` did not save us from that: it only makes `do_write` empty. `acquire()` still
+# ran and still drove the encoder, so the race was live while the output was being
+# discarded -- all of the hazard, none of the benefit.
+#
+# The symptom was a panic reading exactly `explicit panic` and nothing else, at random
+# moments under logging load. That is `core::panic!()` from `__defmt_default_panic`,
+# reached when the corrupted encoder tripped one of defmt's internal assertions; the
+# assertion text then went to the same broken logger and vanished. It was diagnosed on
+# 2026-08-11 after being mistaken for a Wi-Fi provisioning bug, because it happened to
+# fire during a credential write.
+#
+# So: if this firmware ever goes back to `no-op`, **keep `critical-section`**. The output
+# target is a choice; the lock is not.
+#
+# `timestamp` is kept as before, so `_esp_println_timestamp` in main.rs stays a live
+# export.
+esp-println = { workspace = true, default-features = false, features = ["jtag-serial", "critical-section", "defmt-espflash", "timestamp", "esp32c6"] }
+# The `log_*!` macros and the `log` -> debug-bus sink, the same crate and the same
+# `debug-bus` feature the application processor uses. `bus_sink` formats each
+# record into a fixed `heapless::String<96>` and runs it past
+# `variegated_debug::suppress`, so a chatty task cannot empty the 16-slot ring.
+#
+# No chip feature is named, and that is the point: `rp2040`/`rp235xa`/`rp235xb`
+# are what pull in `embassy-rp`, `embassy-usb-logger` and `defmt-rtt`, none of
+# which build for riscv32 -- and `defmt-rtt` would additionally collide with
+# `esp-println`'s `#[defmt::global_logger]`.
+#
+# `defmt` **is** named, and must stay named. It is a default feature of that crate, and
+# this line passes `default-features = false` -- so dropping it would silently switch the
+# defmt half of every `log_*!` back off, which is exactly the state the block above
+# describes as having cost a day to diagnose. It became a feature so that *host* test
+# builds can turn it off; nothing about this firmware changed.
+variegated-log = { path = "../../variegated-rs/variegated-log", default-features = false, features = ["debug-bus", "defmt"] }
+esp-rtos = { workspace = true, features = ["esp-radio", "defmt", "embassy"] }
+static_cell.workspace = true
+# 0.18 removed the `smoltcp` feature entirely -- the blocking smoltcp path is
+# gone and embassy-net/async is the only option now, which is what we already use.
+esp-radio = { workspace = true, features = [
+  "ble",
+  "coex",
+  "defmt",
+  "unstable",
+  "wifi",
+] }
+smoltcp = { workspace = true, features = [
+  "defmt",
+  "medium-ethernet",
+  "multicast",
+  "proto-dhcpv4",
+  "proto-dns",
+  "proto-ipv4",
+  "socket-tcp",
+  "socket-udp",
+] }
+defmt.workspace = true
+# 0.11 dropped the bundled embassy socket integration; `NtpUdpSocket` is now
+# implemented on our side, see src/time.rs.
+sntpc = { workspace = true, features = ["defmt"] }
+jiff = { workspace = true, features = ["static"] }
+log.workspace = true
+esphome-device = { path = "../../../esphome-device-rs", default-features = false, features = ["embassy_net", "defmt"] }
+
+#[patch."https://github.com/vpetrigo/sntpc"]
+#sntpc = { git = "https://github.com/vpetrigo/sntpc", branch = "master" }
+
+[features]
+default = [
+  "esp-backtrace/esp32c6",
+  "esp-bootloader-esp-idf/esp32c6",
+  "esp-hal/esp32c6",
+  "esp-rtos/esp32c6",
+  "esp-radio/esp32c6",
+]
+

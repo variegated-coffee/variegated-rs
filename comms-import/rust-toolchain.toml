@@ -1,0 +1,9 @@
+# Pinned rather than a bare `nightly`. This workspace uses `-Z build-std`, so
+# the compiler and the standard library it rebuilds have to agree; a floating
+# nightly means the build can change underneath you with no commit here.
+#
+# 1.91+ is a hard floor (smoltcp 0.13.1). Bump this date deliberately.
+[toolchain]
+channel    = "nightly-2026-07-29"
+components = ["rust-src"]
+targets = ["riscv32imac-unknown-none-elf"]

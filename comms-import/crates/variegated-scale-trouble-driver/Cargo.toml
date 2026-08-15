@@ -1,0 +1,20 @@
+[package]
+name = "variegated-scale-trouble-driver"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
+[dependencies]
+variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
+trouble-host = { workspace = true, features = ["defmt"] }
+defmt.workspace = true
+embassy-time = { workspace = true, features = ["defmt"] }
+embassy-futures.workspace = true
+heapless = { workspace = true, features = ["defmt"] }
+
+[features]
+default = ["defmt"]
+defmt = []

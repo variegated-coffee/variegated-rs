@@ -1,0 +1,337 @@
+{
+  "boiler_statuses": {
+    "0": {
+      "temperature": 93.0,
+      "pressure": 9.0,
+      "water_level": 80,
+      "output": {
+        "PidOutput": {
+          "p": 1.0,
+          "i": 2.0,
+          "d": 3.0,
+          "out": 4.0,
+          "acting_kp": 5.0,
+          "acting_ki": 6.0,
+          "acting_kd": 7.0
+        }
+      },
+      "control_state": {
+        "mode": "Pressure",
+        "values": {
+          "target_temperature": 93.0,
+          "target_pressure": 9.0
+        }
+      }
+    },
+    "1": {
+      "temperature": 93.0,
+      "pressure": 9.0,
+      "water_level": 80,
+      "output": {
+        "PidOutput": {
+          "p": 1.0,
+          "i": 2.0,
+          "d": 3.0,
+          "out": 4.0,
+          "acting_kp": 5.0,
+          "acting_ki": 6.0,
+          "acting_kd": 7.0
+        }
+      },
+      "control_state": {
+        "mode": "Pressure",
+        "values": {
+          "target_temperature": 93.0,
+          "target_pressure": 9.0
+        }
+      }
+    }
+  },
+  "group_statuses": {
+    "0": {
+      "is_brewing": true,
+      "three_way_valve_open": true,
+      "current_brew": {
+        "brew_time": {
+          "secs": 25,
+          "nanos": 500000000
+        },
+        "brew_input_volume": 36.0,
+        "shot_state": "PostFirstDrop",
+        "extracted_solids": 2.5,
+        "output_volume": 30.0
+      },
+      "input_flow_rate": 2.5,
+      "input_volume": 40.0,
+      "output_flow_rate": 1.5,
+      "output_weight": 36.0,
+      "pressure": 9.0,
+      "temperature": 93.0,
+      "output_temperature": 88.0,
+      "output_electrical_conductivity": 0.5,
+      "extraction_rate": 1.25,
+      "pump_output": {
+        "FixedDutyCycle": 80
+      },
+      "control_state": {
+        "mode": "PressureCurve",
+        "values": {
+          "flow_rate": 2.5,
+          "flow_rate_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          },
+          "pressure": 9.0,
+          "pressure_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          },
+          "output_flow_rate": 1.5,
+          "output_flow_rate_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          },
+          "duty_cycle": 75,
+          "duty_cycle_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          }
+        }
+      },
+      "previous_brew": {
+        "brew_time": {
+          "secs": 27,
+          "nanos": 0
+        },
+        "brew_input_volume": 38.0,
+        "output_weight": 36.5,
+        "started_at_millis": 1000000,
+        "stopped_at_millis": 1027000
+      }
+    },
+    "1": {
+      "is_brewing": true,
+      "three_way_valve_open": true,
+      "current_brew": {
+        "brew_time": {
+          "secs": 25,
+          "nanos": 500000000
+        },
+        "brew_input_volume": 36.0,
+        "shot_state": "PostFirstDrop",
+        "extracted_solids": 2.5,
+        "output_volume": 30.0
+      },
+      "input_flow_rate": 2.5,
+      "input_volume": 40.0,
+      "output_flow_rate": 1.5,
+      "output_weight": 36.0,
+      "pressure": 9.0,
+      "temperature": 93.0,
+      "output_temperature": 88.0,
+      "output_electrical_conductivity": 0.5,
+      "extraction_rate": 1.25,
+      "pump_output": {
+        "FixedDutyCycle": 80
+      },
+      "control_state": {
+        "mode": "PressureCurve",
+        "values": {
+          "flow_rate": 2.5,
+          "flow_rate_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          },
+          "pressure": 9.0,
+          "pressure_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          },
+          "output_flow_rate": 1.5,
+          "output_flow_rate_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          },
+          "duty_cycle": 75,
+          "duty_cycle_curve": {
+            "a": 0.5,
+            "b": 1.5,
+            "c": 2.0,
+            "min": 0.0,
+            "max": 9.0
+          }
+        }
+      },
+      "previous_brew": {
+        "brew_time": {
+          "secs": 27,
+          "nanos": 0
+        },
+        "brew_input_volume": 38.0,
+        "output_weight": 36.5,
+        "started_at_millis": 1000000,
+        "stopped_at_millis": 1027000
+      }
+    }
+  },
+  "water_tap_statuses": {
+    "0": {
+      "is_dispensing": true
+    },
+    "1": {
+      "is_dispensing": true
+    }
+  },
+  "steam_wand_statuses": {
+    "0": {
+      "is_steaming": true,
+      "valve_openness": 100
+    },
+    "1": {
+      "is_steaming": true,
+      "valve_openness": 100
+    }
+  },
+  "tank_statuses": {
+    "0": {
+      "water_level": 75
+    },
+    "1": {
+      "water_level": 75
+    }
+  },
+  "mode": "PowerSaveStandby",
+  "routine_execution": {
+    "routine_index": {
+      "Custom": 3
+    },
+    "current_step": 2,
+    "step_elapsed_time": {
+      "secs": 5,
+      "nanos": 0
+    },
+    "total_elapsed_time": {
+      "secs": 42,
+      "nanos": 0
+    },
+    "resolved_parameters": {
+      "0": 93.0,
+      "1": 36.0
+    }
+  },
+  "comms_status": {
+    "timestamp": 1700000000,
+    "wifi_connected": true,
+    "wifi_rssi": -55,
+    "peripheral_connection_status": {
+      "61440": {
+        "connected": true,
+        "rssi": -70
+      },
+      "61441": {
+        "connected": true,
+        "rssi": -70
+      }
+    },
+    "improv": "Provisioning",
+    "sntp_sync_seq": 7
+  },
+  "comms_status_age": {
+    "secs": 1,
+    "nanos": 250000000
+  },
+  "peripheral_status": {
+    "peripherals": {
+      "57344": {
+        "peripheral_type": "BrewSensor",
+        "is_available": true
+      },
+      "57345": {
+        "peripheral_type": "BrewSensor",
+        "is_available": true
+      }
+    }
+  },
+  "current_local_time": "2026-08-07T09:30:00",
+  "bluetooth": {
+    "scanning": true,
+    "blocked": true,
+    "reports_dropped": 3,
+    "discovered": [
+      {
+        "address": [
+          47,
+          160,
+          26,
+          151,
+          28,
+          0
+        ],
+        "address_random": true,
+        "name": "ACAIA-1C00",
+        "rssi": -63,
+        "suggested_driver": "AcaiaOld"
+      },
+      {
+        "address": [
+          62,
+          96,
+          235,
+          60,
+          28,
+          120
+        ],
+        "address_random": false,
+        "name": "",
+        "rssi": -91,
+        "suggested_driver": null
+      }
+    ]
+  },
+  "pending_shot_annotations": {
+    "entries": [
+      {
+        "key": "DoseWeight",
+        "value": {
+          "Number": 18.5
+        }
+      },
+      {
+        "key": "Beans",
+        "value": {
+          "Text": "Drop Coffee / Kenya Karimikui"
+        }
+      },
+      {
+        "key": {
+          "Other": "basket"
+        },
+        "value": {
+          "Text": "VST 18g"
+        }
+      }
+    ]
+  },
+  "sd_card_present": true
+}
