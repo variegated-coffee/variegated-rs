@@ -26,8 +26,8 @@ use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
 use variegated_controller_types::{BoilerControlMode, BoilerControlState, GroupBrewControlMode, GroupBrewControlState, MachineMode, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
 use variegated_controller_types::Output::PidOutput;
-use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
+use variegated_controller_lib::single_boiler_state;
 use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit, RoutineRepository as RoutineRepositoryTrait};
 use crate::rotary::{RoutineParameterEditState};
 use variegated_instrumentation::async_task_loop;
@@ -523,7 +523,14 @@ impl DisplayController {
         };
 
         if !should_skip_boiler_info {
-            let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index());
+            // Not boiler 0. The two published boilers are one element under two control
+            // states, and the steam switch decides which -- so reading the brew slot
+            // unconditionally meant that flipping to steam left this screen showing the brew
+            // setpoint at 0% with no PID terms. Those are the numbers of the slot the
+            // controller deliberately zeroes, not of the element that is heating.
+            let boiler_status = self
+                .status
+                .get_boiler_status(single_boiler_state::active_boiler_index(&self.status));
 
             let Some(boiler_status) = boiler_status else {
                 Text::with_baseline("No Boiler", Point::zero(), self.text_style_small, Baseline::Top)
@@ -563,8 +570,38 @@ impl DisplayController {
                 }
             },
             BoilerControlMode::Pressure => {
-                let pressure = boiler_status.control_state.values.target_pressure;
+                // Reachable now that this screen can select the steam slot. The steam
+                // control state is allowed to be pressure-controlled --
+                // `steam_boiler_state_or_default` preserves a stored `Pressure` deliberately
+                // -- and `SetBoilerControlTarget(1, Pressure, ..)` arrives from the web
+                // interface and the debug link. Left empty, this arm drew nothing at all:
+                // the top half of the screen went blank while the duty cycle and PID lines
+                // below stayed put, which reads as a hung display rather than as a mode.
+                //
+                // The `Temperature` arm above with the two quantities swapped, so the
+                // layout is the same and nothing collides with the duty cycle at (128, 32)
+                // or the PID terms at (64, 44).
+                let target = boiler_status.control_state.values.target_pressure;
 
+                Text::with_text_style(boiler_status.pressure.map_or("-".to_string(), |p| format!("{:.1} bar", p)).as_str(), Point::new(64, 0), self.text_style_large, TextStyleBuilder::new()
+                    .alignment(Alignment::Center)
+                    .baseline(Baseline::Top)
+                    .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+
+                Text::with_text_style(format!("-> {:.1}", target).as_str(), Point::new(64, 20), self.text_style_medium, TextStyleBuilder::new()
+                    .alignment(Alignment::Center)
+                    .baseline(Baseline::Top)
+                    .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+
+                if let Some(temperature) = boiler_status.temperature {
+                    Text::with_baseline(format!("{:.1} C", temperature).as_str(), Point::new(0, 32), self.text_style_medium_small, Baseline::Top)
+                        .draw(&mut self.display)
+                        .unwrap();
+                }
             },
         };
 
@@ -1259,7 +1296,12 @@ impl DisplayController {
     }
 
     async fn render_old(&mut self) {
-        let boiler_status = self.status.get_boiler_status(BrewBoiler.as_index()).unwrap();
+        // The active slot, for the reason the idle screen gives: in steam mode the brew slot
+        // reports `Off`, and this screen exists to show the live duty cycle and PID terms.
+        let boiler_status = self
+            .status
+            .get_boiler_status(single_boiler_state::active_boiler_index(&self.status))
+            .unwrap();
         let group_status = self.status.get_group_status(SingleGroup.as_index()).unwrap();
 
         let target_temp = match boiler_status.control_state.mode {

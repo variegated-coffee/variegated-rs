@@ -14,8 +14,8 @@
 //! [`BrewModeIdle`]: SingleBoilerSingleGroupControllerState::BrewModeIdle
 
 use variegated_controller_types::{
-    BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex,
-    SingleBoilerSingleGroupControllerState as State,
+    BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, Output,
+    SingleBoilerSingleGroupControllerState as State, Status,
 };
 
 /// The brew boiler. The real one.
@@ -86,6 +86,50 @@ pub fn max_temperature_for(state: State) -> f32 {
     }
 }
 
+/// How the one element's output is split across the two published boiler slots.
+///
+/// The machine has one heating element and `Status` has two boiler entries, so exactly one
+/// of them is the element and the other is a placeholder that must not look live: an
+/// interface showing a duty cycle and a set of PID terms on both would be showing the same
+/// element twice, and inviting someone to read the wrong one.
+///
+/// `Output::Off` on the inactive slot is the whole of that convention, and
+/// [`active_boiler_index`] is its inverse. **They change together.** If this ever starts
+/// publishing the real output on both slots, every consumer that asks *which boiler is
+/// driving the element* loses its only answer -- `Status` carries no controller state.
+pub fn element_outputs_for(state: State, element: Output) -> (Output, Output) {
+    match state {
+        State::SteamModeIdle => (Output::Off, element),
+        _ => (element, Output::Off),
+    }
+}
+
+/// The boiler slot whose numbers describe what the element is actually doing.
+///
+/// The inverse of [`element_outputs_for`]. The steam slot carries a live output exactly
+/// while the machine is in steam mode, so a steam slot that is not `Off` is the machine
+/// saying the element is under the steam control state -- and the setpoint, duty cycle and
+/// PID terms an interface should be showing are that slot's, not the brew slot's.
+///
+/// The test is the *variant*, not the duty cycle. `update_boiler` returns `Output::Off`
+/// only when the effective control mode is `Off`; a boiler that has reached temperature, or
+/// been cut off by the over-temperature or dry-run interlock, still reports
+/// `PidOutput { out: 0.0, .. }` and is still the live slot.
+///
+/// **Falls back to the brew boiler when neither slot is live** -- power save, or a machine
+/// switched off. That is the right answer for a display, since the brew slot carries the
+/// setpoint a user recognises, but it means this cannot tell "steam is off because we are
+/// brewing" from "everything is off". It is not a mode oracle.
+pub fn active_boiler_index(status: &Status) -> BoilerIndex {
+    let steam_is_live = status
+        .get_boiler_status(STEAM_BOILER)
+        // `matches!` rather than `!= Output::Off`: `PidOutput` carries floats, and an
+        // equality test on it is one refactor away from depending on NaN comparing equal.
+        .is_some_and(|boiler| !matches!(boiler.output, Output::Off));
+
+    if steam_is_live { STEAM_BOILER } else { BREW_BOILER }
+}
+
 /// What the machine should actually heat to in steam mode, given the stored steam state.
 ///
 /// `BoilerControlMode::Off` in this slot is treated as *unconfigured* rather than as a
@@ -122,6 +166,8 @@ pub fn steam_boiler_state_or_default(stored: BoilerControlState) -> BoilerContro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use variegated_control_algorithm::pid::PidOut;
+    use variegated_controller_types::BoilerStatus;
 
     const ALL_STATES: [State; 5] = [
         State::BrewModeIdle,
@@ -138,6 +184,27 @@ mod tests {
         (false, BREW_BOILER),
         (false, STEAM_BOILER),
     ];
+
+    /// A `Status` carrying the two boiler slots and nothing else, as `send_status` builds
+    /// it: both slots report the same physical sensors, and only the output differs.
+    fn status_with(brew: Output, steam: Output) -> Status {
+        let mut status = Status::default();
+
+        for (index, output) in [(BREW_BOILER, brew), (STEAM_BOILER, steam)] {
+            let _ = status.boiler_statuses.insert(
+                index,
+                BoilerStatus {
+                    temperature: Some(94.0),
+                    pressure: None,
+                    water_level: None,
+                    output,
+                    control_state: BoilerControlState::default(),
+                },
+            );
+        }
+
+        status
+    }
 
     /// The property the missing arm violated: no mode may be a dead end.
     ///
@@ -318,5 +385,61 @@ mod tests {
             steam_boiler_state_or_default(stored).values.target_pressure,
             1.9
         );
+    }
+
+    /// The property the display depends on: the slot it picks is the slot the element was
+    /// published under. Built with `element_outputs_for` rather than by hand, so the two
+    /// halves of the convention cannot drift apart without this failing.
+    #[test]
+    fn the_active_slot_is_the_one_the_element_is_under() {
+        let element = Output::FixedDutyCycle(47);
+
+        for state in ALL_STATES {
+            let (brew, steam) = element_outputs_for(state, element);
+
+            let expected = if state == State::SteamModeIdle {
+                STEAM_BOILER
+            } else {
+                BREW_BOILER
+            };
+
+            assert_eq!(
+                active_boiler_index(&status_with(brew, steam)),
+                expected,
+                "for {state:?}"
+            );
+        }
+    }
+
+    /// A steam PID that has settled to zero duty is still the live slot.
+    ///
+    /// This is what a rule of "pick the boiler with a non-zero duty cycle" would get wrong,
+    /// and it is the steady state of a machine that has reached its steam temperature --
+    /// the moment someone is most likely to be looking at the screen.
+    #[test]
+    fn a_settled_steam_pid_is_still_the_active_boiler() {
+        let settled = Output::PidOutput(PidOut::default());
+        assert_eq!(
+            active_boiler_index(&status_with(Output::Off, settled)),
+            STEAM_BOILER
+        );
+    }
+
+    /// Power save, and a machine switched off, leave neither slot live. Answering "brew" is
+    /// a choice rather than an accident: it is the slot carrying the setpoint a user
+    /// recognises.
+    #[test]
+    fn nothing_running_falls_back_to_the_brew_boiler() {
+        assert_eq!(
+            active_boiler_index(&status_with(Output::Off, Output::Off)),
+            BREW_BOILER
+        );
+    }
+
+    /// The display holds a `Status::default()` until the first one arrives, and renders from
+    /// it. Answering with a boiler index that is not in the map would be worse than useless.
+    #[test]
+    fn an_absent_steam_slot_is_the_brew_boiler() {
+        assert_eq!(active_boiler_index(&Status::default()), BREW_BOILER);
     }
 }

@@ -884,10 +884,12 @@ impl<
     }
 
     async fn send_status(&mut self, boiler_output: Output, pump_output: Output) {
-        let (brew_boiler_output, steam_boiler_output) = match self.state {
-            SingleBoilerSingleGroupControllerState::SteamModeIdle => (Output::Off, boiler_output.clone()),
-            _ => (boiler_output.clone(), Output::Off),
-        };
+        // One element, two published slots: the inactive one reports `Off` so that an
+        // interface can tell which of them the element is actually under. The split lives in
+        // `single_boiler_state` beside its inverse, `active_boiler_index`, because the two
+        // are one convention and a test there holds them together.
+        let (brew_boiler_output, steam_boiler_output) =
+            crate::single_boiler_state::element_outputs_for(self.state, boiler_output);
 
         let brew_boiler_status = BoilerStatus {
             temperature: self.boiler.get_temperature(),
