@@ -85,6 +85,9 @@ where
     )
 }
 
+// See `RoutineRepository` in `routine.rs`: one executor, one core, so the `Send` bound the
+// lint wants to make available would never be asked for.
+#[allow(async_fn_in_trait)]
 pub trait SettingsStorage<SettingsT: Default> {
     async fn load_settings(&mut self) -> Result<SettingsT, &'static str>;
     async fn save_settings(&mut self, data: &SettingsT) -> Result<(), &'static str>;
@@ -164,13 +167,13 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
                     sequential_storage::Error::BufferTooBig => {
                         log_info!("Error BufferTooBig");
                     },
-                    /// A provided buffer was to small to be used (usize is size needed)
-                    sequential_storage::Error::BufferTooSmall(usize) => {
-                        log_info!("Error BufferTooSmall: {}", usize);
+                    // A provided buffer was too small to be used (the value is the size needed)
+                    sequential_storage::Error::BufferTooSmall(needed) => {
+                        log_info!("Error BufferTooSmall: {}", needed);
                     },
-                    /// A serialization error (from the key or value)
-                    sequential_storage::Error::SerializationError(SerializationError) => {
-                        log_info!("Error SerializationError: {:?}", SerializationError);
+                    // A serialization error (from the key or value)
+                    sequential_storage::Error::SerializationError(err) => {
+                        log_info!("Error SerializationError: {:?}", err);
                     },
                     sequential_storage::Error::ItemTooBig => {
                         log_info!("Error ItemTooBig");

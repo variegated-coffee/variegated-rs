@@ -1,5 +1,3 @@
-#![no_std]
-
 extern crate alloc;
 
 use crc::{Crc, CRC_32_ISCSI};

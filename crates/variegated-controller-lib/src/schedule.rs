@@ -111,6 +111,10 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
     }
 }
 
+// See `RoutineRepository` in `routine.rs` for why these are `async fn` rather than
+// `-> impl Future + Send`: one executor, one core, and `get_schedules` returns an iterator
+// borrowed from `&mut self`.
+#[allow(async_fn_in_trait)]
 pub trait ScheduleStore {
     async fn add_schedule(&mut self, item: ScheduleItem);
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem>;
@@ -296,10 +300,16 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
             .unwrap();
 
         let mut max_index = 0usize;
-        while let item = iterator
-            .next::<Option<ScheduleItem>>(&mut self.deserialization_buffer)
-            .await
-        {
+        // `loop`, not `while let item = ...`: that pattern is irrefutable, so it never ended
+        // the loop and only read as though it might. What actually terminates this is the
+        // two `else { break }` arms below -- an `Err` from the iterator, or the `None` that
+        // means the end of the map. Written as a `while let` it looked bounded, and losing
+        // either `break` would hang the machine at boot while loading the schedule.
+        loop {
+            let item = iterator
+                .next::<Option<ScheduleItem>>(&mut self.deserialization_buffer)
+                .await;
+
             let Ok(item) = item else {
                 log_warn!("Invalid schedule item encountered in flash, stopping load");
                 break;

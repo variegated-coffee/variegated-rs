@@ -1141,7 +1141,7 @@ impl<
     }
 
     async fn publish_general_configuration(&mut self) {
-        let config: Configuration = self.create_general_configuration().await;;
+        let config: Configuration = self.create_general_configuration().await;
         self.configuration_channel_sender.publish_immediate(config);
     }
 
@@ -2094,10 +2094,10 @@ impl<
                     Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
-            MachineCommand::UpdateRoutine(idx, Routine) => {
+            MachineCommand::UpdateRoutine(idx, routine) => {
                 match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
                     Ok(mut repo) => {
-                        let res = repo.update_routine(idx, Routine).await;
+                        let res = repo.update_routine(idx, routine).await;
                         if res.is_err() {
                             log_warn!("Failed to update routine at index {}: index out of bounds", idx);
                         }

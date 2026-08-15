@@ -648,6 +648,16 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
 }
 
 
+// `async fn` in a public trait, deliberately. The lint's objection is that a caller
+// cannot write `T::get_routine(): Send` and so cannot spawn the future on a work-stealing
+// executor -- which does not describe this firmware. Everything that touches a
+// `RoutineRepository` runs on one embassy executor pinned to one core, and several of the
+// methods below return `impl Iterator<Item = &Routine>` borrowed from `&mut self`, which
+// cannot be made `Send` in any useful way regardless. Desugaring to
+// `-> impl Future<Output = _> + Send` would be a breaking API change that buys nothing.
+//
+// Same reasoning applies to `ScheduleStore`, `SettingsStorage` and nv3007's `DisplayModel`.
+#[allow(async_fn_in_trait)]
 pub trait RoutineRepository {
     /// Get a routine by its index. Returns None if the routine doesn't exist.
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine>;

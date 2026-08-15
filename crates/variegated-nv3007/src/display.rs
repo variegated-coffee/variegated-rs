@@ -3,6 +3,11 @@
 use display_interface::{AsyncWriteOnlyDataCommand, DisplayError};
 
 /// Trait to represent a specific display variant
+// `init` is `async fn` in a public trait on purpose. The lint wants callers to be able to
+// require `Send` on the returned future; this display is driven from a single embassy
+// executor on one core, so nothing ever will, and desugaring would be a breaking change to
+// a published-shaped API for no gain.
+#[allow(async_fn_in_trait)]
 pub trait DisplayVariant {
     /// Width of display
     const WIDTH: u16;
