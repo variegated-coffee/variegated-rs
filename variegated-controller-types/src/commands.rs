@@ -187,6 +187,31 @@ pub enum MachineCommand {
     /// What identifying means is the machine's to decide: flash the display, blink an LED,
     /// or on a machine with neither, nothing at all.
     IdentifyMachine,
+
+    /// Republish the current [`crate::Configuration`], unchanged or not.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// Not a user command, like [`Self::UpdateCommsStatus`]: it exists because
+    /// `Configuration` is the one payload on the link that is *published once* and read
+    /// only through a pub-sub channel, and embassy-sync's channels have no retained
+    /// value. A subscriber created after the publish never sees it -- `subscriber()`
+    /// starts a reader at the current message id -- so a consumer that comes up late
+    /// (the comms processor's HTTP cache waits on Wi-Fi association and DHCP, tens of
+    /// seconds after boot) is left with nothing and no way to ask.
+    ///
+    /// Every other payload survives that race by accident: `MachineDefinition` and
+    /// `RoutineSummaries` are written into caches directly by their reader arms, and
+    /// `Status` is republished at 1 Hz forever. This is the missing "ask again" for the
+    /// one that is not.
+    ///
+    /// Distinct from
+    /// [`crate::CommsProcessorToApplicationProcessorMessage::RequestConfiguration`],
+    /// which the *transceiver* answers out of its own cache of the last configuration it
+    /// forwarded. That reply is only as good as the cache, and the cache is empty until a
+    /// publish has been seen -- so it cannot recover a boot where the first publish went
+    /// nowhere. This one reaches the controller, which always has the real value.
+    RequestConfiguration,
 }
 
 impl MachineCommand {
@@ -254,6 +279,7 @@ impl MachineCommand {
             MachineCommand::OpenWifiProvisioningWindow { .. } => "OpenWifiProvisioningWindow",
             MachineCommand::CloseWifiProvisioningWindow => "CloseWifiProvisioningWindow",
             MachineCommand::IdentifyMachine => "IdentifyMachine",
+            MachineCommand::RequestConfiguration => "RequestConfiguration",
             MachineCommand::SetShotAnnotations(_, _) => "SetShotAnnotations",
             MachineCommand::SetPendingShotAnnotations(_) => "SetPendingShotAnnotations",
             MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
@@ -323,6 +349,7 @@ impl defmt::Format for MachineCommand {
             // reaches the debug wire and the TCP debug server.
             MachineCommand::SetWifiCredentials(c) => defmt::write!(f, "SetWifiCredentials({})", c),
             MachineCommand::IdentifyMachine => defmt::write!(f, "IdentifyMachine"),
+            MachineCommand::RequestConfiguration => defmt::write!(f, "RequestConfiguration"),
         }
     }
 }

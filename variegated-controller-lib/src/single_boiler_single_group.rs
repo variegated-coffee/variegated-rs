@@ -506,6 +506,14 @@ impl<
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
         let mut last_configuration = self.current_configuration();
+        // `Instant::MIN` is tick zero, so this reads as "last published at boot" and the
+        // first republish falls due ten seconds after boot rather than ten seconds after
+        // this loop starts. The two are not the same on this board: `task()` runs after
+        // the settings flash load, the ADC bring-up and the display reset, so if that
+        // preamble ever takes more than ten seconds the republish is due on the first
+        // tick instead of a further ten seconds later. Using `Instant::now()` here would
+        // silently push the first retry out by however long boot happened to take.
+        let mut last_configuration_publish = Instant::MIN;
 
         loop {
             self.persistent_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
@@ -650,6 +658,37 @@ impl<
             let pump_pid_out = self.update_pump(actual_pump_control_target, delta_t).await;
 
             self.send_status(boiler_pid_out, pump_pid_out).await;
+
+            // Republish the configuration every 10 seconds whether or not it changed,
+            // matching `dual_boiler_single_group`.
+            //
+            // This is what makes the payload survivable, and it is worth being explicit
+            // about why it is needed at all. `Configuration` is published through an
+            // embassy-sync pub-sub channel, which retains nothing: `try_publish` succeeds
+            // with no subscribers and simply drops the value, and `subscriber()` starts a
+            // reader at the *current* message id, so a consumer created afterwards never
+            // sees what came before it. On this board the one guaranteed publish is the
+            // boot one -- forced by the Bluetooth lazy load a few milliseconds in -- and
+            // the comms processor's HTTP cache does not subscribe until Wi-Fi association
+            // and DHCP have finished, tens of seconds later. Publish-on-change alone
+            // therefore left `/configuration` answering 503 for the entire life of a boot,
+            // until the first setting was edited.
+            //
+            // Every other payload on the link already survives this: `MachineDefinition`
+            // and `RoutineSummaries` are written into caches directly by their reader
+            // arms, and `Status` is republished at 1 Hz. This closes the gap for the one
+            // that was neither.
+            //
+            // `last_configuration` is advanced with it so the change comparison at the top
+            // of the loop does not immediately publish a second copy.
+            let now = Instant::now();
+            if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
+                let current_config = self.current_configuration();
+                let config = self.general_configuration(current_config.clone());
+                self.configuration_channel_sender.publish_immediate(config);
+                last_configuration_publish = now;
+                last_configuration = current_config;
+            }
 
             // Feed the watchdog to prevent system reset
             if let Some(ref mut watchdog) = self.watchdog {
@@ -1623,6 +1662,20 @@ impl<
                 if let Some(publisher) = self.identify_publisher.as_ref() {
                     publisher.send(Instant::now());
                 }
+            }
+            MachineCommand::RequestConfiguration => {
+                // Published here rather than by setting a pending flag, so the answer is on
+                // the channel before this function returns. The caller is a consumer that
+                // has just discovered it has no configuration at all; making it wait for
+                // the next comparison tick would be an odd way to answer "send it now".
+                //
+                // Deliberately does not touch the caller's `last_configuration`. Publishing
+                // a value equal to it is harmless -- the change comparison in `task` sees
+                // no change and does not publish again -- whereas resetting it would make
+                // the *next* genuine change invisible.
+                log_info!("Configuration republish requested");
+                let config = self.general_configuration(self.current_configuration());
+                self.configuration_channel_sender.publish_immediate(config);
             }
             MachineCommand::SetShotAnnotations(id, annotations) => {
                 // Identical to the dual-boiler arm, and identical for a reason: the

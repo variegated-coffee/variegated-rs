@@ -699,11 +699,21 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     info!("Configuration requested by ESP32");
                                     bus::emit_event(DebugEvent::ConfigurationRequested);
 
-                                    // Serialize inside the lock to minimize clone lifetime
+                                    // Serialize inside the lock to minimize clone lifetime.
+                                    //
+                                    // Through `frame_for_link` rather than `to_allocvec_cobs`,
+                                    // which is what every other reply on this link already
+                                    // does. A configuration larger than the far side's
+                                    // accumulator is not truncated on arrival, it is lost --
+                                    // and on the wire that is indistinguishable from this
+                                    // reply never being sent, which is the same failure the
+                                    // old full-definition `Routines` reply shipped. The guard
+                                    // changes nothing for a frame that fits; it makes the
+                                    // other case say so.
                                     let output = last_sent_config.lock(|cell| {
                                         cell.borrow().as_ref().and_then(|boxed_config| {
                                             let response = ApplicationProcessorToCommsProcessorMessage::Configuration((**boxed_config).clone());
-                                            to_allocvec_cobs(&response).ok()
+                                            frame_for_link(&response, "configuration")
                                         })
                                     });
 
@@ -712,7 +722,28 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         info!("Sent current configuration to ESP32");
                                         bus::emit_event(DebugEvent::ConfigurationSent);
                                     } else {
-                                        info!("No configuration available yet");
+                                        // An empty cache used to end here, which made the
+                                        // request unanswerable exactly when it mattered
+                                        // most: this cache is filled by *forwarding* a
+                                        // configuration, so it is empty precisely on the
+                                        // boot where no configuration has reached the link
+                                        // yet -- the boot where the comms processor is
+                                        // asking because it has nothing either.
+                                        //
+                                        // Ask the controller instead of reporting failure.
+                                        // It always holds the real value, and its reply
+                                        // goes out through the ordinary publish path a tick
+                                        // later, which also fills this cache for next time.
+                                        //
+                                        // `try_send`, never `send`: this future also drives
+                                        // the CommsStatus and configuration paths, and
+                                        // blocking on a full command queue would stall the
+                                        // link. A full queue means the controller is
+                                        // already being asked plenty of things and will
+                                        // publish soon regardless.
+                                        info!("No configuration cached yet; asking the controller to republish");
+                                        let _ = command_sender
+                                            .try_send(MachineCommand::RequestConfiguration);
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::RequestMachineDefinition => {
@@ -1017,11 +1048,18 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         .unwrap_or(true)
                 });
 
-                // Serialize and box in tight scope to minimize stack usage
+                // Serialize and box in tight scope to minimize stack usage.
+                //
+                // Guarded like every other reply on this link -- see the note at the
+                // `RequestConfiguration` arm. This is the send that matters most for it:
+                // it now runs every ten seconds on both controllers, so a configuration
+                // that has outgrown the link would otherwise be silently discarded by the
+                // far accumulator six times a minute with nothing anywhere to say why the
+                // browser never sees one.
                 let response = ApplicationProcessorToCommsProcessorMessage::Configuration(config.clone());
-                let output = to_allocvec_cobs(&response);
+                let output = frame_for_link(&response, "configuration");
 
-                if let Ok(output) = output {
+                if let Some(output) = output {
                     let _ = tx_sender.send(output).await;
                     info!("Sent updated configuration to ESP32");
 

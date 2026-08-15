@@ -2455,6 +2455,16 @@ impl<
                     publisher.send(Instant::now());
                 }
             }
+            MachineCommand::RequestConfiguration => {
+                // This board already republishes every 10 seconds, so the command is not
+                // load-bearing here the way it is on a single-boiler machine -- but it is
+                // implemented all the same, because a consumer that has just come up
+                // should not have to wait out someone else's timer, and because a command
+                // that works on one controller and is dropped by the other is exactly the
+                // sort of divergence that makes the two firmwares need separate handling.
+                log_info!("Configuration republish requested");
+                self.publish_general_configuration().await;
+            }
             MachineCommand::SetShotAnnotations(id, annotations) => {
                 // Editing a *stored* shot is a whole-file rewrite on the card, which
                 // happens on core 1. Handed across rather than performed here.
