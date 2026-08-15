@@ -1,50 +1,56 @@
 [workspace]
+# Layout, as of 2026-08-15: a crate that produces a flashable binary lives in
+# `firmwares/`, everything else in `crates/`. Sibling path dependencies inside `crates/`
+# are unaffected by that split -- `../variegated-hal` from `crates/variegated-controller-lib`
+# still resolves -- which is why only the three firmware manifests carry `../../crates/`.
 members = [
-    "variegated-silvia-firmware",
-    "variegated-gs3-firmware",
-    "variegated-adc-tools",
-    "variegated-controller-lib",
-    "variegated-controller-types",
-    "variegated-control-algorithm",
-    "variegated-ads124s08",
-    "variegated-embassy-dual-c595-shift-register",
-    "variegated-fdc1004",
-    "variegated-gravity-driver",
-    "variegated-mcp9600",
-    "variegated-nau7802",
-    "variegated-tlc59108",
-    "variegated-embassy-rp-frequency-counter",
-    "variegated-hal",
-    "variegated-log",
-    "variegated-soft-pwm", "variegated-instrumentation",
-    "variegated-mcp23017",
-    "variegated-nv3007",
-    "variegated-comms",
-    "variegated-exfat-format",
-    "variegated-timekeeping",
-    "variegated-rp235x-atomic-raw-mutex",
-    "variegated-debug-codec",
-    "variegated-debug",
-    "variegated-postcard-schema",
-    "variegated-postcard-schema-derive",
+    "firmwares/variegated-silvia-firmware",
+    "firmwares/variegated-gs3-firmware",
+
+    "crates/variegated-adc-tools",
+    "crates/variegated-controller-lib",
+    "crates/variegated-controller-types",
+    "crates/variegated-control-algorithm",
+    "crates/variegated-ads124s08",
+    "crates/variegated-embassy-dual-c595-shift-register",
+    "crates/variegated-fdc1004",
+    "crates/variegated-gravity-driver",
+    "crates/variegated-mcp9600",
+    "crates/variegated-nau7802",
+    "crates/variegated-tlc59108",
+    "crates/variegated-embassy-rp-frequency-counter",
+    "crates/variegated-hal",
+    "crates/variegated-log",
+    "crates/variegated-soft-pwm",
+    "crates/variegated-instrumentation",
+    "crates/variegated-mcp23017",
+    "crates/variegated-nv3007",
+    "crates/variegated-comms",
+    "crates/variegated-exfat-format",
+    "crates/variegated-timekeeping",
+    "crates/variegated-rp235x-atomic-raw-mutex",
+    "crates/variegated-debug-codec",
+    "crates/variegated-debug",
+    "crates/variegated-postcard-schema",
+    "crates/variegated-postcard-schema-derive",
 
     # The `#[board_cfg(...)]` / `aliased_bind_interrupts!` macro, merged in from its own
     # repository on 2026-08-15. It is still published to crates.io from here. Both it and
     # its fixture crate are deliberately absent from `default-members` below -- see the
     # note there, the reasons are not the same.
-    "variegated-board-cfg",
-    "variegated-board-cfg-tests",
+    "crates/variegated-board-cfg",
+    "crates/variegated-board-cfg-tests",
 
     # The ESP32-C6 comms side, merged in from variegated-comms-rs on 2026-08-15. The
     # first five are portable no_std and would build for either architecture; only
     # `variegated-comms-firmware` is riscv32-only, and it is the reason for
     # `default-members` below.
-    "variegated-comms-api-types",
-    "variegated-trouble-connection-manager",
-    "variegated-belka-portal-trouble-driver",
-    "variegated-scale-trouble-driver",
-    "variegated-improv-trouble",
-    "variegated-comms-firmware",
+    "crates/variegated-comms-api-types",
+    "crates/variegated-trouble-connection-manager",
+    "crates/variegated-belka-portal-trouble-driver",
+    "crates/variegated-scale-trouble-driver",
+    "crates/variegated-improv-trouble",
+    "firmwares/variegated-comms-firmware",
 ]
 
 # This workspace spans two architectures, so `--workspace` is not a usable command here:
@@ -59,38 +65,38 @@ members = [
 # `variegated-controller-types/serde` would newly enable serde inside the espresso
 # firmwares. They still get compile coverage: every comms firmware build compiles them.
 #
-# Build the comms firmware with `cd variegated-comms-firmware && cargo build`, or
+# Build the comms firmware with `cd firmwares/variegated-comms-firmware && cargo build`, or
 # `scripts/build-comms-firmware.sh`. It cannot be built from here -- see that directory's
 # `.cargo/config.toml` and `rust-toolchain.toml`.
 default-members = [
-    "variegated-silvia-firmware",
-    "variegated-gs3-firmware",
-    "variegated-adc-tools",
-    "variegated-controller-lib",
-    "variegated-controller-types",
-    "variegated-control-algorithm",
-    "variegated-ads124s08",
-    "variegated-embassy-dual-c595-shift-register",
-    "variegated-fdc1004",
-    "variegated-gravity-driver",
-    "variegated-mcp9600",
-    "variegated-nau7802",
-    "variegated-tlc59108",
-    "variegated-embassy-rp-frequency-counter",
-    "variegated-hal",
-    "variegated-log",
-    "variegated-soft-pwm",
-    "variegated-instrumentation",
-    "variegated-mcp23017",
-    "variegated-nv3007",
-    "variegated-comms",
-    "variegated-exfat-format",
-    "variegated-timekeeping",
-    "variegated-rp235x-atomic-raw-mutex",
-    "variegated-debug-codec",
-    "variegated-debug",
-    "variegated-postcard-schema",
-    "variegated-postcard-schema-derive",
+    "firmwares/variegated-silvia-firmware",
+    "firmwares/variegated-gs3-firmware",
+    "crates/variegated-adc-tools",
+    "crates/variegated-controller-lib",
+    "crates/variegated-controller-types",
+    "crates/variegated-control-algorithm",
+    "crates/variegated-ads124s08",
+    "crates/variegated-embassy-dual-c595-shift-register",
+    "crates/variegated-fdc1004",
+    "crates/variegated-gravity-driver",
+    "crates/variegated-mcp9600",
+    "crates/variegated-nau7802",
+    "crates/variegated-tlc59108",
+    "crates/variegated-embassy-rp-frequency-counter",
+    "crates/variegated-hal",
+    "crates/variegated-log",
+    "crates/variegated-soft-pwm",
+    "crates/variegated-instrumentation",
+    "crates/variegated-mcp23017",
+    "crates/variegated-nv3007",
+    "crates/variegated-comms",
+    "crates/variegated-exfat-format",
+    "crates/variegated-timekeeping",
+    "crates/variegated-rp235x-atomic-raw-mutex",
+    "crates/variegated-debug-codec",
+    "crates/variegated-debug",
+    "crates/variegated-postcard-schema",
+    "crates/variegated-postcard-schema-derive",
     # Neither `variegated-board-cfg` nor its fixture crate is here, for two different
     # reasons.
     #
@@ -111,12 +117,13 @@ default-members = [
 # std. Both halves are needed. It reaches the comms firmware as a build-dependency, which
 # cargo compiles as a host unit regardless.
 #
-# It sits at the workspace root rather than under `variegated-comms-firmware/`, where it
+# It sits in `crates/` rather than under `firmwares/variegated-comms-firmware/`, where it
 # would be more obviously "that firmware's build input": `exclude` does not reach a
 # package nested inside a *member's* directory, and cargo fails with "multiple workspace
-# roots found in the same workspace". A sibling is the arrangement that works.
+# roots found in the same workspace". `crates/` is not itself a package, so excluding a
+# directory inside it works exactly as excluding one at the root did.
 exclude = [
-    "variegated-schema-export",
+    "crates/variegated-schema-export",
 ]
 
 resolver = "2"

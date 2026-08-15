@@ -30,7 +30,7 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMS="$REPO/variegated-comms-firmware"
+COMMS="$REPO/firmwares/variegated-comms-firmware"
 OUT="${1:-$REPO/target/comms-firmware-logs}"
 mkdir -p "$OUT"
 

@@ -25,8 +25,9 @@ set -eu
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 cd /
-# `../variegated-schema-export`, not `tools/schema-export`: the exporter sits at the
-# workspace root because cargo's `exclude` cannot reach a package nested inside a
-# member's directory. `$repo` is still this crate, which is where `frontend/` lives and
-# therefore what the exporter should write into.
-exec cargo run --quiet --manifest-path "$repo/../variegated-schema-export/Cargo.toml" -- "$@" "$repo"
+# `../../crates/variegated-schema-export`, not `tools/schema-export`: the exporter is an
+# excluded member of the workspace rather than a file under this crate, because cargo's
+# `exclude` cannot reach a package nested inside a member's directory. `$repo` is still
+# this crate, which is where `frontend/` lives and therefore what the exporter should
+# write into.
+exec cargo run --quiet --manifest-path "$repo/../../crates/variegated-schema-export/Cargo.toml" -- "$@" "$repo"

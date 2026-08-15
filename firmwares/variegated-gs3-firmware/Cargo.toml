@@ -38,26 +38,26 @@ panic-probe = { workspace = true, features = ["print-defmt"] }
 
 num-traits = { workspace = true, features = ["libm"] }
 
-variegated-board-cfg = { version = "0.3.0", path = "../variegated-board-cfg" }
+variegated-board-cfg = { version = "0.3.0", path = "../../crates/variegated-board-cfg" }
 
-variegated-hal = { version = "0.1.0", path = "../variegated-hal", features = ["rp235xb", "atomic-mutex"] }
+variegated-hal = { version = "0.1.0", path = "../../crates/variegated-hal", features = ["rp235xb", "atomic-mutex"] }
 
-variegated-ads124s08 = { version = "0.1.0", path = "../variegated-ads124s08", features = ["defmt"] }
-variegated-fdc1004 = { version = "0.1.0", path = "../variegated-fdc1004", features = ["defmt"] }
-variegated-gravity-driver = { version = "0.1.0", path = "../variegated-gravity-driver", features = ["defmt"], optional = true }
-variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
-variegated-controller-lib = { version = "0.1.0", path = "../variegated-controller-lib" }
-variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }
-variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation", features = ["instrumentation"] }
-variegated-debug = { version = "0.1.0", path = "../variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt", "source-application", "rp235xb"] }
-variegated-mcp23017 = { version = "0.1.0", path = "../variegated-mcp23017", features = ["defmt"] }
-variegated-tlc59108 = { version = "0.1.0", path = "../variegated-tlc59108", features = ["defmt"] }
-variegated-nv3007 = { version = "0.1.0", path = "../variegated-nv3007", features = ["defmt", "graphics", "delta-updates"], optional = true, default-features = false }
-variegated-comms = { version = "0.1.0", path = "../variegated-comms" }
+variegated-ads124s08 = { version = "0.1.0", path = "../../crates/variegated-ads124s08", features = ["defmt"] }
+variegated-fdc1004 = { version = "0.1.0", path = "../../crates/variegated-fdc1004", features = ["defmt"] }
+variegated-gravity-driver = { version = "0.1.0", path = "../../crates/variegated-gravity-driver", features = ["defmt"], optional = true }
+variegated-adc-tools = { version = "0.1.0", path = "../../crates/variegated-adc-tools" }
+variegated-controller-lib = { version = "0.1.0", path = "../../crates/variegated-controller-lib" }
+variegated-controller-types = { version = "0.1.0", path = "../../crates/variegated-controller-types" }
+variegated-instrumentation = { version = "0.1.0", path = "../../crates/variegated-instrumentation", features = ["instrumentation"] }
+variegated-debug = { version = "0.1.0", path = "../../crates/variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt", "source-application", "rp235xb"] }
+variegated-mcp23017 = { version = "0.1.0", path = "../../crates/variegated-mcp23017", features = ["defmt"] }
+variegated-tlc59108 = { version = "0.1.0", path = "../../crates/variegated-tlc59108", features = ["defmt"] }
+variegated-nv3007 = { version = "0.1.0", path = "../../crates/variegated-nv3007", features = ["defmt", "graphics", "delta-updates"], optional = true, default-features = false }
+variegated-comms = { version = "0.1.0", path = "../../crates/variegated-comms" }
 # `debug-bus` installs the `log` -> debug bus bridge; see `bus_sink::init()` in main.
-variegated-log = { version = "0.1.0", path = "../variegated-log", features = ["debug-bus", "rp235xb"] }
-variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping", features = ["defmt"] }
-variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
+variegated-log = { version = "0.1.0", path = "../../crates/variegated-log", features = ["debug-bus", "rp235xb"] }
+variegated-timekeeping = { version = "0.1.0", path = "../../crates/variegated-timekeeping", features = ["defmt"] }
+variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../../crates/variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal.workspace = true

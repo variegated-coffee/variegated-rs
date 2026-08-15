@@ -34,11 +34,12 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# `$REPO/../target` and `comms-release`, not `$REPO/target` and `release`: since this
+# `$REPO/../../target` and `comms-release`, not `$REPO/target` and `release`: since this
 # crate became a member of the variegated-rs workspace the build directory is the
 # workspace root's, and the profile is the custom one (see `[profile.comms-release]` in
 # the root Cargo.toml for why this firmware cannot share `release` with the RP2350 side).
-ELF="${1:-$REPO/../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware}"
+# Two levels up, since the firmwares moved under `firmwares/`.
+ELF="${1:-$REPO/../../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware}"
 TOP="${2:-30}"
 
 # `rust-objdump`/`rust-nm` are resolved through whichever toolchain rustup picks for the

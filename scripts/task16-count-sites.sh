@@ -22,13 +22,14 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # anything else lands on the branch -- as it already has.
 BASE_REF="${1:-1dba280}"
 
-# Two lists, because the GS3 firmware's main.rs moved: it was `examples/dual-boiler/` at
-# the baseline revision and is `variegated-gs3-firmware/` now. Using one list for both
-# sides would either make `git archive` extract nothing from the baseline or make the
-# working-tree grep miss the file entirely -- and both failures look like a plausible
-# count rather than an error.
+# Two lists, because everything on this side has moved since the baseline: the GS3
+# firmware's main.rs was `examples/dual-boiler/` then and is
+# `firmwares/variegated-gs3-firmware/` now, and the libraries gained a `crates/` prefix in
+# the same reorganisation. Using one list for both sides would either make `git archive`
+# extract nothing from the baseline or make the working-tree grep miss the files entirely
+# -- and both failures look like a plausible count rather than an error.
 BASE_PATHS="variegated-controller-lib/src variegated-hal/src examples/dual-boiler/src/main.rs"
-PATHS="variegated-controller-lib/src variegated-hal/src variegated-gs3-firmware/src/main.rs"
+PATHS="crates/variegated-controller-lib/src crates/variegated-hal/src firmwares/variegated-gs3-firmware/src/main.rs"
 
 # Any log-macro invocation, in every form this tree uses: `defmt::info!`,
 # `variegated_log::log_info!`, bare `log_info!`, bare `info!`. Commented-out lines

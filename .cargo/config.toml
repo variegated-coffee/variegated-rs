@@ -12,7 +12,7 @@
 # a crate directory is the intended path -- there each `runner` is `./probe-runner.sh` and
 # there is no ambiguity. This entry only has to name one of them, and names the GS3 because
 # that is the machine the old `default-run = "dual_boiler"` pointed at.
-runner = "./variegated-gs3-firmware/probe-runner.sh"
+runner = "./firmwares/variegated-gs3-firmware/probe-runner.sh"
 #runner = "elf2uf2-rs"
 
 # flip-link does NOT work on this target. Tried 2026-08-10 while chasing a HardFault, and

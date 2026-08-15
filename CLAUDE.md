@@ -9,7 +9,20 @@ Variegated.rs is a collection of Rust libraries for building espresso machine co
 ## Architecture & Key Concepts
 
 ### Crate Organization
-This is a Cargo workspace with the following key crates:
+
+Two directories, split on one question: **does this crate produce something you flash?**
+
+| | holds |
+|---|---|
+| `firmwares/` | the three crates that build a flashable binary — `variegated-silvia-firmware`, `variegated-gs3-firmware`, `variegated-comms-firmware` |
+| `crates/` | everything else — libraries, drivers, the `variegated-board-cfg` proc macro, the `variegated-schema-export` host tool |
+
+Path dependencies inside `crates/` are plain siblings (`path = "../variegated-hal"`); only
+the three firmware manifests reach across, with `path = "../../crates/..."`. If you add a
+crate, add it to `members` in the root `Cargo.toml`, and to `default-members` too unless it
+is ESP32-C6-only or cannot be built for `thumbv8m` — see below for what that costs.
+
+The key crates:
 
 - **`variegated-hal`**: Hardware abstraction layer with GPIO-controlled components, ADC interfaces, and espresso machine primitives (boilers, groups, steam wands, water taps)
 - **`variegated-controller-lib`**: High-level machine controllers and brewing routines
@@ -108,7 +121,7 @@ cargo build -p <crate> --target thumbv8m.main-none-eabihf --message-format=json 
 scripts/warning-report.py <crate> w.json
 
 # The ESP32-C6 comms firmware. Must be built by `cd`-ing in; see below.
-cd variegated-comms-firmware && cargo build --profile comms-release
+cd firmwares/variegated-comms-firmware && cargo build --profile comms-release
 scripts/build-comms-firmware.sh [output-dir]
 ```
 
@@ -129,7 +142,8 @@ what the espresso binaries contain.
 
 **The comms firmware can only be built from its own directory.** Both cargo and rustup
 resolve `.cargo/config.toml` and `rust-toolchain.toml` by walking up from the *current
-working directory*, not from `--manifest-path`. `variegated-comms-firmware/` carries both:
+working directory*, not from `--manifest-path`. `firmwares/variegated-comms-firmware/`
+carries both:
 the riscv target, `-Z build-std`, `force-frame-pointers`, and the nightly the last two
 need. `cargo build -p variegated-comms-firmware` from the root silently gets stable and
 thumbv8m, and fails. Use `scripts/build-comms-firmware.sh`, or that crate's
@@ -154,7 +168,9 @@ The 125 commits from `variegated-comms-rs` are ancestors of `main` and fully rea
 plus `read-tree`, which records the files as additions in the merge commit rather than as
 renames, so there is no rename chain for `--follow` to walk. Name a pre-merge commit and the
 old path instead — the tree there was `crates/<crate>/`, with `frontend/` and
-`tools/schema-export/` at its root:
+`tools/schema-export/` at its root. Note the collision: that `crates/` is the *old repo's*,
+and it is not this repo's `crates/` — the comms firmware lives in `firmwares/` here, and
+`crates/variegated-comms-firmware` has never been a path in this tree:
 
 ```bash
 git log <pre-merge-sha> -- crates/variegated-comms-firmware/src/bin/main.rs
@@ -168,7 +184,7 @@ git log --all -- crates/variegated-comms-firmware/src/http.rs
 The macro behind `#[board_cfg(...)]`, `aliased_bind_interrupts!` and `type_aliases!` had its
 own repository until 2026-08-15, when it was merged in the same way the comms tree was (so
 `git log --follow` will not reach its 9 pre-merge commits either; its old path was
-`variegated-board-cfg/src/lib.rs`, unchanged). Two things follow from it being a **public,
+`variegated-board-cfg/src/lib.rs`, without today's `crates/` prefix). Two things follow from it being a **public,
 general-purpose crate** rather than an internal one:
 
 - **It is still released to crates.io**, so its `[dependencies]` and MSRV are downstream
@@ -292,8 +308,8 @@ on the item with a comment saying why it is kept — never a crate-level `#![all
 ## Key Files & Examples
 
 ### Firmware crates
-- **`variegated-silvia-firmware/`**: the Rancilio Silvia dev rig — single boiler, single group
-- **`variegated-gs3-firmware/`**: the La Marzocco GS3 carrier — dual boiler, single group
+- **`firmwares/variegated-silvia-firmware/`**: the Rancilio Silvia dev rig — single boiler, single group
+- **`firmwares/variegated-gs3-firmware/`**: the La Marzocco GS3 carrier — dual boiler, single group
 - Both include board configuration files and hardware-specific implementations
 
 These are the shipping firmwares, not examples. They lived in a package literally named

@@ -25,10 +25,11 @@ set -eu
 cd "$(dirname "$0")/.."
 
 MARKER=${1:-"tcp: command injection compiled in (VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS)"}
-# `../target` and `comms-release`: this crate is a member of the variegated-rs workspace,
-# so the build directory is the workspace root's and the profile is the custom one. See
+# `../../target` and `comms-release`: this crate is a member of the variegated-rs
+# workspace, so the build directory is the workspace root's and the profile is the custom
+# one. Two levels up, not one, since the firmwares moved under `firmwares/`. See
 # `[profile.comms-release]` in the root Cargo.toml.
-BIN=../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware
+BIN=../../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware
 
 # `strings -a`, not `strings`: without it the default on some platforms is to scan
 # only the loadable sections it recognises, and .rodata on this target is not always
@@ -40,7 +41,7 @@ marker_count() {
 # Both builds are noisy and neither's warnings are this script's business, so the
 # output is kept and summarised rather than discarded: a failure here is usually a
 # build failure, and swallowing it would leave nothing to look at.
-LOG=../target/tcp_command_gate_check.log
+LOG=../../target/tcp_command_gate_check.log
 
 echo "=== building with VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS unset ==="
 # `env -u` rather than trusting the caller's environment to be clean: this check is
