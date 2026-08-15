@@ -61,12 +61,22 @@ pub const DEFAULT_STEAM_TARGET_TEMPERATURE: f32 = 120.0;
 
 /// Ceiling for the element in brew mode.
 ///
-/// Not a new number: this is what `current_configuration` has always published as the brew
-/// boiler's `max_temperature`. It was only ever *advertised*, though — the dual-boiler cuts
-/// heating at its configured maximum (`dual_boiler_single_group.rs:1184`, `:1259`) and the
-/// single-boiler had no such interlock at all, so the figure reached the interface and
-/// bounded nothing. Naming it here gives the publisher and the interlock one source.
-pub const MAX_BREW_TEMPERATURE: f32 = 100.0;
+/// **A brew target is not a cup temperature.** Water loses heat on its way from the boiler
+/// to the puck — through the group, the portafilter and the basket, all of which start
+/// colder than the water — so a boiler set at the temperature you want at the puck delivers
+/// less than that. Compensating for it is normal practice, and it is why this ceiling has to
+/// sit above 100 °C: the interesting brew targets are on the other side of that number.
+///
+/// This figure was 100.0 when the interlock was introduced, taken from what
+/// `current_configuration` had been publishing as the brew boiler's `max_temperature` while
+/// nothing enforced it. Advertised and unenforced, 100 bounded nothing and cost nothing;
+/// enforced, it cut off exactly the range the machine needs, and the rotary editor —
+/// which stops where the interlock cuts in — could no longer reach a usable brew target.
+///
+/// 110 is a limit, not a recommendation, and the machine is declared good for 150
+/// ([`MAX_STEAM_TEMPERATURE`]), so this is not near the hardware's edge. Raise it if a real
+/// brew target ever needs more.
+pub const MAX_BREW_TEMPERATURE: f32 = 110.0;
 
 /// Ceiling for the element in steam mode, likewise already published for the virtual steam
 /// boiler. It is what makes [`DEFAULT_STEAM_TARGET_TEMPERATURE`] look conservative — the
@@ -360,6 +370,20 @@ mod tests {
             };
             assert_eq!(max_temperature_for(state), expected, "for {:?}", state);
         }
+    }
+
+    /// The brew ceiling has to leave room above the boiling point, because a brew target is
+    /// not a cup temperature: the water cools between the boiler and the puck, and the
+    /// setpoint is raised to pay for it. A ceiling at 100 was enforced briefly and put the
+    /// useful part of that range out of reach — both of the interlock and of the rotary
+    /// editor, which stops wherever this constant does.
+    #[test]
+    fn the_brew_ceiling_leaves_room_above_boiling() {
+        assert!(
+            MAX_BREW_TEMPERATURE > 100.0,
+            "a brew target has to be able to exceed 100 °C to compensate for the loss \
+             between boiler and grouphead; got {MAX_BREW_TEMPERATURE}"
+        );
     }
 
     /// The substituted steam default has to sit under the ceiling that will be enforced
