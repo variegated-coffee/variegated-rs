@@ -229,19 +229,40 @@ variable from their own build scripts for the same reason.
 
 ### Zero warnings is part of the definition of done
 
-**A firmware crate must build with zero warnings of its own, in every feature
-configuration the gate builds.** Not "no new warnings", not "the count did not go up" —
-zero. A change that adds one is not finished.
+**Every crate in this repository must build with zero warnings, in every configuration
+that is built.** Not "no new warnings", not "the count did not go up" — zero. A change that
+adds one is not finished.
 
-This applies to **all three firmwares** — both espresso ones and the comms one — and to the
-five supporting comms crates, plus `variegated-board-cfg` and its fixture. All ten are at
-zero.
+This is now literal rather than aspirational: the four gate configurations report
+**0/0/0/0**, and the comms firmware's 8 are entirely `esphome-device`'s, which lives in the
+sibling `esphome-device-rs` repository and cannot be fixed from here. That is the only
+number in this repo that is not zero, and it is a dependency's.
 
-What is *not* yet at zero is the library crates: `variegated-controller-types` and friends
-still account for the 121/100/25 totals the gate scripts report. Those totals are a
-dependency-side number; the rule above is about a crate's own diagnostics, which is what
-`scripts/warning-report.py` measures. Extending the rule to the libraries is the remaining
-work before this can be a genuinely repo-wide policy.
+**Five configurations, not four.** The gate covers gs3, gs3+`pwm-steam-valve`, silvia and
+gs3+`character-display,pwm-leds`. Two more can only be reached by hand, and both have hidden
+warnings before:
+
+```bash
+cd firmwares/variegated-comms-firmware && cargo build --profile comms-release
+cargo test-aarch64 -p variegated-controller-lib \
+    --no-default-features --features std,serde,double_boiler,single_group
+```
+
+The host build is the one people forget. It turns `hardware` and `defmt` *off*, which
+compiles code the other five never see and stops compiling code they all do — an import
+used only inside a `defmt::Format` impl is unused there, and a field read only by the
+`hardware`-gated controllers looks dead. Gate those with `#[cfg(feature = "defmt")]` and
+`#[cfg_attr(not(feature = "hardware"), allow(dead_code))]` rather than unconditionally,
+so a real regression on target still gets reported.
+
+**A driver crate for an IC keeps its whole register map.** These are general drivers, not
+drivers for the one way this firmware happens to use a chip, so a constant with no method
+behind it yet is not dead code — and the fix is `pub mod registers;`, not
+`#[allow(dead_code)]`. `variegated-ads124s08` has always done it that way;
+`variegated-tlc59108` and `variegated-mcp23017` had private register modules, which is
+precisely why the compiler called their datasheet transcriptions unreachable. Note the
+knock-on: making the module public brings its items under the crate's
+`#![warn(missing_docs)]`, so they need doc comments.
 
 One trap when clearing warnings in a `no_std` firmware: **an unused import may be the only
 thing linking a crate in.** `cargo fix` removed `use esp_println::println;` from the comms
@@ -250,12 +271,27 @@ esp-println carries the `#[defmt::global_logger]` and an extern crate nothing na
 `--gc-sections` discards. The fix is `use esp_println as _;`, not deletion. The same applies
 to panic handlers and allocators.
 
-This is enforceable because it is currently true, and it was made true deliberately: both
-firmwares carried 69 and 59 warnings until 2026-08-15, and roughly 70% of that was unused
-imports that had accumulated across refactors. The cost of the backlog was not the noise
-itself but what the noise hid — a dropped `Result` that silently discarded an operator's
-edit, and a documented pin-parking routine that nothing ever called. Neither was findable
-in a list of 69.
+This is enforceable because it is currently true, and it was made true deliberately: the
+firmwares carried 69 and 59 warnings and the libraries another 123 until 2026-08-15, and
+roughly half of all of it was unused imports accumulated across refactors. The cost was
+never the noise itself but what the noise hid. Every pass has found something:
+
+- a dropped `Result` that silently discarded an operator's parameter edit
+- a documented pin-parking routine that nothing ever called
+- **a UART read whose `Result` was bound and dropped**, so an aborted transfer's buffer was
+  fed to a COBS decoder mid-frame — one error cost two messages, and reported neither
+- **a bloom step that ran for `bloom_after` instead of `bloom_time`**, so a routine asking
+  to bloom for 7 s bloomed for 3
+- **a `GroupConfiguration` accepted by a controller's constructor, stored, and never read**
+- a `while let` on an irrefutable pattern that only looked like it terminated
+- 34 lines of PIO assembly assembled into a binding nothing loaded, duplicating the block
+  immediately below it
+
+None of those were findable in a list of 123. Note what they have in common: **the fix that
+silences the warning and the fix that repairs the defect are different edits, and the cheap
+one is usually wrong.** `cargo fix` will offer to rename a dropped `Result` to `_res` and a
+misused `bloom_time` to `_bloom_time`. Both offers make the bug permanent. Read what the
+compiler is pointing at before accepting a suggestion.
 
 Two things this rule has to survive, both of which have already bitten:
 

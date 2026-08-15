@@ -2,17 +2,22 @@
 # Build the firmware configurations that gate this branch and report the warning/error
 # counts for each. Compare two runs with `scripts/compare-warnings.sh`.
 #
-# Baselines as of 2026-08-15: gs3 120, gs3+pwm-steam-valve 120, silvia 98,
-# gs3+optional-peripherals 120, 0 errors throughout.
+# Baseline as of 2026-08-15: **zero warnings and zero errors in all four**, and that is
+# the contract rather than a high-water mark. See "Zero warnings is part of the definition
+# of done" in CLAUDE.md: any non-zero number below is a regression, in this repo or in a
+# dependency, and is to be found rather than recorded here.
 #
-# Down from 121/121/100/121 earlier the same day, when `variegated-board-cfg` moved into
-# this workspace and its one dead-field warning was fixed. Note the asymmetry: -1 on the
-# gs3 configurations and -2 on silvia, for one warning. These totals are `grep -c '^warning'`
-# over the log, and cargo renders a *replayed* (cached) diagnostic as a single
-# `path:line:col: warning: ...` line, which does not match, where a freshly compiled one
-# gets the full multi-line form whose first line does. So a crate's contribution to these
-# numbers depends on whether it was rebuilt in that particular run. Per-crate counts are
-# what to compare; these are a smoke signal.
+# It reached zero in stages: 192/190/179/197 before the firmwares moved out of the
+# `examples` package, 121/121/100/121 once the firmwares' own warnings went, 120/120/98/120
+# when `variegated-board-cfg` moved in, and 0/0/0/0 once the twelve library crates were
+# cleared.
+#
+# Two configurations are NOT covered here and must be run by hand -- the comms firmware,
+# via `scripts/build-comms-firmware.sh`, and the controller-lib host tests, which turn
+# `hardware` and `defmt` off and so compile a different program:
+#
+#   cargo test-aarch64 -p variegated-controller-lib \
+#       --no-default-features --features std,serde,double_boiler,single_group
 #
 # **Every one of those is a dependency's.** Both firmware bins emit zero warnings of their
 # own in every configuration built here, and per CLAUDE.md that is the definition of done,
