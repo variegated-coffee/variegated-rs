@@ -2,16 +2,8 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::fmt;
-use core::time::Duration;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Utc, Weekday};
+use chrono::Datelike;
 use heapless::index_map::FnvIndexMap;
-use heapless::index_set::FnvIndexSet;
-use variegated_control_algorithm::pid::PidOut;
 
 // Constants
 pub const MAX_BOILERS: usize = 8;

@@ -6,7 +6,6 @@ use alloc::boxed::Box;
 use async_trait::async_trait;
 use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
-use embassy_sync::signal::Signal;
 use embassy_sync::watch::Receiver;
 pub use variegated_controller_types::{DutyCycleType, FlowRateType, InputVolumeType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
 
@@ -56,7 +55,7 @@ pub struct SensorReading<Transformed> {
 }
 pub use pump::{Pump, PumpError};
 use heapless::index_map::FnvIndexMap;
-use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS, ECType, Output};
+use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS, ECType};
 use crate::scale::ScaleConfiguration;
 
 pub mod gpio;

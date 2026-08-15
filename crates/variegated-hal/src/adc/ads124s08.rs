@@ -7,9 +7,8 @@ use embedded_hal::digital::InputPin;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::spi::SpiDevice;
 use embedded_hal_async::digital::Wait;
-use variegated_log::log_debug;
 use variegated_adc_tools::ConversionParameters;
-use variegated_ads124s08::{ADS124S08, ADS124S08Error, Code};
+use variegated_ads124s08::{ADS124S08, ADS124S08Error};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::Mux;
 use variegated_instrumentation::{async_task_loop, CounterHandle, IndicatorHandle};
@@ -87,10 +86,13 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
             counter.increment();
         }
 
+        // One `elapsed()`, read once and used: the binding and the indicator used to call
+        // it separately, so the number reported was very slightly later than the one the
+        // name suggested.
         let took = start.elapsed();
 
         if let Some(indicator) = self.time_indicator {
-            indicator.set(start.elapsed().as_millis());
+            indicator.set(took.as_millis());
         }
 
         //drop(dev);

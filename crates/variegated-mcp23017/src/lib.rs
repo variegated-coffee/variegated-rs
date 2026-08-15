@@ -483,14 +483,14 @@ where
 /// Extension trait for creating pin instances from a shared driver
 pub trait Mcp23017Ext<M: RawMutex, I2C, D> {
     /// Create a pin instance for the given pin number
-    fn pin(&self, pin: u8) -> Mcp23017Pin<M, I2C, D>;
+    fn pin(&self, pin: u8) -> Mcp23017Pin<'_, M, I2C, D>;
 
     /// Create an interrupt-capable pin instance
-    fn interrupt_pin<INT>(&self, pin: u8, interrupt_pin: INT) -> Mcp23017InterruptPin<M, I2C, D, INT>;
+    fn interrupt_pin<INT>(&self, pin: u8, interrupt_pin: INT) -> Mcp23017InterruptPin<'_, M, I2C, D, INT>;
 }
 
 impl<M: RawMutex, I2C, D> Mcp23017Ext<M, I2C, D> for Mutex<M, Mcp23017<I2C, D>> {
-    fn pin(&self, pin: u8) -> Mcp23017Pin<M, I2C, D> {
+    fn pin(&self, pin: u8) -> Mcp23017Pin<'_, M, I2C, D> {
         let (port, bit) = if pin < 8 {
             (Port::A, pin)
         } else {
@@ -505,7 +505,7 @@ impl<M: RawMutex, I2C, D> Mcp23017Ext<M, I2C, D> for Mutex<M, Mcp23017<I2C, D>> 
         }
     }
 
-    fn interrupt_pin<INT>(&self, pin: u8, interrupt_pin: INT) -> Mcp23017InterruptPin<M, I2C, D, INT> {
+    fn interrupt_pin<INT>(&self, pin: u8, interrupt_pin: INT) -> Mcp23017InterruptPin<'_, M, I2C, D, INT> {
         let (port, bit) = if pin < 8 {
             (Port::A, pin)
         } else {

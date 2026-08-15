@@ -5,11 +5,8 @@ use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash};
-use variegated_controller_types::{BoilerConfiguration, GroupConfiguration};
-use heapless::Vec;
-use postcard::to_slice;
 use sequential_storage::cache::Cache;
-use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError, Value};
+use sequential_storage::map::{Key, MapConfig, MapStorage, Value};
 use crate::flash::BorrowedFlash;
 
 /// Keys within a shared settings flash range.

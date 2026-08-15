@@ -1,7 +1,7 @@
 #![no_std]
 
-use embassy_rp::gpio::{AnyPin, Output};
-use embassy_time::{Delay, Duration, Instant, Timer};
+use embassy_rp::gpio::Output;
+use embassy_time::{Duration, Instant};
 
 pub struct DualC595ShiftRegister<'a> {
     serial_pin: Output<'a>,

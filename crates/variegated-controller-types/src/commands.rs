@@ -1,5 +1,4 @@
 use crate::*;
-use heapless::index_map::FnvIndexMap;
 
 /// Commands for storage operations that may take a long time
 /// These are handled by a separate task to avoid blocking the main control loop
@@ -314,9 +313,9 @@ impl defmt::Format for MachineCommand {
             MachineCommand::AddScheduleItem(item) => defmt::write!(f, "AddScheduleItem({})", item),
             MachineCommand::RemoveScheduleItem(idx) => defmt::write!(f, "RemoveScheduleItem({})", idx),
             MachineCommand::UpdateScheduleItem(idx, item) => defmt::write!(f, "UpdateScheduleItem({}, {})", idx, item),
-            MachineCommand::AddRoutine(routine) => defmt::write!(f, "AddRoutine()"),
+            MachineCommand::AddRoutine(_routine) => defmt::write!(f, "AddRoutine()"),
             MachineCommand::RemoveRoutine(idx) => defmt::write!(f, "RemoveRoutine({})", idx),
-            MachineCommand::UpdateRoutine(idx, routine) => defmt::write!(f, "UpdateRoutine({})", idx),
+            MachineCommand::UpdateRoutine(idx, _routine) => defmt::write!(f, "UpdateRoutine({})", idx),
             MachineCommand::SetMachineMode(mode) => defmt::write!(f, "SetMachineMode({:?})", mode),
             MachineCommand::OptimizeConfigurationStorage => defmt::write!(f, "OptimizeConfigurationStorage"),
             MachineCommand::OptimizeRoutineStorage => defmt::write!(f, "OptimizeRoutineStorage"),

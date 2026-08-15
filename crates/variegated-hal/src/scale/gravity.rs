@@ -7,7 +7,7 @@ use defmt::Format;
 // `core::fmt::Display`, so the `log` half of `log_*!` will not compile for them.
 // That is every `info!` in this file, which is why only `log_error` is imported.
 use variegated_log::log_error;
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver, Sender as ChannelSender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;

@@ -5,7 +5,6 @@
 use core::fmt;
 #[cfg(feature = "defmt")]
 use defmt::Format;
-use defmt::info;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 use ux::i24;
@@ -473,8 +472,7 @@ where
 
         for _ in 0..33 {
             let m = self.measure_channel(channel, capdac).await?;
-            let m_i32: i32 = m.clone().into();
-            //info!("Measured raw value: {}, CAPDAC: {}", m_i32, capdac);
+            //info!("Measured raw value: {}, CAPDAC: {}", i32::from(m.clone()), capdac);
             if m < i24::max_value() && m > i24::min_value() {
                 return Ok(SuccessfulMeasurement::MeasurementInRange(MeasuredCapacitance::new(m, capdac)));
             }

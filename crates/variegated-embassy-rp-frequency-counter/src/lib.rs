@@ -1,11 +1,8 @@
 #![no_std]
 
 use defmt::info;
-use embassy_rp::pio::{Common, Config, Direction, FifoJoin, Instance, LoadedProgram, Pin, Pio, PioPin, ShiftDirection, StateMachine};
+use embassy_rp::pio::{Config, Direction, FifoJoin, Instance, LoadedProgram, Pin, Pio, PioPin};
 use embassy_rp::Peri;
-use embassy_time::{Instant, Timer};
-use log::log;
-use variegated_log::log_info;
 
 pub struct PioFrequencyCounter<'a, P: Instance> {
     pio: Pio<'a, P>,
@@ -22,40 +19,6 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
             pin3: Option<Peri<'a, Pin3T>>,
             pin4: Option<Peri<'a, Pin4T>>,
     ) -> Self {
-        let program = pio::pio_asm!(
-    "mov y, ~null"        //Initialize Y all 1s
-    "set x, 0"            //Initialize X to 0
-".wrap_target"
-    "wait 1 pin 0"        //Wait for initial rising edge
-    "mov x, y"            //Store the counter value at rising edge
-    "mov y, ~null"        //Reset counter to max value (all 1s)
-"high_loop:"
-    "jmp pin, high_cont"  //If pin is still high, continue high loop
-    "jmp falling_edge"    //If pin is low, we've found a falling edge
-"high_cont:"
-    "jmp y--, high_loop"  //Decrement counter and continue high loop
-    "jmp falling_edge"    //Counter reached 0, treat as falling edge
-"falling_edge:"
-    "mov isr, x"          //Move high period count to ISR
-    "push"                //Push high period count to RX FIFO
-    "mov x, y"            //Store current counter value
-    "mov y, ~null"        //Reset counter to max value (all 1s)
-    "nop"                 //Balance cycles with rising_edge path
-"low_loop:"
-    "jmp pin, rising_edge" //If pin is high, we've found a rising edge
-    "jmp low_cont"         //If pin is still low, continue low loop
-"low_cont:"
-    "jmp y--, low_loop"    //Decrement counter and continue low loop
-    "jmp rising_edge"     //Counter reached 0, treat as rising edge
-"rising_edge:"
-    "mov isr, x"           //Move low period count to ISR
-    "push"                 //Push low period count to RX FIFO
-    "mov x, y"             // Store current counter value
-    "mov y, ~null"         // Reset counter to max value (all 1s)
-    "jmp high_loop"        // Start over with high loop
-".wrap"
-        );
-
         let program = pio::pio_asm!(
     "mov y, ~null"        //Initialize Y all 1s
     "set x, 0"            //Initialize X to 0
@@ -180,7 +143,7 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
 
         let diff = (self.edges[0][0]).abs_diff(self.edges[0][1]);
 
-        let cycles = (diff as f64 * 2.0 + 5.0);
+        let cycles = diff as f64 * 2.0 + 5.0;
 
         let cpu_freq: f64 = 125_000_000.0;
 

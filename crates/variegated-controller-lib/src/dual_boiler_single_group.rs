@@ -3,12 +3,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use crc::{Crc, CRC_32_ISCSI};
-use defmt::Format;
 use variegated_log::{log_debug, log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
-use embassy_rp::adc::Config;
 use embassy_rp::watchdog::Watchdog;
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
@@ -16,22 +14,22 @@ use embassy_sync::watch;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
-use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
+use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BoilerType, BrewStatus, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, KalmanParameters, TemperatureType, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankIndex, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
-use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
+use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
 use variegated_timekeeping::TimeKeeper;
-use crate::schedule::{InMemoryScheduleStore, ScheduleStore};
+use crate::schedule::ScheduleStore;
 use crate::settings::SettingsStorage;
 use crate::{BLUETOOTH_SCAN_DURATION_MS, BLUETOOTH_SCAN_SLACK_MS};
 use variegated_controller_types::bluetooth::{

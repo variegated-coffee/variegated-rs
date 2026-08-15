@@ -205,7 +205,6 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeating
     async fn execute_independent_schedule(&mut self, schedule: &HeatingSchedule) {
         let brew_duration = schedule.brew_duration;
         let steam_duration = schedule.steam_duration;
-        let max_duration = brew_duration.max(steam_duration);
 
         // Turn on elements that need to be on
         if brew_duration > Duration::from_millis(1) {

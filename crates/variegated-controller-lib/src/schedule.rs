@@ -1,14 +1,14 @@
 use alloc::collections::btree_map::BTreeMap;
 use alloc::vec::Vec;
 use core::ops::{DerefMut, Range};
-use chrono::{DateTime, Datelike, Duration, Timelike, TimeZone};
+use chrono::{Datelike, Duration, Timelike};
 use variegated_log::{log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_time::Timer;
-use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
+use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::Cache;
 use sequential_storage::map::{MapConfig, MapStorage};
 use crate::flash::BorrowedFlash;

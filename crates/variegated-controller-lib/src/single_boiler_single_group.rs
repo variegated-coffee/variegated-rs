@@ -2,26 +2,22 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use core::ops::DerefMut;
 use crc::{Crc, CRC_32_ISCSI};
-use defmt::Format;
 use variegated_log::{log_debug, log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
-use embassy_sync::watch;
 use embassy_rp::watchdog::Watchdog;
 use embassy_time::{Instant, Timer};
 use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
-use postcard::{from_bytes, from_bytes_crc32, to_slice, to_slice_crc32};
+use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerControlTargetValuesUpdate, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, GroupIndex, InputVolumeType, PeripheralStatus, FlowRateType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PressureType, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankIndex, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -353,7 +349,7 @@ impl<
         boiler: Boiler<'a, M, N_WATCH>,
         group: Group<'a, M, N_WATCH>,
         tank: Option<Tank<'a, M, N_WATCH>>,
-        mut settings_store: SettingsStoreT,
+        settings_store: SettingsStoreT,
         machine_config: MachineConfiguration,
         tank_config: TankConfiguration,
         group_config: GroupConfiguration,

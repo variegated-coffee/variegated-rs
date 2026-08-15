@@ -3,19 +3,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::format;
-use core::{fmt, iter};
 use core::ops::{DerefMut, Range};
 use variegated_log::log_info;
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
-use embedded_storage_async::nor_flash::{MultiwriteNorFlash, NorFlash};
-use heapless::index_map::FnvIndexMap;
+use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::Cache;
-use sequential_storage::map::{Key, MapConfig, MapStorage, SerializationError, Value};
+use sequential_storage::map::{MapConfig, MapStorage};
 use crate::flash::BorrowedFlash;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, FlowRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, InputVolumeType, MachineCommand, MAX_GROUPS, PidLimits, PidParameters, PidTerm, PressureType, RoutineIndex, Status, TemperatureType, WaterTapIndex, WeightType, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, MachineCommand, RoutineIndex, Status, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
 
 // Re-export types that are commonly used by consumers of this module
 pub use variegated_controller_types::{
@@ -1226,7 +1224,7 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
         },
     ];
 
-    if let (Some(bloom_after), Some(bloom_time)) = (bloom_after, bloom_time) {
+    if let (Some(bloom_after), Some(_bloom_time)) = (bloom_after, bloom_time) {
         steps.push(RoutineStep {
             entry_command: vec![],
             exits: vec![RoutineExit::new(

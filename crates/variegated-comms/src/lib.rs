@@ -13,7 +13,7 @@ use embassy_futures::join::{join, join4, join5};
 use embassy_rp::uart::{UartRx, UartTx};
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::blocking_mutex::Mutex;
-use postcard::{from_bytes_cobs, to_allocvec_cobs};
+use postcard::to_allocvec_cobs;
 use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::debug_command::DebugCommand;
 use variegated_controller_types::wifi::StoredWifiCredentials;

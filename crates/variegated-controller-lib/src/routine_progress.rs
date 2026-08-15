@@ -25,7 +25,7 @@
 
 use variegated_controller_types::{
     BoilerIndex, GroupIndex, ParameterUnit, ParameterValue, Routine, RoutineExecutionStatus,
-    RoutineExitCondition, StateCondition, Status, WaterTapIndex,
+    RoutineExitCondition, StateCondition, Status,
 };
 
 use crate::routine::resolve_parameter_value;
