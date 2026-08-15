@@ -115,8 +115,6 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
             return 0.0;
         }
         
-        let mut latest_val: Option<u32> = None;
-        
         if self.pio.sm0.rx().stalled() {
             info!("FIFO stalled");
         }
@@ -133,7 +131,7 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
         }*/
 
         while !self.pio.sm0.rx().empty() {
-            latest_val = self.pio.sm0.rx().try_pull();
+            let latest_val = self.pio.sm0.rx().try_pull();
 
             info!("latest_val: {:?}", latest_val);
 
@@ -155,10 +153,8 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
             return 0.0;
         }
         
-        let mut latest_val: Option<u32> = None;
-
         while !self.pio.sm1.rx().empty() {
-            latest_val = self.pio.sm1.rx().try_pull();
+            let latest_val = self.pio.sm1.rx().try_pull();
 
             self.edges[1][1] = self.edges[1][0];
             self.edges[1][0] = latest_val.unwrap();
@@ -178,10 +174,8 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
             return 0.0;
         }
         
-        let mut latest_val: Option<u32> = None;
-
         while !self.pio.sm2.rx().empty() {
-            latest_val = self.pio.sm2.rx().try_pull();
+            let latest_val = self.pio.sm2.rx().try_pull();
 
             self.edges[2][1] = self.edges[2][0];
             self.edges[2][0] = latest_val.unwrap();
@@ -201,10 +195,8 @@ impl<'a, P: Instance> PioFrequencyCounter<'a, P> {
             return 0.0;
         }
         
-        let mut latest_val: Option<u32> = None;
-
         while !self.pio.sm3.rx().empty() {
-            latest_val = self.pio.sm3.rx().try_pull();
+            let latest_val = self.pio.sm3.rx().try_pull();
 
             self.edges[3][1] = self.edges[3][0];
             self.edges[3][0] = latest_val.unwrap();

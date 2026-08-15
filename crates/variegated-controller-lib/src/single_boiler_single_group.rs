@@ -240,7 +240,12 @@ pub struct SingleBoilerSingleGroupController<
     ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration,
     machine_config: MachineConfiguration,
     tank_config: TankConfiguration,
-    group_config: GroupConfiguration,
+    // No `group_config`. It was accepted as a constructor argument, stored, and never read:
+    // the group configuration this controller publishes is built from
+    // `config.persistent.pid_parameters` and `config.ephemeral` further down. So the
+    // argument was ignored, and the field was a copy of something that never applied. The
+    // parameter is gone too -- the Silvia firmware passed `GroupConfiguration::default()`,
+    // so nothing observable changes.
     boiler_config: BoilerConfiguration,
     routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
     current_routine: Option<RoutineExecutionContext<SingleBoilerSingleGroupControllerState, SingleBoilerSingleGroupConfiguration>>,
@@ -350,7 +355,6 @@ impl<
         settings_store: SettingsStoreT,
         machine_config: MachineConfiguration,
         tank_config: TankConfiguration,
-        group_config: GroupConfiguration,
         boiler_config: BoilerConfiguration,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -405,7 +409,6 @@ impl<
             ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration::default(),
             machine_config,
             tank_config,
-            group_config,
             boiler_config,
             routine_repository,
             current_routine: None,

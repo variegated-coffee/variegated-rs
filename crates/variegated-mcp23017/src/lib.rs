@@ -74,7 +74,10 @@ use embedded_hal_async_git::i2c::I2c as AsyncI2c;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 
-mod registers;
+// `pub`, for the reason `variegated-tlc59108` gives and `variegated-ads124s08` already
+// followed: a general MCP23017 driver should hand out the register map. IOCON's HAEN,
+// DISSLW and BANK bits have no method here and are still part of the chip.
+pub mod registers;
 use registers::*;
 
 // Re-export types that users may need
@@ -489,35 +492,24 @@ pub trait Mcp23017Ext<M: RawMutex, I2C, D> {
     fn interrupt_pin<INT>(&self, pin: u8, interrupt_pin: INT) -> Mcp23017InterruptPin<'_, M, I2C, D, INT>;
 }
 
+// Neither constructor splits the pin number into a port and a bit any more. Both wrappers
+// stored that split and nothing ever read it: every operation on a pin goes through
+// `driver.read_pin(self.pin_number)` / `write_pin(self.pin_number)`, and those call
+// `pin_to_port_bit` themselves. Two derivations of the same thing, one of them unused, is
+// how they end up disagreeing.
 impl<M: RawMutex, I2C, D> Mcp23017Ext<M, I2C, D> for Mutex<M, Mcp23017<I2C, D>> {
     fn pin(&self, pin: u8) -> Mcp23017Pin<'_, M, I2C, D> {
-        let (port, bit) = if pin < 8 {
-            (Port::A, pin)
-        } else {
-            (Port::B, pin - 8)
-        };
-
         Mcp23017Pin {
             driver: self,
             pin_number: pin,
-            port,
-            bit,
         }
     }
 
     fn interrupt_pin<INT>(&self, pin: u8, interrupt_pin: INT) -> Mcp23017InterruptPin<'_, M, I2C, D, INT> {
-        let (port, bit) = if pin < 8 {
-            (Port::A, pin)
-        } else {
-            (Port::B, pin - 8)
-        };
-
         Mcp23017InterruptPin {
             driver: self,
             interrupt_pin,
             pin_number: pin,
-            port,
-            bit,
         }
     }
 }
@@ -526,8 +518,6 @@ impl<M: RawMutex, I2C, D> Mcp23017Ext<M, I2C, D> for Mutex<M, Mcp23017<I2C, D>> 
 pub struct Mcp23017Pin<'a, M: RawMutex, I2C, D> {
     driver: &'a Mutex<M, Mcp23017<I2C, D>>,
     pin_number: u8,
-    port: Port,
-    bit: u8,
 }
 
 /// Interrupt-capable pin wrapper
@@ -535,8 +525,6 @@ pub struct Mcp23017InterruptPin<'a, M: RawMutex, I2C, D, INT> {
     driver: &'a Mutex<M, Mcp23017<I2C, D>>,
     interrupt_pin: INT,
     pin_number: u8,
-    port: Port,
-    bit: u8,
 }
 
 // Blocking trait implementations for standard embedded_hal

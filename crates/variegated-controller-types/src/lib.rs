@@ -2,7 +2,6 @@
 
 extern crate alloc;
 
-use chrono::Datelike;
 use heapless::index_map::FnvIndexMap;
 
 // Constants

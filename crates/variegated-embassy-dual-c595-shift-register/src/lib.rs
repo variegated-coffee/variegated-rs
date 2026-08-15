@@ -41,7 +41,12 @@ impl<'a> DualC595ShiftRegister<'a> {
         self.storage_register_clock_pin.set_low();
     }
 
-    pub(crate) async fn clear(&mut self) {
+    /// Drive every output low.
+    ///
+    /// `pub`, not `pub(crate)`: this crate is a general driver for a pair of chained 595s
+    /// and clearing them is an operation any consumer wants, even though nothing inside
+    /// the crate calls it.
+    pub async fn clear(&mut self) {
         self.write(0).await;
     }
 }

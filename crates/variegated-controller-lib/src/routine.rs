@@ -185,10 +185,6 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         resolve_parameter_value(pv, &self.parameters, &self.routine.derived_parameters)
     }
 
-    fn resolve_derived_parameter(&self, idx: u8) -> f32 {
-        resolve_derived_parameter(idx, &self.parameters, &self.routine.derived_parameters)
-    }
-
     fn create_linear_transition_curve(
         &self, 
         current_value: f32, 

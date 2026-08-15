@@ -58,7 +58,13 @@ use core::fmt;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 
-mod registers;
+// `pub`, like `variegated-ads124s08`'s. This is a general driver for a TLC59108, not a
+// driver for the one way this firmware happens to use one, so the register map is part of
+// what it offers: a consumer that wants MODE1's oscillator bit or an auto-increment mode
+// this crate has no method for should be able to reach it rather than re-read the
+// datasheet. It also stops `dead_code` firing on every constant no method here touches,
+// which is the honest answer to that warning -- these are not dead, they were unreachable.
+pub mod registers;
 pub use registers::IrefConfig;
 use registers::*;
 

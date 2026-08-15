@@ -64,10 +64,19 @@ fn get_wrap_counter(pio_num: u8, sm_num: u8) -> &'static AtomicU32 {
 
 
 pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance> {
-    pio_num: u8,
-    sm_num: u8,
+    // `sm` and `dma_channel` are held, not used, and that is the point: they are the
+    // ownership handles for the state machine and the DMA channel. The counter runs
+    // entirely through the raw PAC after `new` configures it -- nothing here calls a method
+    // on either -- but dropping them would stop the state machine and free the channel for
+    // something else to claim while it is still transferring into `counter_ptr`. An
+    // `#[allow]` rather than a deletion, because deletion is a hardware change.
+    //
+    // `pio_num` and `sm_num` used to sit here too. Those were genuinely dead: they are read
+    // during construction to pick the counter and wrap-count slots, and never again.
+    #[allow(dead_code)]
     sm: StateMachine<'d, P, SM>,
     irq: Irq<'d, P, IRQ>,
+    #[allow(dead_code)]
     dma_channel: Peri<'d, C>,
     frequency_signal: Sender<'d, M, SensorReading<T>, N>,
     total_pulses_signal: Option<Sender<'d, M, SensorReading<U>, N>>,
@@ -217,8 +226,6 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
 
         let now = Instant::now();
         Self {
-            pio_num,
-            sm_num,
             sm,
             irq,
             dma_channel,

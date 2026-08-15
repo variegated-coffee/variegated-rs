@@ -51,6 +51,8 @@ pub enum Register {
 }
 
 impl Register {
+    /// The register's address in IOCON.BANK = 0 mapping, which is the chip's reset default
+    /// and the only one this driver configures.
     pub const fn addr(&self) -> u8 {
         *self as u8
     }

@@ -408,7 +408,11 @@ where
     }
 
     /// Set address window for partial updates (NV3007 specific)
-    async fn set_address_window_nv3007(
+    ///
+    /// `pub` because this is a general driver for the panel, not for the one way the GS3
+    /// firmware drives it: a consumer doing its own partial updates needs the window
+    /// setter even though nothing in this crate calls it yet.
+    pub async fn set_address_window_nv3007(
         &mut self,
         x0: u16,
         y0: u16,
@@ -444,8 +448,11 @@ where
         }
     }
 
-    /// Get required buffer size (NV3007 specific)
-    fn buffer_size_nv3007(&self) -> usize {
+    /// Get required buffer size (NV3007 specific), accounting for rotation.
+    ///
+    /// `pub` for the same reason as `set_address_window_nv3007`: a caller allocating its
+    /// own framebuffer needs this number, and the panel is what knows it.
+    pub fn buffer_size_nv3007(&self) -> usize {
         let (width, height) = self.effective_dimensions_nv3007();
         (width as usize) * (height as usize) * 2
     }

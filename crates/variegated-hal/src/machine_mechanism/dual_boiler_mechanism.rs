@@ -22,6 +22,19 @@ impl Default for DualBoilerConfig {
     }
 }
 
+/// The states this mechanism reports it is in.
+///
+/// `FillingTank` and `SteamingAndDispensingWater` are never constructed, and that is a gap
+/// in the bookkeeping rather than a missing feature: what actually drives the hardware is
+/// the arbitration in `update`, which works off `brew_request` / `water_dispersal_request` /
+/// `fill_request` / `steam_dispersal_request` and never consults this enum. Tank filling
+/// does happen -- the `fill_request` branch drives the fill solenoid -- it just is not
+/// reflected here, and the same goes for steaming while dispensing water.
+///
+/// Kept with an `#[allow]` rather than deleted, because deleting them would erase the
+/// record that this enum is meant to cover those two cases. Wiring the assignments up is a
+/// change to state tracking, not a warnings fix.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Format)]
 enum DualBoilerMechanismState {
     Idle,

@@ -456,8 +456,12 @@ pub struct DualBoilerSingleGroupController<
 //    ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration,
     machine_config: MachineConfiguration,
     tank_config: TankConfiguration,
-    group_config: GroupConfiguration,
-    water_tap_config: WaterTapConfiguration,
+    // `group_config` and `water_tap_config` used to sit here, cloned out of the default
+    // persistent configuration at construction and then never read. The live values live in
+    // `self.configuration` and reach the rest of the system through
+    // `insert_group_configuration` / `insert_water_tap_configuration`; these were snapshots
+    // frozen at boot. Removed rather than kept, because a stale copy of a configuration is
+    // worse than no copy -- it reads like the real thing.
     brew_boiler_config: BoilerConfiguration,
     steam_boiler_config: BoilerConfiguration,
 
@@ -698,8 +702,6 @@ impl<
         let brew_boiler_config = default_persistent.brew_boiler.clone();
         let steam_boiler_config = default_persistent.steam_boiler.clone();
         let tank_config = default_persistent.tank.clone();
-        let group_config = default_persistent.group.clone();
-        let water_tap_config = default_persistent.water_tap.clone();
 
         // Initialize steam wand from ephemeral configuration
         #[cfg(feature = "pwm-steam-valve")]
@@ -733,8 +735,6 @@ impl<
 //            ephemeral_configuration: DualBoilerSingleGroupEphemeralConfiguration::default(),
             machine_config,
             tank_config,
-            group_config,
-            water_tap_config,
             brew_boiler_config,
             steam_boiler_config,
             brew_boiler_enabled: true,

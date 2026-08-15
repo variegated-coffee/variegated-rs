@@ -354,6 +354,7 @@ where
         self.write_u8(TARE_CMD, cmd).await
     }
     
+    /// Tare a single channel, leaving the other three untouched.
     pub async fn execute_tare_single(&mut self, channel: Channel) -> Result<(), Error<I2C::Error>> {
         let mut channels = [false; 4];
         channels[channel as usize - 1] = true;

@@ -47,6 +47,7 @@ pub enum Register {
 }
 
 impl Register {
+    /// The register's address on the I2C bus, as the control byte expects it.
     pub const fn addr(&self) -> u8 {
         *self as u8
     }
@@ -91,30 +92,17 @@ pub enum AutoIncrement {
 }
 
 impl AutoIncrement {
+    /// The mode shifted into MODE1's AI2..AI0 field, ready to be OR'd into the register.
     pub const fn bits(&self) -> u8 {
         (*self as u8) << 5
     }
 }
 
-/// LED driver output state (2 bits per LED)
-#[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub enum LedState {
-    /// LED driver off
-    Off = 0b00,
-    /// LED driver on (fully on, no PWM)
-    FullyOn = 0b01,
-    /// LED driver controlled by PWM register
-    Pwm = 0b10,
-    /// LED driver controlled by PWM and group PWM/group blinking
-    PwmAndGroup = 0b11,
-}
-
-impl LedState {
-    pub const fn bits(&self) -> u8 {
-        *self as u8
-    }
-}
+// A second `LedState`, identical to the one in `lib.rs` down to the discriminants, used to
+// sit here with its own `bits()`. `lib.rs` defines the same name at module scope, and a
+// local definition beats the `use registers::*` glob, so this one was shadowed and could
+// never be reached -- which is what the compiler was saying. `lib.rs`'s is the public one,
+// the one the GS3 firmware imports; deleted rather than kept in sync by hand.
 
 /// IREF register configuration for output current control
 ///
@@ -225,7 +213,9 @@ impl IrefConfig {
     }
 }
 
-/// Software reset I2C sequence
+/// Software reset I2C sequence: the reserved address the TLC59108 answers a reset on.
 pub const SWRST_ADDR: u8 = 0x4B;
+/// First byte of the software-reset magic sequence, sent to [`SWRST_ADDR`].
 pub const SWRST_BYTE1: u8 = 0xA5;
+/// Second byte of the software-reset magic sequence, sent to [`SWRST_ADDR`].
 pub const SWRST_BYTE2: u8 = 0x5A;

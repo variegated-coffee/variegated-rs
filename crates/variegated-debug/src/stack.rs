@@ -42,7 +42,9 @@ pub fn core0_span() -> usize {
         static mut _stack_start: u32;
     }
 
-    unsafe { ((&raw const _stack_start) as usize) - ((&raw const __sheap) as usize) }
+    // No `unsafe` block: `&raw const` on a `static mut` creates a pointer without reading
+    // through it, which is safe. Only the dereference would need one, and there is none.
+    ((&raw const _stack_start) as usize) - ((&raw const __sheap) as usize)
 }
 
 /// Deepest point core 0's stack has ever reached, in bytes.

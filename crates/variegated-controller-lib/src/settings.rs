@@ -1,12 +1,12 @@
 use alloc::vec;
-use core::ops::{Deref, DerefMut, Range};
+use core::ops::{DerefMut, Range};
 use variegated_log::log_info;
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
-use embedded_storage_async::nor_flash::{ErrorType, MultiwriteNorFlash, NorFlash};
+use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::Cache;
-use sequential_storage::map::{Key, MapConfig, MapStorage, Value};
+use sequential_storage::map::{MapConfig, MapStorage, Value};
 use crate::flash::BorrowedFlash;
 
 /// Keys within a shared settings flash range.
