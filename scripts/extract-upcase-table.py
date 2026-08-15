@@ -21,7 +21,7 @@ Generate a reference on macOS:
 
 then
 
-    scripts/extract-upcase-table.py ref.img > crates/variegated-controller-lib/src/exfat_upcase.rs
+    scripts/extract-upcase-table.py ref.img > crates/variegated-exfat-format/src/upcase.rs
 
 The extracted bytes are checked against the checksum stored in the volume's own up-case
 directory entry, so a mis-parse fails here rather than producing a plausible constant.

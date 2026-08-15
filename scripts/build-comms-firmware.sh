@@ -8,23 +8,19 @@
 # walking up from cwd. `cargo build -p variegated-comms-firmware` from the workspace root
 # picks up stable and thumbv8m instead, and fails.
 #
-# `--profile comms-release` rather than `--release`: this crate became a member of the
-# variegated-rs workspace on 2026-08-15, and only the root manifest's profiles are
-# honoured. `release` there is the RP2350's. See `[profile.comms-release]` in the root
+# `--profile comms-release` rather than `--release`: only the root manifest's profiles are
+# honoured, and `release` there is the RP2350's. See `[profile.comms-release]` in the root
 # Cargo.toml for why the two cannot share one.
 #
 # `SSID`/`PASSWORD` are read with `env!` at compile time, so the build fails
 # without them; the values are irrelevant to a compile check. The TCP-command flag
-# is set so Task 12's `option_env!`-gated code is type-checked too.
+# is set so the `option_env!`-gated command path is type-checked too.
 #
-# Baseline as of 2026-08-15: 8 warnings, 0 errors -- and **every one of them belongs to
-# `esphome-device`**, which lives in the sibling `esphome-device-rs` repository and cannot
-# be fixed from here. 7 diagnostics plus its summary line.
-#
-# Down from 25: the other 17 were `variegated-controller-types`, a workspace library, and
-# went when the library crates were cleared. Nothing in this repository contributes to the
-# number any more, so 8 is the floor until that sibling repo is cleaned, and anything above
-# 8 is a regression.
+# Expect 8 warnings, 0 errors -- and **every one of the 8 belongs to `esphome-device`**
+# (7 diagnostics plus its summary line), which lives in the sibling `esphome-device-rs`
+# repository and cannot be fixed from here. Nothing in this repository contributes to the
+# number, so 8 is the floor until that sibling repo is cleaned, and anything above 8 is a
+# regression.
 #
 # Usage: scripts/build-comms-firmware.sh [output-dir]
 set -u
@@ -45,12 +41,9 @@ WARNS=$(grep -cE '^warning' "$LOG")
 ERRS=$(grep -cE '^error' "$LOG")
 echo "comms-firmware: exit=$RC warnings=$WARNS errors=$ERRS log=$LOG"
 
-# The per-crate summary lines, which are what humans have been reading. `|| true`
-# because this used to be the script's last command and therefore its exit status,
-# which made the contract exactly backwards: a build that failed with compiler errors
-# matched `^error`, so grep exited 0 and **the script exited 0**, while a clean build
-# with no warnings matched nothing, so grep exited 1 and **the script exited 1**. It
-# only ever appeared to work because the known-good build emits 8 warnings.
+# The per-crate summary lines, which are what humans read. `|| true` is load-bearing:
+# grep exits 1 when it matches nothing, so without it a *clean* build would fail the
+# script and a build full of compiler errors would pass it.
 grep -E 'generated [0-9]+ warning|^error' "$LOG" || true
 
 # Both conditions, for the reason `build-firmware.sh` gives: cargo can fail without a

@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
-# Build the firmware configurations that gate this branch and report the warning/error
-# counts for each. Compare two runs with `scripts/compare-warnings.sh`.
+# Build the four RP2350 firmware configurations that gate this branch and report the
+# warning/error counts for each.
 #
-# Baseline as of 2026-08-15: **zero warnings and zero errors in all four**, and that is
-# the contract rather than a high-water mark. See "Zero warnings is part of the definition
-# of done" in CLAUDE.md: any non-zero number below is a regression, in this repo or in a
-# dependency, and is to be found rather than recorded here.
-#
-# It reached zero in stages: 192/190/179/197 before the firmwares moved out of the
-# `examples` package, 121/121/100/121 once the firmwares' own warnings went, 120/120/98/120
-# when `variegated-board-cfg` moved in, and 0/0/0/0 once the twelve library crates were
-# cleared.
+# **The contract is zero warnings and zero errors in all four**, not a high-water mark.
+# See "Zero warnings is part of the definition of done" in CLAUDE.md: any non-zero number
+# below is a regression, in this repo or in a dependency, and is to be found rather than
+# recorded here. When one rises, find out whose it is before anything else --
+# `scripts/warning-report.py` reports a crate's *own* count, which is the one that must
+# stay at zero. A dependency upgrade moving the totals is ordinary; a firmware
+# contributing to them is not.
 #
 # Two configurations are NOT covered here and must be run by hand -- the comms firmware,
 # via `scripts/build-comms-firmware.sh`, and the controller-lib host tests, which turn
@@ -19,36 +17,15 @@
 #   cargo test-aarch64 -p variegated-controller-lib \
 #       --no-default-features --features std,serde,double_boiler,single_group
 #
-# **Every one of those is a dependency's.** Both firmware bins emit zero warnings of their
-# own in every configuration built here, and per CLAUDE.md that is the definition of done,
-# not an achievement to be spent. If a total below rises, find out whose it is before
-# touching this header: `scripts/warning-report.py` reports a crate's own count, which is
-# the one that must stay at zero. A dependency upgrade moving these numbers is ordinary; a
-# firmware contributing to them is a regression.
-#
-# For reference, the totals came down in three steps, only the last of which was code:
-# 192/190/179/197 before the two firmwares moved out of the `examples` package, then -1
-# everywhere for the inert `[profile.*]` blocks that went with the split, then -18 on silvia
-# for dependencies it never used, and finally -70/-60 as the firmwares' own 69/67/59/74
-# went to zero.
-#
-# (The numbers this header carried before that -- 83/81/71, from Task 16 -- had gone stale
-# long beforehand and were not re-measured when they drifted. Re-measure and update these
-# when you change them on purpose; a baseline nobody refreshes is a gate nobody is passing.)
-#
-# **This script's exit status is part of the gate.** It did not used to be: `run`
-# captured cargo's status into a local, printed it, and threw it away, and the script's
-# last statement was a `run` whose last command was `echo` -- so a build with 17 errors
-# printed the number and exited 0. Anything reading the exit code was reading the
-# `echo`. `RC` below is the accumulator that was missing; `set -e` is deliberately
-# still absent, because every build must run even after one fails or the printed counts
-# are incomplete.
+# **This script's exit status is part of the gate**, which is what `RC` accumulates.
+# `set -e` is deliberately absent: every build must run even after one fails, or the
+# printed counts are incomplete.
 #
 # Usage: scripts/build-firmware.sh [output-dir]
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-$REPO/target/task16-logs}"
+OUT="${1:-$REPO/target/firmware-build-logs}"
 mkdir -p "$OUT"
 
 TARGET=thumbv8m.main-none-eabihf
@@ -57,7 +34,7 @@ RC=0
 run() {
     local name="$1"; shift
     local log="$OUT/$name.log"
-    # From the repo root, not a package directory: each firmware is now its own workspace
+    # From the repo root, not a package directory: each firmware is its own workspace
     # member and is named with `-p`. Running here also means the root `.cargo/config.toml`
     # is the one that applies, so the arena size these builds get is the one a plain
     # root-level `cargo build` gets.
@@ -78,8 +55,7 @@ run() {
 }
 
 # Each firmware crate's `default` feature set *is* its machine's configuration, so the
-# plain builds need no `--features` at all -- that was the point of splitting the
-# `examples` package in two.
+# plain builds need no `--features` at all.
 run gs3 -p variegated-gs3-firmware
 run gs3_pwm_steam_valve -p variegated-gs3-firmware --features=pwm-steam-valve
 run silvia -p variegated-silvia-firmware
@@ -91,8 +67,7 @@ run silvia -p variegated-silvia-firmware
 run gs3_optional_peripherals -p variegated-gs3-firmware --features=character-display,pwm-leds
 # Not covered here: the GS3's `gravity` feature. It is mutually exclusive with the default
 # `bluetooth-group-1-scale`, so it needs `--no-default-features` and the rest of the set
-# spelled out by hand rather than riding along with the line above. It was not compiled by
-# any gate build before the crate split either, so this is a pre-existing hole, not a new
-# one -- but it is a hole, and those paths will rot until something builds them.
+# spelled out by hand rather than riding along with the line above. That is a hole in the
+# gate, and those paths will rot until something builds them.
 
 exit $RC

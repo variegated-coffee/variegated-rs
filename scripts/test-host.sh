@@ -15,9 +15,9 @@
 # `variegated-instrumentation` needs `--features instrumentation` rather than `std`:
 # the feature is what compiles the counters and indicators at all, and without it the
 # crate's `count!`/`indicate!` macros expand to nothing and there is nothing to test.
-# It belongs here rather than in a caller's memory because it was listed in a task
-# brief, was not in this script, and so was silently skipped for the whole plan --
-# every suite the gate depends on lives in this file or it does not get run.
+#
+# **Every suite the gate depends on lives in this file or it does not get run.** A suite
+# that exists only in a caller's memory is one that gets silently skipped.
 #
 # Usage: scripts/test-host.sh [extra cargo test args...]
 set -u
@@ -45,5 +45,12 @@ run "variegated-debug-codec" -p variegated-debug-codec "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"
 run "variegated-instrumentation" -p variegated-instrumentation --features instrumentation "$@"
+# `--no-default-features` turns `hardware` and `defmt` off, which compiles code none of the
+# five on-target gate configurations sees. CLAUDE.md's "Zero warnings" section calls this
+# the configuration people forget.
+run "variegated-controller-lib" -p variegated-controller-lib --no-default-features --features std,serde,double_boiler,single_group "$@"
+# A proc-macro crate cannot invoke its own macros, so `variegated-board-cfg`'s tests live
+# in this fixture crate. It is an ordinary std crate and is not a workspace default member.
+run "variegated-board-cfg-tests" -p variegated-board-cfg-tests "$@"
 
 exit $RC
