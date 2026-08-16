@@ -1,7 +1,8 @@
 import { memo } from 'preact/compat';
 import { useCallback, useEffect, useState } from 'preact/hooks';
-import { ShotAnnotations, ShotLogId, ShotLogList, ShotLogListEntry } from '../schemas/schemas';
+import { ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogListEntry } from '../schemas/schemas';
 import * as shotLogApi from '../api/shotLogs';
+import { useShotLogEvents } from '../state/shotLogEvents';
 import {
   doseWeight,
   formatKey,
@@ -82,8 +83,30 @@ function formatSize(bytes: number): string {
   return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} kB`;
 }
 
+/** A stable key for an entry, since `day` may be null. */
+function entryKey(id: ShotLogId): string {
+  return `${id.day ?? 'nodate'}-${id.time}`;
+}
+
+/**
+ * The machine's listing order: dated shots newest first, undated last.
+ *
+ * Mirrors `ShotLogId::listing_rank` on the firmware. Undated shots go last rather than
+ * first even though `null` sorts low in most comparisons -- they are the ones recorded
+ * before the clock synced, and putting them ahead of this morning's shots is what the
+ * firmware used to do by accident.
+ */
+function compareListing(a: ShotLogListEntry, b: ShotLogListEntry): number {
+  const aUndated = a.id.day === null;
+  const bUndated = b.id.day === null;
+  if (aUndated !== bUndated) return aUndated ? 1 : -1;
+  if (!aUndated && a.id.day !== b.id.day) return (b.id.day as number) - (a.id.day as number);
+  return b.id.time - a.id.time;
+}
+
 const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLogPanelProps) => {
-  const [logs, setLogs] = useState<ShotLogList | null>(null);
+  const [entries, setEntries] = useState<ShotLogListEntry[]>([]);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -97,11 +120,30 @@ const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLog
   const grind = grindDraft ?? textOf(pending, 'GrindSize');
   const dose = doseWeight(pending);
 
+  /**
+   * Merge a page in, newest first, without duplicating anything.
+   *
+   * Keyed by id rather than appended blindly, because two things can deliver the same
+   * shot: a `Stored` push and a refresh that was already in flight when it arrived.
+   * Sorted on every merge so a push that belongs mid-list lands in the right place --
+   * `Stored` is normally the newest, but nothing on the wire promises it.
+   */
+  const merge = useCallback((incoming: ShotLogListEntry[]) => {
+    setEntries((current) => {
+      const byKey = new Map(current.map((entry) => [entryKey(entry.id), entry]));
+      for (const entry of incoming) byKey.set(entryKey(entry.id), entry);
+      return Array.from(byKey.values()).sort(compareListing);
+    });
+  }, []);
+
+  /** Discard everything held and fetch the newest page. */
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      setLogs(await shotLogApi.fetchShotLogs());
+      const page = await shotLogApi.fetchShotLogs();
+      setEntries(page.entries);
+      setHasMore(page.truncated);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load shots');
     } finally {
@@ -109,11 +151,52 @@ const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLog
     }
   }, []);
 
+  /**
+   * The page after the last entry held.
+   *
+   * The cursor is the *last entry* rather than a page number, so a shot stored or deleted
+   * while the user is paging cannot make an entry appear twice or vanish.
+   */
+  const loadOlder = useCallback(async () => {
+    const last = entries[entries.length - 1];
+    if (!last) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      const page = await shotLogApi.fetchShotLogs({ before: last.id });
+      merge(page.entries);
+      setHasMore(page.truncated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load older shots');
+    } finally {
+      setLoading(false);
+    }
+  }, [entries, merge]);
+
   // On mount and on an explicit Refresh only. A shot list changes once per shot, and
-  // polling it would put an SD card read behind every tick of the status stream.
+  // polling it would put an SD card read behind every tick of the status stream -- which
+  // is what the pushes below make unnecessary anyway.
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Pushed by the machine when a shot is stored or deleted, including by another browser.
+  // `Deleted` is also how *this* browser learns its own delete worked: the DELETE response
+  // only says the command was queued.
+  useShotLogEvents(
+    useCallback(
+      (event: ShotLogEvent) => {
+        if (event.type === 'Stored') {
+          merge([event.value]);
+        } else {
+          const gone = entryKey(event.value);
+          setEntries((current) => current.filter((entry) => entryKey(entry.id) !== gone));
+        }
+      },
+      [merge]
+    )
+  );
 
   const run = async (action: () => Promise<void>) => {
     setError(null);
@@ -141,7 +224,23 @@ const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLog
     });
   };
 
-  const entries: ShotLogListEntry[] = logs?.entries ?? [];
+  /**
+   * Delete a shot, after asking.
+   *
+   * Confirmed because it cannot be undone and cannot report failure: the machine queues
+   * the command and answers 200, and the only evidence it worked is the `Deleted` push
+   * that removes the row. If no push arrives the row stays, which is the honest outcome.
+   */
+  const remove = async (entry: ShotLogListEntry) => {
+    if (
+      !window.confirm(
+        `Delete the shot from ${formatShotTime(entry.id)}? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    await run(() => shotLogApi.deleteShotLog(entry.id));
+  };
 
   // Three different situations that look identical if you only check for an empty list,
   // and lead somewhere completely different.
@@ -234,12 +333,24 @@ const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLog
                 >
                   Download
                 </a>
+                <button
+                  style={{ ...secondaryButtonStyle, background: '#a33' }}
+                  onClick={() => void remove(entry)}
+                >
+                  Delete
+                </button>
               </div>
             );
           })}
-          {logs?.truncated && (
-            <div style={{ ...noteStyle, marginTop: '0.75rem' }}>
-              Showing the {entries.length} most recent shots. There are more on the card.
+          {hasMore && (
+            <div style={{ marginTop: '0.75rem' }}>
+              <button
+                style={secondaryButtonStyle}
+                onClick={() => void loadOlder()}
+                disabled={loading}
+              >
+                {loading ? 'Loading…' : 'Load older'}
+              </button>
             </div>
           )}
         </div>
