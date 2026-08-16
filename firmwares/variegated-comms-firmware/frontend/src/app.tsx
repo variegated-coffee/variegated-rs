@@ -203,12 +203,6 @@ export function App() {
             <RoutineBuilder
               routines={routines}
               machineDefinition={machineDefinition as MachineDefinition}
-              onRefresh={() => {
-                const ws = getWebSocketService();
-                if (ws) {
-                  ws.requestRoutines();
-                }
-              }}
             />
           </section>
         )}

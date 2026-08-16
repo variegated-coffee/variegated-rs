@@ -18,7 +18,7 @@ use variegated_controller_types::MachineCommand;
 use crate::api_types::RoutineSummaryStorage;
 use crate::channels::{
     ApplicationStatusSubscriber, ApplicationConfigurationSubscriber, ApplicationRoutineSubscriber,
-    MACHINE_DEFINITION, ROUTINE_CACHE, MACHINE_COMMAND_CAPACITY,
+    CONFIG_REQUEST, MACHINE_DEFINITION, ROUTINE_CACHE, MACHINE_COMMAND_CAPACITY,
 };
 use crate::ws_types::WsMessage;
 
@@ -470,6 +470,7 @@ fn encode_ws_message(msg: &WsMessage<'_>) -> Result<Vec<u8>, &'static str> {
 enum ClientRequest {
     MachineDefinition,
     Routines,
+    Configuration,
     Command(MachineCommand),
 }
 
@@ -480,6 +481,7 @@ impl ClientRequest {
         match msg {
             WsMessage::RequestMachineDefinition => Some(Self::MachineDefinition),
             WsMessage::RequestRoutines => Some(Self::Routines),
+            WsMessage::RequestConfiguration => Some(Self::Configuration),
             WsMessage::SendMachineCommand(cmd) => Some(Self::Command(cmd)),
             _ => {
                 log_warn!("Received unexpected message type from client");
@@ -553,6 +555,22 @@ async fn handle_client_request_tx(
             };
             send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
             log_info!("Sent RoutinesUpdate response");
+        }
+        // The one request this server does not answer itself.
+        //
+        // `CONFIG_CACHE` is right there and would be cheaper, and that is exactly why it
+        // is not used: this processor holds no configuration of its own, so its cache is
+        // only ever as current as the last thing the application processor volunteered.
+        // Asking across the link costs one round trip and produces a value the machine
+        // has just confirmed.
+        //
+        // Nothing is sent back from here. The reply arrives as a `Configuration` message,
+        // goes onto the configuration pubsub like any other, and is delivered to every
+        // connected client by the update handler -- including this one, which is why
+        // there is no correlation id and nothing to wait for.
+        ClientRequest::Configuration => {
+            log_info!("Received RequestConfiguration, asking the application processor");
+            CONFIG_REQUEST.signal(());
         }
         ClientRequest::Command(cmd) => {
             log_info!("Received SendMachineCommand, forwarding");

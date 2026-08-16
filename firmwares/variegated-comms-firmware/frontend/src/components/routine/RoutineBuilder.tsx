@@ -7,13 +7,17 @@ import { getWebSocketService } from '../../services/websocket';
 import { createRoutine, deleteRoutine, saveRoutine } from '../../api/routines';
 import { invalidateRoutineBody, loadRoutineBody, useRoutineBody } from '../../state/routineBodies';
 
+// No `onRefresh`. Saving, deleting and duplicating used to call one, and it could only
+// ever re-read the comms processor's cache -- which, called immediately after a write,
+// had not yet heard about it. The application processor now pushes a fresh summary list
+// whenever its repository changes, so `routines` updates on its own a few milliseconds
+// later, from the machine rather than from a cache that was asked too early.
 interface RoutineBuilderProps {
   routines: RoutineSummaryStorage;
   machineDefinition: MachineDefinition | null;
-  onRefresh?: () => void;
 }
 
-const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: RoutineBuilderProps) => {
+const RoutineBuilderComponent = ({ routines, machineDefinition }: RoutineBuilderProps) => {
   const [editingRoutine, setEditingRoutine] = useState<RoutineIdentifier | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [addingType, setAddingType] = useState<'custom' | 'function'>('custom');
@@ -60,7 +64,6 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
 
       setEditingRoutine(null);
       setIsAdding(false);
-      onRefresh?.();
     } catch (e) {
       showError(`Could not save routine: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -83,7 +86,6 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
       await deleteRoutine(identifier);
       invalidateRoutineBody(identifier);
       showSuccess('Routine deleted successfully');
-      onRefresh?.();
     } catch (e) {
       showError(`Could not delete routine: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -101,7 +103,6 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, onRefresh }: Rou
       const routine = await loadRoutineBody(identifier);
       await createRoutine({ ...routine, name: `${routine.name} (copy)` });
       showSuccess('Routine duplicated successfully');
-      onRefresh?.();
     } catch (e) {
       showError(`Could not duplicate routine: ${e instanceof Error ? e.message : String(e)}`);
     }

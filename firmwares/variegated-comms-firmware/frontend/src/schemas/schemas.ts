@@ -868,7 +868,8 @@ export const WsMessageSchema = enumType('WsMessage', {
   }),
   RequestMachineDefinition: unitVariant('RequestMachineDefinition'),
   RequestRoutines: unitVariant('RequestRoutines'),
-  SendMachineCommand: newtypeVariant('SendMachineCommand', MachineCommandSchema)
+  SendMachineCommand: newtypeVariant('SendMachineCommand', MachineCommandSchema),
+  RequestConfiguration: unitVariant('RequestConfiguration')
 });
 
 export type ShotLogList = InferType<typeof ShotLogListSchema>;

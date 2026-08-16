@@ -46,4 +46,20 @@ pub enum WsMessage<'a> {
     RequestRoutines,
     /// Send a machine command
     SendMachineCommand(MachineCommand),
+    /// Request the current configuration.
+    ///
+    /// Appended rather than grouped with the other two requests above, because postcard
+    /// encodes an enum as its declaration-order discriminant: inserting it next to its
+    /// siblings would renumber `SendMachineCommand` and silently mis-decode every command
+    /// a client sends. See the note on `RoutinesUpdate` about the hand-copied mirrors in
+    /// `variegated-cli`.
+    ///
+    /// Unlike `RequestRoutines`, this is **not** answered from the comms processor's
+    /// cache. It is forwarded to the application processor, whose reply arrives on the
+    /// ordinary configuration publish path and so reaches every connected client rather
+    /// than only the one that asked. A configuration is the one piece of state a client
+    /// gets no other way -- there is no HTTP fetch for it in the frontend, and the
+    /// pubsub only carries what is published *after* a client subscribes, so a page
+    /// loaded between two publishes had nothing to show until the next one.
+    RequestConfiguration,
 }

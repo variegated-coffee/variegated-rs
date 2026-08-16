@@ -778,6 +778,15 @@ pub fn all() -> Vec<Fixture> {
             "WsMessageSchema",
             &WsMessage::RequestRoutines,
         ),
+        // The unit variant appended after `SendMachineCommand`, here to pin its
+        // discriminant. A unit variant encodes to one byte and nothing else, so this
+        // fixture is worth exactly one thing -- catching the day someone tidies the
+        // client-to-server variants into a group and renumbers the command beside them.
+        fixture::<WsMessage>(
+            "ws_request_configuration",
+            "WsMessageSchema",
+            &WsMessage::RequestConfiguration,
+        ),
         fixture("shot_log_list", "ShotLogListSchema", &shot_log_list()),
         // The routine listing, which until now had **no fixture at all**: `roots.rs`
         // emitted its schema and nothing ever serialised one, so the response every

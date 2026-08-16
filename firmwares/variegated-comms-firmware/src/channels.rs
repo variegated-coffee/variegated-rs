@@ -634,6 +634,20 @@ pub enum RoutineRequestError {
     Mismatched,
 }
 
+/// A client wants the current configuration, picked up by the sender task.
+///
+/// No reply signal beside it, unlike [`ROUTINE_REQUEST`] and [`SHOT_LOG_REQUEST`]: nobody
+/// waits on this. The answer arrives as an ordinary `Configuration` message, is published
+/// to the configuration pubsub like every other one, and reaches *every* connected client
+/// -- so the client that asked is served by the same broadcast as the ones that did not.
+/// That also means no lock is needed here: there is no correlation to protect, and a
+/// second request while one is in flight is answered by the first one's reply.
+///
+/// A `Signal` rather than a channel for the same reason `ROUTINES_CHANGED` is one on the
+/// other side of the link: two browsers loading at once should cost one round trip, not
+/// two.
+pub static CONFIG_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// A chunk request bound for the application processor, picked up by its sender task.
 pub static ROUTINE_REQUEST: Signal<CriticalSectionRawMutex, (RoutineIndex, u16)> = Signal::new();
 

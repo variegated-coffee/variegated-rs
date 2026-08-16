@@ -42,8 +42,10 @@ export class WebSocketService {
   // Retry timers for initial data requests
   private machineDefinitionRetryTimer: number | null = null;
   private routinesRetryTimer: number | null = null;
+  private configurationRetryTimer: number | null = null;
   private machineDefinitionReceived: boolean = false;
   private routinesReceived: boolean = false;
+  private configurationReceived: boolean = false;
   private readonly retryDelay: number = 3000;
 
   constructor(url: string, callbacks: WebSocketServiceCallbacks) {
@@ -65,11 +67,13 @@ export class WebSocketService {
         this.reconnectAttempts = 0;
         this.machineDefinitionReceived = false;
         this.routinesReceived = false;
+        this.configurationReceived = false;
         this.callbacks.onConnect?.();
 
         // Request initial data with retry
         this.requestMachineDefinitionWithRetry();
         this.requestRoutinesWithRetry();
+        this.requestConfigurationWithRetry();
       };
 
       this.ws.onclose = (event) => {
@@ -111,6 +115,11 @@ export class WebSocketService {
     if (this.routinesRetryTimer !== null) {
       clearTimeout(this.routinesRetryTimer);
       this.routinesRetryTimer = null;
+    }
+
+    if (this.configurationRetryTimer !== null) {
+      clearTimeout(this.configurationRetryTimer);
+      this.configurationRetryTimer = null;
     }
 
     if (this.ws) {
@@ -156,6 +165,11 @@ export class WebSocketService {
           break;
         case 'ConfigurationUpdate':
           console.log('Received ConfigurationUpdate');
+          this.configurationReceived = true;
+          if (this.configurationRetryTimer !== null) {
+            clearTimeout(this.configurationRetryTimer);
+            this.configurationRetryTimer = null;
+          }
           this.callbacks.onConfigurationUpdate?.(message.value);
           break;
         case 'MachineDefinition':
@@ -248,16 +262,51 @@ export class WebSocketService {
     }, this.retryDelay);
   }
 
+  /**
+   * Ask for the configuration once per connection, retrying until one arrives.
+   *
+   * Unlike the two above, this is not answered from a cache on the machine: the comms
+   * processor forwards it to the application processor and the reply comes back on the
+   * ordinary broadcast path. So it is a real round trip, and worth exactly one per
+   * connection -- every subsequent change arrives unprompted.
+   *
+   * It has to be asked for at all because a configuration reaches the browser only by
+   * that broadcast, and a broadcast carries nothing to a client that was not yet
+   * subscribed. A page opened between two publishes had an empty configuration until the
+   * next one happened to come along.
+   */
+  private requestConfigurationWithRetry(): void {
+    if (this.configurationReceived) {
+      return;
+    }
+
+    console.log('Sending RequestConfiguration');
+    this.sendMessage({ type: 'RequestConfiguration' });
+
+    if (this.configurationRetryTimer !== null) {
+      clearTimeout(this.configurationRetryTimer);
+    }
+    this.configurationRetryTimer = window.setTimeout(() => {
+      this.configurationRetryTimer = null;
+      if (!this.configurationReceived && this.isConnected()) {
+        console.log('Retrying RequestConfiguration...');
+        this.requestConfigurationWithRetry();
+      }
+    }, this.retryDelay);
+  }
+
   // Public request methods (for manual refresh)
   requestMachineDefinition(): void {
     console.log('Sending RequestMachineDefinition');
     this.sendMessage({ type: 'RequestMachineDefinition' });
   }
 
-  requestRoutines(): void {
-    console.log('Sending RequestRoutines');
-    this.sendMessage({ type: 'RequestRoutines' });
-  }
+  // No `requestRoutines()`. The list is asked for once per connection, above, and every
+  // change after that arrives unprompted -- the application processor pushes a fresh
+  // summary list whenever its repository is mutated. A manual refresh could only re-read
+  // the comms processor's cache, which is the same thing the push already updated; called
+  // straight after a write, as it was, it read that cache *before* the write had reached
+  // the machine and reliably returned the stale list.
 
   // Command methods
   sendMachineCommand(command: MachineCommand): void {

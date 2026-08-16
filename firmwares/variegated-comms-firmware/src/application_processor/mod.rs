@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
-use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_futures::join::join;
 use esp_hal::uart::{UartRx, UartTx};
 use esp_hal::Async;
@@ -28,6 +28,7 @@ use crate::channels::{
     WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
     ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
     RoutineReply, ROUTINE_REPLY, ROUTINE_REQUEST, ROUTINE_WRITE,
+    CONFIG_REQUEST,
 };
 use variegated_controller_types::ROUTINE_WRITE_CHUNK_LEN;
 use crate::ble::scanner::{ScanReport, SCAN_RESULT_CAPACITY};
@@ -539,9 +540,18 @@ pub async fn start(
                         // The two routine futures are one arm because they share
                         // `ROUTINE_LOCK` -- only one of them can be signalled at a time,
                         // so pairing them here costs a nesting level and no fairness.
-                        select3(
+                        //
+                        // A configuration request sits below both and above scan results.
+                        // Below, because nothing is blocked on it -- the answer comes back
+                        // as a broadcast rather than a reply, so a client that waits a
+                        // moment longer sees no error, where a shot-log or routine
+                        // requester waits on a timeout and gets a 503. Above, because it
+                        // is a page that has nothing to display, and a scan result is
+                        // still the one genuinely droppable thing here.
+                        select4(
                             SHOT_LOG_REQUEST.wait(),
                             select(ROUTINE_REQUEST.wait(), ROUTINE_WRITE.wait()),
+                            CONFIG_REQUEST.wait(),
                             scan_result_receiver.receive(),
                         ),
                     ),
@@ -694,7 +704,7 @@ pub async fn start(
                 // and goes out through the command arm above like every other write --
                 // it is the reads that need an answer, and therefore a request/reply
                 // pairing at all.
-                Either4::Fourth(Either::Second(Either::Second(Either3::First(request)))) => {
+                Either4::Fourth(Either::Second(Either::Second(Either4::First(request)))) => {
                     let message = match request {
                         ShotLogRequest::List { limit } => {
                             CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit }
@@ -721,7 +731,7 @@ pub async fn start(
                     }
                 }
                 // An HTTP handler wants one routine's definition.
-                Either4::Fourth(Either::Second(Either::Second(Either3::Second(Either::First((index, offset)))))) => {
+                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either::First((index, offset)))))) => {
                     let message = CommsProcessorToApplicationProcessorMessage::RequestRoutineChunk {
                         index,
                         offset,
@@ -740,7 +750,7 @@ pub async fn start(
                 // The bytes came off a socket as postcard and go onto the link as
                 // postcard; nothing here decodes them. This processor does not know what
                 // a `Routine` is, which is the point -- see `RoutineWrite`.
-                Either4::Fourth(Either::Second(Either::Second(Either3::Second(Either::Second(write))))) => {
+                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either::Second(write))))) => {
                     let total = write.bytes.len() as u16;
                     let mut offset = 0usize;
                     let mut wrote_all = true;
@@ -805,7 +815,37 @@ pub async fn start(
                         ));
                     }
                 }
-                Either4::Fourth(Either::Second(Either::Second(Either3::Third(report)))) => {
+                // A client asked for the configuration on the WebSocket.
+                //
+                // The same message this task already sends on startup and, until one
+                // arrives, every few seconds after -- but that retry stops for good once
+                // `CONFIG_RECEIVED` is set, which is the right behaviour for a processor
+                // that then gets every change pushed to it, and the wrong one for a
+                // browser that connects an hour later and subscribes to a pubsub carrying
+                // only what is published from now on.
+                //
+                // Nothing is correlated back to the requester: the reply lands in the
+                // reader above, goes onto the configuration pubsub, and reaches every
+                // connected client.
+                Either4::Fourth(Either::Second(Either::Second(Either4::Third(())))) => {
+                    let message = CommsProcessorToApplicationProcessorMessage::RequestConfiguration;
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if tx.write_async(&serialized_message).await.is_err() {
+                                log_error!("Failed to write configuration request to UART");
+                            } else {
+                                log_info!("Sent RequestConfiguration on behalf of a client");
+                            }
+                        }
+                        // Not `.expect(..)`, for the same reason as the shot-log arm
+                        // above: this carries something a client asked for, and panicking
+                        // the processor that owns Wi-Fi and BLE over it would hand anyone
+                        // on port 80 a way to take the machine down. A client that gets no
+                        // configuration sees an empty page, not a dead machine.
+                        Err(_) => log_error!("Failed to serialize configuration request"),
+                    }
+                }
+                Either4::Fourth(Either::Second(Either::Second(Either4::Fourth(report)))) => {
                     let message = match report {
                         ScanReport::Discovered(device) => {
                             CommsProcessorToApplicationProcessorMessage::BluetoothPeripheralDiscovered(device)
