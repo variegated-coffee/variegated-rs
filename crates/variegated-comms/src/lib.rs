@@ -399,6 +399,13 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // gets no answer at all is indistinguishable from a dead link.
     shot_log_query_sender: Option<Sender<'static, SM, ShotLogQuery, 1>>,
     shot_log_reply_receiver: Option<ChannelReceiver<'static, SM, ShotLogReply, 1>>,
+    // Unsolicited shot-log events -- a shot stored, or a shot deleted. A third channel
+    // rather than a third use of the reply path above, because that path has no
+    // correlation id and an unsolicited message on it can be collected by a client
+    // waiting on a listing. `None` on a machine with no card, where the arm parks.
+    shot_log_event_receiver: Option<
+        ChannelReceiver<'static, SM, variegated_controller_types::ShotLogEvent, 2>,
+    >,
     // The stored Wi-Fi credentials, published by the controller whenever they change.
     // `None` on a machine with no credential store, in which case `RequestWifiCredentials`
     // goes unanswered and the comms processor keeps asking -- which is the honest outcome,
@@ -1311,6 +1318,33 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         }
                     }
                 },
+                join(
+                async {
+                    // Shot-log events, pushed the moment the card changes.
+                    //
+                    // Its own channel rather than the reply path, which has no
+                    // correlation id: an unsolicited message there can be collected by a
+                    // client waiting on a listing.
+                    let Some(receiver) = shot_log_event_receiver else {
+                        core::future::pending::<()>().await;
+                        return;
+                    };
+
+                    loop {
+                        let event = receiver.receive().await;
+
+                        // `send().await`, like the scale command and the shot-log reply:
+                        // this is machine traffic arriving at most once a shot, so it
+                        // belongs on the same footing as `Status` rather than behind the
+                        // debug relay's reserved-capacity dance.
+                        let response =
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogEvent(event);
+                        if let Some(output) = frame_for_link(&response, "a shot log event") {
+                            let _ = tx_sender.send(output).await;
+                            info!("Sent a shot log event to ESP32");
+                        }
+                    }
+                },
                 async {
                     // A fresh summary list whenever the routines change, whoever changed
                     // them.
@@ -1335,6 +1369,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         }
                     }
                 },
+                ),
                 ),
             ),
             ),

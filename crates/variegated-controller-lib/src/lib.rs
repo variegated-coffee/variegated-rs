@@ -64,7 +64,7 @@ pub use variegated_exfat_format as exfat_format;
 pub use sd_card::{SharedSpiBus, SpiBusLease, SpiLeaseError};
 #[cfg(feature = "sd-card-storage")]
 pub use shot_log_storage::{
-    ChunkRead, SdShotLogStorage, ShotLogStorage, ShotLogStorageError,
+    ChunkRead, SdShotLogStorage, ShotLogStorage, ShotLogStorageError, StoredShot,
 };
 
 extern crate alloc;

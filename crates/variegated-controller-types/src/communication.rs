@@ -413,6 +413,16 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// learns it. Before this existed, a save was fire-and-forget and a routine too large
     /// to persist was indistinguishable from one that stored cleanly.
     RoutineWriteResult(RoutineWriteOutcome),
+    /// A shot was stored or deleted.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// Unsolicited, like [`Self::BluetoothPeripherals`] and unlike the four shot-log
+    /// replies above it. It travels on its own channel rather than on the reply path for
+    /// a reason worth keeping: that path has no correlation id, so an unsolicited message
+    /// arriving on it can be collected by a client waiting on a listing.
+    ShotLogEvent(crate::shot_log::ShotLogEvent),
 }
 
 /// An operation on a scale, as carried by

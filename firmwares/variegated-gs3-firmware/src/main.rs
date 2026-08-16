@@ -46,7 +46,7 @@ use embassy_rp::pio::Pio;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use futures::future::join_all;
 
-use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog, ShotLogDayFilter, ShotLogListRequest};
+use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog, ShotLogDayFilter, ShotLogEvent, ShotLogListEntry, ShotLogListRequest};
 // Only the PWM steam valve build declares a steam wand or drives a solenoid through one.
 // These stay on their own `use` lines rather than joining the lists above precisely so the
 // cfg can be attached -- a name folded into an ungated list becomes an unused import in a
@@ -264,14 +264,16 @@ async fn esp_transceiver_task(
     // the transceiver refuses shot-log requests with `CardNotPresent` instead of leaving
     // the comms processor to time out.
     #[cfg(feature = "sd-card-storage")]
-    let (shot_log_query_sender, shot_log_reply_receiver) = (
+    let (shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver) = (
         Some(SHOT_LOG_QUERY_CHANNEL.sender()),
         Some(SHOT_LOG_REPLY_CHANNEL.receiver()),
+        Some(SHOT_LOG_EVENT_CHANNEL.receiver()),
     );
     #[cfg(not(feature = "sd-card-storage"))]
-    let (shot_log_query_sender, shot_log_reply_receiver) = (None, None);
+    let (shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver) =
+        (None, None, None);
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, wifi_credentials_receiver, wifi_provisioning_receiver).await;
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver).await;
 }
 
 
@@ -1090,6 +1092,17 @@ static SHOT_LOG_QUERY_CHANNEL: Channel<SyncSendRawMutex, ShotLogQuery, 1> = Chan
 #[cfg(feature = "sd-card-storage")]
 static SHOT_LOG_REPLY_CHANNEL: Channel<SyncSendRawMutex, ShotLogReply, 1> = Channel::new();
 
+/// Shot-log events on their way to the comms processor.
+///
+/// Its own channel rather than the reply path above, which has no correlation id: an
+/// unsolicited message there can be collected by a client waiting on a listing.
+///
+/// A `Channel`, not a `Signal`: `Signal` is latest-wins, so a delete arriving behind a
+/// store would silently swallow it and the browser would never learn about the shot that
+/// had just been recorded. Depth 2 is one of each.
+#[cfg(feature = "sd-card-storage")]
+static SHOT_LOG_EVENT_CHANNEL: Channel<SyncSendRawMutex, ShotLogEvent, 2> = Channel::new();
+
 /// How many shots `AppDebugOp::SdListShots` asks for.
 ///
 /// Enough to be a real exercise of the listing -- it walks day directories and
@@ -1322,11 +1335,35 @@ async fn shot_log_storage_task(
                 }
                 let card = storage.as_mut().expect("ensured above");
                 match card.store_shot(&shot_log).await {
-                    Ok(id) => log_info!(
-                        "SD: stored shot {}/{}",
-                        id.dir_name().as_str(),
-                        id.file_name().as_str()
-                    ),
+                    Ok(stored) => {
+                        log_info!(
+                            "SD: stored shot {}/{} ({} bytes)",
+                            stored.id.dir_name().as_str(),
+                            stored.id.file_name().as_str(),
+                            stored.size_bytes
+                        );
+                        // Announced from what we already hold rather than by re-listing:
+                        // the id and size come back from the store, and the annotations
+                        // are the ones that went onto the card a moment ago.
+                        let entry = ShotLogListEntry {
+                            id: stored.id,
+                            size_bytes: stored.size_bytes,
+                            annotations: shot_log.metadata.annotations.clone(),
+                        };
+                        // `try_send`, never `await`: this is the one operation that
+                        // cannot be retried, and it must not park behind a comms
+                        // processor that has stopped draining. A dropped notice costs a
+                        // stale browser until its next refresh; a parked store loses the
+                        // shot.
+                        if SHOT_LOG_EVENT_CHANNEL
+                            .try_send(ShotLogEvent::Stored(entry))
+                            .is_err()
+                        {
+                            log_warn!(
+                                "SD: dropped a stored-shot notice; the event channel was full"
+                            );
+                        }
+                    }
                     Err(e) => {
                         log_warn!("SD: failed to store shot: {:?}", e);
                         // A failed store means the mount is suspect -- most likely the
@@ -1591,11 +1628,22 @@ async fn handle_shot_log_query(
         }
         ShotLogQuery::Delete { id } => {
             match card.delete_shot(id).await {
-                Ok(()) => log_info!(
-                    "SD: deleted {}/{}",
-                    id.dir_name().as_str(),
-                    id.file_name().as_str()
-                ),
+                Ok(()) => {
+                    log_info!(
+                        "SD: deleted {}/{}",
+                        id.dir_name().as_str(),
+                        id.file_name().as_str()
+                    );
+                    // The only confirmation a delete produces. It arrived as a
+                    // fire-and-forget command, so the HTTP 200 said nothing about
+                    // whether the file went away; this is what does.
+                    if SHOT_LOG_EVENT_CHANNEL
+                        .try_send(ShotLogEvent::Deleted(id))
+                        .is_err()
+                    {
+                        log_warn!("SD: dropped a deleted-shot notice; the event channel was full");
+                    }
+                }
                 // Logged and dropped. There is nothing to answer: this arrived as a
                 // fire-and-forget command and the requester is not waiting.
                 Err(e) => log_warn!(

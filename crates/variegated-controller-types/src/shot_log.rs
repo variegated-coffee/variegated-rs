@@ -576,6 +576,30 @@ pub struct ShotLogList {
     pub truncated: bool,
 }
 
+/// Something happened to the set of stored shots.
+///
+/// Pushed unprompted, and the only thing on the shot-log path that is: a listing and a
+/// download are both answers to questions. It exists so a browser does not have to poll
+/// an SD card to notice a shot it just pulled, and so a delete -- which is
+/// fire-and-forget, see [`crate::MachineCommand::DeleteShotLog`] -- has any confirmation
+/// at all.
+///
+/// `Stored` carries the whole entry rather than an id, so a client can render the new row
+/// without a round trip. It costs about 600 bytes of static on the comms processor, which
+/// is the price of the notice being useful on arrival.
+///
+/// **Append-only.**
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShotLogEvent {
+    /// A shot was written to the card.
+    Stored(ShotLogListEntry),
+    /// A shot was removed from it.
+    Deleted(ShotLogId),
+}
+
 // ============================================================================
 // Runtime logging types (for internal use during execution)
 // ============================================================================
@@ -1522,6 +1546,26 @@ mod shot_log_page_tests {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let decoded: ShotLogListRequest = postcard::from_bytes(&encoded).unwrap();
             assert_eq!(decoded, request);
+        }
+    }
+
+    /// Both event shapes round-trip, and they are distinguishable.
+    ///
+    /// A `Deleted` decoded as a `Stored` would take an id for the front of an entry and
+    /// hand the frontend a row built out of the next message's bytes.
+    #[test]
+    fn shot_log_events_round_trip() {
+        let stored = ShotLogEvent::Stored(ShotLogListEntry {
+            id: ShotLogId { day: Some(20_260_809), time: 16_423_349 },
+            size_bytes: 51_291,
+            annotations: ShotAnnotations::new(),
+        });
+        let deleted = ShotLogEvent::Deleted(ShotLogId { day: None, time: 42 });
+
+        for event in [stored, deleted] {
+            let encoded = postcard::to_allocvec(&event).unwrap();
+            let decoded: ShotLogEvent = postcard::from_bytes(&encoded).unwrap();
+            assert_eq!(decoded, event);
         }
     }
 }

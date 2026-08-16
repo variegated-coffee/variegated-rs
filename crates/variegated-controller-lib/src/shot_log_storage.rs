@@ -119,6 +119,20 @@ pub struct ChunkRead {
     pub last: bool,
 }
 
+/// Where a stored shot landed, and how big it is.
+///
+/// The size is here so the storage task can announce the shot without reopening the file
+/// it has just closed -- `store_shot_inner` already holds the encoded length, and reading
+/// it back over a 10 MHz bus to learn a number it just had would be absurd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Derived unconditionally, like `ChunkRead` above: this crate depends on defmt outright
+// and has no `defmt` feature, so a `cfg_attr` guard here would never fire.
+#[derive(defmt::Format)]
+pub struct StoredShot {
+    pub id: ShotLogId,
+    pub size_bytes: u32,
+}
+
 /// How many bytes the self-test writes.
 ///
 /// **This must exceed one exFAT cluster, and the reason is a bug it failed to catch.**
@@ -243,8 +257,8 @@ impl SelfTestReport {
 /// deadlocked core 1.
 #[allow(async_fn_in_trait)]
 pub trait ShotLogStorage {
-    /// Store a completed shot, returning where it landed.
-    async fn store_shot(&mut self, shot: &ShotLog) -> Result<ShotLogId, ShotLogStorageError>;
+    /// Store a completed shot, returning where it landed and how large it is.
+    async fn store_shot(&mut self, shot: &ShotLog) -> Result<StoredShot, ShotLogStorageError>;
 
     /// One page of the listing, newest first, with annotations.
     async fn list_shots(
@@ -739,7 +753,7 @@ where
         &mut self,
         shot: &ShotLog,
         id: ShotLogId,
-    ) -> Result<ShotLogId, ShotLogStorageError> {
+    ) -> Result<StoredShot, ShotLogStorageError> {
         // Encode before touching the card. A serialization failure must not be able to
         // leave a truncated file behind, and `truncate` below is destructive.
         let bytes = encode_shot(shot)?;
@@ -795,7 +809,10 @@ where
         })?;
 
         log_debug!("SD: stored {} ({} bytes)", path.as_str(), bytes.len());
-        Ok(id)
+        Ok(StoredShot {
+            id,
+            size_bytes: bytes.len() as u32,
+        })
     }
 
     async fn list_shots_inner(
@@ -1230,7 +1247,7 @@ where
     BD::Error: Debug,
     M: embassy_sync::blocking_mutex::raw::RawMutex,
 {
-    async fn store_shot(&mut self, shot: &ShotLog) -> Result<ShotLogId, ShotLogStorageError> {
+    async fn store_shot(&mut self, shot: &ShotLog) -> Result<StoredShot, ShotLogStorageError> {
         if !self.available {
             return Err(ShotLogStorageError::CardNotPresent);
         }

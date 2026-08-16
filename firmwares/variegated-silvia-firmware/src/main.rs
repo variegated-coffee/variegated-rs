@@ -148,7 +148,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // The two trailing `None`s are the shot-log query and reply halves: this board has no
     // card reader, so the transceiver refuses shot-log requests outright rather than
     // forwarding them to a storage task that does not exist.
-    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver)).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver)).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]

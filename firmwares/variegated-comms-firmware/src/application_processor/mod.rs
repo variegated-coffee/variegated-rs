@@ -260,6 +260,11 @@ pub async fn start(
                             ApplicationProcessorToCommsProcessorMessage::ShotLogAnnotations { id, annotations } => {
                                 SHOT_LOG_REPLY.signal(ShotLogReply::Annotations { id, annotations });
                             }
+                            ApplicationProcessorToCommsProcessorMessage::ShotLogEvent(event) => {
+                                // Logged only, for now. Task 6 turns this into a publish
+                                // onto the pubsub the WebSocket reads.
+                                log_info!("Shot log event: {:?}", event);
+                            }
                             ApplicationProcessorToCommsProcessorMessage::ShotLogError(e) => {
                                 // An explicit refusal -- no card, no storage, or a request
                                 // already in flight. Signalled like any other reply so the
