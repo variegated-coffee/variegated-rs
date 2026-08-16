@@ -58,6 +58,27 @@ task poll*. `bin/main.rs` names `postcard::from_bytes_cobs::<..Configuration>` a
 against a `Configuration` of ~3.6 kB. That is the lever if the stack ever needs to be
 materially cheaper rather than merely adequate.
 
+### Changes since
+
+`.stack` is the SRAM left after `.data` and `.bss`, so **every byte of new static costs a
+byte of stack, one for one**. Anything that adds a static belongs in this table, measured
+rather than estimated:
+
+```sh
+cd firmwares/variegated-comms-firmware
+rust-size -A ../../target/riscv32imac-unknown-none-elf/comms-release/variegated-comms-firmware
+```
+
+| Change | `.bss` | `.stack` |
+|---|---|---|
+| before the shot-log event channel | 245,800 | 97,256 |
+| `SHOT_LOG_EVENT_CHANNEL` (`PubSubChannel<ShotLogEvent, 1, 1, 1>`) | 246,576 | **96,480** |
+
+776 bytes, which is one `ShotLogEvent` held inline plus the pubsub's bookkeeping. It buys a
+push that carries the whole `ShotLogListEntry`, so a browser renders the new row without a
+round trip. Still ~9 kB above the 87,256 recorded elsewhere as the lowest figure observed to
+survive, and well above the 90,144 that overflowed inside `esp_radio::wifi::new()`.
+
 ## The 42 kB: two wrong answers, then the right one
 
 A provisioning cycle took the heap from ~73 kB to ~115 kB and kept it. Twice this was

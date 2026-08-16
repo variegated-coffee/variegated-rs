@@ -21,6 +21,7 @@ use variegated_debug::relay::relayable;
 use crate::debug::{bus, commands, TCP_DEBUG_CLIENTS};
 use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
+    ShotLogEventPublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
@@ -40,6 +41,7 @@ pub async fn start(
     status_publisher: ApplicationStatusPublisher,
     config_publisher: ApplicationConfigurationPublisher,
     routine_publisher: ApplicationRoutinePublisher,
+    shot_log_event_publisher: ShotLogEventPublisher,
     command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
     sensor_reading_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
     debug_command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, DebugCommand, DEBUG_COMMAND_CAPACITY>,
@@ -261,9 +263,14 @@ pub async fn start(
                                 SHOT_LOG_REPLY.signal(ShotLogReply::Annotations { id, annotations });
                             }
                             ApplicationProcessorToCommsProcessorMessage::ShotLogEvent(event) => {
-                                // Logged only, for now. Task 6 turns this into a publish
-                                // onto the pubsub the WebSocket reads.
+                                // `publish_immediate`, not a send: this is the UART
+                                // reader, and the `Debug(frame)` arm below says why
+                                // back-pressure here is unacceptable. With no client
+                                // connected the ring simply holds the latest event and
+                                // the next one displaces it, which is the right reading
+                                // of a notice nobody is listening for.
                                 log_info!("Shot log event: {:?}", event);
+                                shot_log_event_publisher.publish_immediate(event);
                             }
                             ApplicationProcessorToCommsProcessorMessage::ShotLogError(e) => {
                                 // An explicit refusal -- no card, no storage, or a request

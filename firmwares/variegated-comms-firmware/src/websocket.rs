@@ -18,6 +18,7 @@ use variegated_controller_types::MachineCommand;
 use crate::api_types::RoutineSummaryStorage;
 use crate::channels::{
     ApplicationStatusSubscriber, ApplicationConfigurationSubscriber, ApplicationRoutineSubscriber,
+    ShotLogEventSubscriber,
     CONFIG_REQUEST, MACHINE_DEFINITION, ROUTINE_CACHE, MACHINE_COMMAND_CAPACITY,
 };
 use crate::ws_types::WsMessage;
@@ -29,6 +30,7 @@ pub async fn websocket_server_task(
     mut status_subscriber: ApplicationStatusSubscriber,
     mut configuration_subscriber: ApplicationConfigurationSubscriber,
     mut routine_subscriber: ApplicationRoutineSubscriber,
+    mut shot_log_event_subscriber: ShotLogEventSubscriber,
     machine_command_channel: &'static Channel<CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) {
     // smoltcp's socket buffers, and the two are deliberately asymmetric.
@@ -69,6 +71,7 @@ pub async fn websocket_server_task(
                     &mut status_subscriber,
                     &mut configuration_subscriber,
                     &mut routine_subscriber,
+                    &mut shot_log_event_subscriber,
                     command_sender.clone(),
                 ).await;
 
@@ -91,6 +94,7 @@ async fn handle_websocket_connection(
     status_subscriber: &mut ApplicationStatusSubscriber,
     config_subscriber: &mut ApplicationConfigurationSubscriber,
     routine_subscriber: &mut ApplicationRoutineSubscriber,
+    shot_log_event_subscriber: &mut ShotLogEventSubscriber,
     command_sender: Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
 ) -> Result<(), &'static str> {
     // Perform WebSocket handshake.
@@ -215,7 +219,10 @@ async fn handle_websocket_connection(
                             status_subscriber.next_message_pure(),
                             select(
                                 config_subscriber.next_message_pure(),
-                                routine_subscriber.next_message_pure(),
+                                select(
+                                    routine_subscriber.next_message_pure(),
+                                    shot_log_event_subscriber.next_message_pure(),
+                                ),
                             ),
                         ),
                     ).await {
@@ -238,11 +245,15 @@ async fn handle_websocket_connection(
                             log_info!("Sending ConfigurationUpdate to client");
                             Some(encode_ws_message(&WsMessage::ConfigurationUpdate(config)))
                         }
-                        Either::Second(Either::Second(Either::Second(summaries))) => {
+                        Either::Second(Either::Second(Either::Second(Either::First(summaries)))) => {
                             log_info!("Sending RoutinesUpdate to client");
                             Some(encode_ws_message(&WsMessage::RoutinesUpdate(
                                 RoutineSummaryStorage::from_list(&summaries),
                             )))
+                        }
+                        Either::Second(Either::Second(Either::Second(Either::Second(event)))) => {
+                            log_info!("Sending ShotLogEvent to client");
+                            Some(encode_ws_message(&WsMessage::ShotLogEvent(event)))
                         }
                     };
 

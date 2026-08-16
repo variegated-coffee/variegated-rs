@@ -9,7 +9,8 @@ use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
-    ShotAnnotations, ShotLogId, ShotLogList, ShotLogListRequest, ShotLogStorageError,
+    ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogList, ShotLogListRequest,
+    ShotLogStorageError,
 };
 use variegated_controller_types::debug_command::DebugCommand;
 use esphome_device::{ClientEvent, StateChange};
@@ -580,6 +581,33 @@ pub async fn shot_log_request(
         .await
         .map_err(|_| ShotLogRequestError::Timeout)
 }
+
+/// Shot-log events, on their way from the link to the WebSocket.
+///
+/// A `PubSubChannel` like `STATUS_CHANNEL` and `ROUTINE_CHANNEL`, published with
+/// `immediate_publisher()`: no publisher slot, never awaits, evicts the oldest on a full
+/// ring. That is the same non-blocking contract the `Debug(frame)` arm documents, and for
+/// the same reason -- back-pressure on the UART reader is back-pressure on `Status` and
+/// on everything else the link carries.
+///
+/// **It costs about 600 bytes of `.bss`**, and on this chip `.stack` is the SRAM left
+/// after `.data` and `.bss`, so that is 600 bytes off the stack. That is the price of the
+/// notice carrying the whole entry rather than an id the browser would have to go and
+/// resolve. `ShotLogEvent` owns no heap allocation, so the per-subscriber clone inside
+/// the pubsub's critical section stays allocation-free -- the constraint `bus.rs` spells
+/// out, and the reason a `Box` here would be worse rather than cheaper.
+///
+/// Nothing is retained for a client that connects later. An event is a fact about a
+/// moment, and a browser opening afterwards fetches a page instead.
+pub const SHOT_LOG_EVENT_RECEIVERS: usize = 1;
+pub type ShotLogEventChannel =
+    PubSubChannel<CriticalSectionRawMutex, ShotLogEvent, 1, SHOT_LOG_EVENT_RECEIVERS, 1>;
+pub type ShotLogEventSubscriber =
+    Subscriber<'static, CriticalSectionRawMutex, ShotLogEvent, 1, SHOT_LOG_EVENT_RECEIVERS, 1>;
+pub type ShotLogEventPublisher =
+    Publisher<'static, CriticalSectionRawMutex, ShotLogEvent, 1, SHOT_LOG_EVENT_RECEIVERS, 1>;
+
+pub static SHOT_LOG_EVENT_CHANNEL: StaticCell<ShotLogEventChannel> = StaticCell::new();
 
 // ============================================================================
 // Routine definitions

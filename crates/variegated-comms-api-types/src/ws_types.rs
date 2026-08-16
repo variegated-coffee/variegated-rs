@@ -62,4 +62,16 @@ pub enum WsMessage<'a> {
     /// pubsub only carries what is published *after* a client subscribes, so a page
     /// loaded between two publishes had nothing to show until the next one.
     RequestConfiguration,
+
+    /// A shot was stored or deleted on the card.
+    ///
+    /// Appended rather than grouped with the other server-to-client variants at the top,
+    /// because postcard encodes an enum as its declaration-order discriminant: inserting
+    /// it there would renumber `SendMachineCommand` and silently mis-decode every command
+    /// a client sends. See the note on `RoutinesUpdate` about the hand-copied mirrors in
+    /// `variegated-cli`.
+    ///
+    /// It does not grow this enum: `MachineDefinition` at 3,660 bytes still sets its
+    /// size.
+    ShotLogEvent(variegated_controller_types::shot_log::ShotLogEvent),
 }

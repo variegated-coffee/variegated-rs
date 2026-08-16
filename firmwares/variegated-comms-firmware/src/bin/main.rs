@@ -44,6 +44,7 @@ use variegated_comms_firmware::{
     ble::{ble_devices_task, ble_runner_task, ble_slot_task, ScanPrinter},
     channels::{
         ApplicationConfigurationChannel, ApplicationStatusChannel, ApplicationRoutineChannel,
+        ShotLogEventChannel, SHOT_LOG_EVENT_CHANNEL,
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
         MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL, SENSOR_READING_CHANNEL,
         DEBUG_COMMAND_CHANNEL,
@@ -358,6 +359,7 @@ async fn application_processor_task(
     status_channel: &'static ApplicationStatusChannel,
     config_channel: &'static ApplicationConfigurationChannel,
     routine_channel: &'static ApplicationRoutineChannel,
+    shot_log_event_channel: &'static ShotLogEventChannel,
     command_channel: &'static embassy_sync::channel::Channel<
         embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
         variegated_controller_types::MachineCommand,
@@ -381,6 +383,7 @@ async fn application_processor_task(
     let status_publisher = status_channel.publisher().unwrap();
     let config_publisher = config_channel.publisher().unwrap();
     let routine_publisher = routine_channel.publisher().unwrap();
+    let shot_log_event_publisher = shot_log_event_channel.publisher().unwrap();
     let command_receiver = command_channel.receiver();
     let sensor_reading_receiver = sensor_reading_channel.receiver();
 
@@ -390,6 +393,7 @@ async fn application_processor_task(
         status_publisher,
         config_publisher,
         routine_publisher,
+        shot_log_event_publisher,
         command_receiver,
         sensor_reading_receiver,
         debug_command_receiver,
@@ -580,6 +584,8 @@ async fn main(spawner: Spawner) -> ! {
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let config_channel = CONFIGURATION_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let routine_channel = ROUTINE_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
+    let shot_log_event_channel =
+        SHOT_LOG_EVENT_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
     let sensor_reading_channel = SENSOR_READING_CHANNEL.init(embassy_sync::channel::Channel::new());
 
@@ -677,7 +683,7 @@ async fn main(spawner: Spawner) -> ! {
     // now returns `()`) onto the `#[task]` function itself. A failed spawn used to
     // be discarded silently; `spawn_or_report!` turns it into a `SpawnFailed` event
     // instead. See the macro's doc comment for why an event and not `unwrap`.
-    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver(), printer));
+    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, shot_log_event_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver(), printer));
     spawn_or_report!(spawner, "status_listener", status_listener_task(status_channel));
     log_info!("Application processor tasks spawned");
 
@@ -1063,6 +1069,7 @@ async fn main(spawner: Spawner) -> ! {
     let ws_status_subscriber = status_channel.subscriber().unwrap();
     let ws_config_subscriber = config_channel.subscriber().unwrap();
     let ws_routine_subscriber = routine_channel.subscriber().unwrap();
+    let ws_shot_log_subscriber = shot_log_event_channel.subscriber().unwrap();
 
     // Spawn WebSocket server task
     spawn_or_report!(spawner, "websocket_server", websocket_server_task(
@@ -1070,6 +1077,7 @@ async fn main(spawner: Spawner) -> ! {
         ws_status_subscriber,
         ws_config_subscriber,
         ws_routine_subscriber,
+        ws_shot_log_subscriber,
         command_channel,
     ));
     log_info!("WebSocket server task spawned on port 8080");

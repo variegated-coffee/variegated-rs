@@ -768,6 +768,11 @@ export const RoutineStepSchema = struct({
   description: option(string())
 });
 
+export const ShotLogEventSchema = enumType('ShotLogEvent', {
+  Stored: newtypeVariant('Stored', ShotLogListEntrySchema),
+  Deleted: newtypeVariant('Deleted', ShotLogIdSchema)
+});
+
 export const ShotLogListSchema = struct({
   entries: seq(ShotLogListEntrySchema),
   truncated: bool()
@@ -870,7 +875,8 @@ export const WsMessageSchema = enumType('WsMessage', {
   RequestMachineDefinition: unitVariant('RequestMachineDefinition'),
   RequestRoutines: unitVariant('RequestRoutines'),
   SendMachineCommand: newtypeVariant('SendMachineCommand', MachineCommandSchema),
-  RequestConfiguration: unitVariant('RequestConfiguration')
+  RequestConfiguration: unitVariant('RequestConfiguration'),
+  ShotLogEvent: newtypeVariant('ShotLogEvent', ShotLogEventSchema)
 });
 
 export type ShotLogList = InferType<typeof ShotLogListSchema>;
@@ -957,6 +963,7 @@ export type ShotAnnotation = InferType<typeof ShotAnnotationSchema>;
 export type ShotAnnotationKey = InferType<typeof ShotAnnotationKeySchema>;
 export type ShotAnnotationValue = InferType<typeof ShotAnnotationValueSchema>;
 export type ShotAnnotations = InferType<typeof ShotAnnotationsSchema>;
+export type ShotLogEvent = InferType<typeof ShotLogEventSchema>;
 export type ShotLogId = InferType<typeof ShotLogIdSchema>;
 export type ShotLogListEntry = InferType<typeof ShotLogListEntrySchema>;
 export type ShotState = InferType<typeof ShotStateSchema>;
