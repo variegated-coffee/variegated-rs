@@ -33,7 +33,8 @@ use exfat_slim::asynchronous::file_system::FileSystem;
 use exfat_slim::asynchronous::BlockDevice;
 use variegated_controller_types::shot_log::{ShotLogId, SHOTS_DIR};
 use variegated_controller_types::{
-    ShotAnnotations, ShotLog, ShotLogList, ShotLogListEntry, SHOT_LOG_FORMAT_VERSION,
+    ShotAnnotations, ShotLog, ShotLogDayFilter, ShotLogList, ShotLogListEntry,
+    ShotLogListRequest, SHOT_LOG_FORMAT_VERSION, SHOT_LOG_LIST_BUDGET,
 };
 use variegated_log::{log_debug, log_warn};
 
@@ -245,8 +246,11 @@ pub trait ShotLogStorage {
     /// Store a completed shot, returning where it landed.
     async fn store_shot(&mut self, shot: &ShotLog) -> Result<ShotLogId, ShotLogStorageError>;
 
-    /// The most recent `limit` shots, newest first, with their annotations.
-    async fn list_shots(&mut self, limit: usize) -> Result<ShotLogList, ShotLogStorageError>;
+    /// One page of the listing, newest first, with annotations.
+    async fn list_shots(
+        &mut self,
+        request: ShotLogListRequest,
+    ) -> Result<ShotLogList, ShotLogStorageError>;
 
     /// Read up to `buf.len()` bytes of a stored record starting at `offset`.
     async fn read_chunk(
@@ -796,7 +800,7 @@ where
 
     async fn list_shots_inner(
         &mut self,
-        limit: usize,
+        request: ShotLogListRequest,
     ) -> Result<ShotLogList, ShotLogStorageError> {
         self.mount().await?;
 
@@ -821,33 +825,51 @@ where
             .await?
             .into_iter()
             .filter_map(|name| ShotLogId::parse_dir_name(&name).map(|day| (day, name)))
+            // The day filter, applied before anything is opened. `All` visits every
+            // directory whose name parses, and the other two visit exactly one.
+            .filter(|(day, _)| match request.day {
+                ShotLogDayFilter::All => true,
+                ShotLogDayFilter::Day(wanted) => *day == Some(wanted),
+                ShotLogDayFilter::Undated => day.is_none(),
+            })
             .collect();
         days.sort_unstable_by_key(|(day, _)| ShotLogId::day_listing_rank(*day));
 
         let mut entries = Vec::new();
         let mut truncated = false;
+        let mut budget = SHOT_LOG_LIST_BUDGET;
 
-        for (day_value, day) in days {
+        'days: for (day_value, day) in days {
             let mut day_path = shots_root.clone();
             day_path.push('/');
             day_path.push_str(&day);
 
-            let mut files: Vec<alloc::string::String> = self
+            let mut files: Vec<(u32, alloc::string::String)> = self
                 .dir_names(&day_path)
                 .await?
                 .into_iter()
-                .filter(|name| ShotLogId::parse_file_name(name).is_some())
+                .filter_map(|name| ShotLogId::parse_file_name(&name).map(|time| (time, name)))
                 .collect();
-            files.sort_unstable_by(|a, b| b.cmp(a));
+            files.sort_unstable_by_key(|(time, _)| core::cmp::Reverse(*time));
 
-            for file in files {
-                if entries.len() >= limit {
-                    truncated = true;
-                    break;
+            for (time, file) in files {
+                let id = ShotLogId { day: day_value, time };
+
+                // The cursor, checked *before* the file is opened. That is what makes a
+                // later page cost no more than the first: a skipped entry costs a
+                // comparison, not a 1 kB read over a 10 MHz bus.
+                if let Some(cursor) = request.before {
+                    if !id.listing_follows(&cursor) {
+                        continue;
+                    }
                 }
-                let Some(time) = ShotLogId::parse_file_name(&file) else {
-                    continue;
-                };
+
+                // Below the cursor check, so a skipped entry is not mistaken for
+                // evidence that another page exists.
+                if entries.len() >= request.limit as usize {
+                    truncated = true;
+                    break 'days;
+                }
 
                 let mut path = day_path.clone();
                 path.push('/');
@@ -857,7 +879,7 @@ where
                 // the directory entry plus a second open. `DirectoryEntry::metadata` and
                 // `File::metadata` report the same `FileDetails`, so nothing is lost, and
                 // opening a file on this filesystem is the expensive part.
-                let mut file = match self.fs.open(&path, OpenOptions::new().read(true)).await {
+                let mut handle = match self.fs.open(&path, OpenOptions::new().read(true)).await {
                     Ok(f) => f,
                     Err(e) => {
                         // One unreadable shot must not fail the whole listing.
@@ -869,33 +891,47 @@ where
                         continue;
                     }
                 };
-                let size_bytes = file.metadata().len() as u32;
+                let size_bytes = handle.metadata().len() as u32;
                 // An annotation block that cannot be read leaves the entry with an empty
                 // one rather than dropping the shot: the record is still downloadable,
                 // and a missing row is a worse answer than a row with no beans on it.
                 let annotations = self
-                    .read_annotations_from(&mut file)
+                    .read_annotations_from(&mut handle)
                     .await
                     .unwrap_or_default();
-                let _ = file.close(&mut self.fs).await;
+                let _ = handle.close(&mut self.fs).await;
 
-                entries.push(ShotLogListEntry {
-                    id: ShotLogId {
-                        day: day_value,
-                        time,
-                    },
+                let entry = ShotLogListEntry {
+                    id,
                     size_bytes,
                     annotations,
-                });
-            }
+                };
 
-            if truncated {
-                break;
+                // The frame bound. Stopping here is what keeps the reply reassemblable
+                // on the far side, where an oversized frame is *lost* rather than
+                // truncated -- see SHOT_LOG_LIST_BUDGET.
+                //
+                // `!entries.is_empty()` is load-bearing: without it an entry heavier
+                // than the whole budget would return an empty page with `truncated` set,
+                // and a client paging on that would loop forever. A maximal entry is
+                // ~561 bytes against a 3,800-byte budget, so this cannot fire today; it
+                // costs one comparison and removes the class.
+                let cost = entry.encoded_len_upper_bound();
+                if cost > budget && !entries.is_empty() {
+                    truncated = true;
+                    break 'days;
+                }
+                budget = budget.saturating_sub(cost);
+                entries.push(entry);
             }
         }
 
         if truncated {
-            log_debug!("SD: listing capped at {} entries", limit);
+            log_debug!(
+                "SD: page of {} entries, more to come ({} bytes of budget left)",
+                entries.len(),
+                budget
+            );
         }
 
         Ok(ShotLogList {
@@ -1186,14 +1222,17 @@ where
         result
     }
 
-    async fn list_shots(&mut self, limit: usize) -> Result<ShotLogList, ShotLogStorageError> {
+    async fn list_shots(
+        &mut self,
+        request: ShotLogListRequest,
+    ) -> Result<ShotLogList, ShotLogStorageError> {
         if !self.available {
             return Err(ShotLogStorageError::CardNotPresent);
         }
         if !self.lease().await {
             return Err(ShotLogStorageError::BusUnavailable);
         }
-        let result = self.list_shots_inner(limit).await;
+        let result = self.list_shots_inner(request).await;
         self.release();
         result
     }

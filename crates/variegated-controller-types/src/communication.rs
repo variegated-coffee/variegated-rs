@@ -109,7 +109,12 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     /// tree, and the old variant had no producer on either side -- so reusing the
     /// discriminant costs nothing, where appending would leave a permanent hole. The
     /// same applies to the two below and to the three replies.
-    RequestShotLogList { limit: u16 },
+    ///
+    /// **Repurposed a second time.** It carried a bare `limit` until paging existed; the
+    /// payload is now a whole [`crate::shot_log::ShotLogListRequest`], carrying the
+    /// cursor and the day filter as well. Same discriminant, same reasoning as before --
+    /// both processors are flashed from this tree.
+    RequestShotLogList(crate::shot_log::ShotLogListRequest),
     /// Ask for `SHOT_LOG_CHUNK_LEN` bytes of a stored shot, starting at `offset`.
     ///
     /// The download is a sequence of these rather than one message: a stored shot runs

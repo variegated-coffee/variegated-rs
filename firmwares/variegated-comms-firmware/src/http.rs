@@ -35,14 +35,6 @@ type HttpServer = Server<2, DEFAULT_BUF_SIZE, DEFAULT_MAX_HEADERS_COUNT>;
 /// processor take the web UI down with it.
 const SHOT_LOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(5);
 
-/// How many shots `GET /shots` asks for.
-///
-/// A fixed cap rather than a query parameter: the path is matched exactly, so a
-/// `?limit=` would need query-string parsing that nothing else here does. The reply
-/// carries `truncated`, which is what a UI needs in order to say "the most recent N"
-/// rather than implying it has the whole card.
-const SHOT_LIST_LIMIT: u16 = 50;
-
 /// How long to wait for one chunk of a routine.
 ///
 /// The same five seconds as a shot-log request, and for the same reasons -- this occupies
@@ -108,7 +100,10 @@ use variegated_controller_types::{
     MachineCommand, MachineMode, PidParameterTarget, RoutineIndex, RoutineWriteError,
     RoutineWriteOutcome, ScaleSelector, ScheduleItem, ROUTINE_MAX_ENCODED_LEN,
 };
-use variegated_controller_types::shot_log::{ShotAnnotations, ShotLogId, ShotLogStorageError};
+use variegated_controller_types::shot_log::{
+    ShotAnnotations, ShotLogDayFilter, ShotLogId, ShotLogListRequest, ShotLogStorageError,
+    SHOT_LOG_PAGE_LEN,
+};
 
 use crate::api_types::{
     RoutineSummaryStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
@@ -1267,20 +1262,27 @@ impl HttpHandler {
         index_str.parse().ok()
     }
 
-    /// Split `/shots/<day>/<time>[/tail]` into the shot it names and whatever follows.
+    /// Eight digits, exactly.
     ///
-    /// Returns the trailing segment so one parser serves both the download
-    /// (`/shots/20260809/16423349`) and the annotation edit
-    /// (`/shots/20260809/16423349/annotations`) -- the alternative is two nearly
-    /// identical parsers that can disagree about what a valid id looks like.
+    /// Checked for width rather than merely parsed, because the card stores a time
+    /// zero-padded: a shot filed as `00000042` must not be addressable as `42`.
+    fn parse_shot_time(time: &str) -> Option<u32> {
+        if time.len() != 8 || !time.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        time.parse().ok()
+    }
+
+    /// Split `<day>/<time>[/tail]` into the shot it names and whatever follows.
+    ///
+    /// One parser for every route that names a shot -- the download, the annotation edit,
+    /// the delete and the paging cursor -- so they cannot disagree about what a valid id
+    /// looks like.
     ///
     /// The day component goes through [`ShotLogId::parse_dir_name`], the same function
     /// the storage layer uses when walking the card, so `NODATE` is accepted here exactly
-    /// where it is accepted there and a stray directory is rejected in both places. The
-    /// time component is checked for eight digits rather than merely parsed, so `/shots/
-    /// 20260809/7` cannot address the shot stored as `00000007`.
-    fn parse_shot_path(path: &str) -> Option<(ShotLogId, &str)> {
-        let rest = path.strip_prefix("/shots/")?;
+    /// where it is accepted there and a stray directory is rejected in both places.
+    fn parse_shot_id(rest: &str) -> Option<(ShotLogId, &str)> {
         let (day_str, tail) = rest.split_once('/')?;
         let day = ShotLogId::parse_dir_name(day_str)?;
 
@@ -1288,30 +1290,61 @@ impl HttpHandler {
             Some((time, remainder)) => (time, remainder),
             None => (tail, ""),
         };
-        if time_str.len() != 8 || !time_str.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let time = time_str.parse().ok()?;
+        let time = Self::parse_shot_time(time_str)?;
 
         Some((ShotLogId { day, time }, remainder))
     }
 
-    // GET /shots
+    /// `/shots/<day>/<time>[/tail]`.
+    fn parse_shot_path(path: &str) -> Option<(ShotLogId, &str)> {
+        Self::parse_shot_id(path.strip_prefix("/shots/")?)
+    }
+
+    /// `<day>` or `<day>/before/<time>`, from a `/shots/day/…` route.
+    ///
+    /// The cursor carries only a time, because the route has already fixed the day; the
+    /// full id is rebuilt from both so the storage layer compares the same thing it
+    /// compares everywhere else.
+    fn parse_day_page(rest: &str) -> Option<(ShotLogDayFilter, Option<ShotLogId>)> {
+        let (day_str, tail) = match rest.split_once('/') {
+            Some((day, tail)) => (day, tail),
+            None => (rest, ""),
+        };
+        let day = ShotLogId::parse_dir_name(day_str)?;
+        let filter = match day {
+            Some(value) => ShotLogDayFilter::Day(value),
+            None => ShotLogDayFilter::Undated,
+        };
+
+        if tail.is_empty() {
+            return Some((filter, None));
+        }
+        let time = Self::parse_shot_time(tail.strip_prefix("before/")?)?;
+        Some((filter, Some(ShotLogId { day, time })))
+    }
+
+    // GET /shots, /shots/before/…, /shots/day/…
     async fn handle_get_shots<T, const N: usize>(
         &self,
         conn: &mut ServerConnection<'_, T, N>,
+        day: ShotLogDayFilter,
+        before: Option<ShotLogId>,
     ) -> Result<(), Error<T::Error>>
     where
         T: Read + Write,
     {
-        log_info!("GET /shots");
+        log_info!("GET shots (day {:?}, before {:?})", day, before);
 
-        match shot_log_request(
-            ShotLogRequest::List { limit: SHOT_LIST_LIMIT },
-            SHOT_LOG_TIMEOUT,
-        )
-        .await
-        {
+        // `SHOT_LOG_PAGE_LEN` rather than anything the client said. The count is the
+        // server's, so there is no parameter to validate and no way for a client to ask
+        // for a page the link cannot carry.
+        let request = ShotLogListRequest {
+            limit: SHOT_LOG_PAGE_LEN,
+            before,
+            day,
+        };
+
+        match shot_log_request(ShotLogRequest::List(request), SHOT_LOG_TIMEOUT).await {
             Ok(ShotLogReply::List(list)) => match postcard::to_allocvec(&list) {
                 Ok(binary) => Self::send_binary(conn, &binary).await,
                 Err(e) => {
@@ -1639,8 +1672,29 @@ impl Handler for HttpHandler {
             // to be: `parse_shot_path` would reject "pending" as a day, so the order is
             // not load-bearing for correctness -- but relying on that would mean a future
             // day format that happened to accept it would silently steal this route.
-            (Method::Get, "/shots") => self.handle_get_shots(conn).await,
+            (Method::Get, "/shots") => {
+                self.handle_get_shots(conn, ShotLogDayFilter::All, None).await
+            }
             (Method::Put, "/shots/pending") => self.handle_put_pending_annotations(conn).await,
+
+            // The two paging routes, registered **above** the `/shots/<day>/<time>`
+            // download arm below. Unlike the `/shots/pending` ordering note, this one is
+            // load-bearing: `parse_shot_path` rejects "before" and "day" as day
+            // components, so without these arms first both paths answer 400.
+            (Method::Get, p) if p.starts_with("/shots/before/") => {
+                match Self::parse_shot_id(p.strip_prefix("/shots/before/").unwrap_or("")) {
+                    Some((id, "")) => {
+                        self.handle_get_shots(conn, ShotLogDayFilter::All, Some(id)).await
+                    }
+                    _ => Self::send_bad_request(conn, "Invalid shot cursor").await,
+                }
+            }
+            (Method::Get, p) if p.starts_with("/shots/day/") => {
+                match Self::parse_day_page(p.strip_prefix("/shots/day/").unwrap_or("")) {
+                    Some((day, before)) => self.handle_get_shots(conn, day, before).await,
+                    None => Self::send_bad_request(conn, "Invalid shot day").await,
+                }
+            }
             (Method::Get, p) if p.starts_with("/shots/") => {
                 match Self::parse_shot_path(p) {
                     Some((id, "")) => self.handle_get_shot(conn, id).await,

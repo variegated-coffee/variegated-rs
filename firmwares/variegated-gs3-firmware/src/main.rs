@@ -46,7 +46,7 @@ use embassy_rp::pio::Pio;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use futures::future::join_all;
 
-use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog};
+use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog, ShotLogDayFilter, ShotLogListRequest};
 // Only the PWM steam valve build declares a steam wand or drives a solenoid through one.
 // These stay on their own `use` lines rather than joining the lists above precisely so the
 // cfg can be attached -- a name folded into an ungated list becomes an unused import in a
@@ -1496,7 +1496,7 @@ async fn handle_shot_log_query(card: &mut SdStorage, query: ShotLogQuery) -> Sho
     use variegated_controller_lib::shot_log_storage::ShotLogStorage;
 
     match query {
-        ShotLogQuery::List { limit } => match card.list_shots(limit as usize).await {
+        ShotLogQuery::List(request) => match card.list_shots(request).await {
             Ok(list) => {
                 // Logged here rather than at the requester, because the two requesters
                 // want the same thing and only one of them can take the reply off the
@@ -1838,9 +1838,11 @@ async fn debug_command_task(
                 // `try_send`: a full depth-1 channel means a request is already in
                 // flight, and the honest response to a debug command in that case is to
                 // say so rather than to queue behind it.
-                let query = ShotLogQuery::List {
+                let query = ShotLogQuery::List(ShotLogListRequest {
                     limit: SD_LIST_SHOTS_LIMIT,
-                };
+                    before: None,
+                    day: ShotLogDayFilter::All,
+                });
                 if SHOT_LOG_QUERY_CHANNEL.try_send(query).is_err() {
                     log_warn!("SD list requested, but a shot-log request is already in flight");
                 }

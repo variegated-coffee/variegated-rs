@@ -9,7 +9,7 @@ use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
-    ShotAnnotations, ShotLogId, ShotLogList, ShotLogStorageError,
+    ShotAnnotations, ShotLogId, ShotLogList, ShotLogListRequest, ShotLogStorageError,
 };
 use variegated_controller_types::debug_command::DebugCommand;
 use esphome_device::{ClientEvent, StateChange};
@@ -484,7 +484,7 @@ pub fn load_address48(slot: &AtomicU64) -> Option<[u8; 6]> {
 /// only the two reads have to wait for an answer.
 #[derive(Clone, Debug)]
 pub enum ShotLogRequest {
-    List { limit: u16 },
+    List(ShotLogListRequest),
     Chunk { id: ShotLogId, offset: u32 },
 }
 

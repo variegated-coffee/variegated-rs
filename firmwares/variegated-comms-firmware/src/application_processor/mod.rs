@@ -706,8 +706,8 @@ pub async fn start(
                 // pairing at all.
                 Either4::Fourth(Either::Second(Either::Second(Either4::First(request)))) => {
                     let message = match request {
-                        ShotLogRequest::List { limit } => {
-                            CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit }
+                        ShotLogRequest::List(request) => {
+                            CommsProcessorToApplicationProcessorMessage::RequestShotLogList(request)
                         }
                         ShotLogRequest::Chunk { id, offset } => {
                             CommsProcessorToApplicationProcessorMessage::RequestShotLogChunk {

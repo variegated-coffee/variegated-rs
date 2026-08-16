@@ -436,6 +436,62 @@ pub const SHOT_LOG_LIST_BUDGET: usize = 3_800;
 // `variegated-comms` is the 4096 this refers to.
 const _: () = assert!(SHOT_LOG_LIST_BUDGET + 296 <= 4096);
 
+/// Which days a listing covers.
+///
+/// An enum rather than an `Option<u32>`, and the reason is that `None` is already taken:
+/// [`ShotLogId::day`] uses it for *undated*, so an `Option` here would have to mean
+/// *every day* and the two would be indistinguishable in the one type that carries both.
+/// An `Option<Option<u32>>` says both and reads as neither, in Rust and in the generated
+/// TypeScript alike.
+///
+/// **Append-only.** postcard encodes an enum as its declaration-order discriminant.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShotLogDayFilter {
+    /// Every day directory on the card.
+    All,
+    /// One `YYYYMMDD` directory.
+    Day(u32),
+    /// `SHOTS/NODATE` -- shots taken before the clock synced.
+    Undated,
+}
+
+/// One page of a listing.
+///
+/// One type with three consumers -- the wire message, the cross-core query and the
+/// storage trait -- so there is nothing to keep in step. It lives here rather than beside
+/// the storage code for the reason [`SHOT_LOG_CHUNK_LEN`] does: it is a wire shape, and
+/// this crate is what the schema exporter, the CLI and the comms firmware all link
+/// against.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShotLogListRequest {
+    /// At most this many entries. [`SHOT_LOG_LIST_BUDGET`] may cut the page shorter.
+    pub limit: u16,
+    /// Resume strictly *after* this shot in the listing order, or start at the newest.
+    ///
+    /// Compared with [`ShotLogId::listing_follows`], **not** with the derived `Ord`,
+    /// which disagrees about undated shots. A skipped entry is never opened, which is
+    /// what makes a later page cost no more than the first.
+    pub before: Option<ShotLogId>,
+    pub day: ShotLogDayFilter,
+}
+
+impl ShotLogListRequest {
+    /// The newest page, unfiltered -- what a client asks for first.
+    pub const fn newest() -> Self {
+        Self {
+            limit: SHOT_LOG_PAGE_LEN,
+            before: None,
+            day: ShotLogDayFilter::All,
+        }
+    }
+}
+
 /// What went wrong with a shot-log operation, at the granularity a caller can act on.
 ///
 /// Deliberately coarse: nothing above the storage layer can do anything differently for a
@@ -509,10 +565,14 @@ pub enum ShotLogStorageError {
 pub struct ShotLogList {
     /// Newest first.
     pub entries: Vec<ShotLogListEntry>,
-    /// More shots exist on the card than were returned.
+    /// There is another page after the last entry here.
     ///
-    /// Present so a capped listing cannot be mistaken for the whole card -- the UI says
-    /// "the most recent N" rather than implying there are no others.
+    /// Set when the count bound or [`SHOT_LOG_LIST_BUDGET`] ended the page with matching
+    /// shots still unvisited. A client resumes by sending the last entry's id as
+    /// [`ShotLogListRequest::before`].
+    ///
+    /// The name predates paging, where it meant "the card holds more than this"; under a
+    /// cursor that is the same computation and the same fact.
     pub truncated: bool,
 }
 
@@ -1440,5 +1500,28 @@ mod shot_log_page_tests {
     #[test]
     fn one_maximal_entry_always_fits() {
         assert!(maximal_entry().encoded_len_upper_bound() <= SHOT_LOG_LIST_BUDGET);
+    }
+
+    /// The request round-trips, including the three-way day filter.
+    ///
+    /// `ShotLogDayFilter` is an enum rather than an `Option<u32>` because `None` would
+    /// have to mean *every day* while `ShotLogId::day: None` already means *undated*.
+    /// This pins that all three cases survive the wire distinctly.
+    #[test]
+    fn a_list_request_round_trips_every_day_filter() {
+        for day in [
+            ShotLogDayFilter::All,
+            ShotLogDayFilter::Day(20_260_809),
+            ShotLogDayFilter::Undated,
+        ] {
+            let request = ShotLogListRequest {
+                limit: SHOT_LOG_PAGE_LEN,
+                before: Some(ShotLogId { day: None, time: 42 }),
+                day,
+            };
+            let encoded = postcard::to_allocvec(&request).unwrap();
+            let decoded: ShotLogListRequest = postcard::from_bytes(&encoded).unwrap();
+            assert_eq!(decoded, request);
+        }
     }
 }

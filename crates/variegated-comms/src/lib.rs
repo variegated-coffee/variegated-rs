@@ -880,11 +880,15 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         // cache comparison to swallow it.
                                     }
                                 }
-                                CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit } => {
-                                    info!("Shot log list requested by ESP32 (limit {})", limit);
+                                CommsProcessorToApplicationProcessorMessage::RequestShotLogList(request) => {
+                                    info!(
+                                        "Shot log page requested by ESP32 (limit {}, cursor {:?})",
+                                        request.limit,
+                                        request.before
+                                    );
                                     forward_shot_log_query(
                                         shot_log_query_sender.as_ref(),
-                                        ShotLogQuery::List { limit },
+                                        ShotLogQuery::List(request),
                                         &tx_sender,
                                     );
                                 }
@@ -1157,10 +1161,15 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                     // cannot flood the queue the way high-rate debug frames can -- and
                     // dropping it would leave the far side waiting out a timeout for an
                     // answer this processor had already produced.
-                    if let Ok(output) = to_allocvec_cobs(&response) {
+                    //
+                    // Through `frame_for_link`, not a bare encode. An oversized frame is
+                    // *lost* on the far side rather than truncated, so without this an
+                    // overrun and a dead link are the same event -- which is exactly how
+                    // the old `Routines` reply failed. `SHOT_LOG_LIST_BUDGET` is what
+                    // keeps a listing under the limit; this is what says so out loud on
+                    // the day something else does not.
+                    if let Some(output) = frame_for_link(&response, "a shot log reply") {
                         let _ = tx_sender.send(output).await;
-                    } else {
-                        info!("Failed to serialize shot log reply");
                     }
                 }
             },

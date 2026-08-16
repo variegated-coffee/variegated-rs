@@ -21,7 +21,8 @@
 //! card reader beyond two enum definitions nobody constructs.
 
 use variegated_controller_types::{
-    ShotAnnotations, ShotLogId, ShotLogList, ShotLogStorageError, SHOT_LOG_CHUNK_LEN,
+    ShotAnnotations, ShotLogId, ShotLogList, ShotLogListRequest, ShotLogStorageError,
+    SHOT_LOG_CHUNK_LEN,
 };
 
 /// A request for the storage task.
@@ -35,8 +36,8 @@ use variegated_controller_types::{
 // a `Format` impl monomorphized there has no `_defmt_acquire` to link against.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum ShotLogQuery {
-    /// The most recent `limit` shots, newest first.
-    List { limit: u16 },
+    /// One page of the listing, newest first.
+    List(ShotLogListRequest),
     /// Up to [`SHOT_LOG_CHUNK_LEN`] bytes of a stored record, starting at `offset`.
     Chunk { id: ShotLogId, offset: u32 },
     /// Replace a stored shot's annotations, rewriting the whole record.
