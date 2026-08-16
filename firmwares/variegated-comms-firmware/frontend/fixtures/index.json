@@ -7,6 +7,9 @@
   { "name": "ws_request_routines", "schema": "WsMessageSchema" },
   { "name": "ws_request_configuration", "schema": "WsMessageSchema" },
   { "name": "shot_log_list", "schema": "ShotLogListSchema" },
+  { "name": "shot_log_list_page_two", "schema": "ShotLogListSchema" },
+  { "name": "ws_shot_log_stored", "schema": "WsMessageSchema" },
+  { "name": "ws_shot_log_deleted", "schema": "WsMessageSchema" },
   { "name": "routine_summaries", "schema": "RoutineSummaryStorageSchema" },
   { "name": "ws_routines_update", "schema": "WsMessageSchema" },
   { "name": "routine", "schema": "RoutineSchema" }

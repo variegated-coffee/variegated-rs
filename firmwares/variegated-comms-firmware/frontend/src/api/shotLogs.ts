@@ -1,5 +1,5 @@
 import { ShotAnnotations, ShotAnnotationsSchema, ShotLogId, ShotLogList, ShotLogListSchema } from '../schemas/schemas';
-import { fetchPostcard, postEmpty, putPostcard } from '../utils/postcard';
+import { deleteRequest, fetchPostcard, postEmpty, putPostcard } from '../utils/postcard';
 
 /**
  * Shot logs live on the machine's SD card, not in the WebSocket status stream.
@@ -41,13 +41,56 @@ export function shotDownloadUrl(id: ShotLogId): string {
   return `/shots/${shotDayPath(id)}/${shotTimePath(id)}`;
 }
 
+/** Which shots a listing covers. `'NODATE'` is the undated directory. */
+export interface ShotLogPageOptions {
+  day?: number | 'NODATE';
+  /** Resume strictly after this shot. Take it from the last entry of the previous page. */
+  before?: ShotLogId;
+}
+
 /**
- * The most recent shots on the card, newest first.
+ * One page of shots, newest first.
  *
- * The list may be capped -- check `truncated` before telling a user this is everything.
+ * Ten at a time, or fewer -- the machine cuts a page short when the entries are heavy
+ * enough to threaten the inter-processor link's frame limit. **Check `truncated` rather
+ * than the entry count** to decide whether another page exists; a short page is not the
+ * last page.
+ *
+ * The count is the machine's, not ours: there is no `limit` parameter, so a client cannot
+ * ask for a page the link cannot carry.
+ *
+ * Paths are segments rather than a query string because the firmware's router matches
+ * paths exactly and parses no query at all.
+ *
+ * `day` is callable but nothing in the UI passes it yet.
  */
-export async function fetchShotLogs(): Promise<ShotLogList> {
-  return fetchPostcard('/shots', ShotLogListSchema);
+export async function fetchShotLogs(options: ShotLogPageOptions = {}): Promise<ShotLogList> {
+  const { day, before } = options;
+
+  let path: string;
+  if (day !== undefined) {
+    const dayPath = day === 'NODATE' ? 'NODATE' : String(day).padStart(8, '0');
+    path = before
+      ? `/shots/day/${dayPath}/before/${shotTimePath(before)}`
+      : `/shots/day/${dayPath}`;
+  } else {
+    path = before
+      ? `/shots/before/${shotDayPath(before)}/${shotTimePath(before)}`
+      : '/shots';
+  }
+
+  return fetchPostcard(path, ShotLogListSchema);
+}
+
+/**
+ * Remove a shot from the card.
+ *
+ * **Queued, not confirmed.** A 200 means the command reached the machine's command
+ * channel; whether the file is gone arrives afterwards as a `ShotLogEvent` of kind
+ * `Deleted`. A delete that fails on the card produces no event, and the row stays.
+ */
+export async function deleteShotLog(id: ShotLogId): Promise<void> {
+  return deleteRequest(`/shots/${shotDayPath(id)}/${shotTimePath(id)}`);
 }
 
 /**

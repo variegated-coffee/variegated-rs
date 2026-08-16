@@ -16,7 +16,8 @@ import {
   PumpConfiguration,
   RoutineIndex,
   ScheduleItem,
-  BluetoothPeripheralAssociation
+  BluetoothPeripheralAssociation,
+  ShotLogEvent
 } from '../schemas/schemas';
 
 export interface WebSocketServiceCallbacks {
@@ -24,6 +25,14 @@ export interface WebSocketServiceCallbacks {
   onConfigurationUpdate?: (config: Configuration) => void;
   onMachineDefinition?: (def: MachineDefinition) => void;
   onRoutinesUpdate?: (routines: RoutineSummaryStorage) => void;
+  /**
+   * A shot was stored or deleted on the card.
+   *
+   * Unprompted, and the only shot-log traffic on this socket -- listings and downloads
+   * are HTTP. There is no retry and no initial request: an event is a fact about a
+   * moment, and a client that connects afterwards fetches a page instead.
+   */
+  onShotLogEvent?: (event: ShotLogEvent) => void;
   onCommandAck?: (id: number, success: boolean, error?: string) => void;
   onConnect?: () => void;
   onDisconnect?: () => void;
@@ -189,6 +198,10 @@ export class WebSocketService {
             this.routinesRetryTimer = null;
           }
           this.callbacks.onRoutinesUpdate?.(message.value);
+          break;
+        case 'ShotLogEvent':
+          console.log('Received ShotLogEvent:', message.value);
+          this.callbacks.onShotLogEvent?.(message.value);
           break;
         case 'CommandAck': {
           const ack = message.value as { id: number; success: boolean; error: string | null };

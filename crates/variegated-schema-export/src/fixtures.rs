@@ -793,6 +793,31 @@ pub fn all() -> Vec<Fixture> {
             &WsMessage::RequestConfiguration,
         ),
         fixture("shot_log_list", "ShotLogListSchema", &shot_log_list()),
+        fixture(
+            "shot_log_list_page_two",
+            "ShotLogListSchema",
+            &shot_log_list_page_two(),
+        ),
+        // Both event shapes. `Stored` carries an entry and `Deleted` a bare id, so a
+        // decoder that confused the two would read the id as the front of an entry and
+        // build a row out of whatever followed.
+        fixture(
+            "ws_shot_log_stored",
+            "WsMessageSchema",
+            &WsMessage::ShotLogEvent(ShotLogEvent::Stored(ShotLogListEntry {
+                id: ShotLogId { day: Some(20_260_809), time: 17_000_101 },
+                size_bytes: 48_112,
+                annotations: ShotAnnotations::new(),
+            })),
+        ),
+        fixture::<WsMessage>(
+            "ws_shot_log_deleted",
+            "WsMessageSchema",
+            &WsMessage::ShotLogEvent(ShotLogEvent::Deleted(ShotLogId {
+                day: None,
+                time: 42,
+            })),
+        ),
         // The routine listing, which until now had **no fixture at all**: `roots.rs`
         // emitted its schema and nothing ever serialised one, so the response every
         // client depends on had never been round-tripped. It is here now because the
@@ -910,6 +935,23 @@ fn shot_log_list() -> ShotLogList {
             },
         ],
         truncated: true,
+    }
+}
+
+/// The page after [`shot_log_list`], as a cursor would fetch it.
+///
+/// `truncated: false`, so it is also the fixture that proves a UI stops offering "load
+/// older" at the end rather than looping on an empty page. One entry rather than three,
+/// because a short final page is the shape a real card produces and the one a client that
+/// assumed full pages would mishandle.
+fn shot_log_list_page_two() -> ShotLogList {
+    ShotLogList {
+        entries: vec![ShotLogListEntry {
+            id: ShotLogId { day: Some(20_260_808), time: 8_150_000 },
+            size_bytes: 12_004,
+            annotations: ShotAnnotations::new(),
+        }],
+        truncated: false,
     }
 }
 

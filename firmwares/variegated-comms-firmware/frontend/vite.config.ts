@@ -41,6 +41,37 @@ export default defineConfig({
             '/shots': 'fixtures/shot_log_list.bin'
           }
 
+          // Paging and deletion, which the exact-match table above cannot express: a
+          // cursor puts a shot id in the path, so the second page is any `/shots/before/`
+          // rather than one fixed string.
+          //
+          // DELETE answers 200 with no body, exactly as the firmware does -- it queues a
+          // command and says nothing about whether the file went away. Nothing is removed
+          // from the fixture, so the mocked panel keeps the row until a push it will
+          // never get here. That is the honest shape of the real thing; the place to
+          // exercise the push is a machine.
+          if (req.url?.startsWith('/shots/') && req.method === 'DELETE') {
+            res.statusCode = 200
+            res.end('Delete queued')
+            console.log(`[mock-data] Queued delete for ${req.url}`)
+            return
+          }
+          if (req.url?.startsWith('/shots/before/') || req.url?.startsWith('/shots/day/')) {
+            const pagePath = path.resolve(__dirname, 'fixtures/shot_log_list_page_two.bin')
+            try {
+              res.setHeader('Content-Type', 'application/octet-stream')
+              res.setHeader('Access-Control-Allow-Origin', '*')
+              res.statusCode = 200
+              res.end(fs.readFileSync(pagePath))
+              console.log(`[mock-data] Served ${req.url} from shot_log_list_page_two.bin`)
+            } catch (error) {
+              console.error('[mock-data] Error reading the second page fixture:', error)
+              res.statusCode = 500
+              res.end(JSON.stringify({ error: 'Failed to load mock data' }))
+            }
+            return
+          }
+
           // Check if the request matches one of our mock endpoints
           if (req.url && mockDataMap[req.url]) {
             const mockFile = mockDataMap[req.url]

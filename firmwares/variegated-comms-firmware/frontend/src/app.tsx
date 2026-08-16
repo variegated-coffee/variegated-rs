@@ -9,6 +9,7 @@ import { JsonModal } from './components/JsonModal';
 import { MachineProvider } from './contexts/MachineContext';
 import { createWebSocketService, getWebSocketService } from './services/websocket';
 import { syncRoutineBodies } from './state/routineBodies';
+import { publishShotLogEvent } from './state/shotLogEvents';
 import {
   MachineDefinition,
   Status,
@@ -61,6 +62,11 @@ export function App() {
         // Start walking the definitions in the background. A no-op when the list is
         // unchanged, which is the usual case -- see `syncRoutineBodies`.
         syncRoutineBodies(newRoutines);
+      },
+      // Straight into the module store rather than into component state. The panel is the
+      // only consumer and it wants a stream, not a value -- see `state/shotLogEvents`.
+      onShotLogEvent: (event) => {
+        publishShotLogEvent(event);
       },
       onConnect: () => {
         setConnected(true);

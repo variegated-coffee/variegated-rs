@@ -1,0 +1,14 @@
+{
+  "ShotLogEvent": {
+    "Stored": {
+      "id": {
+        "day": 20260809,
+        "time": 17000101
+      },
+      "size_bytes": 48112,
+      "annotations": {
+        "entries": []
+      }
+    }
+  }
+}
