@@ -353,6 +353,53 @@ pub struct ShotLogListEntry {
     pub annotations: ShotAnnotations,
 }
 
+impl ShotLogListEntry {
+    /// Upper bound on this entry's postcard length.
+    ///
+    /// No allocation and no trial encode: it sums the annotation strings the entry
+    /// already holds, plus the widest varint each fixed field can produce. A listing
+    /// calls this once per entry it is about to return, on a device where the
+    /// alternative -- serialising each entry to measure it -- would allocate a page's
+    /// worth of throwaway buffers to answer a question about a page it is still
+    /// assembling.
+    ///
+    /// An *upper* bound rather than an exact length, so the arithmetic cannot be wrong
+    /// in the dangerous direction. Overestimating ends a page one entry early, which the
+    /// cursor handles for free; underestimating puts a frame on the link that the far
+    /// side silently drops.
+    pub fn encoded_len_upper_bound(&self) -> usize {
+        // `day: Option<u32>` is a one-byte tag plus a varint; `time: u32` is a varint.
+        // Five bytes is the widest a `u32` varint gets.
+        const ID_LEN: usize = 1 + 5 + 5;
+        // `size_bytes: u32`.
+        const SIZE_LEN: usize = 5;
+        // The annotation vector's length prefix. One byte, since MAX_SHOT_ANNOTATIONS
+        // is 8 and a varint below 128 is one byte.
+        const VEC_LEN: usize = 1;
+
+        let annotations: usize = self
+            .annotations
+            .iter()
+            .map(|annotation| {
+                // One byte of enum discriminant each, then the payload. A named key and
+                // a `Number` are their discriminant plus a fixed payload; the two
+                // string-carrying cases add their own length prefix.
+                let key = 1 + match &annotation.key {
+                    ShotAnnotationKey::Other(name) => 1 + name.len(),
+                    _ => 0,
+                };
+                let value = 1 + match &annotation.value {
+                    ShotAnnotationValue::Number(_) => 4,
+                    ShotAnnotationValue::Text(text) => 1 + text.len(),
+                };
+                key + value
+            })
+            .sum();
+
+        ID_LEN + SIZE_LEN + VEC_LEN + annotations
+    }
+}
+
 /// How many bytes one shot-log download chunk carries.
 ///
 /// Sized to sit inside the 4096-byte `CobsAccumulator` on both ends of the
@@ -363,6 +410,31 @@ pub struct ShotLogListEntry {
 /// [`crate::ApplicationProcessorToCommsProcessorMessage::ShotLogChunk`], so both
 /// processors have to agree on it or the decode fails outright.
 pub const SHOT_LOG_CHUNK_LEN: usize = 1024;
+
+/// How many entries one page of a listing asks for.
+///
+/// A *maximum*, not a promise: the byte budget below can end a page sooner, and
+/// [`ShotLogList::truncated`] is what says so.
+pub const SHOT_LOG_PAGE_LEN: u16 = 10;
+
+/// How many bytes of entries one page may carry.
+///
+/// A count alone is not a safe bound, and the reason is worth stating plainly. The
+/// inter-processor link reassembles through a `CobsAccumulator::<4096>` on both ends, and
+/// a frame at or over that length is not truncated on arrival -- it is *lost*: the
+/// accumulator overruns, discards and resynchronises on the next sentinel, so an
+/// oversized reply is indistinguishable from a dead link. A maximal [`ShotLogListEntry`]
+/// weighs about 561 bytes, so eight annotation-heavy shots already overrun. The previous
+/// fixed cap of fifty had that failure latent in it, and it was never hit only because no
+/// real card carried full annotation blocks.
+///
+/// 3,800 leaves 296 bytes for the reply's own discriminant, the vector's length prefix,
+/// the `truncated` flag and COBS' one-in-254 overhead.
+pub const SHOT_LOG_LIST_BUDGET: usize = 3_800;
+
+// The whole point of the constant, checked where it cannot rot. `LINK_FRAME_LIMIT` in
+// `variegated-comms` is the 4096 this refers to.
+const _: () = assert!(SHOT_LOG_LIST_BUDGET + 296 <= 4096);
 
 /// What went wrong with a shot-log operation, at the granularity a caller can act on.
 ///
@@ -1296,5 +1368,77 @@ mod routine_event_width_tests {
         };
         assert_eq!(event.to_step, 3u32);
         assert_eq!(event.from_step, Some(2u32));
+    }
+}
+
+/// That a page of a listing fits in a link frame.
+///
+/// Requires `serde`, since the whole question is about encoded lengths.
+#[cfg(all(test, feature = "serde"))]
+mod shot_log_page_tests {
+    use super::*;
+
+    /// An entry with every field at its bound: eight annotations, each with a maximal
+    /// custom key and a maximal text value.
+    fn maximal_entry() -> ShotLogListEntry {
+        let mut annotations = ShotAnnotations::new();
+        for i in 0..MAX_SHOT_ANNOTATIONS {
+            let mut key = heapless::String::<SHOT_ANNOTATION_KEY_LEN>::new();
+            core::fmt::Write::write_fmt(&mut key, format_args!("{:016}", i)).unwrap();
+            let mut value = heapless::String::<SHOT_ANNOTATION_TEXT_LEN>::new();
+            core::fmt::Write::write_fmt(&mut value, format_args!("{:048}", i)).unwrap();
+            annotations
+                .set(
+                    ShotAnnotationKey::Other(key),
+                    ShotAnnotationValue::Text(value),
+                )
+                .unwrap();
+        }
+        ShotLogListEntry {
+            id: ShotLogId { day: Some(20_260_809), time: 16_423_349 },
+            size_bytes: u32::MAX,
+            annotations,
+        }
+    }
+
+    /// The bound is an *upper* bound. It may overestimate; it must never underestimate,
+    /// because underestimating is what puts an oversized frame on the link.
+    #[test]
+    fn the_bound_is_never_below_the_real_length() {
+        for entry in [
+            maximal_entry(),
+            ShotLogListEntry {
+                id: ShotLogId { day: None, time: 0 },
+                size_bytes: 0,
+                annotations: ShotAnnotations::new(),
+            },
+        ] {
+            let actual = postcard::to_allocvec(&entry).unwrap().len();
+            assert!(
+                entry.encoded_len_upper_bound() >= actual,
+                "bound {} is below the real length {}",
+                entry.encoded_len_upper_bound(),
+                actual
+            );
+        }
+    }
+
+    /// The assertion that would have caught the bug this budget exists for: a full page
+    /// of maximal entries does *not* fit, so the count alone was never a safe bound.
+    #[test]
+    fn a_full_page_of_maximal_entries_exceeds_the_budget() {
+        let weight = maximal_entry().encoded_len_upper_bound();
+        assert!(
+            SHOT_LOG_PAGE_LEN as usize * weight > SHOT_LOG_LIST_BUDGET,
+            "if this ever stops being true the byte budget is dead code and should be \
+             removed rather than left to look like protection"
+        );
+    }
+
+    /// One entry always fits, which is what stops a page from coming back empty with
+    /// `truncated` set -- a client paging on that would loop forever.
+    #[test]
+    fn one_maximal_entry_always_fits() {
+        assert!(maximal_entry().encoded_len_upper_bound() <= SHOT_LOG_LIST_BUDGET);
     }
 }
