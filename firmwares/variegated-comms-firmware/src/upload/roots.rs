@@ -11,27 +11,48 @@
 //! The trailing NUL is inside the counted length -- MbedTLS requires it for PEM input.
 //! [`CStr`] gives that for free and refuses at compile time if an interior NUL creeps in.
 //!
-//! # Which roots, and why this set is provisional
+//! # Which root, and how it was chosen
 //!
-//! **These must be confirmed against the endpoint actually in use**, and re-confirmed if
-//! the hosting changes:
+//! **GTS Root R4 only**, because that is what `plantlet.variegated.coffee` actually chains
+//! to. Confirmed, not assumed:
 //!
 //! ```sh
-//! openssl s_client -connect <endpoint-host>:443 -showcerts </dev/null
+//! openssl s_client -connect plantlet.variegated.coffee:443 \
+//!     -servername plantlet.variegated.coffee -showcerts </dev/null
+//! #   0 s:CN=variegated.coffee          i:Google Trust Services, CN=WE1
+//! #   1 s:Google Trust Services, CN=WE1 i:Google Trust Services LLC, CN=GTS Root R4
+//! #   2 s:GTS Root R4                   i:GlobalSign nv-sa, CN=GlobalSign Root CA
+//!
+//! openssl s_client -connect plantlet.variegated.coffee:443 \
+//!     -servername plantlet.variegated.coffee -CAfile roots/gts-root-r4.pem </dev/null
+//! #   Verify return code: 0 (ok)
 //! ```
 //!
-//! Take the **root** the chain terminates at, not the intermediate -- an intermediate
-//! rotates far more often, and pinning one turns a routine renewal into a machine that
-//! silently stops uploading.
+//! The **root**, not the intermediate: `WE1` rotates far more often than R4, and pinning it
+//! would turn a routine renewal into a machine that silently stops uploading. The server
+//! also sends R4 cross-signed by GlobalSign Root CA (element 2 above); that path is not
+//! needed once R4 is a trust anchor in its own right, and MbedTLS stops there.
+//!
+//! **The first bundle here was ISRG Root X1** -- a reasonable guess at a self-hosted
+//! endpoint, and wrong: Let's Encrypt appears nowhere in this chain, so every handshake
+//! would have failed on an untrusted root once it got far enough to check. Guessing a trust
+//! anchor is not a shortcut worth taking; the `s_client` line above takes ten seconds.
+//!
+//! R4 is ECDSA P-384, which is why `curve-secp384r1` and `alg-sha512` are in the curated
+//! feature set. The whole chain is ECDSA -- the endpoint negotiates TLS 1.3 with
+//! `TLS_AES_256_GCM_SHA384` and an `ecdsa_secp256r1_sha256` peer signature -- so `alg-rsa`,
+//! `alg-rsa-pss` and `kex-ecdhe-rsa` are unused against *this* host. They are kept anyway:
+//! they cost flash rather than the heap that is actually scarce, and dropping them would
+//! make a move to an RSA-issued certificate fail as an obscure handshake error.
 //!
 //! Deliberately *not* a full Mozilla bundle. That is ~140 certificates: ~200 kB of flash,
 //! and worse, every one of them is parsed into heap at handshake time. This firmware talks
 //! to exactly one host, so the trust store should be the roots that host actually uses.
 //!
-//! Each root costs ~1.9 kB of `.rodata` here and ~1.5 kB of heap while parsed. The bundle
-//! is parsed inside an upload attempt and dropped afterwards rather than held resident:
-//! uploads happen once a shot, and holding kilobytes permanently to save a few tens of
-//! milliseconds of parsing is the wrong trade on a machine with ~2.4 kB of `.stack` spare.
+//! A root costs its PEM in `.rodata` -- 765 bytes for R4, against 1,939 for the RSA-4096
+//! ISRG X1 it replaced -- plus roughly a kilobyte of heap while parsed. The bundle is parsed
+//! inside an upload attempt and dropped afterwards rather than held resident: uploads happen
+//! once a shot, and the heap is the scarcest thing on this device during a handshake.
 //!
 //! [`Certificate`]: mbedtls_rs::Certificate
 //! [`CStr`]: core::ffi::CStr
@@ -49,7 +70,7 @@ use core::ffi::CStr;
 /// parse error at the first upload: a `panic!` reached in a `const` initializer is
 /// evaluated at compile time.
 const BUNDLE_TEXT: &str = concat!(
-    include_str!("roots/isrg-root-x1.pem"),
+    include_str!("roots/gts-root-r4.pem"),
     "\0"
 );
 

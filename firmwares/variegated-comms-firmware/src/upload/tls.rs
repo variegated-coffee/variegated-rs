@@ -37,6 +37,8 @@ use mbedtls_rs::{
     X509,
 };
 
+use variegated_log::log_info;
+
 use super::roots;
 use crate::channels;
 
@@ -139,10 +141,24 @@ pub enum ConnectError {
     BadServerName,
     /// TCP refused, unreachable, or timed out.
     Tcp,
-    /// The handshake failed. Carries MbedTLS's verification bitmask, which is non-zero
-    /// when the *certificate* was the problem and zero when it was anything else --
-    /// distinguishing "wrong endpoint or expired cert" from "the network dropped".
-    Handshake { verification_flags: u32 },
+    /// `Session::new` failed before a byte was sent. Almost always
+    /// `MBEDTLS_ERR_SSL_ALLOC_FAILED` (-0x7F00): setting a session up allocates the two
+    /// record buffers, the SSL context, the config and the DRBG, and that is the largest
+    /// single demand this firmware makes on the heap.
+    ///
+    /// Kept distinct from [`Self::Handshake`] because reporting it as one sends you
+    /// looking at the certificate for what is a memory problem.
+    SessionSetup { code: i32 },
+    /// The handshake failed. Carries both of MbedTLS's answers, which mean different
+    /// things:
+    ///
+    /// * `verification_flags` non-zero: the **certificate** was rejected -- untrusted
+    ///   root (0x08), expired (0x01), wrong host (0x04).
+    /// * `verification_flags` zero: the certificate was *not* the problem, or the
+    ///   handshake never got far enough to check one. Read `code` instead;
+    ///   -0x7F00 is an allocation failure, and on this device that is the first thing to
+    ///   suspect.
+    Handshake { code: i32, verification_flags: u32 },
 }
 
 /// The buffers a [`Session`] borrows for the life of the connection.
@@ -208,18 +224,40 @@ pub async fn connect<'a>(
         alpn_protocols: Some(&[c"http/1.1"]),
     });
 
-    let mut session =
-        Session::new(tls, socket, &config).map_err(|_| ConnectError::Handshake {
-            verification_flags: 0,
-        })?;
+    // Bracketing the heap around the session, which is the idiom `heap_free` exists for
+    // (see `docs/comms-firmware-memory-budget.md`): the high-water line only ever moves
+    // up and cannot attribute, so the difference either side of a suspect region is the
+    // only way to cost it. This region is the largest single heap demand in the firmware.
+    let heap_before = crate::debug::snapshot::heap_free();
 
-    match session.connect().await {
+    let mut session = Session::new(tls, socket, &config).map_err(|e| ConnectError::SessionSetup {
+        code: session_error_code(e),
+    })?;
+
+    let result = session.connect().await;
+    log_info!(
+        "TLS session: heap free {} -> {}",
+        heap_before,
+        crate::debug::snapshot::heap_free()
+    );
+
+    match result {
         Ok(()) => Ok(session),
-        Err(_) => Err(ConnectError::Handshake {
-            // Non-zero means the certificate was the problem -- expired, wrong host, or a
-            // root we do not carry. Zero means it was not, which is worth telling apart in
-            // a log line at three in the morning.
+        Err(e) => Err(ConnectError::Handshake {
+            code: session_error_code(e),
             verification_flags: session.tls_verification_details(),
         }),
+    }
+}
+
+/// The raw MbedTLS code, or 0 for an I/O error from the socket underneath.
+///
+/// The number matters more than the variant: `-0x7F00` is `MBEDTLS_ERR_SSL_ALLOC_FAILED`,
+/// and the difference between that and a certificate rejection is the difference between a
+/// memory problem and a trust problem.
+fn session_error_code(e: mbedtls_rs::SessionError) -> i32 {
+    match e {
+        mbedtls_rs::SessionError::MbedTls(e) => e.code(),
+        mbedtls_rs::SessionError::Io(_) => 0,
     }
 }

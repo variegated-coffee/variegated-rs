@@ -119,16 +119,30 @@ edge-nal-embassy = { workspace = true, features = ["tcp"] }
 # not fit, and `mbedtls-rs` exposes no way to reach `mbedtls_ssl_conf_max_frag_len`, so RFC
 # 6066 cannot rescue it either.
 #
-# Curated, at 8192/2048, the same arithmetic gives **8237 + 2093 = 10330**. Two of those
-# 672 bytes come from the feature list rather than the sizes: dropping `cipher-mode-cbc`
-# takes `MBEDTLS_SSL_PADDING_ADD` 256 -> 0 and `MAC_ADD` 48 -> 16, and dropping
-# `tls-proto-dtls` takes the CID expansion to 0.
+# Curated, at 4096/1024, the same arithmetic gives **4128 + 1056 = 5184**. Some of that
+# comes from the feature list rather than the sizes: dropping `cipher-mode-cbc` takes
+# `MBEDTLS_SSL_PADDING_ADD` 256 -> 0 and `MAC_ADD` 48 -> 16, and dropping `tls-proto-dtls`
+# takes the CID expansion to 0.
 #
-# `IN` is 8192 and not 4096 because MbedTLS must hold the server's entire `Certificate`
-# handshake message in one buffer, and a three-cert RSA-2048 chain is 4-5 kB. `OUT` is 2048
-# because the largest thing this firmware sends is a 1024-byte shot-log chunk.
+# # Why 4096 in, and the measurement behind it
+#
+# `IN` has to hold the server's entire `Certificate` handshake message in one buffer, so it
+# is bounded by the chain, not by a preference. This started at 8192 against a guess that a
+# three-cert RSA-2048 chain runs 4-5 kB. Measured against the real endpoint it is three
+# certs and ~2610 DER bytes, because the chain is ECDSA throughout:
+#
+#   openssl s_client -connect plantlet.variegated.coffee:443 \
+#       -servername plantlet.variegated.coffee -showcerts </dev/null
+#
+# 4096 therefore has ~1.4 kB of margin and buys back ~5 kB of heap, which is the resource
+# that actually ran out: the first on-device run peaked at 122,456 of 122,880 with 424
+# bytes to spare. **Re-measure the chain if the hosting changes** -- an RSA chain would be
+# roughly double and would not fit.
+#
+# `OUT` is 1024 because the largest thing this firmware sends is a 1024-byte shot-log chunk,
+# and the request head is under 512.
 mbedtls-rs = { workspace = true, features = [
-    "ssl-in-content-len-8192", "ssl-out-content-len-2048",
+    "ssl-in-content-len-4096", "ssl-out-content-len-1024",
     # X.509 validity dates. `hook-wall-clock` implies `hook-timer`. The clock is the
     # SNTP-synced one from `time.rs`; before the first sync the hook returns `None`, which
     # MbedTLS treats as both expired and not-yet-valid -- i.e. it fails closed.

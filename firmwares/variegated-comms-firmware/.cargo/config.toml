@@ -5,6 +5,31 @@ runner = "espflash flash --monitor --chip esp32c6 --log-format defmt --output-fo
 DEFMT_LOG="info"
 VARIEGATED_DEBUG_ALLOW_TCP_COMMANDS = "1"
 
+# The C compiler MbedTLS is built with, and without this the build does not work on macOS
+# at all.
+#
+# `mbedtls-rs-sys` compiles MbedTLS from source here rather than using its prebuilt
+# `riscv32imac-unknown-none-elf` archives, because those are built `#undef
+# MBEDTLS_HAVE_TIME` and the `hook-wall-clock` feature -- X.509 validity dates -- rejects
+# them. See the `mbedtls-rs` entry in this crate's Cargo.toml for the whole argument.
+#
+# Its cmake invocation passes `-DCMAKE_C_COMPILER` and resolves the bare name `clang` from
+# `PATH` unless `CLANG_PATH` is set (`gen/builder.rs:694`). **Apple's `/usr/bin/clang` has
+# no RISC-V backend**, so it resolves, compiles nothing, and fails cmake's compiler probe
+# with `No available targets are compatible with triple "riscv32-unknown-unknown"` -- which
+# names neither clang nor the reason.
+#
+# An env var here rather than telling everyone to prefix `PATH`, because this reaches every
+# caller the same way: `cargo build`, `scripts/cargo.sh`, `scripts/build-comms-firmware.sh`
+# and RustRover's Cargo run configurations all get it without any per-tool setup.
+#
+# Cargo's `[env]` does not override a variable already in the environment, so this is a
+# default rather than a policy: `export CLANG_PATH=/usr/local/opt/llvm/bin/clang` on an
+# Intel Mac, or a distro path on Linux, and that wins. Any clang with the RISC-V target
+# built in will do -- check with
+# `<clang> --print-targets | grep riscv32`.
+CLANG_PATH = "/opt/homebrew/opt/llvm/bin/clang"
+
 # Let smoltcp drain the whole RX queue in one poll instead of three packets at a time.
 #
 # esp-radio reports this as embassy-net's `max_burst_size` capability, and 0 is the

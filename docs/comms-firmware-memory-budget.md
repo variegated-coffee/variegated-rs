@@ -91,7 +91,32 @@ push that carries the whole `ShotLogListEntry`, so a browser renders the new row
 round trip. Still ~9 kB above the 87,256 recorded elsewhere as the lowest figure observed to
 survive, and well above the 90,144 that overflowed inside `esp_radio::wifi::new()`.
 
-### The shot uploader puts `.stack` at 90,256, and that needs confirming on hardware
+### The heap, not `.stack`, is what the uploader ran out of
+
+First on-device run, 2026-08-16: `.stack` held -- nothing crashed -- and the **heap peaked at
+122,456 of 122,880, 424 bytes short of the ceiling**, against 82,356 before TLS existed. The
+handshake failed with `verification_flags: 0`, i.e. not a certificate rejection, which is
+what an allocation failure inside `mbedtls_ssl_setup` looks like: MbedTLS returns
+`MBEDTLS_ERR_SSL_ALLOC_FAILED` rather than aborting, so the firmware stays up and the log
+says nothing about memory.
+
+Two things came out of that, and the second is the general lesson:
+
+* Record buffers cut from `IN=8192`/`OUT=2048` to `4096`/`1024` -- from 10,330 bytes per
+  session to 5,184 -- once the endpoint's certificate chain was *measured* at ~2,610 DER
+  bytes rather than guessed at 4-5 kB. The CA bundle also went from RSA-4096 ISRG X1 to
+  ECDSA P-384 GTS Root R4, which is the root that endpoint actually chains to and about a
+  kilobyte cheaper to parse.
+* **The `Heap high-water` line is the one to watch for this feature, not `Stack
+  high-water`.** Every earlier estimate in this document worried about `.stack`, because
+  that is what has historically bound this firmware. TLS inverted it: MbedTLS's statics
+  cost ~2.8 kB of `.stack` but its per-session allocations cost ~40 kB of heap.
+
+`upload::tls::connect` now brackets the session with `heap_free()` and logs
+`TLS session: heap free X -> Y`, so the next run attributes the cost directly instead of
+leaving it to be inferred from a high-water mark.
+
+### `.stack` sits at 90,256, which also needs confirming on hardware
 
 **This is the open question in this firmware.** The figure is below the 94,028 recorded
 peak and a hair above the 90,144 that overflowed inside `esp_radio::wifi::new()` -- but
