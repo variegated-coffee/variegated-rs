@@ -4990,6 +4990,7 @@ dependencies = [
  "variegated-log",
  "variegated-scale-trouble-driver",
  "variegated-schema-export",
+ "variegated-shot-upload",
  "variegated-trouble-connection-manager",
 ]
 
@@ -5394,6 +5395,19 @@ dependencies = [
  "variegated-control-algorithm",
  "variegated-controller-types",
  "variegated-postcard-schema",
+]
+
+[[package]]
+name = "variegated-shot-upload"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt 1.1.1",
+ "embassy-futures",
+ "embedded-io-async 0.7.0",
+ "heapless 0.9.3",
+ "mbedtls-rs",
+ "variegated-controller-types",
 ]
 
 [[package]]

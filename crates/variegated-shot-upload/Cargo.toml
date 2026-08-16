@@ -1,0 +1,92 @@
+[package]
+name         = "variegated-shot-upload"
+version      = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Everything about uploading a shot log that is not the ESP32-C6.
+#
+# # Why this is a crate and not a module in the firmware
+#
+# `variegated-comms-firmware` sets `[lib] harness = false`, under which cargo runs no tests
+# at all and reports success -- so anything decidable that lives there is untested by
+# construction. That is not a hypothetical: the first version of this code shipped with
+# ISRG Root X1 as its trust anchor against an endpoint that chains to GTS Root R4, and the
+# mistake survived to hardware twice because nothing could assert on it.
+#
+# What stays in the firmware is what genuinely needs the chip: the embassy task, DNS and the
+# TCP socket, the esp-hal SHA/RSA accelerator hooks, the SNTP-backed wall clock, and the
+# shot-log link. What lives here is everything else -- the trust anchors, URL parsing, HTTP
+# status policy, the TLS session configuration and the request framing -- all of it host
+# testable, and all of it tested.
+
+[lib]
+# Note the absence of `harness = false`, which is the entire point of this crate existing.
+bench = false
+
+[features]
+default = []
+# The TLS session and the trust-anchor tests.
+#
+# **Off by default because `mbedtls-rs-sys` does not build for an Apple host**, and this
+# crate has to stay testable on a developer machine. Three separate upstream gaps, all
+# reproducible with `cargo test -p variegated-shot-upload --features tls` on macOS:
+#
+#   1. Forcing clang makes the build pass its own bundled sysroot, whose `time_t` is
+#      `int64_t` against the macOS SDK's `long`:
+#      `_time_t.h:31:33: error: typedef redefinition with different types`.
+#      Avoidable with `use-gcc`, which is why the dev-dependency below sets it.
+#   2. Past that, the generated bindings reference a type they never emit:
+#      `error[E0425]: cannot find type __darwin_time_t in this scope`.
+#      (`bindings.rs:1295: pub type time_t = __darwin_time_t;`)
+#   3. And their own std wall-clock backend does not know about BSD's `struct tm`:
+#      `error[E0063]: missing fields tm_gmtoff and tm_zone`
+#      (`src/hook/backend/std/wall_clock.rs:29`).
+#
+# So the tests that need real MbedTLS run on Linux, in a container:
+# `scripts/test-mbedtls.sh`. Everything without a TLS dependency -- URL parsing, status
+# policy, request framing, which is where most of the decisions live -- tests everywhere.
+tls = ["dep:mbedtls-rs"]
+# `defmt::Format` on the error types, so a firmware can log one without reaching into its
+# fields. Off by default and never enabled for a host test: defmt declares `links = "defmt"`
+# and emits references to `_defmt_acquire` with no provider, so a host binary that
+# monomorphizes any `Format` impl fails to link -- as "Too many sections!", which mentions
+# neither defmt nor logging.
+defmt = ["dep:defmt", "mbedtls-rs?/defmt"]
+
+[dependencies]
+defmt = { workspace = true, optional = true }
+embedded-io-async = { workspace = true }
+heapless.workspace = true
+variegated-controller-types = { path = "../variegated-controller-types", default-features = false }
+# The algorithm surface, buffer sizes and clock hooks are properties of *this* use case, so
+# they are declared here rather than by each consumer. The firmware adds only its chip
+# feature (`esp32c6`), which cannot be named here because it pulls `esp-hal` and would stop
+# this crate building for a host at all.
+mbedtls-rs = { workspace = true, optional = true, features = [
+    "ssl-in-content-len-4096", "ssl-out-content-len-1024",
+    "hook-wall-clock",
+    "alg-sha512",
+    "alg-rsa", "alg-rsa-pss",
+    "kex-ecdhe-rsa",
+    "curve-secp384r1",
+] }
+
+[dev-dependencies]
+# A no_std block-on, so the framing tests need no async runtime. Already in the graph.
+embassy-futures.workspace = true
+# `std` brings `StdWallClock`, without which X.509 date checking has no clock and every
+# certificate reads as expired -- the chain test would then pass for the wrong reason.
+#
+# **No `use-gcc` here, and that is load-bearing.** It looks like the fix for the sysroot
+# collision, and it trades one failure for two worse ones: without the bundled sysroot,
+# bindgen reads the *system* `time.h`, emits `pub type time_t = __time_t` without the
+# typedef it names, and finds a `struct tm` carrying glibc/BSD's `tm_gmtoff`/`tm_zone` that
+# `mbedtls-rs-sys`'s own std backend does not fill in. Both were reproduced on Linux *and*
+# macOS -- it is not a platform quirk, it is what leaving the sysroot behind does.
+mbedtls-rs = { workspace = true, features = ["std"] }
+# `mbedtls-rs-sys` keeps its hook globals behind a `critical_section::Mutex`, and that crate
+# is a facade: someone in the graph has to supply the implementation or the test binary
+# fails to link with `undefined reference to _critical_section_1_0_acquire`. On the device
+# esp-hal provides it; here `std` does.
+critical-section = { version = "1", features = ["std"] }

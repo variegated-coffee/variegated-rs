@@ -40,10 +40,11 @@ members = [
     "crates/variegated-board-cfg",
     "crates/variegated-board-cfg-tests",
 
-    # The ESP32-C6 comms side. The first five are portable no_std and would build for
+    # The ESP32-C6 comms side. The first six are portable no_std and would build for
     # either architecture; only `variegated-comms-firmware` is riscv32-only, and it is the
     # reason for `default-members` below.
     "crates/variegated-comms-api-types",
+    "crates/variegated-shot-upload",
     "crates/variegated-trouble-connection-manager",
     "crates/variegated-belka-portal-trouble-driver",
     "crates/variegated-scale-trouble-driver",
@@ -56,9 +57,10 @@ members = [
 # nothing relevant. `default-members` is what keeps a bare `cargo build` meaning "the
 # RP2350 side", which is what it has always meant.
 #
-# The six comms crates are deliberately *all* absent from this list, not just the
-# riscv-only firmware. Including the five portable ones would compile the whole BLE stack
-# for thumbv8m on every build, and -- less obviously -- resolver 2 unifies features across
+# The seven comms crates are deliberately *all* absent from this list, not just the
+# riscv-only firmware. Including the six portable ones would compile the whole BLE stack
+# for thumbv8m on every build -- and `variegated-shot-upload` would build MbedTLS from
+# source for it, which is worse. Less obviously, resolver 2 unifies features across
 # one invocation's graph, so `variegated-comms-api-types` asking for
 # `variegated-controller-types/serde` would newly enable serde inside the espresso
 # firmwares. They still get compile coverage: every comms firmware build compiles them.

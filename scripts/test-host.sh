@@ -42,12 +42,17 @@ run() {
 # `load_settings` maps a deserialization error to `Default`.
 run "variegated-controller-types" -p variegated-controller-types --no-default-features --features serde,std,sequential-storage "$@"
 
-# The decidable half of shot-log upload -- URL parsing and HTTP status classification.
+# Shot-log upload: URL parsing, HTTP status policy and request framing.
 #
-# It lives here rather than in `variegated-comms-firmware` because that crate sets
-# `[lib] harness = false`, under which cargo runs no tests at all and reports success. No
-# `--no-default-features`: this crate's default feature set is empty and it pulls no defmt.
-run "variegated-comms-api-types" -p variegated-comms-api-types "$@"
+# It lives outside `variegated-comms-firmware` because that crate sets `[lib] harness =
+# false`, under which cargo runs no tests at all and reports success.
+#
+# **Without `--features tls`, which is deliberate.** That feature pulls MbedTLS, which does
+# not build for an Apple host, and this gate has to run anywhere. The trust-anchor tests it
+# gates -- the ones that would have caught shipping the wrong root -- run in a Linux
+# container instead: `scripts/test-mbedtls.sh`. Run that too when the roots, the endpoint or
+# the MbedTLS feature set change.
+run "variegated-shot-upload" -p variegated-shot-upload "$@"
 run "variegated-debug-codec" -p variegated-debug-codec "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"

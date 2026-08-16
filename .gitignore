@@ -1,4 +1,8 @@
 /target
+# The Linux container's build directory (`scripts/test-mbedtls.sh`). Kept separate from
+# `/target` because Apple-host and Linux object files cannot share one, and pointing both
+# at the same path makes every invocation rebuild the world.
+/target-docker
 test-bin
 
 # `/debug/` is anchored, unlike the unanchored `debug/` this used to be in

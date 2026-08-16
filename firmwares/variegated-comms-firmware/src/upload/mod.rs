@@ -1,47 +1,47 @@
-//! Uploading finished shot logs to a remote HTTPS endpoint.
+//! Uploading finished shot logs to a remote HTTPS endpoint -- the ESP32-C6 half.
 //!
 //! The application processor holds the endpoint and token and pushes them over the link
 //! ([`channels::SHOT_UPLOAD_CONFIG`]); this side does the network. It also holds the shots
 //! -- there is no SD card on this processor -- so a shot is pulled 1 kB at a time over the
 //! UART link and written straight into the TLS session.
 //!
+//! # What is here, and what deliberately is not
+//!
+//! Everything in this module needs the chip: the embassy task, DNS and the TCP socket, the
+//! esp-hal SHA/RSA accelerator hooks, the SNTP-backed wall clock, and the shot-log link.
+//!
+//! Everything with a *decision* in it lives in [`variegated_shot_upload`], which is a
+//! separate crate for one reason: `variegated-comms-firmware` sets `[lib] harness = false`,
+//! under which cargo runs no tests and reports success. Trust anchors, URL parsing, HTTP
+//! status policy and request framing are all over there, and all tested. The rule that keeps
+//! the split honest: **no status-code branching and no URL slicing in this file.**
+//!
 //! # Live only
 //!
 //! A shot is uploaded when `ShotLogEvent::Stored` arrives and never otherwise. There is no
-//! watermark, no backfill and no persisted record of what has gone up: this processor has
-//! no flash, and putting that state on the application processor is a bigger change than
-//! the feature is worth. A shot recorded while the network is down does not reach the
-//! endpoint, and the browser's download is the recovery path.
-//!
-//! # Nothing here decides anything
-//!
-//! URL parsing and HTTP status handling live in `variegated_comms_api_types::upload`,
-//! which is host-tested. This module contains no `if code == 429` and no string slicing of
-//! URLs; it calls `parse_https_url` once and `classify_status` once. The firmware crate
-//! sets `[lib] harness = false`, under which cargo runs no tests and reports success, so
-//! anything decidable that lives here is untested by construction.
-
-pub mod roots;
-pub mod tls;
+//! watermark, no backfill and no persisted record of what has gone up: this processor has no
+//! flash, and putting that state on the application processor is a bigger change than the
+//! feature is worth. A shot recorded while the network is down does not reach the endpoint,
+//! and the browser's download is the recovery path.
 
 use alloc::{boxed::Box, vec};
-use core::fmt::Write as _;
 use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{select, Either};
 use embassy_net::dns::DnsQueryType;
+use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::pubsub::WaitResult;
 use embassy_time::{with_timeout, Duration, Timer};
-use embedded_io_async::Write;
-use variegated_comms_api_types::upload::{
-    classify_status, parse_https_url, retry_delay, UploadOutcome, MAX_ATTEMPTS,
-    MAX_RETRY_AFTER_SECS,
-};
 use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::shot_log::{ShotLogEvent, ShotLogId, ShotLogListEntry};
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_log::{log_info, log_warn};
+use variegated_shot_upload::body::{self, Chunk, ChunkSource};
+use variegated_shot_upload::{
+    classify_status, parse_https_url, retry_delay, session, UploadOutcome, MAX_ATTEMPTS,
+    MAX_RETRY_AFTER_SECS,
+};
 
 use crate::channels::{
     self, shot_log_request, ShotLogEventSubscriber, ShotLogReply, ShotLogRequest,
@@ -55,18 +55,38 @@ const SHOT_LOG_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// The hard guarantee that nothing stalls forever, and deliberately outside every
 /// finer-grained timeout rather than instead of them. Dropping the attempt future
-/// mid-handshake is safe: the `Session` and its `TcpSocket` go with it, and the next
-/// attempt starts from a fresh connection.
+/// mid-handshake is safe: the session and its socket go with it, and the next attempt starts
+/// from a fresh connection.
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Anything larger is refused by the endpoint, so do not spend link time pulling it.
 const MAX_UPLOAD_BYTES: u32 = 4 * 1024 * 1024;
 
+/// How long a connect or a stalled read/write may take before the socket gives up.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Receive buffer for the outbound socket.
+///
+/// **Heap, not a `static`.** Every byte of `.bss` costs a byte of `.stack` one for one, and
+/// the margin on this chip is a couple of kilobytes. It is also why the socket is an
+/// `embassy_net::tcp::TcpSocket` taking plain slices rather than an `edge_nal_embassy::Tcp`,
+/// which needs a `TcpBuffers<N, TX, RX>` pool -- a fixed-size array with nowhere to live but
+/// a static.
+///
+/// It must *not* borrow from `bin/main.rs`'s `TcpBuffers<2, 4096, 4096>`: that pool's socket
+/// count is pinned 1:1 to the HTTP server's handler count, so taking one would stop port 80
+/// listening.
+const TCP_RX_LEN: usize = 1536;
+
+/// Transmit buffer, sized against two maximum segments (2 x 1452) for the same reason the
+/// HTTP server's is: under 2 MSS interacts badly with Nagle. Shot bytes arrive 1 kB at a
+/// time, so this is several chunks of runway.
+const TCP_TX_LEN: usize = 4096;
+
 /// Why one attempt did not upload the shot.
 ///
-/// No `defmt::Format`: it wraps `UploadOutcome`, which lives in a crate with no defmt
-/// dependency and should not gain one for this. Nothing formats this type anyway -- it is
-/// matched on, and each arm logs its own line.
+/// No `defmt::Format`: it wraps `UploadOutcome`, from a crate with no defmt dependency.
+/// Nothing formats this -- it is matched on, and each arm logs its own line.
 #[derive(Debug)]
 enum AttemptError {
     /// The endpoint string is not a usable HTTPS URL. Permanent until reconfigured.
@@ -82,6 +102,92 @@ enum AttemptError {
     Http(UploadOutcome),
 }
 
+/// The wall clock MbedTLS reads for X.509 validity dates.
+///
+/// A unit struct over two atomics, which is what makes it `Sync` without an `unsafe impl`.
+/// `esp_hal::rtc_cntl::Rtc<'d>` holds a peripheral singleton and is not `Sync`, so it cannot
+/// satisfy the `&'static (dyn MbedtlsWallClock + Send + Sync)` the hook wants -- and an
+/// *unset* RTC reads as a valid 1970 timestamp, which would fail closed only by accident.
+struct SyncedWallClock;
+
+static WALL_CLOCK: SyncedWallClock = SyncedWallClock;
+
+/// The monotonic clock, for handshake timeouts. Unrelated to the wall clock: MbedTLS keeps
+/// the two separate, and only the wall clock affects certificate validity.
+static TIMER: mbedtls_rs::sys::hook::backend::embassy::timer::EmbassyTimer =
+    mbedtls_rs::sys::hook::backend::embassy::timer::EmbassyTimer;
+
+impl mbedtls_rs::sys::hook::wall_clock::MbedtlsWallClock for SyncedWallClock {
+    /// `None` until SNTP has answered, which MbedTLS reads as the certificate being both
+    /// expired and not yet valid. That is intended: a machine with no idea what year it is
+    /// cannot meaningfully check a validity window, and the safe answer to "I don't know" is
+    /// to refuse.
+    fn instant(&self) -> Option<mbedtls_rs::sys::tm> {
+        if !channels::TIME_SYNCED.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        // Anchor plus elapsed, rather than reading the `Rtc`: this is called from MbedTLS's
+        // C code with no context to hand one.
+        let anchor_secs = channels::SNTP_UNIX_SECS.load(Ordering::Relaxed) as i64;
+        let anchor_ms = channels::LAST_SNTP_SYNC_MS.load(Ordering::Relaxed);
+        let elapsed_secs =
+            embassy_time::Instant::now().as_millis().saturating_sub(anchor_ms) / 1000;
+        let unix = anchor_secs.saturating_add(elapsed_secs as i64);
+
+        let timestamp = jiff::Timestamp::from_second(unix).ok()?;
+        let dt = jiff::tz::TimeZone::UTC.to_datetime(timestamp);
+
+        Some(mbedtls_rs::sys::tm {
+            tm_sec: dt.second() as i32,
+            tm_min: dt.minute() as i32,
+            tm_hour: dt.hour() as i32,
+            tm_mday: dt.day() as i32,
+            // C counts months from zero and years from 1900. Getting either wrong shifts
+            // every certificate's validity window by a month or a century, and the symptom is
+            // a handshake failing on a date error against a perfectly good certificate.
+            tm_mon: dt.month() as i32 - 1,
+            tm_year: dt.year() as i32 - 1900,
+            tm_wday: dt.date().weekday().to_sunday_zero_offset() as i32,
+            tm_yday: dt.date().day_of_year() as i32 - 1,
+            // No DST in UTC, and MbedTLS's date comparison does not read this anyway.
+            tm_isdst: 0,
+        })
+    }
+}
+
+/// Install the clock hooks. Must run before the first handshake.
+///
+/// `unsafe` because the hooks are global state MbedTLS reads from C. Both arguments are
+/// `'static` unit structs, so there is nothing that can dangle.
+fn install_hooks() {
+    unsafe {
+        mbedtls_rs::sys::hook::timer::hook_timer(Some(&TIMER));
+        mbedtls_rs::sys::hook::wall_clock::hook_wall_clock(Some(&WALL_CLOCK));
+    }
+}
+
+/// Shot bytes, fetched a chunk at a time over the inter-processor link.
+///
+/// # The lock is never held across the network
+///
+/// `shot_log_request` takes `SHOT_LOG_LOCK` per call and drops it on return, so by the time
+/// this returns the lock is free and the caller's TLS write happens outside it. That is
+/// load-bearing rather than incidental: holding it across a write would put every browser
+/// shot-log request behind a stalled socket.
+struct LinkChunkSource;
+
+impl ChunkSource for LinkChunkSource {
+    async fn chunk(&mut self, id: ShotLogId, offset: u32) -> Option<Chunk> {
+        match shot_log_request(ShotLogRequest::Chunk { id, offset }, SHOT_LOG_TIMEOUT).await {
+            Ok(ShotLogReply::Chunk { id, offset, total, last, bytes }) => {
+                Some(Chunk { id, offset, total, last, bytes })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Upload finished shots as they are recorded.
 #[embassy_executor::task]
 pub async fn shot_upload_task(
@@ -91,14 +197,13 @@ pub async fn shot_upload_task(
     rsa: esp_hal::peripherals::RSA<'static>,
 ) -> ! {
     // Before the first handshake, and once: these are global hooks MbedTLS reads from C.
-    tls::install_hooks();
+    install_hooks();
 
     // One `Tls` may exist at a time, and it owns the RNG for the program's life.
     //
     // `Trng` rather than `Rng`: only `Trng` implements `TryCryptoRng`, which is what
     // `Tls::new` requires. `try_new` succeeds because `esp_radio::wifi::new` has already
-    // bumped the entropy source counter by the time this task runs; it needs no ADC and no
-    // peripheral of its own.
+    // bumped the entropy source counter by the time this task runs.
     static RNG: static_cell::StaticCell<esp_hal::rng::Trng> = static_cell::StaticCell::new();
     let tls = match esp_hal::rng::Trng::try_new() {
         Ok(trng) => match mbedtls_rs::Tls::new(RNG.init(trng)) {
@@ -109,7 +214,7 @@ pub async fn shot_upload_task(
     };
 
     // Scoped to the task rather than to an attempt: the queue must be alive across every
-    // `session.connect()`, and there is exactly one uploader.
+    // handshake, and there is exactly one uploader.
     //
     // **Not optional.** Without the `exp_mod` hook, verifying an RSA-4096 root is software
     // big-int on a 160 MHz core inside one call with no yield point -- long enough to trip
@@ -156,8 +261,8 @@ pub async fn shot_upload_task(
 
 /// Report why uploads are off, then park forever.
 ///
-/// Parking rather than returning: returning from a task frees its pool slot, and a slot
-/// that can never be refilled is worse than a task that is visibly idle.
+/// Parking rather than returning: returning from a task frees its pool slot, and a slot that
+/// can never be refilled is worse than a task that is visibly idle.
 async fn park(message: &str, reason: &'static str) -> ! {
     log_warn!("{}", message);
     bus::emit_event(DebugEvent::ShotUploadFailed { reason: name(reason) });
@@ -280,8 +385,8 @@ async fn attempt_upload(
 ) -> Result<(), AttemptError> {
     let url = parse_https_url(endpoint).map_err(|_| AttemptError::BadEndpoint)?;
 
-    // Checked before opening a socket rather than left to surface as a handshake failure,
-    // so the log line names the actual cause.
+    // Checked before opening a socket rather than left to surface as a handshake failure, so
+    // the log line names the actual cause.
     if !channels::TIME_SYNCED.load(Ordering::Relaxed) {
         return Err(AttemptError::NoClock);
     }
@@ -299,8 +404,8 @@ async fn attempt_upload(
     };
 
     // NUL-terminated, for SNI and the certificate's CN/SAN check. `parse_https_url` has
-    // already bounded the host to 253 bytes and rejected anything outside the host
-    // alphabet, so neither push can fail on a URL that got this far.
+    // already bounded the host to 253 bytes and rejected anything outside the host alphabet,
+    // so neither push can fail on a URL that got this far.
     let mut server_name = heapless::String::<256>::new();
     if server_name.push_str(url.host).is_err() || server_name.push('\0').is_err() {
         return Err(AttemptError::BadEndpoint);
@@ -308,129 +413,67 @@ async fn attempt_upload(
     let server_name = core::ffi::CStr::from_bytes_with_nul(server_name.as_bytes())
         .map_err(|_| AttemptError::BadEndpoint)?;
 
-    let mut buffers = tls::SocketBuffers::new();
-    let mut session = tls::connect(
-        tls.reference(),
-        stack,
-        &mut buffers,
-        embassy_net::IpEndpoint::new(addr, url.port),
-        server_name,
-    )
-    .await
-    .map_err(|e| {
-        log_warn!("Shot upload: TLS connect failed: {:?}", e);
-        AttemptError::Network
-    })?;
+    // `vec![0u8; n]` rather than `Box::new([0u8; n])`: the latter builds the array on the
+    // stack first, and this task is polled on the one executor stack everything shares.
+    let mut rx = vec::from_elem(0u8, TCP_RX_LEN);
+    let mut tx = vec::from_elem(0u8, TCP_TX_LEN);
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    socket.set_timeout(Some(SOCKET_TIMEOUT));
+    socket
+        .connect(embassy_net::IpEndpoint::new(addr, url.port))
+        .await
+        .map_err(|_| AttemptError::Network)?;
 
-    // Chunk zero *before* a byte of the request goes out. Once `Content-Length` is on the
-    // wire we are committed to producing exactly that many bytes, and a card that turns
-    // out to be missing could then only be expressed by hanging up mid-body. Same ordering
-    // `HttpHandler::handle_get_shot` documents, for a stronger reason.
-    let (first, total, last) =
-        match shot_log_request(ShotLogRequest::Chunk { id, offset: 0 }, SHOT_LOG_TIMEOUT).await {
-            Ok(ShotLogReply::Chunk { bytes, total, last, .. }) => (bytes, total, last),
-            _ => return Err(AttemptError::Link),
-        };
+    // Bracketing the heap around the session, the idiom `heap_free` exists for: the
+    // high-water line only moves up and cannot attribute, so the difference either side of a
+    // suspect region is the only way to cost it. This is the largest single heap demand in
+    // the firmware.
+    let heap_before = crate::debug::snapshot::heap_free();
 
-    let mut head = heapless::String::<512>::new();
-    let _ = write!(
-        head,
-        "POST {} HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Authorization: Bearer {}\r\n\
-         Content-Type: application/octet-stream\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n",
-        url.path, url.host, token, total
+    let mut tls_session = session::connect(tls.reference(), socket, server_name)
+        .await
+        .map_err(|e| {
+            log_warn!("Shot upload: TLS connect failed: {:?}", e);
+            AttemptError::Network
+        })?;
+
+    log_info!(
+        "TLS session: heap free {} -> {}",
+        heap_before,
+        crate::debug::snapshot::heap_free()
     );
 
-    session
-        .write_all(head.as_bytes())
+    // Chunk zero *before* a byte of the request goes out. Once `Content-Length` is on the
+    // wire we are committed to producing exactly that many bytes, and a card that turns out
+    // to be missing could then only be expressed by hanging up mid-body. Fetched here rather
+    // than inside `body::send` so "no such shot" and "the link died" stay distinguishable.
+    let mut source = LinkChunkSource;
+    let first = source.chunk(id, 0).await.ok_or(AttemptError::Link)?;
+
+    let head = body::request_head(url.path, url.host, token, first.total);
+
+    body::send(&mut tls_session, &mut source, id, first, &head)
         .await
-        .map_err(|_| AttemptError::Network)?;
+        .map_err(|e| match e {
+            body::BodyError::Source => AttemptError::Link,
+            body::BodyError::Write => AttemptError::Network,
+        })?;
 
-    stream_body(&mut session, id, first, total, last).await?;
-    read_response(&mut session).await
-}
-
-/// Pump the shot from the link into the session, lockstep, one chunk at a time.
-///
-/// # The lock is never held across the network
-///
-/// `shot_log_request` takes `SHOT_LOG_LOCK` per call and drops it on return, so the `await`
-/// on the request has *finished* before the `write_all` below is entered. That ordering is
-/// load-bearing rather than incidental: holding the lock across a TLS write would put every
-/// browser shot-log request behind a stalled socket. Keep the two statements in this order.
-async fn stream_body<T>(
-    session: &mut mbedtls_rs::Session<'_, T>,
-    id: ShotLogId,
-    first: vec::Vec<u8>,
-    total: u32,
-    mut last: bool,
-) -> Result<(), AttemptError>
-where
-    T: embedded_io_async::Read + embedded_io_async::Write,
-{
-    let mut written = first.len() as u32;
-    session
-        .write_all(&first)
-        .await
-        .map_err(|_| AttemptError::Network)?;
-
-    while !last {
-        let (bytes, chunk_last) = match shot_log_request(
-            ShotLogRequest::Chunk { id, offset: written },
-            SHOT_LOG_TIMEOUT,
-        )
-        .await
-        {
-            Ok(ShotLogReply::Chunk { id: reply_id, offset, bytes, last, .. }) => {
-                // `SHOT_LOG_LOCK` should make a mismatch impossible; checked anyway,
-                // because splicing another shot's bytes into this upload is a corruption no
-                // consumer could detect -- the CRC fails on a file that looks structurally
-                // fine, and nothing points at where it came from.
-                if reply_id != id || offset != written {
-                    return Err(AttemptError::Link);
-                }
-                (bytes, last)
-            }
-            _ => return Err(AttemptError::Link),
-        };
-
-        // A chunk that would take us past `Content-Length` means the shot grew or the far
-        // side is confused. Either way the promise already on the wire cannot be kept.
-        if bytes.is_empty() || written as u64 + bytes.len() as u64 > total as u64 {
-            return Err(AttemptError::Link);
-        }
-
-        session
-            .write_all(&bytes)
-            .await
-            .map_err(|_| AttemptError::Network)?;
-        written += bytes.len() as u32;
-        last = chunk_last;
-    }
-
-    if written != total {
-        return Err(AttemptError::Link);
-    }
-    session.flush().await.map_err(|_| AttemptError::Network)?;
-
-    Ok(())
+    read_response(&mut tls_session).await
 }
 
 /// Read the status line and decide what it means.
 ///
-/// The body is never read: `Connection: close` means there is nothing to drain, and the
-/// only things worth knowing are the code and `Retry-After`.
+/// The body is never read: `Connection: close` means there is nothing to drain, and the only
+/// things worth knowing are the code and `Retry-After`. Note there is no branching on the
+/// code here -- [`classify_status`] owns that, and it is tested.
 async fn read_response<T>(session: &mut mbedtls_rs::Session<'_, T>) -> Result<(), AttemptError>
 where
     T: embedded_io_async::Read + embedded_io_async::Write,
 {
     let mut buf = vec::from_elem(0u8, 640);
-    // Boxed so it never lands inline in the task future, where it would cost `.stack`.
-    // `16` rather than 8 because a CDN in front of the endpoint routinely sends more, and
+    // Boxed so it never lands inline in the task future, where it would cost `.stack`. `16`
+    // rather than 8 because a CDN in front of the endpoint routinely sends more, and
     // `receive` returns `TooManyHeaders` rather than truncating.
     let mut response = Box::new(edge_http::ResponseHeaders::<16>::new());
 

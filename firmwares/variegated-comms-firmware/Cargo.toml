@@ -141,6 +141,14 @@ edge-nal-embassy = { workspace = true, features = ["tcp"] }
 #
 # `OUT` is 1024 because the largest thing this firmware sends is a 1024-byte shot-log chunk,
 # and the request head is under 512.
+# Everything about uploading a shot that is not the chip: trust anchors, URL parsing, HTTP
+# status policy, the TLS session configuration and request framing -- all host-tested, which
+# nothing in *this* crate can be (`[lib] harness = false`). `tls` is what compiles its
+# MbedTLS-dependent half; see that crate's Cargo.toml for why it is not on by default.
+variegated-shot-upload = { path = "../../crates/variegated-shot-upload", features = ["tls", "defmt"] }
+# Named here as well so this firmware can add the chip feature. `variegated-shot-upload`
+# cannot: `esp32c6` pulls `esp-hal` and would stop that crate building for a host, which is
+# the whole point of it. Cargo unifies the two into one feature set for this build.
 mbedtls-rs = { workspace = true, features = [
     "ssl-in-content-len-4096", "ssl-out-content-len-1024",
     # X.509 validity dates. `hook-wall-clock` implies `hook-timer`. The clock is the
