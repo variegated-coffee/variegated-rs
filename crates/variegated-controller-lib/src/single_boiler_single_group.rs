@@ -26,6 +26,7 @@ use crate::pump_transfer::{PumpPidEngagement, PumpPidTransfer};
 use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
 };
+use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -217,6 +218,7 @@ pub struct SingleBoilerSingleGroupController<
     SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
+    UploadStoreT: SettingsStorage<ShotUploadConfig>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
@@ -325,6 +327,16 @@ pub struct SingleBoilerSingleGroupController<
     // Where credentials go for the transceiver to put on the link. A `Watch` rather than a
     // channel because only the latest value matters.
     wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
+
+    // Where finished shot logs are uploaded, at its own key in the settings flash range.
+    // Same shape and same reasoning as the Wi-Fi trio above: its own key rather than a
+    // field on the persistent configuration, and its own publish rather than riding
+    // `Configuration`, because the token is a secret and that path ends at the browser.
+    shot_upload_store: UploadStoreT,
+    shot_upload_config: ShotUploadConfig,
+    shot_upload_config_loaded: bool,
+    shot_upload_publish_pending: bool,
+    shot_upload_config_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, ShotUploadConfig, 2>>,
 }
 
 impl<
@@ -334,11 +346,12 @@ impl<
     SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
+    UploadStoreT: SettingsStorage<ShotUploadConfig>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, BluetoothStoreT, WifiStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> SingleBoilerSingleGroupConfiguration {
         SingleBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -371,6 +384,11 @@ impl<
         // Where credentials go for the transceiver to put on the link. `None` on a machine
         // with no comms processor.
         wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
+        shot_upload_store: UploadStoreT,
+        // Where the shot-log upload config goes for the transceiver to put on the link.
+        // `None` on a machine with no comms processor -- which is also a machine that
+        // cannot upload anything, so the config is stored and simply never acted on.
+        shot_upload_config_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, ShotUploadConfig, 2>>,
         // Already `start`ed by the caller, with `crate::WATCHDOG_TIMEOUT` -- the same
         // constant `task()` feeds it with. embassy-rp 0.10's `feed` sets the new timeout
         // rather than merely refreshing the old one, so the two values have to agree --
@@ -446,6 +464,11 @@ impl<
             identify_publisher,
             clear_wifi_credentials_signal,
             wifi_credentials_publisher,
+            shot_upload_store,
+            shot_upload_config: ShotUploadConfig::default(),
+            shot_upload_config_loaded: false,
+            shot_upload_publish_pending: false,
+            shot_upload_config_publisher,
         }
     }
 
@@ -480,6 +503,16 @@ impl<
             log_warn!("Failed to save Wi-Fi credentials");
         }
         self.wifi_publish_pending = true;
+    }
+
+    /// Persist the shot-log upload config and arrange for the comms processor to hear
+    /// about it. Same reasoning as `save_wifi_credentials` directly above, and for a
+    /// sharper reason: the token grants write access to an account on a public service.
+    async fn save_shot_upload_config(&mut self) {
+        if self.shot_upload_store.save_settings(&self.shot_upload_config).await.is_err() {
+            log_warn!("Failed to save shot upload config");
+        }
+        self.shot_upload_publish_pending = true;
     }
 
     /// Forget the stored network, persistently.
@@ -551,6 +584,21 @@ impl<
                 self.wifi_publish_pending = true;
             }
 
+            // Same lazy load again, for the upload config.
+            if !self.shot_upload_config_loaded {
+                self.shot_upload_config_loaded = true;
+                self.shot_upload_config =
+                    self.shot_upload_store.load_settings().await.unwrap_or_default();
+                // The endpoint is not a secret and is the field you need when uploads go
+                // somewhere unexpected; the token is reported only as present-or-not.
+                log_info!(
+                    "Shot upload: endpoint {}, token {}",
+                    if self.shot_upload_config.endpoint.is_some() { "configured" } else { "none stored" },
+                    if self.shot_upload_config.token.is_some() { "configured" } else { "none stored" }
+                );
+                self.shot_upload_publish_pending = true;
+            }
+
             // Credentials go out on their own channel, never inside `Configuration` --
             // that path ends at the browser. Checked here rather than folded into the
             // configuration comparison below for the same reason.
@@ -558,6 +606,14 @@ impl<
                 self.wifi_publish_pending = false;
                 if let Some(publisher) = self.wifi_credentials_publisher.as_ref() {
                     publisher.send(self.wifi_credentials.clone());
+                }
+            }
+
+            // Separately again, and for the same reason: the upload token is a secret.
+            if self.shot_upload_publish_pending {
+                self.shot_upload_publish_pending = false;
+                if let Some(publisher) = self.shot_upload_config_publisher.as_ref() {
+                    publisher.send(self.shot_upload_config.clone());
                 }
             }
 
@@ -1670,6 +1726,23 @@ impl<
                     self.wifi_credentials = stored;
                     self.save_wifi_credentials().await;
                     log_info!("Stored new Wi-Fi credentials");
+                }
+            }
+            MachineCommand::SetShotUploadConfig(config) => {
+                // Persisted without validation, for a different reason than the Wi-Fi arm
+                // above: this processor *could* parse the URL, but it is not the one that
+                // uses it. The comms processor parses it at upload time and reports what
+                // it found; two parsers on one string with nothing keeping them in
+                // agreement is worse than one.
+                if self.shot_upload_config != config {
+                    self.shot_upload_config = config;
+                    self.save_shot_upload_config().await;
+                    // Never the token, and not even its length -- see the type's `Debug`.
+                    log_info!(
+                        "Stored shot upload config: endpoint {}, token {}",
+                        if self.shot_upload_config.endpoint.is_some() { "set" } else { "cleared" },
+                        if self.shot_upload_config.token.is_some() { "set" } else { "cleared" }
+                    );
                 }
             }
             MachineCommand::OpenWifiProvisioningWindow { duration_ms } => {

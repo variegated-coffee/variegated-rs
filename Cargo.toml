@@ -322,6 +322,12 @@ edge-nal = "0.7.0"
 edge-nal-embassy = "0.9.0"
 edge-net = "0.14.0"
 edge-ws = { version = "0.8.0", default-features = false }
+# TLS for shot-log upload. `default-features = false` lives here rather than on the member
+# for the same cargo reason as `esp-println` above, and it matters more: the default `tls`
+# bundle compiles in every algorithm MbedTLS has, and the algorithm set is what determines
+# the per-connection record-buffer overhead. The member selects a curated set; see the
+# comment there, which is where the arithmetic lives.
+mbedtls-rs = { version = "0.1.0", default-features = false }
 embedded-io = "0.7.1"
 embedded-io-async = "0.7.0"
 smoltcp = { version = "0.13.1", default-features = false }

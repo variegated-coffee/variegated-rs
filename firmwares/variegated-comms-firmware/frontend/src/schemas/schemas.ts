@@ -300,6 +300,11 @@ export const ShotStateSchema = enumType('ShotState', {
   PostFirstDrop: unitVariant('PostFirstDrop')
 });
 
+export const ShotUploadConfigSchema = struct({
+  endpoint: option(string()),
+  token: option(string())
+});
+
 export const SteamWandConfigurationSchema = struct({
   temperature_target: option(f32()),
   openness: option(u8()),
@@ -859,7 +864,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   SetWifiCredentials: newtypeVariant('SetWifiCredentials', WifiCredentialsSchema),
   IdentifyMachine: unitVariant('IdentifyMachine'),
   RequestConfiguration: unitVariant('RequestConfiguration'),
-  DeleteShotLog: newtypeVariant('DeleteShotLog', ShotLogIdSchema)
+  DeleteShotLog: newtypeVariant('DeleteShotLog', ShotLogIdSchema),
+  SetShotUploadConfig: newtypeVariant('SetShotUploadConfig', ShotUploadConfigSchema)
 });
 
 export const WsMessageSchema = enumType('WsMessage', {
@@ -967,6 +973,7 @@ export type ShotLogEvent = InferType<typeof ShotLogEventSchema>;
 export type ShotLogId = InferType<typeof ShotLogIdSchema>;
 export type ShotLogListEntry = InferType<typeof ShotLogListEntrySchema>;
 export type ShotState = InferType<typeof ShotStateSchema>;
+export type ShotUploadConfig = InferType<typeof ShotUploadConfigSchema>;
 export type StateCondition = InferType<typeof StateConditionSchema>;
 export type SteamWandConfiguration = InferType<typeof SteamWandConfigurationSchema>;
 export type SteamWandDefinition = InferType<typeof SteamWandDefinitionSchema>;

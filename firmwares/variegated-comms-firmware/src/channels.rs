@@ -240,6 +240,36 @@ pub const WIFI_CREDENTIAL_RECEIVERS: usize = 1;
 /// [`RequestWifiCredentials`]: variegated_controller_types::CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials
 pub static WIFI_CREDENTIALS_RECEIVED: AtomicBool = AtomicBool::new(false);
 
+/// Where finished shot logs are uploaded, and the token that authorises it.
+///
+/// **`Box`ed, unlike every other payload on this page.** A `Watch` stores its value inline
+/// in a `static`, and `ShotUploadConfig` is ~330 bytes of `heapless::String`; `.bss` costs
+/// `.stack` one for one and the margin is ~2.4 kB (see the block above `heap_allocator!` in
+/// `bin/main.rs`). The same call [`SHOT_LOG_REPLY`] makes about its 1 kB chunk.
+///
+/// Written from the UART reader with `send`, which never awaits and never fails -- the same
+/// no-back-pressure requirement [`WIFI_CREDENTIALS`] has.
+pub static SHOT_UPLOAD_CONFIG: Watch<
+    CriticalSectionRawMutex,
+    alloc::boxed::Box<variegated_controller_types::shot_upload::ShotUploadConfig>,
+    SHOT_UPLOAD_CONFIG_RECEIVERS,
+> = Watch::new();
+
+/// Receiver slots on [`SHOT_UPLOAD_CONFIG`]. One, for the upload task.
+pub const SHOT_UPLOAD_CONFIG_RECEIVERS: usize = 1;
+
+/// Whether the application processor has answered [`RequestShotUploadConfig`] at all.
+///
+/// Set on **receipt**, never on the endpoint being present -- the same trap
+/// [`WIFI_CREDENTIALS_RECEIVED`] documents, and easier to fall into here because the
+/// payload has its own empty state rather than being an `Option`. A machine that has never
+/// been configured for uploads answers with a default `ShotUploadConfig`, and that is a
+/// complete answer; testing for `endpoint.is_some()` would make such a machine re-ask
+/// every ten seconds forever.
+///
+/// [`RequestShotUploadConfig`]: variegated_controller_types::CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig
+pub static SHOT_UPLOAD_CONFIG_RECEIVED: AtomicBool = AtomicBool::new(false);
+
 /// An open provisioning window, in milliseconds, or zero to close one.
 ///
 /// The application processor decides whether a window may open -- it is the only side that

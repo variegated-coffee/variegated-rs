@@ -96,6 +96,56 @@ edge-http.workspace = true
 edge-ws.workspace = true
 edge-nal.workspace = true
 edge-nal-embassy = { workspace = true, features = ["tcp"] }
+# TLS for shot-log upload, with real X.509 verification.
+#
+# # This forces MbedTLS to be built from source, and that is not a preference
+#
+# `mbedtls-rs-sys` ships prebuilt `.a`s for `riscv32imac-unknown-none-elf`, but they are
+# compiled with `#undef MBEDTLS_HAVE_TIME` and `#undef MBEDTLS_HAVE_TIME_DATE`. X.509
+# `notBefore`/`notAfter` checking needs both, so `hook-wall-clock` rejects the prebuilt set
+# and rebuilds. The build therefore needs cmake, ninja and a clang that can target riscv32
+# -- Apple's cannot, so `CC_riscv32imac_unknown_none_elf` must point at Homebrew's LLVM (or
+# enable `use-gcc` + `force-esp-riscv-gcc`). See `scripts/build-comms-firmware.sh`.
+#
+# That would be a poor trade on its own. It is not a trade, because the buffers below
+# require the same rebuild:
+#
+# # The record buffers, which are the reason any of this fits
+#
+# `MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH` is not defined, so `mbedtls_ssl_setup` allocates
+# `IN` and `OUT` in full for the life of the session and never shrinks them. At the `tls`
+# bundle's 16384 defaults that is 16765 + 16765 = **33530 bytes per connection**, against a
+# heap with ~40 kB spare (see the block above `heap_allocator!` in `bin/main.rs`). It does
+# not fit, and `mbedtls-rs` exposes no way to reach `mbedtls_ssl_conf_max_frag_len`, so RFC
+# 6066 cannot rescue it either.
+#
+# Curated, at 8192/2048, the same arithmetic gives **8237 + 2093 = 10330**. Two of those
+# 672 bytes come from the feature list rather than the sizes: dropping `cipher-mode-cbc`
+# takes `MBEDTLS_SSL_PADDING_ADD` 256 -> 0 and `MAC_ADD` 48 -> 16, and dropping
+# `tls-proto-dtls` takes the CID expansion to 0.
+#
+# `IN` is 8192 and not 4096 because MbedTLS must hold the server's entire `Certificate`
+# handshake message in one buffer, and a three-cert RSA-2048 chain is 4-5 kB. `OUT` is 2048
+# because the largest thing this firmware sends is a 1024-byte shot-log chunk.
+mbedtls-rs = { workspace = true, features = [
+    "ssl-in-content-len-8192", "ssl-out-content-len-2048",
+    # X.509 validity dates. `hook-wall-clock` implies `hook-timer`. The clock is the
+    # SNTP-synced one from `time.rs`; before the first sync the hook returns `None`, which
+    # MbedTLS treats as both expired and not-yet-valid -- i.e. it fails closed.
+    "hook-wall-clock",
+    # Routes SHA-256/512 and modular exponentiation to the C6's accelerators. Not an
+    # optimisation: without the `exp_mod` hook, verifying an RSA-4096 root is software
+    # big-int on a 160 MHz core inside a single call with no yield point, which is an
+    # executor stall long enough to trip `watchdog.rs`.
+    "esp32c6", "embassy-time",
+    # On top of the non-negotiable floor (TLS 1.2+1.3, ECDHE-ECDSA, SHA-256, AES-GCM,
+    # HKDF, ECP/ECDH/ECDSA, PK, secp256r1, CTR-DRBG, entropy, base64, PEM, X.509 parse):
+    "alg-sha512",                # SHA-384, for AES-256-GCM-SHA384 and P-384 signatures
+    "alg-rsa", "alg-rsa-pss",    # RSA certificate chains; PSS is mandatory in TLS 1.3
+    "kex-ecdhe-rsa",             # TLS 1.2 against an RSA certificate
+    "curve-secp384r1",           # ISRG Root X2, GTS Root R4
+    "defmt",
+] }
 embedded-io.workspace = true
 embedded-io-async.workspace = true
 esp-alloc.workspace = true

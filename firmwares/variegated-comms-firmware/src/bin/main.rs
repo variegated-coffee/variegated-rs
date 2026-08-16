@@ -517,7 +517,7 @@ async fn main(spawner: Spawner) -> ! {
     // section sizes from `scripts/memory-report.sh`:
     //
     //     heap     82356 peak  of 122880   (64 kB reclaimed + 56 kB here)   ~40 kB spare
-    //     .stack   94028 peak  of  97408                                   ~3.4 kB spare
+    //     .stack   94028 peak  of  96480                                   ~2.4 kB spare
     //
     // **The binding constraint is the stack, and it binds by about one deep call.** The
     // heap peak is a full Improv provisioning cycle with a BLE client connected, which is

@@ -29,6 +29,10 @@ pub mod key {
     /// (`0x0010_0000..0x0012_0000`); machines upgraded across that move lose their
     /// pairings once and re-pair.
     pub const BLUETOOTH_ASSOCIATIONS: u8 = 2;
+    /// Where finished shot logs are uploaded, and the token that authorises it. Set over
+    /// the debug bus by `MachineCommand::SetShotUploadConfig`, and pushed to the comms
+    /// processor, which has no flash to keep it in.
+    pub const SHOT_UPLOAD_CONFIG: u8 = 3;
 }
 
 /// The flash range every settings store lives in.
@@ -42,7 +46,7 @@ pub mod key {
 /// The three stores that share it are distinguished by [`key`], not by address.
 pub const SETTINGS_RANGE: Range<u32> = 0x0000_0000..0x0008_0000;
 
-/// The three stores every machine keeps, over one flash range.
+/// The four stores every machine keeps, over one flash range.
 ///
 /// Returned rather than boxed into a struct because each has a different `SettingsT` and
 /// the caller wraps them in `Mutex`es of its own choosing.
@@ -56,6 +60,7 @@ pub fn machine_stores<'a, M, T, ConfigT>(
     SequentialStorageSettingsStorage<'a, M, T, ConfigT>,
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::bluetooth::BluetoothAssociations>,
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::wifi::StoredWifiCredentials>,
+    SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::shot_upload::ShotUploadConfig>,
 )
 where
     M: RawMutex,
@@ -81,6 +86,11 @@ where
             flash,
             SETTINGS_RANGE,
             key::WIFI_CREDENTIALS,
+        ),
+        SequentialStorageSettingsStorage::new_with_key(
+            flash,
+            SETTINGS_RANGE,
+            key::SHOT_UPLOAD_CONFIG,
         ),
     )
 }

@@ -466,6 +466,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             IdentifyMachine => {}
             RequestConfiguration => {}
             DeleteShotLog(_) => {}
+            SetShotUploadConfig(_) => {}
         }
     }
 
@@ -616,6 +617,18 @@ fn machine_commands() -> Vec<MachineCommand> {
         // the URL as the literal `NODATE`, and it is the encoding of the `Option` in the
         // id that a frontend gets wrong first.
         DeleteShotLog(ShotLogId { day: None, time: 42 }),
+        // Both fields `Some`, and the endpoint deliberately long and non-ASCII: this is the
+        // only `Option<heapless::String<N>>` pair on the wire, and a decoder that reads the
+        // two `Option` tags in the wrong order round-trips a short matched pair straight
+        // past. The 300-byte-class endpoint also forces the two-byte length prefix that the
+        // 64-byte token does not have, so a fixed-width length read shows up here.
+        SetShotUploadConfig(ShotUploadConfig {
+            endpoint: Some(
+                heapless::String::try_from("https://plantlet.example/caf\u{00e9}/api/shots?src=r\u{00e9}seau")
+                    .unwrap(),
+            ),
+            token: Some(heapless::String::try_from("0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ").unwrap()),
+        }),
     ]
 }
 

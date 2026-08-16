@@ -115,7 +115,14 @@ use crate::Status;
 ///   bump covers `RequestShotLogList` changing shape and `ShotLogEvent` being appended to
 ///   the inter-processor reply enum; neither reaches the debug wire directly, but the
 ///   shot-log types they carry reach it through `Status::pending_shot_annotations`.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8D;
+/// * `0x8E` -- `MachineCommand` gained `SetShotUploadConfig`, appended. Device-inbound, so
+///   the same direction and the same reasoning as the three above, with one addition: this
+///   one carries a *secret*. A host built against an older version encodes some other
+///   variant's payload at this discriminant, and the failure mode of getting that wrong is
+///   a bearer token written into whichever field the old layout happens to land on. The
+///   same bump covers `RequestShotUploadConfig` and `ShotUploadConfig` being appended to
+///   the two inter-processor enums.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8E;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

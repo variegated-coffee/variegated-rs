@@ -42,15 +42,24 @@ difference is that region's cost. That is what finally settled the argument belo
 
 ## Measured
 
-Taken across a full Improv provisioning cycle with a BLE client connected, which is this
-firmware's peak-memory event:
+Peaks taken across a full Improv provisioning cycle with a BLE client connected, which is
+this firmware's peak-memory event. Capacities are linker facts, re-measured with
+`scripts/memory-report.sh` against the current tree:
 
-* **stack peak 94,028** of 95,640 before the rebalance — 1,612 bytes of headroom.
-* **heap peak 82,356**, with ~40 kB spare.
+* **stack peak 94,028** of **96,480** — **2,452 bytes of headroom**.
+* **heap peak 82,356** of 122,880 (64 kB `#[ram(reclaimed)]` + 56 kB in `.bss`) — ~40 kB
+  spare.
 
-So the heap was carrying the slack and the stack had none. `heap_allocator!` 56 kB → 40 kB
-moved 16,384 bytes across: `.bss` 245,512 → 229,128, `.stack` 95,640 → **113,992**. That
-leaves the heap ~24 kB over its peak and the stack ~18 kB over its own.
+So the heap carries the slack and the stack has almost none. **The stack is the binding
+constraint, and it binds by about one deep call.**
+
+An earlier revision of this section claimed a rebalance — `heap_allocator!` 56 kB → 40 kB,
+moving 16,384 bytes and taking `.stack` to 113,992 — as though it had happened. **It never
+landed.** `bin/main.rs`'s second `heap_allocator!` still reads `size: 56 * 1024`, and
+`memory-report.sh` still shows a 57,344-byte allocator static in `.bss`. The figures above
+are what the linker actually produces; size changes against them, not against the
+rebalance. If the rebalance is done later, update both this paragraph and the table below
+in the same commit — the discrepancy cost a measurement pass to rediscover.
 
 **The stack figure is not main's own depth.** `esp_rtos::main` runs the executor on the main
 thread, so every embassy task is polled on this one stack and 94,028 is the *deepest single
@@ -73,11 +82,55 @@ rust-size -A ../../target/riscv32imac-unknown-none-elf/comms-release/variegated-
 |---|---|---|
 | before the shot-log event channel | 245,800 | 97,256 |
 | `SHOT_LOG_EVENT_CHANNEL` (`PubSubChannel<ShotLogEvent, 1, 1, 1>`) | 246,576 | **96,480** |
+| shot-upload config channel + link plumbing | 247,264 | 95,792 |
+| **+ MbedTLS actually linked** (measured with a probe, see below) | 248,960 | **93,008** |
 
 776 bytes, which is one `ShotLogEvent` held inline plus the pubsub's bookkeeping. It buys a
 push that carries the whole `ShotLogListEntry`, so a browser renders the new row without a
 round trip. Still ~9 kB above the 87,256 recorded elsewhere as the lowest figure observed to
 survive, and well above the 90,144 that overflowed inside `esp_radio::wifi::new()`.
+
+### MbedTLS does not currently fit, and this is how that was measured
+
+**`.stack` 93,008 is below the recorded stack peak of 94,028.** Linking MbedTLS costs 1,020
+bytes more `.stack` than the machine is known to use, so the shot-log uploader cannot be
+turned on as things stand.
+
+Two traps in measuring this, both hit on the way to the number above:
+
+* **Adding the dependency measures nothing.** `--gc-sections` plus fat LTO discard every
+  MbedTLS symbol while no reachable code calls one. With `mbedtls-rs` in `Cargo.toml`, the
+  `upload` module written, and no call from `bin/main.rs`, `llvm-nm | grep -c mbedtls` was
+  **2** and the sections were indistinguishable from not having the dependency at all. The
+  figure above was taken with a temporary probe task spawned from `main` that reaches
+  `Certificate::new` and `Session::connect`; it was removed afterwards, which is why the
+  current tree measures 247,264 / 95,792 again.
+* **The cost is not where the fallback ladder points.** The curated feature set and the
+  `ssl-*-content-len-*` sizes move *heap*, and the CA bundle is `.rodata`. Neither returns a
+  byte of `.stack`. What costs `.stack` is MbedTLS's RAM-resident statics: `.bss` +1,696 and
+  `.data` +1,064, i.e. 2,760 bytes of RWDATA, one for one.
+
+Full deltas with MbedTLS linked (curated features, `IN=8192`/`OUT=2048`, one CA root):
+
+| section | before | after | delta |
+|---|---|---|---|
+| `.bss` | 247,264 | 248,960 | +1,696 |
+| `.data` | 26,076 | 27,140 | +1,064 |
+| `.stack` | 95,792 | **93,008** | **-2,784** |
+| `.text` | 1,477,272 | 1,628,180 | +150,908 |
+| `.rodata` | 210,016 | 235,968 | +25,952 |
+
+Flash is the easy half: +176,860 bytes total, inside the 120-200 kB estimated. **The
+partition table has not been checked** -- there is no `partitions.csv` in the crate, so
+`esp-bootloader-esp-idf`'s default applies and this needs confirming against
+`espflash board-info` before it means anything.
+
+And 1,020 bytes is the optimistic reading. 94,028 is the peak *without* a TLS handshake on
+the stack; `esp_rtos::main` polls every task on this one stack, and MbedTLS's handshake has
+deeper C call chains than anything else in this firmware, so the peak itself will move up.
+
+The levers that would actually pay, from the "Not yet spent" list below: they return
+`.stack` directly, which the feature-level knobs cannot.
 
 ## The 42 kB: two wrong answers, then the right one
 

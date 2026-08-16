@@ -26,6 +26,7 @@ use crate::channels::{
     ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
     ImprovReport, IMPROV_REPORT_CHANNEL,
+    SHOT_UPLOAD_CONFIG, SHOT_UPLOAD_CONFIG_RECEIVED,
     WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
     ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
     RoutineReply, ROUTINE_REPLY, ROUTINE_REQUEST, ROUTINE_WRITE,
@@ -403,6 +404,27 @@ pub async fn start(
                                 // would otherwise re-ask forever.
                                 WIFI_CREDENTIALS_RECEIVED.store(true, Ordering::Relaxed);
                             }
+                            ApplicationProcessorToCommsProcessorMessage::ShotUploadConfig(config) => {
+                                // Configured-or-not again, and for a sharper reason than the
+                                // Wi-Fi arm above: this token grants write access to an
+                                // account on a public service, and this line reaches the TCP
+                                // debug server. The endpoint is not a secret, but printing it
+                                // beside the token is one edit away from printing both.
+                                log_info!(
+                                    "Received shot upload config (endpoint {}, token {})",
+                                    if config.endpoint.is_some() { "set" } else { "unset" },
+                                    if config.token.is_some() { "set" } else { "unset" }
+                                );
+                                // Boxed on the way in: the `Watch` holds its value inline in
+                                // a static, and this type is ~330 bytes against a ~2.4 kB
+                                // `.stack` margin.
+                                SHOT_UPLOAD_CONFIG.sender().send(alloc::boxed::Box::new(config));
+
+                                // On receipt, not on the endpoint being present. See the note
+                                // on the flag itself -- a machine that never uploads would
+                                // otherwise re-ask forever.
+                                SHOT_UPLOAD_CONFIG_RECEIVED.store(true, Ordering::Relaxed);
+                            }
                             ApplicationProcessorToCommsProcessorMessage::OpenWifiProvisioningWindow { duration_ms } => {
                                 // Already vetted: the application processor refuses to open
                                 // a window while a shot is running, because it is the only
@@ -479,6 +501,14 @@ pub async fn start(
         tx.write_async(&serialized_message).await
             .expect("Failed to write RequestWifiCredentials");
         log_warn!("Sent initial RequestWifiCredentials command on startup");
+
+        // Send initial RequestShotUploadConfig command on startup
+        let request_upload_message = CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig;
+        let serialized_message = postcard::to_allocvec_cobs(&request_upload_message)
+            .expect("Failed to serialize RequestShotUploadConfig");
+        tx.write_async(&serialized_message).await
+            .expect("Failed to write RequestShotUploadConfig");
+        log_warn!("Sent initial RequestShotUploadConfig command on startup");
 
         // Track last request times for periodic operations
         let mut last_routine_request = Instant::now();
@@ -945,6 +975,21 @@ pub async fn start(
                             tx.write_async(&serialized_message).await
                                 .expect("Failed to write RequestWifiCredentials");
                             log_warn!("Sent periodic RequestWifiCredentials command (still waiting for response)");
+                        }
+
+                        // Only send RequestShotUploadConfig if we have not been answered yet.
+                        //
+                        // Same rule as the two above, and the one most easily got wrong: an
+                        // empty `ShotUploadConfig` is a complete answer meaning "uploads are
+                        // not configured on this machine". Testing `endpoint.is_some()` here
+                        // would make every unconfigured machine re-ask forever.
+                        if !SHOT_UPLOAD_CONFIG_RECEIVED.load(Ordering::Relaxed) {
+                            let request_upload_message = CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig;
+                            let serialized_message = postcard::to_allocvec_cobs(&request_upload_message)
+                                .expect("Failed to serialize RequestShotUploadConfig");
+                            tx.write_async(&serialized_message).await
+                                .expect("Failed to write RequestShotUploadConfig");
+                            log_warn!("Sent periodic RequestShotUploadConfig command (still waiting for response)");
                         }
 
                         last_config_retry = Instant::now();

@@ -62,6 +62,7 @@ use variegated_hal::scale::{gravity, ScaleController};
 use variegated_hal::scale::gravity::{GravityController, GravityDevice, GravityStatusProvider};
 use variegated_instrumentation::{define_counters, define_indicators, PerformanceCounters, PerformanceIndicators};
 use variegated_comms::esp_transceiver_main;
+use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 // The snapshot payload types are gone from here: building a `DebugStateSnapshot` is now
 // `variegated_debug::snapshot`'s job, and this binary supplies only the three values it
@@ -102,7 +103,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>, shot_upload_config_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, ShotUploadConfig, 2>) {
     // One binding for both the UART and the debug relay's byte budget, so the two cannot
     // drift apart.
     //
@@ -148,7 +149,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // The two trailing `None`s are the shot-log query and reply halves: this board has no
     // card reader, so the transceiver refuses shot-log requests outright rather than
     // forwarding them to a storage task that does not exist.
-    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver)).await;
+    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -332,6 +333,7 @@ static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<NoopRawMutex, u32, 2>> = St
 /// The credentials the controller last loaded or stored, for the transceiver to put on the
 /// link. A `Watch` because only the latest value matters.
 static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<NoopRawMutex, StoredWifiCredentials, 2>> = StaticCell::new();
+static SHOT_UPLOAD_CONFIG_WATCH: StaticCell<Watch<NoopRawMutex, ShotUploadConfig, 2>> = StaticCell::new();
 /// When the controller last handled an Improv `IdentifyMachine`, for the display to flash on.
 ///
 /// A `Watch` because only the latest request matters: a second Identify arriving mid-flash
@@ -491,10 +493,10 @@ async fn main_task(spawner: Spawner) -> ! {
     let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
-    // All three stores, over one flash range keyed by `settings::key`. The range and the
+    // All four stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
     // `variegated_controller_lib::settings::machine_stores`.
-    let (mut settings_storage, bluetooth_store, wifi_store) =
+    let (mut settings_storage, bluetooth_store, wifi_store, shot_upload_store) =
         variegated_controller_lib::settings::machine_stores::<
             _,
             _,
@@ -505,6 +507,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
     let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());
+    let shot_upload_config_watch = SHOT_UPLOAD_CONFIG_WATCH.init(Watch::new());
     let identify_watch = IDENTIFY_WATCH.init(Watch::new());
 
     info!("Configuration loaded");
@@ -767,6 +770,8 @@ async fn main_task(spawner: Spawner) -> ! {
         wifi_store,
         Some(wifi_provisioning_channel.sender()),
         Some(wifi_credentials_watch.sender()),
+        shot_upload_store,
+        Some(shot_upload_config_watch.sender()),
         Some(watchdog),
         // shot_log_sender: this board has no SD card -- this crate has no
         // `sd-card-storage` feature at all, so there is no storage task to send
@@ -876,7 +881,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let debug_command_sender = debug_commands_channel.sender();
     let debug_command_receiver = debug_commands_channel.receiver();
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver()).unwrap());
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")).unwrap());
 
     // Wire up the structured debug bus: USB CDC transport, periodic sampler,
     // periodic state snapshot, and injected-command handling. The channel itself is

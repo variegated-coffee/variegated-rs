@@ -35,6 +35,7 @@ use crate::{BLUETOOTH_SCAN_DURATION_MS, BLUETOOTH_SCAN_SLACK_MS};
 use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
 };
+use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 
 /// Persistent configuration for dual-boiler single-group machine
@@ -422,6 +423,7 @@ pub struct DualBoilerSingleGroupController<
     ScheduleStoreT: ScheduleStore + 'static,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations> + 'static,
     WifiStoreT: SettingsStorage<StoredWifiCredentials> + 'static,
+    UploadStoreT: SettingsStorage<ShotUploadConfig> + 'static,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
@@ -578,6 +580,22 @@ pub struct DualBoilerSingleGroupController<
     // intermediate one has missed nothing.
     wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
 
+    // Where finished shot logs are uploaded, at its own key in the settings flash range.
+    //
+    // Same shape as the Wi-Fi trio directly above and for the same three reasons: a key
+    // rather than a field on the persistent configuration (appending to that blob is a
+    // factory reset); held in RAM because this is its only reader and writer; and published
+    // on its own rather than riding the `Configuration` push, because the token is a secret
+    // and `Configuration` is what the browser receives.
+    //
+    // The comms processor has no flash, so this is the only copy on the machine.
+    shot_upload_store: &'static Mutex<StorageM, UploadStoreT>,
+    shot_upload_config: ShotUploadConfig,
+    shot_upload_publish_pending: bool,
+    // Where the config goes for the transceiver to put on the link. A `Watch` for the same
+    // reason as `wifi_credentials_publisher`: only the latest value matters.
+    shot_upload_config_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, ShotUploadConfig, 2>>,
+
     // Status tracking
     previous_status: Option<Status>,
     brew_temperature_movavg: MovAvg<f32, f32, 10>,
@@ -622,11 +640,12 @@ impl<
     ScheduleStoreT: ScheduleStore,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
+    UploadStoreT: SettingsStorage<ShotUploadConfig>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
 /*    fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -663,6 +682,11 @@ impl<
         // Where credentials go for the transceiver to put on the link. `None` on a machine
         // with no comms processor.
         wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
+        shot_upload_store: &'static Mutex<StorageM, UploadStoreT>,
+        // Where the shot-log upload config goes for the transceiver to put on the link.
+        // `None` on a machine with no comms processor -- which is also a machine that
+        // cannot upload anything, so the config is stored and simply never acted on.
+        shot_upload_config_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, ShotUploadConfig, 2>>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         watchdog: Option<Watchdog>,
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
@@ -753,6 +777,10 @@ impl<
             identify_publisher,
             clear_wifi_credentials_signal,
             wifi_credentials_publisher,
+            shot_upload_store,
+            shot_upload_config: ShotUploadConfig::default(),
+            shot_upload_publish_pending: false,
+            shot_upload_config_publisher,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
@@ -938,6 +966,20 @@ impl<
         self.wifi_publish_pending = true;
     }
 
+    /// Mirrors `save_wifi_credentials` exactly, including the 100 ms lock timeout that is
+    /// the house style for every store lock taken from the control loop.
+    async fn save_shot_upload_config(&mut self) {
+        match with_timeout(Duration::from_millis(100), self.shot_upload_store.lock()).await {
+            Ok(mut store) => {
+                if store.save_settings(&self.shot_upload_config).await.is_err() {
+                    log_warn!("Failed to save shot upload config");
+                }
+            }
+            Err(_) => log_warn!("Failed to acquire shot_upload_store lock for save (timeout)"),
+        }
+        self.shot_upload_publish_pending = true;
+    }
+
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
         let mut last_published_configuration = self.configuration.clone();
@@ -975,6 +1017,25 @@ impl<
             if self.wifi_credentials.0.is_some() { "configured" } else { "none stored" }
         );
         self.wifi_publish_pending = true;
+
+        // Once, before the loop, for the same reason as the two stores above.
+        self.shot_upload_config = match self.shot_upload_store.lock().await.load_settings().await {
+            Ok(config) => config,
+            Err(_) => {
+                log_warn!("Failed to load shot upload config; uploads disabled");
+                ShotUploadConfig::default()
+            }
+        };
+        // The endpoint is safe to log and is the field you need when uploads go somewhere
+        // unexpected; the token is reported only as present-or-not. `ShotUploadConfig`'s
+        // own `Debug` elides it, but this path formats the fields itself, so it has to
+        // make the same choice explicitly.
+        log_info!(
+            "Shot upload: endpoint {}, token {}",
+            if self.shot_upload_config.endpoint.is_some() { "configured" } else { "none stored" },
+            if self.shot_upload_config.token.is_some() { "configured" } else { "none stored" }
+        );
+        self.shot_upload_publish_pending = true;
 
         loop {
             // A scan the comms processor never reported the end of -- because it reset,
@@ -1123,6 +1184,15 @@ impl<
             self.wifi_publish_pending = false;
             if let Some(publisher) = self.wifi_credentials_publisher.as_ref() {
                 publisher.send(self.wifi_credentials.clone());
+            }
+        }
+
+        // Separately again, and for the same reason: the upload token is a secret, so it
+        // rides its own channel rather than `Configuration`.
+        if self.shot_upload_publish_pending {
+            self.shot_upload_publish_pending = false;
+            if let Some(publisher) = self.shot_upload_config_publisher.as_ref() {
+                publisher.send(self.shot_upload_config.clone());
             }
         }
 
@@ -2401,6 +2471,27 @@ impl<
                     self.wifi_credentials = stored;
                     self.save_wifi_credentials().await;
                     log_info!("Stored new Wi-Fi credentials");
+                }
+            }
+            MachineCommand::SetShotUploadConfig(config) => {
+                // Persisted without validation, for a different reason than the Wi-Fi arm
+                // above: this processor *could* parse the URL, but it is not the one that
+                // uses it. The comms processor parses it at upload time and reports what it
+                // found, and duplicating that here would put two parsers on one string with
+                // no mechanism keeping them in agreement.
+                //
+                // The compare-before-save matters more than usual: `save_settings` short-
+                // circuits on an equal cached value, but reaching it at all takes the store
+                // lock, and this command can arrive on every reconnect.
+                if self.shot_upload_config != config {
+                    self.shot_upload_config = config;
+                    self.save_shot_upload_config().await;
+                    // Never the token, and not even its length -- see the type's `Debug`.
+                    log_info!(
+                        "Stored shot upload config: endpoint {}, token {}",
+                        if self.shot_upload_config.endpoint.is_some() { "set" } else { "cleared" },
+                        if self.shot_upload_config.token.is_some() { "set" } else { "cleared" }
+                    );
                 }
             }
             MachineCommand::OpenWifiProvisioningWindow { duration_ms } => {

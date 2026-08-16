@@ -16,6 +16,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use postcard::to_allocvec_cobs;
 use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::debug_command::DebugCommand;
+use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage,
@@ -415,6 +416,13 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // Accepted provisioning-window requests, carrying the duration in milliseconds; zero
     // means close. `None` on a machine whose controller was not given the matching sender.
     wifi_provisioning_receiver: Option<ChannelReceiver<'static, SM, u32, 2>>,
+    // The stored shot-log upload config, published by the controller whenever it changes.
+    // `None` on a machine with no store, in which case `RequestShotUploadConfig` goes
+    // unanswered and the comms processor keeps asking -- the same honest outcome, and the
+    // same trap, as `wifi_credentials_receiver` above.
+    shot_upload_config_receiver: Option<
+        embassy_sync::watch::Receiver<'static, SM, ShotUploadConfig, 2>,
+    >,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -435,6 +443,19 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // would answer "no network" before the controller had said anything, and the comms
     // processor stops asking on receipt -- so it would never be corrected.
     let cached_wifi: Mutex<M, RefCell<Option<StoredWifiCredentials>>> = Mutex::new(RefCell::new(None));
+
+    // The last upload config the controller published, cached so `RequestShotUploadConfig`
+    // can be answered from this task.
+    //
+    // The outer `Option` is load-bearing for the same reason as `cached_wifi`'s above, and
+    // the distinction is easier to lose here because the inner type has its own empty
+    // state: `None` means *nothing has been published yet*, while
+    // `Some(ShotUploadConfig::default())` means the controller has said there is genuinely
+    // nothing configured. The comms processor stops asking on receipt, so collapsing the
+    // two would tell it "uploads are off" before the controller had spoken, and it would
+    // never ask again.
+    let cached_shot_upload: Mutex<M, RefCell<Option<ShotUploadConfig>>> =
+        Mutex::new(RefCell::new(None));
 
     // Box the machine definition to save stack space
     let machine_definition = Box::new(machine_definition);
@@ -1011,6 +1032,38 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         None => info!("No Wi-Fi credentials published yet; not answering"),
                                     }
                                 }
+                                CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig => {
+                                    info!("Shot upload config requested by ESP32");
+
+                                    // Answered from the cached copy, exactly like the
+                                    // Wi-Fi arm above and for the same two reasons: this
+                                    // task holds no store handle, and a flash read on the
+                                    // UART reader would put every message on the link
+                                    // behind it.
+                                    //
+                                    // Nothing published yet is not answered at all. An
+                                    // empty config is a *complete* answer meaning "uploads
+                                    // are not configured", and the comms processor stops
+                                    // asking on receipt -- so sending one prematurely would
+                                    // disable uploads until the next reboot.
+                                    let output = cached_shot_upload.lock(|cell| {
+                                        cell.borrow().as_ref().map(|config| {
+                                            let response = ApplicationProcessorToCommsProcessorMessage::ShotUploadConfig(
+                                                config.clone(),
+                                            );
+                                            to_allocvec_cobs(&response).ok()
+                                        })
+                                    });
+
+                                    match output {
+                                        Some(Some(output)) => {
+                                            let _ = tx_sender.send(output).await;
+                                            info!("Sent shot upload config to ESP32");
+                                        }
+                                        Some(None) => info!("Failed to serialize shot upload config"),
+                                        None => info!("No shot upload config published yet; not answering"),
+                                    }
+                                }
                                 CommsProcessorToApplicationProcessorMessage::WifiCredentialsProvisioned(credentials) => {
                                     // Straight to the controller as a command, the same
                                     // route scan results take: this is the only channel from
@@ -1345,6 +1398,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         }
                     }
                 },
+                join(
                 async {
                     // A fresh summary list whenever the routines change, whoever changed
                     // them.
@@ -1369,6 +1423,50 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         }
                     }
                 },
+                async {
+                    // The shot-log upload config, pushed whenever the controller changes
+                    // it -- so a token rotated over the CLI takes effect without either
+                    // processor rebooting.
+                    //
+                    // Unprompted for the same reason as the credentials arm above: the
+                    // comms processor holds no configuration of its own. And like that
+                    // one, this cannot ride on the `Configuration` publish, because the
+                    // token is a secret and that path ends at the browser.
+                    let Some(mut receiver) = shot_upload_config_receiver else {
+                        core::future::pending::<()>().await;
+                        return;
+                    };
+
+                    loop {
+                        let config = receiver.changed().await;
+
+                        // Cached before sending, not after -- a `RequestShotUploadConfig`
+                        // arriving while the send below is queued should be answered with
+                        // the new value rather than the old one.
+                        cached_shot_upload.lock(|cell| {
+                            cell.replace(Some(config.clone()));
+                        });
+
+                        let response =
+                            ApplicationProcessorToCommsProcessorMessage::ShotUploadConfig(
+                                config.clone(),
+                            );
+                        if let Ok(output) = to_allocvec_cobs(&response) {
+                            let _ = tx_sender.send(output).await;
+                            // Configured-or-not, never the value. The endpoint would be
+                            // harmless, but this line sits one edit away from the token
+                            // beside it.
+                            info!(
+                                "Sent shot upload config to ESP32 (endpoint {}, token {})",
+                                if config.endpoint.is_some() { "set" } else { "unset" },
+                                if config.token.is_some() { "set" } else { "unset" }
+                            );
+                        } else {
+                            info!("Failed to serialize the shot upload config");
+                        }
+                    }
+                },
+                ),
                 ),
                 ),
             ),

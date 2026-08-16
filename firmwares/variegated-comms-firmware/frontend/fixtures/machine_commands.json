@@ -538,5 +538,11 @@
       "day": null,
       "time": 42
     }
+  },
+  {
+    "SetShotUploadConfig": {
+      "endpoint": "https://plantlet.example/café/api/shots?src=réseau",
+      "token": "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    }
   }
 ]

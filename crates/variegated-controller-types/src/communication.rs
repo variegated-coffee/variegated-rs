@@ -214,6 +214,16 @@ pub enum CommsProcessorToApplicationProcessorMessage {
         last: bool,
         bytes: heapless::Vec<u8, { crate::ROUTINE_WRITE_CHUNK_LEN }>,
     },
+    /// Ask for the stored shot-log upload configuration.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Sent at boot and repeated until answered, exactly like
+    /// [`Self::RequestWifiCredentials`], and carrying the same trap: **a config with both
+    /// fields `None` is a complete answer**, so the retry stops on receipt rather than on
+    /// the endpoint being present. A machine that has never been configured for uploads
+    /// would otherwise ask forever.
+    RequestShotUploadConfig,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -423,6 +433,24 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// a reason worth keeping: that path has no correlation id, so an unsolicited message
     /// arriving on it can be collected by a client waiting on a listing.
     ShotLogEvent(crate::shot_log::ShotLogEvent),
+    /// Where to upload finished shot logs, and the token that authorises it.
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// Sent in answer to
+    /// [`CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig`] and
+    /// unprompted whenever it changes, so a token rotated over the CLI takes effect
+    /// without a reboot of either processor.
+    ///
+    /// No outer `Option`, unlike [`Self::WifiCredentials`]: `ShotUploadConfig`'s fields are
+    /// individually optional, so the type already expresses "nothing configured" and a
+    /// second layer of it would have two spellings for one state.
+    ///
+    /// Deliberately *not* carried inside `Configuration`, for the same reason as
+    /// [`Self::WifiCredentials`] -- and more sharply, since this token grants write access
+    /// to an account on a public service.
+    ShotUploadConfig(crate::shot_upload::ShotUploadConfig),
 }
 
 /// An operation on a scale, as carried by

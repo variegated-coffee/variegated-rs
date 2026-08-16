@@ -15,6 +15,7 @@ pub mod stack;
 pub mod time;
 pub mod utils;
 pub mod watchdog;
+pub mod upload;
 pub mod websocket;
 pub mod wifi;
 

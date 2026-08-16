@@ -56,6 +56,7 @@ use variegated_controller_types::SteamWandDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
 use variegated_controller_types::bluetooth::BluetoothAssociations;
+use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
@@ -237,6 +238,7 @@ async fn esp_transceiver_task(
     bluetooth_scan_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u16, 2>>,
     wifi_credentials_receiver: Option<embassy_sync::watch::Receiver<'static, SyncSendRawMutex, StoredWifiCredentials, 2>>,
     wifi_provisioning_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u32, 2>>,
+    shot_upload_config_receiver: Option<embassy_sync::watch::Receiver<'static, SyncSendRawMutex, ShotUploadConfig, 2>>,
 ) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart: the budget is a fraction of the link, and a stale figure
@@ -273,7 +275,7 @@ async fn esp_transceiver_task(
     let (shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver) =
         (None, None, None);
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver).await;
+    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver).await;
 }
 
 
@@ -473,12 +475,16 @@ type BluetoothStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawM
 /// Wi-Fi credentials, in the same settings range under a key of their own. Same reasoning
 /// as the Bluetooth store above; only the payload type and the key differ.
 type WifiStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, StoredWifiCredentials>;
+/// Shot-log upload endpoint and token, in the same settings range under a key of their own.
+/// Same reasoning again; only the payload type and the key differ.
+type ShotUploadStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, ShotUploadConfig>;
 
 type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
 type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
 type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
 type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
 type WifiStoreMutex = Mutex<SyncSendRawMutex, WifiStoreType>;
+type ShotUploadStoreMutex = Mutex<SyncSendRawMutex, ShotUploadStoreType>;
 type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
 /// Core 1's stack.
@@ -983,6 +989,7 @@ static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
 /// pile up behind a scan already running.
 static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u16, 2>> = StaticCell::new();
 static WIFI_STORE: StaticCell<WifiStoreMutex> = StaticCell::new();
+static SHOT_UPLOAD_STORE: StaticCell<ShotUploadStoreMutex> = StaticCell::new();
 /// Accepted provisioning-window requests, carrying the duration in milliseconds; zero
 /// means close. Crosses cores like the scan channel above, hence `SyncSendRawMutex`.
 ///
@@ -998,6 +1005,7 @@ static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u32, 2>> 
 /// missed an intermediate one has missed nothing. Sized for one receiver -- the
 /// transceiver -- plus the sender's own slot.
 static WIFI_CREDENTIALS_WATCH: StaticCell<Watch<SyncSendRawMutex, StoredWifiCredentials, 2>> = StaticCell::new();
+static SHOT_UPLOAD_CONFIG_WATCH: StaticCell<Watch<SyncSendRawMutex, ShotUploadConfig, 2>> = StaticCell::new();
 /// When the controller last handled an Improv `IdentifyMachine`, for the displays to flash on.
 ///
 /// A `Watch` rather than a channel because it has two receivers -- the TFT task on core 1 and
@@ -2311,10 +2319,10 @@ async fn main_task(
         variegated_controller_lib::WATCHDOG_TIMEOUT.as_millis()
     );
 
-    // All three stores, over one flash range keyed by `settings::key`. The range and the
+    // All four stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
     // `variegated_controller_lib::settings::machine_stores`.
-    let (settings_storage, bluetooth_store, wifi_store) =
+    let (settings_storage, bluetooth_store, wifi_store, shot_upload_store) =
         variegated_controller_lib::settings::machine_stores::<
             SyncSendRawMutex,
             SettingsFlashType,
@@ -2368,6 +2376,10 @@ async fn main_task(
     let wifi_store_ref = WIFI_STORE.init(Mutex::new(wifi_store));
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
     let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());
+
+    // Shot-log upload endpoint and token, at a key of their own in the settings range.
+    let shot_upload_store_ref = SHOT_UPLOAD_STORE.init(Mutex::new(shot_upload_store));
+    let shot_upload_config_watch = SHOT_UPLOAD_CONFIG_WATCH.init(Watch::new());
 
     log_info!("Configuration loaded");
 
@@ -2921,6 +2933,8 @@ async fn main_task(
         wifi_store_ref,
         Some(wifi_provisioning_channel.sender()),
         Some(wifi_credentials_watch.sender()),
+        shot_upload_store_ref,
+        Some(shot_upload_config_watch.sender()),
         peripheral_registry,
         Some(watchdog),
         interlock_enabled_signal,
@@ -2994,7 +3008,7 @@ async fn main_task(
     #[cfg(not(feature = "bluetooth-group-1-scale"))]
     let scale_command_receiver = None;
 
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()))));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")))));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]

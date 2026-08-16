@@ -80,6 +80,7 @@ pub mod shot_log;
 // threshold policy -- living in the crate that holds types, and it was put here only
 // because `variegated-controller-lib` could not build for a host and so could not test
 // it. That is fixed; see the module layout note at the top of that crate's `lib.rs`.
+pub mod shot_upload;
 pub mod status;
 pub mod wifi;
 
@@ -101,4 +102,5 @@ pub use routines::steps::*;
 pub use schedule::*;
 pub use wifi::*;
 pub use shot_log::*;
+pub use shot_upload::*;
 pub use status::*;

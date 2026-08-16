@@ -226,6 +226,24 @@ pub enum MachineCommand {
     /// reported by a `ShotLogEvent::Deleted` push; a failure is logged on the application
     /// processor and the shot simply stays where it was.
     DeleteShotLog(crate::shot_log::ShotLogId),
+
+    /// Set where finished shot logs are uploaded, and the token that authorises it.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// A user command, unlike [`Self::SetWifiCredentials`] directly above: nothing has
+    /// proven this endpoint or token works, and nothing on this processor can. The comms
+    /// processor discovers whether they are right the first time it tries to upload a
+    /// shot, and reports the result on the debug bus.
+    ///
+    /// **Carries a secret.** `ShotUploadConfig`'s `Debug` and `defmt::Format` are
+    /// hand-written to elide the token precisely because this variant puts it on the debug
+    /// wire and the TCP debug server. Anything that formats a `MachineCommand` inherits
+    /// that; anything that reaches into the field does not.
+    ///
+    /// Either field may be `None`, which clears it. Clearing the endpoint is how a machine
+    /// stops uploading.
+    SetShotUploadConfig(crate::shot_upload::ShotUploadConfig),
 }
 
 impl MachineCommand {
@@ -298,6 +316,7 @@ impl MachineCommand {
             MachineCommand::SetPendingShotAnnotations(_) => "SetPendingShotAnnotations",
             MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
             MachineCommand::DeleteShotLog(_) => "DeleteShotLog",
+            MachineCommand::SetShotUploadConfig(_) => "SetShotUploadConfig",
         }
     }
 }
@@ -364,6 +383,10 @@ impl defmt::Format for MachineCommand {
             // password, and formatting the fields here would bypass that. This command
             // reaches the debug wire and the TCP debug server.
             MachineCommand::SetWifiCredentials(c) => defmt::write!(f, "SetWifiCredentials({})", c),
+            // `{}` on the config, not its fields, for the same reason as the line above:
+            // the type's own `Format` elides the token and reaching past it would defeat
+            // that. This one grants write access to an account on a public service.
+            MachineCommand::SetShotUploadConfig(c) => defmt::write!(f, "SetShotUploadConfig({})", c),
             MachineCommand::IdentifyMachine => defmt::write!(f, "IdentifyMachine"),
             MachineCommand::RequestConfiguration => defmt::write!(f, "RequestConfiguration"),
         }
