@@ -128,7 +128,13 @@ use crate::Status;
 ///   mirror image: an older host reads a discriminant it does not know, or -- had these
 ///   been inserted rather than appended -- reads `SpawnFailed` as one of these and renders
 ///   confident nonsense about a task that started fine.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8F;
+/// * `0x90` -- shot-upload settings became editable from the browser. `MachineCommand`
+///   gained `SetShotUploadSettings`, appended; `ShotUploadConfig` gained a trailing
+///   `enabled` field; and `Configuration` gained `shot_upload`. The middle one is the reason
+///   this bump is not optional in either direction: postcard is positional, so a host built
+///   against the older shape reads the new `enabled` byte as the start of whatever it
+///   thought came next. `Configuration` reaches the debug wire inside `Status`.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x90;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

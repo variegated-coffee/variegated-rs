@@ -232,10 +232,14 @@ pub async fn shot_upload_task(
         // while unconfigured must not block the config from landing.
         match select(config_rx.changed(), events.next_message()).await {
             Either::First(new_config) => {
+                // Logged here, on change, rather than per shot. A machine with uploads
+                // deliberately switched off should say so once, not narrate it over every
+                // espresso -- and this line is the one that explains a quiet uploader.
                 log_info!(
-                    "Shot upload config updated (endpoint {}, token {})",
+                    "Shot upload config updated (endpoint {}, token {}, uploads {})",
                     if new_config.endpoint.is_some() { "set" } else { "unset" },
-                    if new_config.token.is_some() { "set" } else { "unset" }
+                    if new_config.token.is_some() { "set" } else { "unset" },
+                    if new_config.enabled { "enabled" } else { "DISABLED" }
                 );
                 config = Some(new_config);
             }
@@ -277,6 +281,13 @@ async fn upload_shot(
     config: &ShotUploadConfig,
     entry: &ShotLogListEntry,
 ) {
+    // Switched off is a *configured* state, not a missing one -- the endpoint and token are
+    // still there, waiting. Checked first and silently, because the reason was already
+    // logged when the config arrived; saying it again per shot would be noise.
+    if !config.enabled {
+        return;
+    }
+
     let (Some(endpoint), Some(token)) = (config.endpoint.as_ref(), config.token.as_ref()) else {
         return;
     };

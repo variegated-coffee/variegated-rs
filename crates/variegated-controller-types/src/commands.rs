@@ -244,6 +244,22 @@ pub enum MachineCommand {
     /// Either field may be `None`, which clears it. Clearing the endpoint is how a machine
     /// stops uploading.
     SetShotUploadConfig(crate::shot_upload::ShotUploadConfig),
+
+    /// Edit the shot-upload settings, keeping the stored token unless told otherwise.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// What the settings UI sends, where [`Self::SetShotUploadConfig`] is the full-replace
+    /// form the CLI uses. The difference is the token: the browser is never sent the current
+    /// one -- `Configuration` carries only a `token_set` bool -- so it cannot send it back,
+    /// and a full replace would make every endpoint edit demand the token be re-entered.
+    /// `ShotUploadTokenUpdate` carries the three-way answer instead.
+    ///
+    /// **Carries a secret** in its `Set` arm. `ShotUploadTokenUpdate`'s `Debug` and
+    /// `defmt::Format` are hand-written to elide it, for the same reason
+    /// `ShotUploadConfig`'s are: this variant reaches the debug wire and the TCP debug
+    /// server.
+    SetShotUploadSettings(crate::shot_upload::ShotUploadSettings),
 }
 
 impl MachineCommand {
@@ -317,6 +333,7 @@ impl MachineCommand {
             MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
             MachineCommand::DeleteShotLog(_) => "DeleteShotLog",
             MachineCommand::SetShotUploadConfig(_) => "SetShotUploadConfig",
+            MachineCommand::SetShotUploadSettings(_) => "SetShotUploadSettings",
         }
     }
 }
@@ -387,6 +404,12 @@ impl defmt::Format for MachineCommand {
             // the type's own `Format` elides the token and reaching past it would defeat
             // that. This one grants write access to an account on a public service.
             MachineCommand::SetShotUploadConfig(c) => defmt::write!(f, "SetShotUploadConfig({})", c),
+            // `{}` on the whole value again, not its fields: `ShotUploadSettings` derives
+            // `Format`, but its `token` field's impl is hand-written and elides. Reaching
+            // past it here would put the token on the wire this line travels.
+            MachineCommand::SetShotUploadSettings(s) => {
+                defmt::write!(f, "SetShotUploadSettings({})", s)
+            }
             MachineCommand::IdentifyMachine => defmt::write!(f, "IdentifyMachine"),
             MachineCommand::RequestConfiguration => defmt::write!(f, "RequestConfiguration"),
         }

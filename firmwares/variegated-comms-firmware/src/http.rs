@@ -108,7 +108,8 @@ use variegated_controller_types::shot_log::{
 use crate::api_types::{
     RoutineSummaryStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
     SetGroupControlRequest, SetGroupPumpConfigurationRequest, SetPidParametersRequest,
-    SetSteamValveOpennessRequest, SetWaterTapPumpConfigurationRequest,
+    SetShotUploadSettingsRequest, SetSteamValveOpennessRequest,
+    SetWaterTapPumpConfigurationRequest,
 };
 use crate::channels::{
     routine_request, routine_write, shot_log_request, ApplicationConfigurationSubscriber,
@@ -1186,6 +1187,56 @@ impl HttpHandler {
         }
     }
 
+    // POST /command/set-shot-upload-settings
+    //
+    // The one settings write the SPA cannot send over the WebSocket: a maximal payload is
+    // ~326 bytes and `websocket.rs`'s inbound frame buffer is a fixed 256, over which it
+    // closes the connection rather than erroring. See `SetShotUploadSettingsRequest`.
+    //
+    // **This route accepts a bearer token on an unauthenticated server.** That is not new --
+    // every `/command/*` route here is equally open, and the machine is expected to be on a
+    // trusted network -- but it is worth knowing that this one carries a credential rather
+    // than a setpoint. The read-back path deliberately does not return it; see
+    // `ShotUploadView::token_set`.
+    async fn handle_set_shot_upload_settings<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!("POST /command/set-shot-upload-settings");
+
+        // 512, not the 326-byte maximum: postcard's framing and any future field would
+        // otherwise sit one byte from a 400 that reads as "malformed" rather than "too big".
+        let body = Self::read_body(conn, 512).await?;
+
+        let req: SetShotUploadSettingsRequest = match postcard::from_bytes(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                log_error!(
+                    "Failed to deserialize SetShotUploadSettingsRequest: {:?}",
+                    defmt::Debug2Format(&e)
+                );
+                return Self::send_bad_request(conn, "Invalid postcard data").await;
+            }
+        };
+
+        // No log of the settings themselves. `ShotUploadSettings` elides the token in its
+        // own `Format` impl, but this line would be the place someone reached past it.
+        let cmd = MachineCommand::SetShotUploadSettings(req.settings);
+        match self.command_sender.try_send(cmd) {
+            Ok(_) => {
+                log_info!("SetShotUploadSettings command sent");
+                Self::send_text(conn, 200, "OK", "Shot upload settings updated").await
+            }
+            Err(_) => {
+                log_error!("Command channel full");
+                Self::send_unavailable(conn, "Command channel full").await
+            }
+        }
+    }
+
     // POST /command/optimize-routine-storage
     async fn handle_optimize_routine_storage<T, const N: usize>(
         &self,
@@ -1872,6 +1923,9 @@ impl Handler for HttpHandler {
             }
             (Method::Post, "/command/set-steam-valve-openness") => {
                 self.handle_set_steam_valve_openness(conn).await
+            }
+            (Method::Post, "/command/set-shot-upload-settings") => {
+                self.handle_set_shot_upload_settings(conn).await
             }
             (Method::Post, "/command/optimize-routine-storage") => {
                 self.handle_optimize_routine_storage(conn).await

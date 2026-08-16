@@ -291,6 +291,7 @@ default = [
   "esp-hal/esp32c6",
   "esp-rtos/esp32c6",
   "esp-radio/esp32c6",
+#  "insecure-tls"
 ]
 
 # **Builds a firmware that does not check the upload endpoint's certificate.**

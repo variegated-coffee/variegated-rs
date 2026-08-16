@@ -3,7 +3,8 @@
 use variegated_comms_api_types::api_types::{
     RoutineSummaryStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
     SetGroupControlRequest, SetGroupPumpConfigurationRequest, SetPidParametersRequest,
-    SetSteamValveOpennessRequest, SetWaterTapPumpConfigurationRequest,
+    SetShotUploadSettingsRequest, SetSteamValveOpennessRequest,
+    SetWaterTapPumpConfigurationRequest,
 };
 use variegated_comms_api_types::ws_types::WsMessage;
 use variegated_controller_types::{
@@ -63,6 +64,7 @@ pub fn registry() -> Registry {
     reg.root::<SetWaterTapPumpConfigurationRequest>();
     reg.root::<SetFillPumpConfigurationRequest>();
     reg.root::<SetSteamValveOpennessRequest>();
+    reg.root::<SetShotUploadSettingsRequest>();
 
     reg
 }

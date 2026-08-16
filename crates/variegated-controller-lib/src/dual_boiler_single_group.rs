@@ -891,6 +891,10 @@ impl<
         // From the RAM copy, not the store: this runs on the publish path, and taking the
         // store's lock here would put a configuration publish behind a flash write.
         configuration.bluetooth_peripherals = self.bluetooth_associations.0.clone();
+        // Same, and note the type conversion is where the token gets dropped -- `From`
+        // reduces it to `token_set: bool`, so there is no path from here to the browser
+        // carrying the secret even if someone later assigns the whole config by mistake.
+        configuration.shot_upload = (&self.shot_upload_config).into();
 
         configuration
     }
@@ -2471,6 +2475,27 @@ impl<
                     self.wifi_credentials = stored;
                     self.save_wifi_credentials().await;
                     log_info!("Stored new Wi-Fi credentials");
+                }
+            }
+            MachineCommand::SetShotUploadSettings(settings) => {
+                // The settings UI's edit. Merged rather than replacing, because the browser
+                // is never sent the token and so cannot send it back -- see
+                // `ShotUploadTokenUpdate`.
+                //
+                // The compare-before-save is doing real work here: the panel posts on every
+                // save, and a save that changed nothing would otherwise take the store lock
+                // and republish.
+                let mut updated = self.shot_upload_config.clone();
+                updated.apply(settings);
+                if self.shot_upload_config != updated {
+                    self.shot_upload_config = updated;
+                    self.save_shot_upload_config().await;
+                    log_info!(
+                        "Shot upload settings updated: endpoint {}, token {}, uploads {}",
+                        if self.shot_upload_config.endpoint.is_some() { "set" } else { "cleared" },
+                        if self.shot_upload_config.token.is_some() { "set" } else { "cleared" },
+                        if self.shot_upload_config.enabled { "enabled" } else { "disabled" }
+                    );
                 }
             }
             MachineCommand::SetShotUploadConfig(config) => {

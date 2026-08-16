@@ -302,7 +302,20 @@ export const ShotStateSchema = enumType('ShotState', {
 
 export const ShotUploadConfigSchema = struct({
   endpoint: option(string()),
-  token: option(string())
+  token: option(string()),
+  enabled: bool()
+});
+
+export const ShotUploadTokenUpdateSchema = enumType('ShotUploadTokenUpdate', {
+  Keep: unitVariant('Keep'),
+  Clear: unitVariant('Clear'),
+  Set: newtypeVariant('Set', string())
+});
+
+export const ShotUploadViewSchema = struct({
+  endpoint: option(string()),
+  enabled: bool(),
+  token_set: bool()
 });
 
 export const SteamWandConfigurationSchema = struct({
@@ -569,6 +582,12 @@ export const ShotAnnotationSchema = struct({
   value: ShotAnnotationValueSchema
 });
 
+export const ShotUploadSettingsSchema = struct({
+  endpoint: option(string()),
+  enabled: bool(),
+  token: ShotUploadTokenUpdateSchema
+});
+
 export const StateConditionSchema = enumType('StateCondition', {
   Brewing: newtypeVariant('Brewing', u8()),
   NotBrewing: newtypeVariant('NotBrewing', u8()),
@@ -690,6 +709,10 @@ export const ScheduleItemSchema = struct({
   commands: seq(ScheduleActionSchema)
 });
 
+export const SetShotUploadSettingsRequestSchema = struct({
+  settings: ShotUploadSettingsSchema
+});
+
 export const ShotAnnotationsSchema = struct({
   entries: seq(ShotAnnotationSchema)
 });
@@ -764,7 +787,8 @@ export const ConfigurationSchema = struct({
   tank_configurations: map(u8(), TankConfigurationSchema),
   steam_wand_configurations: map(u8(), SteamWandConfigurationSchema),
   schedules: seq(ScheduleItemSchema),
-  bluetooth_peripherals: seq(BluetoothPeripheralAssociationSchema)
+  bluetooth_peripherals: seq(BluetoothPeripheralAssociationSchema),
+  shot_upload: ShotUploadViewSchema
 });
 
 export const RoutineStepSchema = struct({
@@ -865,7 +889,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   IdentifyMachine: unitVariant('IdentifyMachine'),
   RequestConfiguration: unitVariant('RequestConfiguration'),
   DeleteShotLog: newtypeVariant('DeleteShotLog', ShotLogIdSchema),
-  SetShotUploadConfig: newtypeVariant('SetShotUploadConfig', ShotUploadConfigSchema)
+  SetShotUploadConfig: newtypeVariant('SetShotUploadConfig', ShotUploadConfigSchema),
+  SetShotUploadSettings: newtypeVariant('SetShotUploadSettings', ShotUploadSettingsSchema)
 });
 
 export const WsMessageSchema = enumType('WsMessage', {
@@ -901,6 +926,7 @@ export type SetGroupPumpConfigurationRequest = InferType<typeof SetGroupPumpConf
 export type SetWaterTapPumpConfigurationRequest = InferType<typeof SetWaterTapPumpConfigurationRequestSchema>;
 export type SetFillPumpConfigurationRequest = InferType<typeof SetFillPumpConfigurationRequestSchema>;
 export type SetSteamValveOpennessRequest = InferType<typeof SetSteamValveOpennessRequestSchema>;
+export type SetShotUploadSettingsRequest = InferType<typeof SetShotUploadSettingsRequestSchema>;
 export type ActuatorCapability = InferType<typeof ActuatorCapabilitySchema>;
 export type BluetoothDriverKind = InferType<typeof BluetoothDriverKindSchema>;
 export type BluetoothPeripheralAssociation = InferType<typeof BluetoothPeripheralAssociationSchema>;
@@ -974,6 +1000,9 @@ export type ShotLogId = InferType<typeof ShotLogIdSchema>;
 export type ShotLogListEntry = InferType<typeof ShotLogListEntrySchema>;
 export type ShotState = InferType<typeof ShotStateSchema>;
 export type ShotUploadConfig = InferType<typeof ShotUploadConfigSchema>;
+export type ShotUploadSettings = InferType<typeof ShotUploadSettingsSchema>;
+export type ShotUploadTokenUpdate = InferType<typeof ShotUploadTokenUpdateSchema>;
+export type ShotUploadView = InferType<typeof ShotUploadViewSchema>;
 export type StateCondition = InferType<typeof StateConditionSchema>;
 export type SteamWandConfiguration = InferType<typeof SteamWandConfigurationSchema>;
 export type SteamWandDefinition = InferType<typeof SteamWandDefinitionSchema>;

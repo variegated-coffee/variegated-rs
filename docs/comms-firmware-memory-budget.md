@@ -84,7 +84,15 @@ rust-size -A ../../target/riscv32imac-unknown-none-elf/comms-release/variegated-
 | `SHOT_LOG_EVENT_CHANNEL` (`PubSubChannel<ShotLogEvent, 1, 1, 1>`) | 246,576 | **96,480** |
 | shot-upload config channel + link plumbing | 247,264 | 95,792 |
 | + MbedTLS linked, nothing else (measured with a probe, see below) | 248,960 | 93,008 |
-| **+ the shot uploader itself** (task future, 2nd event subscriber) | 251,456 | **90,256** |
+| + the shot uploader itself (task future, 2nd event subscriber) | 251,456 | 90,256 |
+| `heap_allocator!` 56 kB → 64 kB, after the heap ran out during a handshake | 259,688 | 82,024 |
+| **+ `ShotUploadView` on `Configuration`** | 259,800 | **81,912** |
+
+That last row is 112 bytes, and it was 1,552 before the field was changed from
+`heapless::String<255>` to `alloc::String`. **`Configuration` is the most expensive struct
+in this firmware to widen**: it is held inline in the cache, the pubsub channel and several
+task futures, so 256 bytes of inline string is 256 bytes six times over. A published type
+that needs a string should carry a pointer to one; `Routine` already does.
 
 776 bytes, which is one `ShotLogEvent` held inline plus the pubsub's bookkeeping. It buys a
 push that carries the whole `ShotLogListEntry`, so a browser renders the new row without a

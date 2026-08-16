@@ -542,7 +542,17 @@
   {
     "SetShotUploadConfig": {
       "endpoint": "https://plantlet.example/café/api/shots?src=réseau",
-      "token": "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+      "token": "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+      "enabled": true
+    }
+  },
+  {
+    "SetShotUploadSettings": {
+      "endpoint": "https://plantlet.example/api/shots",
+      "enabled": false,
+      "token": {
+        "Set": "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+      }
     }
   }
 ]

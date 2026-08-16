@@ -480,6 +480,9 @@ impl<
     fn general_configuration(&self, current: SingleBoilerSingleGroupConfiguration) -> Configuration {
         let mut configuration: Configuration = current.into();
         configuration.bluetooth_peripherals = self.bluetooth_associations.0.clone();
+        // The `From` is where the token gets dropped -- it reduces to `token_set: bool`, so
+        // no path from here to the browser carries the secret.
+        configuration.shot_upload = (&self.shot_upload_config).into();
         configuration
     }
 
@@ -1726,6 +1729,24 @@ impl<
                     self.wifi_credentials = stored;
                     self.save_wifi_credentials().await;
                     log_info!("Stored new Wi-Fi credentials");
+                }
+            }
+            MachineCommand::SetShotUploadSettings(settings) => {
+                // The settings UI's edit. Merged rather than replacing, because the browser
+                // is never sent the token and so cannot send it back -- see
+                // `ShotUploadTokenUpdate`. The compare-before-save matters: the panel posts
+                // on every save, changed or not.
+                let mut updated = self.shot_upload_config.clone();
+                updated.apply(settings);
+                if self.shot_upload_config != updated {
+                    self.shot_upload_config = updated;
+                    self.save_shot_upload_config().await;
+                    log_info!(
+                        "Shot upload settings updated: endpoint {}, token {}, uploads {}",
+                        if self.shot_upload_config.endpoint.is_some() { "set" } else { "cleared" },
+                        if self.shot_upload_config.token.is_some() { "set" } else { "cleared" },
+                        if self.shot_upload_config.enabled { "enabled" } else { "disabled" }
+                    );
                 }
             }
             MachineCommand::SetShotUploadConfig(config) => {

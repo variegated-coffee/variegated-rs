@@ -467,6 +467,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             RequestConfiguration => {}
             DeleteShotLog(_) => {}
             SetShotUploadConfig(_) => {}
+            SetShotUploadSettings(_) => {}
         }
     }
 
@@ -628,6 +629,17 @@ fn machine_commands() -> Vec<MachineCommand> {
                     .unwrap(),
             ),
             token: Some(heapless::String::try_from("0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ").unwrap()),
+            enabled: true,
+        }),
+        // The `Set` arm, and `enabled: false` -- the two together are the combination a
+        // decoder is most likely to get wrong, since a three-variant enum followed by a bool
+        // is exactly where an off-by-one in the discriminant stops being visible.
+        SetShotUploadSettings(ShotUploadSettings {
+            endpoint: Some(heapless::String::try_from("https://plantlet.example/api/shots").unwrap()),
+            enabled: false,
+            token: ShotUploadTokenUpdate::Set(
+                heapless::String::try_from("0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ").unwrap(),
+            ),
         }),
     ]
 }

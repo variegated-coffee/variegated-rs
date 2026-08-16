@@ -5,7 +5,7 @@ use alloc::string::String;
 use serde::{Serialize, Deserialize};
 use variegated_controller_types::{
     RoutineIndex, RoutineSummary, RoutineSummaryList, BoilerControlMode, GroupBrewControlMode,
-    ControlCurve, PidParameters, PumpConfiguration
+    ControlCurve, PidParameters, PumpConfiguration, ShotUploadSettings
 };
 
 /// Every stored routine, summarised and split by index kind.
@@ -118,4 +118,24 @@ pub struct SetFillPumpConfigurationRequest {
 pub struct SetSteamValveOpennessRequest {
     pub steam_wand_index: u8,
     pub openness: u8,
+}
+
+/// Request to set the shot-log upload settings.
+///
+/// # Why this is HTTP and not a WebSocket command
+///
+/// Every other setting the SPA edits goes over the WebSocket as a `SendMachineCommand`.
+/// This one cannot: `websocket.rs` reads inbound frames into a fixed `[u8; 256]` and
+/// **closes the connection** on anything longer, and a maximal payload here is ~326 bytes
+/// -- 1 + 2 + 255 for the endpoint, 1 + 1 + 64 for the token. An endpoint past roughly 186
+/// characters would silently kill the socket. Routine saves moved to HTTP for exactly this
+/// reason.
+///
+/// Carries [`ShotUploadSettings`] whole rather than restating its fields, so the three-way
+/// token semantics have one definition. **The `Set` arm is a secret**; the type's `Debug`
+/// and `defmt::Format` elide it.
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+pub struct SetShotUploadSettingsRequest {
+    pub settings: ShotUploadSettings,
 }

@@ -23,6 +23,60 @@ pub struct Configuration {
     /// own; the comms processor is told separately, through
     /// `ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals`.
     pub bluetooth_peripherals: BluetoothPeripheralList,
+    /// Shot-log upload settings, as much of them as the browser may see.
+    ///
+    /// Same shape as `bluetooth_peripherals` directly above and for the same reason: stored
+    /// under its own settings key, folded in when the configuration is assembled for
+    /// publishing, with the comms processor told separately through
+    /// `ApplicationProcessorToCommsProcessorMessage::ShotUploadConfig`.
+    ///
+    /// **The token is not here, and must never be.** See [`ShotUploadView::token_set`].
+    pub shot_upload: ShotUploadView,
+}
+
+/// What the browser is allowed to know about the shot-upload configuration.
+///
+/// A separate type from `ShotUploadConfig` rather than a field of it, because the difference
+/// between them *is* the point: this one is safe to broadcast and that one is not.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShotUploadView {
+    /// Where shots are uploaded. Not a secret, and the field you need to see when uploads
+    /// are going somewhere unexpected.
+    ///
+    /// `alloc::String`, not the `heapless::String<255>` the *stored* config uses, and the
+    /// difference is worth 1.5 kB of `.stack`. `Configuration` is held inline in several
+    /// statics on the comms processor -- the cache, the pubsub channel, task futures -- so
+    /// 256 bytes here is 256 bytes several times over, and on that chip `.stack` is whatever
+    /// RWDATA is left after `.bss`. A pointer is 12. `Configuration` already carries
+    /// `Vec<ScheduleItem>` and `Routine` carries `String`, so this is the established shape
+    /// for a published type rather than a new dependency.
+    pub endpoint: Option<alloc::string::String>,
+    /// Whether uploading is switched on.
+    pub enabled: bool,
+    /// Whether a token is stored -- **a bool, not the token, and this is not an oversight.**
+    ///
+    /// `Configuration` is broadcast to every connected browser over an unauthenticated
+    /// WebSocket and served by `GET /configuration` over plain HTTP on the LAN. This server
+    /// has no authentication of any kind: no token, no session, no origin check. The upload
+    /// token grants write access to an account on a public service, so putting it here would
+    /// hand it to anything that can reach port 80.
+    ///
+    /// The settings UI is built around this: it never prefills the token field, and
+    /// `ShotUploadTokenUpdate::Keep` exists precisely so it does not have to.
+    pub token_set: bool,
+}
+
+impl From<&crate::shot_upload::ShotUploadConfig> for ShotUploadView {
+    fn from(config: &crate::shot_upload::ShotUploadConfig) -> Self {
+        Self {
+            endpoint: config.endpoint.as_ref().map(|e| e.as_str().into()),
+            enabled: config.enabled,
+            token_set: config.token.is_some(),
+        }
+    }
 }
 
 impl Configuration {
@@ -36,6 +90,7 @@ impl Configuration {
             steam_wand_configurations: FnvIndexMap::new(),
             schedules: vec![],
             bluetooth_peripherals: BluetoothPeripheralList::new(),
+            shot_upload: ShotUploadView::default(),
         }
     }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'preact/hooks';
 import { ScheduleBuilder } from './components/ScheduleBuilder';
 import { BluetoothPanel } from './components/BluetoothPanel';
+import { ShotUploadPanel } from './components/ShotUploadPanel';
 import { ShotLogPanel } from './components/ShotLogPanel';
 import { RoutineBuilder } from './components/routine/RoutineBuilder';
 import { StatusDisplay } from './components/StatusDisplay';
@@ -167,6 +168,11 @@ export function App() {
 
         {/* Configuration Panel */}
         <ConfigurationPanel configuration={config as Configuration} />
+
+        {/* Shot upload */}
+        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+          <ShotUploadPanel shotUpload={(config as Configuration)?.shot_upload} />
+        </section>
 
         {/* Bluetooth peripherals */}
         <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
