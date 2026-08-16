@@ -114,6 +114,48 @@ impl ShotLogId {
             time: Self::parse_file_name(file)?,
         })
     }
+
+    /// Where a day directory sits in a listing: dated days newest first, undated last.
+    ///
+    /// A rank rather than a string comparison, because the obvious string comparison is
+    /// wrong in a way that reads as right. Directory names sorted descending put
+    /// `NODATE` *first* -- `'N'` is `0x4E`, larger than every digit -- which is the
+    /// opposite of what a newest-first listing means. Undated shots are the ones taken
+    /// before the clock synced; they belong at the end, not ahead of this morning's.
+    ///
+    /// `Reverse` rather than a negated comparator so the key composes: a caller can
+    /// `sort_unstable_by_key` with it and get the listing order, with nothing to get
+    /// backwards at the call site.
+    pub fn day_listing_rank(day: Option<u32>) -> (u8, core::cmp::Reverse<u32>) {
+        match day {
+            Some(day) => (0, core::cmp::Reverse(day)),
+            // The second element is unused for undated days -- the leading `1` has
+            // already ordered them after everything -- and is zero rather than a time so
+            // that two undated days cannot be ordered by a number that is not a day.
+            None => (1, core::cmp::Reverse(0)),
+        }
+    }
+
+    /// Where this shot sits in a listing. Smaller is newer.
+    ///
+    /// **Deliberately not `Ord`.** The derive on this struct orders `day: None` *before*
+    /// `Some(_)`, because that is what `Option`'s own `Ord` does -- so the derive and a
+    /// listing disagree about exactly the case that matters. Implementing `Ord` to match
+    /// this would silently change the meaning of every existing comparison; a named
+    /// method cannot.
+    pub fn listing_rank(&self) -> (u8, core::cmp::Reverse<u32>, core::cmp::Reverse<u32>) {
+        let (undated, day) = Self::day_listing_rank(self.day);
+        (undated, day, core::cmp::Reverse(self.time))
+    }
+
+    /// Whether this shot appears strictly later in a listing than `cursor`.
+    ///
+    /// This is the paging cursor. Strict, so a page that resumes from the last entry of
+    /// the previous one does not repeat it -- an inclusive comparison would return one
+    /// duplicate per page, forever.
+    pub fn listing_follows(&self, cursor: &Self) -> bool {
+        self.listing_rank() > cursor.listing_rank()
+    }
 }
 
 // ============================================================================
@@ -732,6 +774,61 @@ mod shot_log_id_tests {
         // ...but ours still are.
         assert_eq!(ShotLogId::parse_dir_name("20260809"), Some(Some(20_260_809)));
         assert_eq!(ShotLogId::parse_file_name("14320512.BIN"), Some(14_320_512));
+    }
+
+    /// Undated shots come *last* in a listing, not first.
+    ///
+    /// The rule the storage layer used to get wrong: it sorted directory names
+    /// descending, and `"NODATE"` is lexicographically larger than any `YYYYMMDD`, so
+    /// undated shots led the list and pushed real shots off the first page.
+    #[test]
+    fn undated_shots_sort_last() {
+        let newest = ShotLogId { day: Some(20_260_809), time: 16_423_349 };
+        let older = ShotLogId { day: Some(20_260_101), time: 10_000_000 };
+        let undated = ShotLogId { day: None, time: 42 };
+
+        let mut ids = alloc::vec![undated, older, newest];
+        ids.sort_unstable_by_key(|id| id.listing_rank());
+
+        assert_eq!(ids, alloc::vec![newest, older, undated]);
+    }
+
+    /// Within a day, later times come first.
+    #[test]
+    fn a_day_lists_its_latest_shot_first() {
+        let early = ShotLogId { day: Some(20_260_809), time: 9_030_001 };
+        let late = ShotLogId { day: Some(20_260_809), time: 16_423_349 };
+        assert!(late.listing_rank() < early.listing_rank());
+    }
+
+    /// `listing_follows` is what a cursor is: strictly later in the listing, never the
+    /// cursor itself. An inclusive comparison would repeat one entry per page forever.
+    #[test]
+    fn a_cursor_excludes_itself_and_everything_newer() {
+        let newest = ShotLogId { day: Some(20_260_809), time: 16_423_349 };
+        let next = ShotLogId { day: Some(20_260_809), time: 15_495_678 };
+        let undated = ShotLogId { day: None, time: 42 };
+
+        assert!(!newest.listing_follows(&newest));
+        assert!(!newest.listing_follows(&next));
+        assert!(next.listing_follows(&newest));
+        // An undated shot follows every dated one, which is the half a derived `Ord`
+        // gets backwards.
+        assert!(undated.listing_follows(&next));
+        assert!(!next.listing_follows(&undated));
+    }
+
+    /// The derived `Ord` is *not* the listing order, and this test exists to keep the
+    /// difference visible rather than to endorse either.
+    #[test]
+    fn the_derived_ord_disagrees_with_the_listing_order() {
+        let dated = ShotLogId { day: Some(20_260_809), time: 1 };
+        let undated = ShotLogId { day: None, time: 1 };
+
+        // `Option::None` sorts before `Some(_)`, so the derive puts undated first...
+        assert!(undated < dated);
+        // ...while a listing puts it last.
+        assert!(undated.listing_rank() > dated.listing_rank());
     }
 }
 

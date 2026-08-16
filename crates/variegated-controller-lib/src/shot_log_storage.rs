@@ -812,24 +812,22 @@ where
             });
         }
 
-        let mut days: Vec<alloc::string::String> = self
+        // Paired with the day each name parses to, so the sort key is the parsed value
+        // rather than the string. The descending string sort this replaced put `NODATE`
+        // *first*, because `'N'` is larger than every digit -- the opposite of what the
+        // comment beside it claimed and of what a newest-first listing means.
+        let mut days: Vec<(Option<u32>, alloc::string::String)> = self
             .dir_names(&shots_root)
             .await?
             .into_iter()
-            .filter(|name| ShotLogId::parse_dir_name(name).is_some())
+            .filter_map(|name| ShotLogId::parse_dir_name(&name).map(|day| (day, name)))
             .collect();
-        // Newest first. Fixed-width names make the string order the chronological
-        // order; `NODATE` sorts after every digit, which puts undated shots last.
-        days.sort_unstable_by(|a, b| b.cmp(a));
+        days.sort_unstable_by_key(|(day, _)| ShotLogId::day_listing_rank(*day));
 
         let mut entries = Vec::new();
         let mut truncated = false;
 
-        for day in days {
-            let Some(day_value) = ShotLogId::parse_dir_name(&day) else {
-                continue;
-            };
-
+        for (day_value, day) in days {
             let mut day_path = shots_root.clone();
             day_path.push('/');
             day_path.push_str(&day);
