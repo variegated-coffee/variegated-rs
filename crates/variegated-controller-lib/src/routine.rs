@@ -8,6 +8,10 @@ use variegated_log::log_info;
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
+// Only `ROUTINES_CHANGED` names this, and that static is `hardware`-gated -- see the note
+// on `notify_routines_changed`.
+#[cfg(feature = "hardware")]
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::Cache;
@@ -651,6 +655,38 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
 }
 
 
+/// Raised whenever the routine list changes -- a routine added, updated or removed, by any
+/// path.
+///
+/// `esp_transceiver_main` waits on this and pushes a fresh `RoutineSummaryList` to the
+/// comms processor unprompted, so a deletion reaches the browser when it happens rather
+/// than on the next fifteen-second poll. It used to be the write path in
+/// `variegated-comms` that pushed, which covered the one call site it was written at and
+/// nothing else: a `MachineCommand::RemoveRoutine` handled by a controller changed the
+/// list with nobody to say so, and the comms processor papered over it by guessing at half
+/// a second. Raising it from the repository is what makes "every mutation is reported"
+/// true by construction rather than by remembering.
+///
+/// A `Signal` rather than a channel because it coalesces: boot-time seeding raises this
+/// once per internal routine, and one push covers all of them.
+#[cfg(feature = "hardware")]
+pub static ROUTINES_CHANGED: Signal<variegated_hal::SyncSendRawMutex, ()> = Signal::new();
+
+/// Raise [`ROUTINES_CHANGED`].
+///
+/// With `hardware` off this is a no-op, so the call sites in the repositories below need no
+/// `#[cfg]` of their own -- the same shape, and for the same reason, as
+/// `variegated_log::emit_event`. `SyncSendRawMutex` comes from `variegated-hal`, which is
+/// optional behind `hardware` and resolves to `CriticalSectionRawMutex` off-target, where a
+/// host test build has no critical-section implementation to link against.
+#[cfg(feature = "hardware")]
+pub fn notify_routines_changed() {
+    ROUTINES_CHANGED.signal(());
+}
+
+#[cfg(not(feature = "hardware"))]
+pub fn notify_routines_changed() {}
+
 // `async fn` in a public trait, deliberately. The lint's objection is that a caller
 // cannot write `T::get_routine(): Send` and so cannot spawn the future on a work-stealing
 // executor -- which does not describe this firmware. Everything that touches a
@@ -819,6 +855,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         // refused would leave the machine serving something a reboot loses.
         self.store_in_flash(storage_index, &opt).await?;
         self.cache.insert(storage_index, opt.unwrap());
+        notify_routines_changed();
         Ok(routine_index)
     }
 
@@ -834,6 +871,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         self.cache.insert(storage_index, routine);
 
         log_info!("Added internal routine at index {:?} (not persisted to flash)", index);
+        notify_routines_changed();
         Ok(())
     }
 
@@ -849,6 +887,10 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         if routine.is_some() {
             let opt: Option<Routine> = None;
             let _ = self.store_in_flash(storage_index, &opt).await;
+            // Inside the `is_some`, so an index that held nothing raises nothing. The
+            // comms processor would discard that push after comparing against its cache,
+            // but "the list changed" should not be said when it did not.
+            notify_routines_changed();
         }
 
         routine
@@ -868,6 +910,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         let opt = Some(routine);
         self.store_in_flash(storage_index, &opt).await?;
         self.cache.insert(storage_index, opt.unwrap());
+        notify_routines_changed();
         Ok(())
     }
 
@@ -984,6 +1027,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
         let routine_index = RoutineIndex::Custom(inner_index);
         let storage_index = routine_index.to_storage_index();
         self.routines.insert(storage_index, routine);
+        notify_routines_changed();
         Ok(routine_index)
     }
 
@@ -995,6 +1039,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
 
         let storage_index = index.to_storage_index();
         self.routines.insert(storage_index, routine);
+        notify_routines_changed();
         Ok(())
     }
 
@@ -1005,7 +1050,14 @@ impl RoutineRepository for InMemoryRoutineRepository {
         }
 
         let storage_index = index.to_storage_index();
-        self.routines.remove(&storage_index)
+        let routine = self.routines.remove(&storage_index);
+        // Only when something was actually removed -- see the note in the flash-backed
+        // repository's `remove_routine`.
+        if routine.is_some() {
+            notify_routines_changed();
+        }
+
+        routine
     }
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
@@ -1017,6 +1069,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
         let storage_index = index.to_storage_index();
         // For update, we allow creating new routines (not just updating existing ones)
         self.routines.insert(storage_index, routine);
+        notify_routines_changed();
         Ok(())
     }
 

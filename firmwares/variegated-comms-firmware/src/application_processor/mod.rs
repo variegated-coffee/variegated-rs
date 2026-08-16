@@ -595,18 +595,21 @@ pub async fn start(
                         MachineCommand::RemoveScheduleItem(_) => {
                             Some(CommsProcessorToApplicationProcessorMessage::RequestConfiguration)
                         }
-                        // `AddRoutine` and `UpdateRoutine` are deliberately absent: the
-                        // frontend no longer sends them, because a routine definition is
-                        // too large for the WebSocket's inbound frame and does not belong
-                        // on this processor's heap. They travel as `RoutineWriteChunk`,
-                        // which reports its own result and is followed by an unsolicited
-                        // summary push from the application processor -- both faster and
-                        // more honest than guessing at half a second. Only deletion still
-                        // rides the command channel, since it is an index rather than a
-                        // body.
-                        MachineCommand::RemoveRoutine(_) => {
-                            Some(CommsProcessorToApplicationProcessorMessage::RequestRoutines)
-                        }
+                        // No routine command appears here at all. The application
+                        // processor's routine repository pushes a fresh
+                        // `RoutineSummaries` whenever it is mutated, whichever path did
+                        // the mutating -- both faster and more honest than guessing at
+                        // half a second.
+                        //
+                        // `AddRoutine` and `UpdateRoutine` were absent already, because
+                        // the frontend no longer sends them: a routine definition is too
+                        // large for the WebSocket's inbound frame and does not belong on
+                        // this processor's heap, so they travel as `RoutineWriteChunk`.
+                        // `RemoveRoutine` still rides the command channel, being an index
+                        // rather than a body, and used to be followed by a delayed
+                        // `RequestRoutines` -- which was the only thing that made a
+                        // deletion visible, and only if the application processor happened
+                        // to be finished by then.
                         // Belt and braces. The application processor pushes the new list
                         // unprompted when it changes, so this request is normally
                         // redundant -- but a command that alters the peripheral set and

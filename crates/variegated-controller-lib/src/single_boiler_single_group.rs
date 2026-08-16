@@ -8,7 +8,7 @@ use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_rp::watchdog::Watchdog;
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer, with_timeout};
 use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use postcard::{from_bytes_crc32, to_slice_crc32};
@@ -1419,8 +1419,60 @@ impl<
                     log_warn!("Failed to optimize configuration storage: {}", e);
                 }
             }
+            // The three routine mutations. These had no arms at all, so a routine deleted
+            // from the web interface fell into the catch-all below and the machine went on
+            // serving it -- the same failure `SetMachineMode` had above, and just as
+            // invisible, since the comms processor's `DELETE` returns before the command
+            // has been anywhere near a repository.
+            //
+            // No "the list changed" notification here. `add_routine`, `remove_routine` and
+            // `update_routine` raise `ROUTINES_CHANGED` themselves, and the transceiver
+            // pushes a fresh summary list off the back of it.
+            MachineCommand::AddRoutine(routine) => {
+                log_info!("Adding new routine");
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => match repo.add_routine(routine).await {
+                        Ok(index) => log_info!("Added routine at index {:?}", index),
+                        Err(e) => log_warn!("Failed to add routine: {}", e),
+                    },
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
+                }
+            }
+            MachineCommand::RemoveRoutine(idx) => {
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => {
+                        let res = repo.remove_routine(idx).await;
+                        if res.is_none() {
+                            log_warn!("Failed to remove routine at index {:?}: no such routine", idx);
+                        }
+                    }
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
+                }
+            }
+            MachineCommand::UpdateRoutine(idx, routine) => {
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => {
+                        let res = repo.update_routine(idx, routine).await;
+                        if let Err(e) = res {
+                            log_warn!("Failed to update routine at index {:?}: {}", idx, e);
+                        }
+                    }
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
+                }
+            }
+            // The repository here is in-memory, so this is a no-op that reports success
+            // rather than an unsupported command. The warning it used to print said "no
+            // routine repository", which was never true -- the field is right there, and
+            // `RunRoutine` reads it.
             MachineCommand::OptimizeRoutineStorage => {
-                log_warn!("OptimizeRoutineStorage not supported for single boiler controller (no routine repository)");
+                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
+                    Ok(mut repo) => {
+                        if let Err(e) = repo.optimize_storage().await {
+                            log_warn!("Failed to optimize routine storage: {}", e);
+                        }
+                    }
+                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
+                }
             }
             MachineCommand::OptimizeScheduleStorage => {
                 log_warn!("OptimizeScheduleStorage not supported for single boiler controller (no schedule store)");

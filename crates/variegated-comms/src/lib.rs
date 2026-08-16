@@ -38,7 +38,7 @@ use variegated_controller_types::{
 use variegated_debug::bus;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver, Sender};
 use postcard::accumulator::{CobsAccumulator, FeedResult};
-use variegated_controller_lib::routine::RoutineRepository;
+use variegated_controller_lib::routine::{self, RoutineRepository};
 use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_timekeeping::TimeKeeper;
@@ -868,15 +868,16 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                             let _ = tx_sender.send(output).await;
                                         }
 
-                                        // The write changed the list, so say so rather
-                                        // than letting the far side discover it on its
-                                        // next poll. It compares against its cache before
-                                        // republishing, so this costs nothing when the
-                                        // write was refused and nothing changed.
-                                        if let Some(output) = build_routine_summaries(routine_repository).await {
-                                            let _ = tx_sender.send(output).await;
-                                            bus::emit_event(DebugEvent::RoutinesSent);
-                                        }
+                                        // No summary push here. `store_routine` went
+                                        // through the repository, which raises
+                                        // `ROUTINES_CHANGED`, and the arm at the bottom of
+                                        // this function does the sending -- for this write
+                                        // and for every other mutation, including the ones
+                                        // that never pass through this task at all. A
+                                        // refused write touches nothing and so says
+                                        // nothing, where the push that used to be here
+                                        // fired regardless and relied on the far side's
+                                        // cache comparison to swallow it.
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::RequestShotLogList { limit } => {
@@ -1197,9 +1198,9 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                     }
                 }
             },
-            // `join4` is embassy-futures' maximum arity, so the fourth slot carries three
+            // `join4` is embassy-futures' maximum arity, so the fourth slot carries four
             // futures nested rather than one. Nesting is free -- a `join` polls both arms
-            // on every wake exactly as a hypothetical `join6` would -- and it keeps the
+            // on every wake exactly as a hypothetical `join7` would -- and it keeps the
             // three arms above textually where they were.
             join(
             async {
@@ -1271,6 +1272,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         }
                     }
                 },
+                join(
                 async {
                     // Provisioning-window requests the controller has already accepted --
                     // it is the only processor that knows a shot is in progress, so
@@ -1300,6 +1302,31 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         }
                     }
                 },
+                async {
+                    // A fresh summary list whenever the routines change, whoever changed
+                    // them.
+                    //
+                    // The repository raises `ROUTINES_CHANGED` from `add`, `update` and
+                    // `remove`, so this covers the chunked write handled a few hundred
+                    // lines above *and* a `MachineCommand::RemoveRoutine` the controller
+                    // handled on the other core, which nothing here ever sees. It replaces
+                    // a push bolted to the write path, which reported the one mutation it
+                    // was written next to and left deletion to a half-second guess on the
+                    // comms processor.
+                    //
+                    // Unlike the two arms above there is no `Option`: every machine has a
+                    // routine repository, and it is already a parameter of this function.
+                    loop {
+                        routine::ROUTINES_CHANGED.wait().await;
+
+                        if let Some(output) = build_routine_summaries(routine_repository).await {
+                            let _ = tx_sender.send(output).await;
+                            info!("Sent routine summaries to ESP32 (unprompted)");
+                            bus::emit_event(DebugEvent::RoutinesSent);
+                        }
+                    }
+                },
+                ),
             ),
             ),
         ),
