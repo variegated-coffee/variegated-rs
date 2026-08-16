@@ -23,10 +23,14 @@ use variegated_postcard_schema::Registry;
 pub fn registry() -> Registry {
     let mut reg = Registry::new();
 
-    // Fetched over HTTP rather than pushed: `GET /shots` is answered on an explicit
-    // refresh, so unlike everything below it this never arrives unsolicited. It still
-    // needs to be a root -- nothing else reaches it, since `Status` carries only the
-    // *pending* annotations and not the stored list.
+    // Fetched over HTTP rather than pushed: a page of the listing is asked for, so unlike
+    // everything below it this never arrives unsolicited. It still needs to be a root --
+    // nothing else reaches it, since `Status` carries only the *pending* annotations and
+    // not the stored list.
+    //
+    // Individual `ShotLogListEntry`s *do* arrive unsolicited, inside a
+    // `WsMessage::ShotLogEvent`, but they reach the schema through this root as well as
+    // through that one and need no separate registration.
     reg.root::<ShotLogList>();
 
     // Pushed by the firmware over the WebSocket.

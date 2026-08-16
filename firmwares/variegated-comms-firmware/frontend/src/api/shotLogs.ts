@@ -5,9 +5,12 @@ import { deleteRequest, fetchPostcard, postEmpty, putPostcard } from '../utils/p
  * Shot logs live on the machine's SD card, not in the WebSocket status stream.
  *
  * That is why this module talks HTTP while `api/bluetooth.ts` next to it talks over the
- * socket: a listing is tens of entries and a download is tens of kilobytes, and the
- * WebSocket's inbound frames are capped at 256 bytes. It also means nothing here is
- * live -- a list is a snapshot from when it was asked for.
+ * socket: a page is ten entries and a download is tens of kilobytes, and the WebSocket's
+ * inbound frames are capped at 256 bytes.
+ *
+ * Nothing here is live -- a page is a snapshot from when it was asked for. What keeps a
+ * rendered list current is the other direction: the machine pushes a `ShotLogEvent` when
+ * a shot is stored or deleted, and `state/shotLogEvents.ts` is where that arrives.
  *
  * This is the first consumer of `utils/postcard.ts`, which existed unused until now.
  */

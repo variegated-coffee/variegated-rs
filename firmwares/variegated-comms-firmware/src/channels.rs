@@ -560,10 +560,14 @@ pub static SHOT_LOG_LOCK: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 /// Ask the application processor for something and wait for the answer.
 ///
-/// Deliberately **not cached**, unlike [`ROUTINE_CACHE`]. A shot list is asked for on an
-/// explicit refresh and a chunk is asked for once per download; caching either would cost
-/// permanent `.bss` on a device with 512 kB of it, to save a round trip nobody is waiting
-/// on twice.
+/// Deliberately **not cached**, unlike [`ROUTINE_CACHE`], and paging makes the case
+/// stronger rather than weaker. A page is asked for once and then superseded by the next
+/// one; a chunk is asked for once per download. Caching either would cost permanent
+/// `.bss` on a device with 512 kB of it -- and a cache keyed by cursor would be a cache
+/// with a different key on every request.
+///
+/// The freshness problem a cache would otherwise create does not arise either: a client
+/// learns about a new or deleted shot from [`SHOT_LOG_EVENT_CHANNEL`], not by re-asking.
 pub async fn shot_log_request(
     request: ShotLogRequest,
     timeout: embassy_time::Duration,
