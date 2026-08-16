@@ -122,7 +122,13 @@ use crate::Status;
 ///   a bearer token written into whichever field the old layout happens to land on. The
 ///   same bump covers `RequestShotUploadConfig` and `ShotUploadConfig` being appended to
 ///   the two inter-processor enums.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8E;
+/// * `0x8F` -- `DebugEvent` gained `ShotUploaded` and `ShotUploadFailed`, appended at the
+///   end of the enum rather than filed with the comms events they belong with topically.
+///   Device-*outbound*, unlike the four above, so the failure it guards against is the
+///   mirror image: an older host reads a discriminant it does not know, or -- had these
+///   been inserted rather than appended -- reads `SpawnFailed` as one of these and renders
+///   confident nonsense about a task that started fine.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8F;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///
@@ -328,6 +334,21 @@ pub enum DebugEvent {
     SpawnFailed { task: Name },
     HeapReport { used: u32, free: u32 },
     CommandRejected { reason: Name },
+    /// A shot reached the upload endpoint. Carries the id rather than a count, so a host
+    /// can tell *which* shots made it without correlating against a listing.
+    ///
+    /// **Appended at the end, not filed with the comms events above where it belongs
+    /// topically.** postcard encodes an enum as its declaration-order discriminant, so
+    /// inserting here would renumber `SpawnFailed`, `HeapReport` and `CommandRejected` --
+    /// and this enum travels to hosts built separately from the firmware.
+    ShotUploaded { day: u32, time: u32 },
+    /// A shot did not. `reason` is one of a small fixed set -- `endpoint`, `clock`,
+    /// `network`, `link`, `http`, `quota`, `rng`, `tls` -- because the distinctions are
+    /// what make this actionable: `clock` clears itself, `http` means check the token,
+    /// `network` means look at the router.
+    ///
+    /// Appended, not inserted; see the note above.
+    ShotUploadFailed { reason: Name },
 }
 
 impl DebugEvent {
@@ -342,7 +363,10 @@ impl DebugEvent {
             DebugEvent::WifiLost
             | DebugEvent::TimeSyncIgnoredImplausible { .. }
             | DebugEvent::BlePeripheralDisconnected { .. }
-            | DebugEvent::InterlockTripped { .. } => Severity::Warn,
+            | DebugEvent::InterlockTripped { .. }
+            // Warn rather than Error: a shot that failed to upload is still on the card,
+            // and the browser can fetch it. Nothing has been lost yet.
+            | DebugEvent::ShotUploadFailed { .. } => Severity::Warn,
             _ => Severity::Info,
         }
     }
@@ -383,6 +407,8 @@ impl DebugEvent {
             DebugEvent::EsphomeClientDisconnected => "esphome_disconnected",
             DebugEvent::TcpDebugClientConnected => "tcp_debug_connected",
             DebugEvent::TcpDebugClientDisconnected => "tcp_debug_disconnected",
+            DebugEvent::ShotUploaded { .. } => "shot_uploaded",
+            DebugEvent::ShotUploadFailed { .. } => "shot_upload_failed",
             DebugEvent::SpawnFailed { .. } => "spawn_failed",
             DebugEvent::HeapReport { .. } => "heap_report",
             DebugEvent::CommandRejected { .. } => "command_rejected",

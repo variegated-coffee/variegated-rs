@@ -41,6 +41,13 @@ run() {
 # behind it, and those are the tests worth running -- a broken one fails *silently*, since
 # `load_settings` maps a deserialization error to `Default`.
 run "variegated-controller-types" -p variegated-controller-types --no-default-features --features serde,std,sequential-storage "$@"
+
+# The decidable half of shot-log upload -- URL parsing and HTTP status classification.
+#
+# It lives here rather than in `variegated-comms-firmware` because that crate sets
+# `[lib] harness = false`, under which cargo runs no tests at all and reports success. No
+# `--no-default-features`: this crate's default feature set is empty and it pulls no defmt.
+run "variegated-comms-api-types" -p variegated-comms-api-types "$@"
 run "variegated-debug-codec" -p variegated-debug-codec "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"

@@ -27,6 +27,7 @@
 //! would fail closed only by accident rather than by construction.
 
 use alloc::vec;
+use core::sync::atomic::Ordering;
 
 use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
@@ -37,6 +38,72 @@ use mbedtls_rs::{
 };
 
 use super::roots;
+use crate::channels;
+
+/// The wall clock MbedTLS reads for X.509 validity dates.
+///
+/// A unit struct over two atomics, which is what makes it `Sync` without an `unsafe impl`
+/// -- see the module docs for why `EspRtcWallClock` is not usable here.
+pub struct SyncedWallClock;
+
+/// The single instance. `hook_wall_clock` wants a `&'static`, and there is nothing to
+/// configure, so a `static` unit rather than a `StaticCell`.
+pub static WALL_CLOCK: SyncedWallClock = SyncedWallClock;
+
+/// The monotonic clock, for handshake timeouts. Unrelated to the wall clock above:
+/// MbedTLS keeps the two separate, and only the wall clock affects certificate validity.
+pub static TIMER: mbedtls_rs::sys::hook::backend::embassy::timer::EmbassyTimer =
+    mbedtls_rs::sys::hook::backend::embassy::timer::EmbassyTimer;
+
+impl mbedtls_rs::sys::hook::wall_clock::MbedtlsWallClock for SyncedWallClock {
+    /// `None` until SNTP has answered, which MbedTLS reads as the certificate being both
+    /// expired and not yet valid. That is the intended behaviour: a machine with no idea
+    /// what year it is cannot meaningfully check a validity window, and the safe answer to
+    /// "I don't know" is to refuse.
+    fn instant(&self) -> Option<mbedtls_rs::sys::tm> {
+        if !channels::TIME_SYNCED.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        // Anchor plus elapsed, rather than reading the `Rtc`: `Rtc` is not `Sync` and this
+        // is called from MbedTLS's C code with no context to hand it one.
+        let anchor_secs = channels::SNTP_UNIX_SECS.load(Ordering::Relaxed) as i64;
+        let anchor_ms = channels::LAST_SNTP_SYNC_MS.load(Ordering::Relaxed);
+        let elapsed_secs =
+            embassy_time::Instant::now().as_millis().saturating_sub(anchor_ms) / 1000;
+        let unix = anchor_secs.saturating_add(elapsed_secs as i64);
+
+        let timestamp = jiff::Timestamp::from_second(unix).ok()?;
+        let dt = jiff::tz::TimeZone::UTC.to_datetime(timestamp);
+
+        Some(mbedtls_rs::sys::tm {
+            tm_sec: dt.second() as i32,
+            tm_min: dt.minute() as i32,
+            tm_hour: dt.hour() as i32,
+            tm_mday: dt.day() as i32,
+            // C counts months from zero and years from 1900. Getting either wrong shifts
+            // every certificate's validity window by a month or a century, and the symptom
+            // is a handshake that fails with a date error on a perfectly good certificate.
+            tm_mon: dt.month() as i32 - 1,
+            tm_year: dt.year() as i32 - 1900,
+            tm_wday: dt.date().weekday().to_sunday_zero_offset() as i32,
+            tm_yday: dt.date().day_of_year() as i32 - 1,
+            // No DST in UTC, and MbedTLS's date comparison does not read this anyway.
+            tm_isdst: 0,
+        })
+    }
+}
+
+/// Install the clock hooks. Idempotent, and must run before the first handshake.
+///
+/// `unsafe` because the hooks are global state MbedTLS reads from C. Both arguments are
+/// `'static` unit structs, so there is nothing that can dangle.
+pub fn install_hooks() {
+    unsafe {
+        mbedtls_rs::sys::hook::timer::hook_timer(Some(&TIMER));
+        mbedtls_rs::sys::hook::wall_clock::hook_wall_clock(Some(&WALL_CLOCK));
+    }
+}
 
 /// Receive buffer for the outbound socket.
 ///

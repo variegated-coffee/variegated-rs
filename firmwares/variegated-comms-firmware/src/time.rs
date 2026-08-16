@@ -12,7 +12,9 @@ use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 
 use variegated_controller_types::debug::DebugEvent;
 
-use crate::channels::{LAST_SNTP_SYNC_MS, SNTP_RESYNC_REQUEST, SNTP_SYNC_SEQ, TIME_SYNCED};
+use crate::channels::{
+    LAST_SNTP_SYNC_MS, SNTP_RESYNC_REQUEST, SNTP_SYNC_SEQ, SNTP_UNIX_SECS, TIME_SYNCED,
+};
 use crate::config::{NTP_SERVER, USEC_IN_SEC};
 use crate::debug::bus;
 
@@ -192,6 +194,11 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
                     embassy_time::Instant::now().as_millis(),
                     Ordering::Relaxed,
                 );
+                // Paired with the line above, and stored second so a reader that catches
+                // the two mid-update lands on an anchor slightly in the *past* rather than
+                // the future. This is the wall clock MbedTLS reads for X.509 validity
+                // dates, which cannot use the `Rtc` directly -- see `upload::tls`.
+                SNTP_UNIX_SECS.store(time.sec() as u32, Ordering::Relaxed);
                 // Announces the sync to the application processor, which re-anchors its
                 // clock on the *change* and ignores the timestamp otherwise. `Relaxed` for
                 // the same reason as its neighbours: the reader is a 1 Hz status task on

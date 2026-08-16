@@ -365,6 +365,23 @@ pub static TIME_SYNCED: AtomicBool = AtomicBool::new(false);
 // "synced at boot" on a device whose clock never synced at all.
 pub static LAST_SNTP_SYNC_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Unix seconds as of the last SNTP answer, paired with [`LAST_SNTP_SYNC_MS`].
+///
+/// The two together are a wall clock that can be read from anywhere, including MbedTLS's
+/// C code during certificate validation: anchor plus `Instant::now()` elapsed. `Rtc` holds
+/// the same information and is the better source, but it is not `Sync` and the X.509 hook
+/// wants a `&'static (dyn .. + Send + Sync)`.
+///
+/// `AtomicU32`, not `AtomicU64`: seconds fit until 2106, and on riscv32imac without `zacas`
+/// a 64-bit atomic falls into `portable_atomic`'s seqlock table. That table is already paid
+/// for by `LAST_SNTP_SYNC_MS` above, so this is a habit rather than a saving -- but the
+/// habit is the point.
+///
+/// Only meaningful when [`TIME_SYNCED`] is true. Readers gate on that; this stays 0 until
+/// the first sync, and a wall clock that reads 1970 is exactly the failure the gate exists
+/// to prevent.
+pub static SNTP_UNIX_SECS: AtomicU32 = AtomicU32::new(0);
+
 // How many times SNTP has successfully returned an answer since boot. Incremented by
 // sntp_task, reported on every `CommsStatus`, and read by the application processor.
 //
@@ -633,7 +650,12 @@ pub async fn shot_log_request(
 ///
 /// Nothing is retained for a client that connects later. An event is a fact about a
 /// moment, and a browser opening afterwards fetches a page instead.
-pub const SHOT_LOG_EVENT_RECEIVERS: usize = 1;
+///
+/// **Two subscribers**: the WebSocket server, and the shot uploader. The count is a
+/// compile-time bound rather than a hint -- `subscriber()` returns `Err` once they are all
+/// taken, and a task that silently never receives an event is exactly the failure mode the
+/// `expect` at each call site exists to convert into a spawn-time panic.
+pub const SHOT_LOG_EVENT_RECEIVERS: usize = 2;
 pub type ShotLogEventChannel =
     PubSubChannel<CriticalSectionRawMutex, ShotLogEvent, 1, SHOT_LOG_EVENT_RECEIVERS, 1>;
 pub type ShotLogEventSubscriber =
