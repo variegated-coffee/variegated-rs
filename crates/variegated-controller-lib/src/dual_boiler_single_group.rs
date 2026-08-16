@@ -2483,6 +2483,25 @@ impl<
                     ),
                 }
             }
+            MachineCommand::DeleteShotLog(id) => {
+                // Handed to core 1 like an annotation edit, and for the same reason: the
+                // card is not reachable from the control loop.
+                match self.shot_log_query_sender {
+                    Some(ref sender) => {
+                        let query = crate::shot_log_query::ShotLogQuery::Delete { id };
+                        if sender.try_send(query).is_err() {
+                            log_warn!(
+                                "DeleteShotLog({:?}) refused: a shot-log request is already in flight",
+                                id
+                            );
+                        }
+                    }
+                    None => log_warn!(
+                        "DeleteShotLog({:?}) ignored: this machine has no shot-log storage",
+                        id
+                    ),
+                }
+            }
             #[cfg(not(feature = "pwm-steam-valve"))]
             MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
                 log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");

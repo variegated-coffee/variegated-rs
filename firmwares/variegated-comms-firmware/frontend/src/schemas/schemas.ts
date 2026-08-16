@@ -853,7 +853,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   CloseWifiProvisioningWindow: unitVariant('CloseWifiProvisioningWindow'),
   SetWifiCredentials: newtypeVariant('SetWifiCredentials', WifiCredentialsSchema),
   IdentifyMachine: unitVariant('IdentifyMachine'),
-  RequestConfiguration: unitVariant('RequestConfiguration')
+  RequestConfiguration: unitVariant('RequestConfiguration'),
+  DeleteShotLog: newtypeVariant('DeleteShotLog', ShotLogIdSchema)
 });
 
 export const WsMessageSchema = enumType('WsMessage', {

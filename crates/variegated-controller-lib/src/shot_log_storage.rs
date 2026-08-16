@@ -1195,10 +1195,32 @@ where
     async fn delete_shot_inner(&mut self, id: ShotLogId) -> Result<(), ShotLogStorageError> {
         self.mount().await?;
         let path = id.path();
-        self.fs
-            .remove_file(path.as_str())
-            .await
-            .map_err(|_| ShotLogStorageError::NotFound)
+
+        // Absent and unremovable are different answers, and this used to give the first
+        // one for both. That was harmless while nothing above could reach this method; it
+        // is not once a user can press Delete and be told "no such shot" about a shot
+        // plainly in front of them on a read-only or full card.
+        match self.fs.exists(path.as_str()).await {
+            Ok(false) => return Err(ShotLogStorageError::NotFound),
+            Ok(true) => {}
+            Err(e) => {
+                log_warn!(
+                    "SD: could not stat {} before deleting: {:?}",
+                    path.as_str(),
+                    defmt::Debug2Format(&e)
+                );
+                return Err(ShotLogStorageError::DirectoryError);
+            }
+        }
+
+        self.fs.remove_file(path.as_str()).await.map_err(|e| {
+            log_warn!(
+                "SD: could not delete {}: {:?}",
+                path.as_str(),
+                defmt::Debug2Format(&e)
+            );
+            ShotLogStorageError::WriteError
+        })
     }
 }
 

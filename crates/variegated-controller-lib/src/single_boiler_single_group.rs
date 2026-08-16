@@ -1747,6 +1747,27 @@ impl<
                     ),
                 }
             }
+            MachineCommand::DeleteShotLog(id) => {
+                // Identical to the dual-boiler arm, for the reason the arm above gives:
+                // the sender is `None` on every build today, so this always refuses, but
+                // a single-boiler machine that gained a card reader should not need
+                // deletion re-implemented from scratch.
+                match self.shot_log_query_sender {
+                    Some(ref sender) => {
+                        let query = crate::shot_log_query::ShotLogQuery::Delete { id };
+                        if sender.try_send(query).is_err() {
+                            log_warn!(
+                                "DeleteShotLog({:?}) refused: a shot-log request is already in flight",
+                                id
+                            );
+                        }
+                    }
+                    None => log_warn!(
+                        "DeleteShotLog({:?}) ignored: this machine has no shot-log storage",
+                        id
+                    ),
+                }
+            }
             // Everything this controller does not implement, named rather than dropped.
             //
             // This arm was `_ => {}`. Sixteen of the fifty-one `MachineCommand` variants

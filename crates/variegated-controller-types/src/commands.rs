@@ -211,6 +211,21 @@ pub enum MachineCommand {
     /// publish has been seen -- so it cannot recover a boot where the first publish went
     /// nowhere. This one reaches the controller, which always has the real value.
     RequestConfiguration,
+
+    /// Delete a shot from the card.
+    ///
+    /// Appended, not inserted.
+    ///
+    /// A `MachineCommand` rather than a shot-log query, matching
+    /// [`Self::SetShotAnnotations`]: the controller is the single interpreter of
+    /// commands, and routing a write around it would give the same operation two
+    /// different behaviours depending on whether it arrived over HTTP or over the debug
+    /// link.
+    ///
+    /// **Fire and forget, and irreversible.** Nothing acknowledges it. Success is
+    /// reported by a `ShotLogEvent::Deleted` push; a failure is logged on the application
+    /// processor and the shot simply stays where it was.
+    DeleteShotLog(crate::shot_log::ShotLogId),
 }
 
 impl MachineCommand {
@@ -282,6 +297,7 @@ impl MachineCommand {
             MachineCommand::SetShotAnnotations(_, _) => "SetShotAnnotations",
             MachineCommand::SetPendingShotAnnotations(_) => "SetPendingShotAnnotations",
             MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
+            MachineCommand::DeleteShotLog(_) => "DeleteShotLog",
         }
     }
 }
@@ -341,6 +357,7 @@ impl defmt::Format for MachineCommand {
             MachineCommand::SetShotAnnotations(id, annotations) => defmt::write!(f, "SetShotAnnotations({:?}, {} entries)", id, annotations.len()),
             MachineCommand::SetPendingShotAnnotations(annotations) => defmt::write!(f, "SetPendingShotAnnotations({} entries)", annotations.len()),
             MachineCommand::TagDoseFromScale(scale) => defmt::write!(f, "TagDoseFromScale({:?})", scale),
+            MachineCommand::DeleteShotLog(id) => defmt::write!(f, "DeleteShotLog({:?})", id),
             MachineCommand::OpenWifiProvisioningWindow { duration_ms } => defmt::write!(f, "OpenWifiProvisioningWindow({})", duration_ms),
             MachineCommand::CloseWifiProvisioningWindow => defmt::write!(f, "CloseWifiProvisioningWindow"),
             // `{}` on the credentials, not their fields: the type's own `Format` elides the
@@ -397,5 +414,30 @@ impl ScheduleAction {
             ScheduleAction::SetBoilerControlTarget(idx, mode, values) => MachineCommand::SetBoilerControlTarget(*idx, *mode, *values),
             ScheduleAction::SetBoilerControlTargetValues(idx, values) => MachineCommand::SetBoilerControlTargetValues(*idx, *values),
         }
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod delete_shot_log_tests {
+    use super::*;
+    use crate::shot_log::ShotLogId;
+
+    /// The command round-trips and names itself.
+    ///
+    /// `label()` is exhaustive by design, so this test's real value is that the *file*
+    /// stops compiling if a future variant skips it -- but the round trip is worth
+    /// pinning too: this command reaches the debug wire, where a wrong discriminant
+    /// deletes the wrong shot rather than failing.
+    #[test]
+    fn delete_shot_log_round_trips() {
+        let command = MachineCommand::DeleteShotLog(ShotLogId {
+            day: Some(20_260_809),
+            time: 16_423_349,
+        });
+        assert_eq!(command.label(), "DeleteShotLog");
+
+        let encoded = postcard::to_allocvec(&command).unwrap();
+        let decoded: MachineCommand = postcard::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded.label(), "DeleteShotLog");
     }
 }

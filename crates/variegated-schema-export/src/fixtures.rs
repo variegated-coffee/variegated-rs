@@ -465,6 +465,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetWifiCredentials(_) => {}
             IdentifyMachine => {}
             RequestConfiguration => {}
+            DeleteShotLog(_) => {}
         }
     }
 
@@ -611,6 +612,10 @@ fn machine_commands() -> Vec<MachineCommand> {
         }),
         IdentifyMachine,
         RequestConfiguration,
+        // The undated case `SetShotAnnotations` above could not take: `day: None` reaches
+        // the URL as the literal `NODATE`, and it is the encoding of the `Option` in the
+        // id that a frontend gets wrong first.
+        DeleteShotLog(ShotLogId { day: None, time: 42 }),
     ]
 }
 

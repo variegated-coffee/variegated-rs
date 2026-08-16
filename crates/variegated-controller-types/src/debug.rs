@@ -109,7 +109,13 @@ use crate::Status;
 ///   the operator did not type. It carries its own magic-value guard as well, because the
 ///   version byte protects against a *differently built* peer and the guard against a
 ///   *corrupted frame* from a correctly built one -- two different failures.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8C;
+/// * `0x8D` -- `MachineCommand` gained `DeleteShotLog`, appended. Device-inbound and
+///   destructive, like `SdFormatCard` and `ClearWifiCredentials` before it, so a version
+///   mismatch must report itself as one rather than as a command nobody typed. The same
+///   bump covers `RequestShotLogList` changing shape and `ShotLogEvent` being appended to
+///   the inter-processor reply enum; neither reaches the debug wire directly, but the
+///   shot-log types they carry reach it through `Status::pending_shot_annotations`.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x8D;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

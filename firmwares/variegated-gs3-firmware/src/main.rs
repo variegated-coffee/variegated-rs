@@ -1347,6 +1347,11 @@ async fn shot_log_storage_task(
                 // point that knows a new question is being asked.
                 let _ = SHOT_LOG_REPLY_CHANNEL.try_receive();
 
+                // Captured before `query` is moved into the handler below. A delete is
+                // the one query with no waiter, so it is also the one that must not
+                // leave an answer on a channel a list request could collect.
+                let is_delete = matches!(query, ShotLogQuery::Delete { .. });
+
                 let reply = if ensure_card_ready(shared_bus, &mut storage, &mut parked, &mut det).await
                 {
                     let card = storage.as_mut().expect("ensured above");
@@ -1356,24 +1361,32 @@ async fn shot_log_storage_task(
                     // is excluded: it means the filesystem answered correctly about a
                     // shot that is not there, which is a fact about the request rather
                     // than about the card.
-                    if matches!(reply, ShotLogReply::Error(e) if e != ShotLogStorageError::NotFound)
+                    if matches!(reply, Some(ShotLogReply::Error(e)) if e != ShotLogStorageError::NotFound)
                     {
                         parked = storage_take(&mut storage);
                     }
                     reply
+                } else if is_delete {
+                    // No reply even here: a delete never had a waiter, and inventing one
+                    // would put an answer on a channel a list request could collect.
+                    log_warn!("SD: delete dropped, no card");
+                    None
                 } else {
                     // Answered immediately rather than after a bus-lease timeout: the
                     // card is known to be absent, and making the caller wait out a
                     // timeout to learn that turns "no card" into "the machine is not
                     // responding".
-                    ShotLogReply::Error(ShotLogStorageError::CardNotPresent)
+                    Some(ShotLogReply::Error(ShotLogStorageError::CardNotPresent))
                 };
 
-                // `try_send` on a channel just drained above, so this can only fail if a
-                // reply raced in between -- which would mean two requests in flight, the
-                // thing the depth-1 channels and the far-side lock exist to prevent.
-                if SHOT_LOG_REPLY_CHANNEL.try_send(reply).is_err() {
-                    log_warn!("SD: dropped a shot-log reply; the reply channel was full");
+                if let Some(reply) = reply {
+                    // `try_send` on a channel just drained above, so this can only fail
+                    // if a reply raced in between -- which would mean two requests in
+                    // flight, the thing the depth-1 channels and the far-side lock exist
+                    // to prevent.
+                    if SHOT_LOG_REPLY_CHANNEL.try_send(reply).is_err() {
+                        log_warn!("SD: dropped a shot-log reply; the reply channel was full");
+                    }
                 }
             }
             Either4::Third(request) => {
@@ -1488,14 +1501,21 @@ async fn shot_log_storage_task(
 /// whether to park the device -- and because the loop is already long enough that a
 /// fourth arm of inline matching would bury the store path it exists to protect.
 ///
-/// Every arm returns a `ShotLogReply` rather than propagating: the requester is on the
-/// other side of a channel and has no way to observe a `Result`, so an error has to
-/// travel as an answer or not at all.
+/// Every arm that answers returns a `ShotLogReply` rather than propagating: the requester
+/// is on the other side of a channel and has no way to observe a `Result`, so an error has
+/// to travel as an answer or not at all.
+///
+/// `None` is `Delete`, which is the one query with no waiter. It arrived as a
+/// fire-and-forget `MachineCommand`, and putting an answer for it on a channel that has no
+/// correlation id would give a concurrent listing something to mistake for its own.
 #[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
-async fn handle_shot_log_query(card: &mut SdStorage, query: ShotLogQuery) -> ShotLogReply {
+async fn handle_shot_log_query(
+    card: &mut SdStorage,
+    query: ShotLogQuery,
+) -> Option<ShotLogReply> {
     use variegated_controller_lib::shot_log_storage::ShotLogStorage;
 
-    match query {
+    Some(match query {
         ShotLogQuery::List(request) => match card.list_shots(request).await {
             Ok(list) => {
                 // Logged here rather than at the requester, because the two requesters
@@ -1569,7 +1589,25 @@ async fn handle_shot_log_query(card: &mut SdStorage, query: ShotLogQuery) -> Sho
                 Err(e) => ShotLogReply::Error(e),
             }
         }
-    }
+        ShotLogQuery::Delete { id } => {
+            match card.delete_shot(id).await {
+                Ok(()) => log_info!(
+                    "SD: deleted {}/{}",
+                    id.dir_name().as_str(),
+                    id.file_name().as_str()
+                ),
+                // Logged and dropped. There is nothing to answer: this arrived as a
+                // fire-and-forget command and the requester is not waiting.
+                Err(e) => log_warn!(
+                    "SD: could not delete {}/{}: {:?}",
+                    id.dir_name().as_str(),
+                    id.file_name().as_str(),
+                    e
+                ),
+            }
+            return None;
+        }
+    })
 }
 
 /// Background task for handling long-running storage operations

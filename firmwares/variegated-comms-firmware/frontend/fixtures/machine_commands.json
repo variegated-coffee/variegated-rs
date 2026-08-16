@@ -532,5 +532,11 @@
     }
   },
   "IdentifyMachine",
-  "RequestConfiguration"
+  "RequestConfiguration",
+  {
+    "DeleteShotLog": {
+      "day": null,
+      "time": 42
+    }
+  }
 ]

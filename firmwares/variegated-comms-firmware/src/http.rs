@@ -1511,6 +1511,28 @@ impl HttpHandler {
             .await
     }
 
+    // DELETE /shots/<day>/<time>
+    async fn handle_delete_shot<T, const N: usize>(
+        &self,
+        conn: &mut ServerConnection<'_, T, N>,
+        id: ShotLogId,
+    ) -> Result<(), Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        log_info!(
+            "DELETE /shots/{}/{}",
+            id.dir_name().as_str(),
+            id.file_name().as_str()
+        );
+
+        // Queued, not confirmed. 200 here means the command reached the channel; whether
+        // the shot is gone is reported by a `ShotLogEvent::Deleted` push, which is also
+        // what tells every *other* connected browser.
+        self.send_command(conn, MachineCommand::DeleteShotLog(id), "Delete queued")
+            .await
+    }
+
     // PUT /shots/pending
     async fn handle_put_pending_annotations<T, const N: usize>(
         &self,
@@ -1706,6 +1728,12 @@ impl Handler for HttpHandler {
                     Some((id, "annotations")) => {
                         self.handle_put_shot_annotations(conn, id).await
                     }
+                    _ => Self::send_bad_request(conn, "Invalid shot path").await,
+                }
+            }
+            (Method::Delete, p) if p.starts_with("/shots/") => {
+                match Self::parse_shot_path(p) {
+                    Some((id, "")) => self.handle_delete_shot(conn, id).await,
                     _ => Self::send_bad_request(conn, "Invalid shot path").await,
                 }
             }

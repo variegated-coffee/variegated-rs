@@ -29,8 +29,8 @@ use variegated_controller_types::{
 ///
 /// Deliberately **not** a mirror of [`crate::shot_log_storage::ShotLogStorage`]. There is
 /// no `ReadAnnotations`, because a listing already carries annotations and nothing can
-/// send such a request; there is no `Delete`, because nothing offers deletion yet.
-/// Variants get added when something can send them, not in anticipation of it.
+/// send such a request. Variants get added when something can send them, not in
+/// anticipation of it.
 #[derive(Debug, Clone, PartialEq)]
 // Guarded, since this crate gained a `defmt` feature: a host test build turns it off, and
 // a `Format` impl monomorphized there has no `_defmt_acquire` to link against.
@@ -45,6 +45,14 @@ pub enum ShotLogQuery {
         id: ShotLogId,
         annotations: ShotAnnotations,
     },
+    /// Remove a stored shot.
+    ///
+    /// **Answered with no [`ShotLogReply`].** This channel has no correlation id, and
+    /// every reply put on it is signalled into the comms processor's single reply slot,
+    /// where a concurrent HTTP request can collect it as its own answer. A delete's
+    /// confirmation therefore travels on the one-way event channel instead, as a
+    /// `ShotLogEvent::Deleted` -- see the storage task in the gs3 firmware.
+    Delete { id: ShotLogId },
 }
 
 /// The storage task's answer to a [`ShotLogQuery`].
