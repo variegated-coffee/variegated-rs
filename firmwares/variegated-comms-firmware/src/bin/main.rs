@@ -578,7 +578,7 @@ async fn main(spawner: Spawner) -> ! {
     // `scripts/memory-report.sh` are single futures with big inline buffers:
     // `application_processor_task` 18896, `http_server_task` 17696, `esphome_server_task`
     // 17104, `debug_tcp_task` 9040, `websocket_server_task` 7008.
-    esp_alloc::heap_allocator!(size: 56 * 1024);
+    esp_alloc::heap_allocator!(size: 64 * 1024);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

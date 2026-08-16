@@ -36,7 +36,7 @@ use variegated_log::log_warn;
 /// headroom is for the radio: esp-rtos runs preemptive threads underneath embassy, and
 /// Wi-Fi and BLE bring-up can hold the CPU for stretches that a tighter window would
 /// read as a hang.
-pub const TIMEOUT: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(10);
+pub const TIMEOUT: esp_hal::time::Duration = esp_hal::time::Duration::from_secs(15);
 
 /// How often [`watchdog_task`] feeds.
 pub const FEED_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_secs(1);
