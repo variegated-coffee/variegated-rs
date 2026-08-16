@@ -293,3 +293,26 @@ default = [
   "esp-radio/esp32c6",
 ]
 
+# **Builds a firmware that does not check the upload endpoint's certificate.**
+#
+#     cargo build --profile comms-release --features insecure-tls
+#
+# A debugging build and never a shipping one. It exists to answer one question -- is a
+# certificate the *only* thing wrong -- when a handshake fails with `BADCERT_NOT_TRUSTED`
+# and `mbedtls-rs`'s safe API gives no way to look at the chain the server actually sent.
+#
+# It is not quiet: `upload::attempt_upload` logs a warning naming the flags verification
+# *would* have produced at every handshake, because a machine that is not checking
+# certificates should be obvious from thirty seconds of log.
+#
+# A feature rather than a runtime flag for the reason `config::TCP_COMMANDS_ENABLED` gives
+# at length: `VERIFIES_CERTIFICATES` is a `const bool`, so with the feature off the warning
+# branch is `if false` and folds away, and `AuthMode::None` is behind a `cfg` and never
+# compiled. There is nothing on the other side of it for a stray write to reach.
+#
+# One thing that looks like a counter-example and is not: `strings` finds "VERIFICATION IS
+# DISABLED" in a default build. That is defmt's interning table in `.defmt`, which sits at
+# VMA 0 and is not a loaded section -- the text costs no flash and the code that would log
+# it is gone. Check `llvm-objdump -h` before concluding otherwise.
+insecure-tls = ["variegated-shot-upload/danger-skip-verification"]
+

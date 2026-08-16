@@ -53,6 +53,22 @@ tls = ["dep:mbedtls-rs"]
 # monomorphizes any `Format` impl fails to link -- as "Too many sections!", which mentions
 # neither defmt nor logging.
 defmt = ["dep:defmt", "mbedtls-rs?/defmt"]
+# **Turns certificate verification off. A debugging tool, never a shipping configuration.**
+#
+# A cargo feature rather than a runtime flag, and that is the mechanism rather than a
+# convenience -- the same argument `config::TCP_COMMANDS_ENABLED` makes in the firmware. With
+# the feature off, the `AuthMode::None` branch is not reachable and is eliminated before it
+# reaches the binary. The point is not that the insecure branch is not taken; it is that
+# there is nothing on the other side of it.
+#
+# It exists because a handshake that fails with `BADCERT_NOT_TRUSTED` gives no way to tell
+# "the trust anchor is wrong" from "everything else is also broken", and the peer chain is
+# not reachable through `mbedtls-rs`'s safe API to look at directly. Turning verification off
+# answers exactly one question: is trust the *only* thing wrong?
+#
+# `roots::tests` still runs and still has to pass with this on, so a build that skips
+# verification at runtime cannot also quietly ship the wrong anchors.
+danger-skip-verification = []
 
 [dependencies]
 defmt = { workspace = true, optional = true }

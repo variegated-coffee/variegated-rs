@@ -443,6 +443,20 @@ async fn attempt_upload(
         crate::debug::snapshot::heap_free()
     );
 
+    // A machine that is not checking certificates must never be quiet about it. The flags
+    // are still populated under `AuthMode::None` -- MbedTLS parses the chain and records its
+    // opinion, it just does not abort -- so this reports what verification *would* have said
+    // while letting the rest of the upload proceed. That is the whole point of the build:
+    // it separates "the trust anchor is wrong" from "everything else is also broken".
+    if !session::VERIFIES_CERTIFICATES {
+        log_warn!(
+            "Shot upload: CERTIFICATE VERIFICATION IS DISABLED in this build. \
+             The chain would have been judged {:#x} (0x8 = NOT_TRUSTED, 0x4 = CN_MISMATCH, \
+             0x1 = EXPIRED). Do not ship this.",
+            tls_session.tls_verification_details()
+        );
+    }
+
     // Chunk zero *before* a byte of the request goes out. Once `Content-Length` is on the
     // wire we are committed to producing exactly that many bytes, and a card that turns out
     // to be missing could then only be expressed by hanging up mid-body. Fetched here rather

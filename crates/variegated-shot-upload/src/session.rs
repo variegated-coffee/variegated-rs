@@ -66,15 +66,33 @@ pub fn client_config(server_name: &CStr) -> Result<SessionConfig<'_>, ConnectErr
     let ca_chain =
         Certificate::new(X509::PEM(roots::CA_BUNDLE_PEM)).map_err(|_| ConnectError::BadCaBundle)?;
 
+    // `AuthMode::None` still *parses* the chain and still records what it thought of it in
+    // `tls_verification_details()`; it just does not abort. So a build with this on will
+    // complete the handshake and can still report the flags, which is what makes it useful
+    // as a diagnostic rather than merely permissive.
+    #[cfg(feature = "danger-skip-verification")]
+    let auth_mode = AuthMode::None;
+    #[cfg(not(feature = "danger-skip-verification"))]
+    let auth_mode = AuthMode::Required;
+
     Ok(SessionConfig::Client(ClientSessionConfig {
         ca_chain: Some(ca_chain),
         creds: None,
+        // Kept even when verification is off: it is what puts the name in SNI, and a server
+        // that picks its certificate by SNI would otherwise serve a different one -- which
+        // would make this diagnostic answer a question nobody asked.
         server_name: Some(server_name),
-        auth_mode: AuthMode::Required,
+        auth_mode,
         min_version: TlsVersion::Tls1_2,
         alpn_protocols: Some(&[c"http/1.1"]),
     }))
 }
+
+/// Whether this build verifies certificates.
+///
+/// Exposed so the firmware can say so in a log line at every handshake. A machine that is
+/// not checking certificates should never be quiet about it.
+pub const VERIFIES_CERTIFICATES: bool = !cfg!(feature = "danger-skip-verification");
 
 /// Complete a verified TLS handshake over an already-connected stream.
 ///
