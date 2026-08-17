@@ -9,7 +9,8 @@ use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
 use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
-use crate::list_menu::{ListMenuType, ListMenuState, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
+use crate::list_menu::{ListMenuType, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
+use variegated_menu::{Adjustable, ListGeometry, ListNav};
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
@@ -134,14 +135,18 @@ pub(crate) enum UIState {
     #[allow(dead_code)]
     DispensingWater,
     RoutineExecution,
-    /// The fourth field is the cached item list. It is `None` at every construction site
-    /// and `_` at every read site, which is why it reports as dead -- see the note on
-    /// [`ListMenuItem::id`] for what it was for and which bug its absence causes.
+    /// The fourth field is the cached item list, populated by `enter_list_menu`. Activation
+    /// resolves the selected row through it -- see the note on [`ListMenuItem::id`] -- and the
+    /// renderer reads it instead of re-fetching every frame.
+    ///
+    /// `None` only where a menu is entered from a synchronous context that has no repository
+    /// to fetch from: `ListMenuType::get_back_state`. Those destinations are `Settings` and
+    /// `PidConfig`, whose rows resolve positionally, so the fallback is correct there.
     ListMenu(
         ListMenuType,
-        ListMenuState,
-        Option<Box<(ListMenuType, ListMenuState)>>,
-        #[allow(dead_code)] Option<Vec<ListMenuItem>>,
+        ListNav,
+        Option<Box<(ListMenuType, ListNav)>>,
+        Option<Vec<ListMenuItem>>,
     ),
     SettingsInformation,
     SettingsDebugInfo,
@@ -165,7 +170,7 @@ pub(crate) enum UIState {
         config_type: ConfigEditType,
         current_value: f32,
         previous_menu_type: ListMenuType,
-        previous_menu_state: ListMenuState,
+        previous_menu_state: ListNav,
     },
 }
 
@@ -199,29 +204,34 @@ impl ManualBrewParameters {
         }
     }
 
-    pub fn adjust_value(&mut self, mode: ControlMode, increment: bool) {
+    /// The bounds and step for each mode, stated exactly once.
+    ///
+    /// They used to be per-mode literals inside `adjust_value` *and* again as rounding clamps
+    /// inside `sync_from_process_values`, which is two places for one fact.
+    fn limits(mode: ControlMode) -> (f32, f32, f32) {
         match mode {
-            ControlMode::PumpDutyCycle => {
-                if increment {
-                    self.duty_cycle = (self.duty_cycle + 5).min(100);
-                } else {
-                    self.duty_cycle = self.duty_cycle.saturating_sub(5);
-                }
-            }
-            ControlMode::PumpFlowRate => {
-                if increment {
-                    self.flow_rate = (self.flow_rate + 0.5).min(50.0);
-                } else {
-                    self.flow_rate = (self.flow_rate - 0.5).max(0.0);
-                }
-            }
-            ControlMode::PumpPressure => {
-                if increment {
-                    self.pressure = (self.pressure + 0.5).min(15.0);
-                } else {
-                    self.pressure = (self.pressure - 0.5).max(0.0);
-                }
-            }
+            //             min    max     step
+            ControlMode::PumpDutyCycle => (0.0, 100.0, 5.0),
+            ControlMode::PumpFlowRate => (0.0, 50.0, 0.5),
+            ControlMode::PumpPressure => (0.0, 15.0, 0.5),
+        }
+    }
+
+    fn adjustable(&self, mode: ControlMode) -> Adjustable {
+        let (min, max, step) = Self::limits(mode);
+        Adjustable::new(self.get_value(mode), min, max, step)
+    }
+
+    pub fn adjust_value(&mut self, mode: ControlMode, increment: bool) {
+        let mut a = self.adjustable(mode);
+        if increment { a.increase() } else { a.decrease() }
+
+        match mode {
+            // Back through `u8`. The value is clamped to 0..=100 by `Adjustable`, so this cast
+            // cannot saturate.
+            ControlMode::PumpDutyCycle => self.duty_cycle = a.value() as u8,
+            ControlMode::PumpFlowRate => self.flow_rate = a.value(),
+            ControlMode::PumpPressure => self.pressure = a.value(),
         }
     }
 
@@ -281,9 +291,12 @@ impl ManualBrewParameters {
     pub fn sync_from_process_values(&mut self, group_status: &variegated_controller_types::GroupStatus) {
         // Update duty cycle from current pump output (clamp to 0-100%)
         let current_duty = group_status.pump_output.duty_cycle();
-        // Round to nearest 5% increment
-        self.duty_cycle = ((current_duty + 2) / 5) * 5; // Integer rounding to 5% increments
-        
+        // Round to nearest 5% increment, in `u16`. `current_duty` is a `DutyCycleType = u8`
+        // produced by a saturating `as u8` cast, so a duty of 254 or 255 overflowed the `+ 2` --
+        // a debug panic, and a wrap to 0 in release.
+        let (_, duty_max, _) = Self::limits(ControlMode::PumpDutyCycle);
+        self.duty_cycle = (((current_duty as u16 + 2) / 5) * 5).min(duty_max as u16) as u8;
+
         // Update flow rate from the current process value. It must be the *input* flow rate:
         // `ControlMode::PumpFlowRate` maps to `GroupBrewControlMode::GroupFlowRate`, whose PID
         // reads `get_input_flow_rate`. Preferring the output flow rate -- which this did --
@@ -292,87 +305,71 @@ impl ManualBrewParameters {
         // input reading, leave the previous target alone rather than substitute the one the
         // loop cannot see, exactly as the pressure branch below does.
         if let Some(flow) = group_status.input_flow_rate {
-            // Clamp to valid range (0.0 to 50.0 ml/s) and round to nearest 0.5 increment
-            let clamped_flow = flow.max(0.0).min(50.0);
-            self.flow_rate = ((clamped_flow + 0.25) / 0.5) as u32 as f32 * 0.5; // Round to 0.5 ml/s increments
+            // Bounds and step from the same table `adjust_value` uses, so the rounding grid a
+            // synced value lands on is the grid the knob then steps along.
+            let (min, max, step) = Self::limits(ControlMode::PumpFlowRate);
+            let clamped_flow = flow.max(min).min(max);
+            self.flow_rate = ((clamped_flow + step / 2.0) / step) as u32 as f32 * step;
         }
-        
-        // Update pressure from current process value  
+
+        // Update pressure from current process value
         if let Some(pressure) = group_status.pressure {
-            // Clamp to valid range (0.0 to 15.0 bar) and round to nearest 0.5 increment
-            let clamped_pressure = pressure.max(0.0).min(15.0);
-            self.pressure = ((clamped_pressure + 0.25) / 0.5) as u32 as f32 * 0.5; // Round to 0.5 bar increments
+            let (min, max, step) = Self::limits(ControlMode::PumpPressure);
+            let clamped_pressure = pressure.max(min).min(max);
+            self.pressure = ((clamped_pressure + step / 2.0) / step) as u32 as f32 * step;
         }
     }
 }
 
+/// What a row of the routine parameter editor is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowKind {
+    Back,
+    Parameter(usize),
+    Execute,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RoutineParameterEditState {
-    pub selected_index: usize,
-    pub scroll_offset: usize,
+    pub nav: ListNav,
     pub parameter_values: RoutineParameters,
     pub routine_name: String,
 }
 
 impl RoutineParameterEditState {
-    pub const VISIBLE_ITEMS: usize = 5; // Same as ListMenuState
-    
     pub fn new(routine: &Routine) -> Self {
         // Initialize with default values from routine parameters
         let mut parameter_values = RoutineParameters::new();
         for param in routine.parameters() {
             let _ = parameter_values.insert(param.index, param.default);
         }
-        
+
         Self {
-            selected_index: 0, // Start with back button selected
-            scroll_offset: 0,
+            nav: ListNav::new(), // Starts on the back row
             parameter_values,
             routine_name: routine.name().to_string(),
         }
     }
-    
-    pub fn is_back_button_selected(&self) -> bool {
-        self.selected_index == 0
-    }
-    
-    pub fn is_execute_selected(&self, routine: &Routine) -> bool {
-        self.selected_index == routine.parameters().len() + 1 // After back + parameters
-    }
-    
-    pub fn get_selected_param_index(&self, routine: &Routine) -> Option<u8> {
-        if self.selected_index == 0 || self.is_execute_selected(routine) {
-            None // Back button or Execute selected
-        } else {
-            // Adjust index for back button offset (same logic as ListMenuState)
-            routine.parameters().get(self.selected_index - 1).map(|p| p.index)
+
+    /// Back, then one row per parameter, then Execute. One index space, same as the list menu.
+    ///
+    /// `param_count` is passed in rather than read off `parameter_values`, because the renderer
+    /// draws `routine.parameters()` and a row count taken from anywhere else is a second source
+    /// of truth for the same number -- which is the class of bug this whole change removes.
+    pub fn geometry(&self, param_count: usize) -> ListGeometry {
+        ListGeometry {
+            total_rows: 1 + param_count + 1,
+            visible_rows: crate::list_menu::VISIBLE_ROWS,
+            wrap: false,
         }
     }
-    
-    pub fn get_total_items(&self, routine: &Routine) -> usize {
-        1 + routine.parameters().len() + 1 // Back + Parameters + Execute
-    }
-    
-    pub fn navigate_up(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            
-            // Adjust scroll offset if needed (same logic as ListMenuState)
-            if self.selected_index < self.scroll_offset + 1 && self.scroll_offset > 0 {
-                self.scroll_offset -= 1;
-            }
-        }
-    }
-    
-    pub fn navigate_down(&mut self, total_items: usize) {
-        if self.selected_index < total_items - 1 {
-            self.selected_index += 1;
-            
-            // Adjust scroll offset if needed (same logic as ListMenuState)
-            if self.selected_index >= self.scroll_offset + Self::VISIBLE_ITEMS - 1 
-               && self.scroll_offset + Self::VISIBLE_ITEMS < total_items {
-                self.scroll_offset += 1;
-            }
+
+    /// What a row is.
+    pub fn row_kind(&self, row: usize, param_count: usize) -> RowKind {
+        match row {
+            0 => RowKind::Back,
+            r if r <= param_count => RowKind::Parameter(r - 1),
+            _ => RowKind::Execute,
         }
     }
 }
@@ -384,6 +381,24 @@ pub(crate) struct UIStatus {
 }
 
 // Menu item activation handler
+/// Enter a list menu with its items already fetched.
+///
+/// **Populating the cache is half the routine-selection fix.** `get_menu_item_id` maps a row
+/// number to an id from static tables and returns `None` unconditionally for
+/// `ListMenuType::Routines`, because a `RoutineIndex` cannot be recovered from a position. The
+/// cached `ListMenuItem` carries one, so activation can resolve through it.
+///
+/// It also spares the renderer a `get_items` call per frame -- it runs on a 1 us delay and was
+/// taking the routine repository mutex and re-allocating a `Vec<String>` every time round.
+async fn enter_list_menu(
+    menu_type: ListMenuType,
+    routine_repository: &RoutineRepository,
+    parent: Option<Box<(ListMenuType, ListNav)>>,
+) -> UIState {
+    let items = menu_type.get_items(Some(routine_repository), None).await;
+    UIState::ListMenu(menu_type, ListNav::new(), parent, Some(items))
+}
+
 pub async fn handle_menu_item_activation(
     item_id: MenuItemId,
     routine_repository: &RoutineRepository,
@@ -416,20 +431,16 @@ pub async fn handle_menu_item_activation(
             None
         },
         MenuItemId::SettingsBoilerTemperaturePID => {
-            let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), menu_state, None, None))
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), routine_repository, None).await)
         },
         MenuItemId::SettingsPumpFlowRatePID => {
-            let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), menu_state, None, None))
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), routine_repository, None).await)
         },
         MenuItemId::SettingsPumpOutputFlowRatePID => {
-            let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), menu_state, None, None))
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), routine_repository, None).await)
         },
         MenuItemId::SettingsPumpPressurePID => {
-            let menu_state = ListMenuState::new();
-            Some(UIState::ListMenu(ListMenuType::PidConfig(PidConfigType::PumpPressure), menu_state, None, None))
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpPressure), routine_repository, None).await)
         },
         MenuItemId::PidTerm(_term) => {
             // This will be called from PID config menu, need to get the PID type from context
@@ -519,14 +530,12 @@ where
                             Direction::CounterClockwise => substate.rotate_clockwise(),
                         };
                     }
-                    UIState::ListMenu(menu_type, menu_state, _, _) => {
-                        // Get total items count from centralized location
+                    UIState::ListMenu(menu_type, nav, _, _) => {
                         let item_count = menu_type.get_item_count(Some(self.routine_repository)).await;
-                        let total_items = item_count + (if menu_type.has_back_button() { 1 } else { 0 });
-                        
+                        let geo = menu_type.geometry(item_count);
                         match direction {
-                            Direction::Clockwise => menu_state.navigate_up(),
-                            Direction::CounterClockwise => menu_state.navigate_down(total_items),
+                            Direction::Clockwise => nav.up(geo),
+                            Direction::CounterClockwise => nav.down(geo),
                         }
                     }
                     UIState::ScaleSettings(substate) => {
@@ -554,25 +563,26 @@ where
                         // Navigate through parameter list (same logic as ListMenu)
                         let mut repo = self.routine_repository.lock().await;
                         if let Some(routine) = repo.get_routine(*routine_index).await {
-                            let total_items = edit_state.get_total_items(routine);
+                            let geo = edit_state.geometry(routine.parameters().len());
                             match direction {
-                                Direction::Clockwise => edit_state.navigate_up(),
-                                Direction::CounterClockwise => edit_state.navigate_down(total_items),
+                                Direction::Clockwise => edit_state.nav.up(geo),
+                                Direction::CounterClockwise => edit_state.nav.down(geo),
                             }
                         }
                     }
                     UIState::ParameterManipulation { current_value, .. } => {
-                        // Adjust parameter value in 0.5 increments
-                        let increment = match direction {
-                            Direction::CounterClockwise => true,  // CounterClockwise increments
-                            Direction::Clockwise => false,        // Clockwise decrements
-                        };
-                        
-                        if increment {
-                            *current_value += 0.5;
-                        } else {
-                            *current_value = (*current_value - 0.5).max(0.0); // Don't go below 0
+                        // Today's behaviour exactly: floor at 0, no ceiling, 0.5 steps.
+                        //
+                        // A data-driven range is not available. `RoutineParameter`
+                        // (`routines/parameters.rs`) carries `index`, `name`, `default` and
+                        // `unit` and no min, max or step, so giving this real bounds means
+                        // extending a shared domain type -- a separate change.
+                        let mut a = Adjustable::new(*current_value, 0.0, f32::INFINITY, 0.5);
+                        match direction {
+                            Direction::CounterClockwise => a.increase(),
+                            Direction::Clockwise => a.decrease(),
                         }
+                        *current_value = a.value();
                     }
                     UIState::ConfigValueEdit { config_type, current_value, .. } => {
                         // Adjust configuration value with appropriate increment
@@ -584,29 +594,28 @@ where
                             }
                         };
                         
-                        let increment = match direction {
-                            Direction::CounterClockwise => true,  // CounterClockwise increments
-                            Direction::Clockwise => false,        // Clockwise decrements
-                        };
-                        
                         // The temperatures stop where the controller's interlock would cut
                         // heating anyway; a target above it can only produce an element that
                         // runs to the limit and shuts off. PID terms keep the old open-ended
                         // behaviour -- there is no principled ceiling for a gain.
-                        let upper_bound = match config_type {
-                            ConfigEditType::BoilerTemperature => Some(MAX_BREW_TEMPERATURE),
-                            ConfigEditType::SteamTemperature => Some(MAX_STEAM_TEMPERATURE),
-                            ConfigEditType::PidParameter(..) => None,
+                        //
+                        // The lower bounds are the substantive change. `-100` used to be the
+                        // floor for *every* quantity edited here, which made it possible to dial
+                        // a brew setpoint to -100 degrees C. It now applies only to the PID
+                        // components, which can legitimately be negative; picking real PID limits
+                        // is a domain question and a separate conversation.
+                        let (min, max) = match config_type {
+                            ConfigEditType::BoilerTemperature => (0.0, MAX_BREW_TEMPERATURE),
+                            ConfigEditType::SteamTemperature => (0.0, MAX_STEAM_TEMPERATURE),
+                            ConfigEditType::PidParameter(..) => (-100.0, f32::INFINITY),
                         };
 
-                        if increment {
-                            *current_value += increment_size;
-                            if let Some(max) = upper_bound {
-                                *current_value = current_value.min(max);
-                            }
-                        } else {
-                            *current_value = (*current_value - increment_size).max(-100f32); // Don't go below -100
+                        let mut a = Adjustable::new(*current_value, min, max, increment_size);
+                        match direction {
+                            Direction::CounterClockwise => a.increase(),
+                            Direction::Clockwise => a.decrease(),
                         }
+                        *current_value = a.value();
                     }
                     _ => {}
                 }
@@ -619,12 +628,10 @@ where
                     UIState::Idle(substate) => {
                         match substate {
                             IdleSubState::RoutineMenuSelected => {
-                                let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None, None);
+                                self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None).await;
                             }
                             IdleSubState::SettingsMenuSelected => {
-                                let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
+                                self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
                             }
                             // Nothing selected, and the machine is not on: the press turns
                             // it on.
@@ -653,12 +660,29 @@ where
                             _ => {}
                         }
                     }
-                    UIState::ListMenu(menu_type, menu_state, parent_state, _) => {
+                    UIState::ListMenu(menu_type, nav, parent_state, cached_items) => {
                         let menu_type = *menu_type;
-                        let has_back_button = menu_type.has_back_button();
-                        
-                        // Check if back button is selected
-                        if has_back_button && menu_state.is_back_button_selected() {
+                        let selected_row = nav.selected();
+
+                        // Prefer the cached item's own id, falling back to the positional table.
+                        //
+                        // `get_menu_item_id` returns `None` **unconditionally** for
+                        // `ListMenuType::Routines`, because a `RoutineIndex` cannot be recovered
+                        // from a row number -- and the cached `ListMenuItem` carries one. This is
+                        // the fix `ListMenuItem::id`'s doc comment describes and that nobody
+                        // connected; it is what makes `handle_menu_item_activation`'s
+                        // `MenuItemId::Routine` arm reachable at all.
+                        let resolved = menu_type.item_index(selected_row).and_then(|item_index| {
+                            cached_items
+                                .as_ref()
+                                .and_then(|items| items.get(item_index))
+                                .map(|item| item.id)
+                                .or_else(|| menu_type.get_menu_item_id(item_index))
+                        });
+
+                        // Row space throughout: `item_index` returns `None` for the back row and
+                        // `Some(i)` for an item, which is the same mapping the renderer uses.
+                        if menu_type.item_index(selected_row).is_none() {
                             // Use stored parent state if available, otherwise use default back state
                             if let Some(parent) = parent_state {
                                 let (parent_menu_type, parent_menu_state) = *parent.clone();
@@ -666,12 +690,8 @@ where
                             } else {
                                 self.status.state = menu_type.get_back_state();
                             }
-                        } else if let Some(item_index) = menu_state.get_selected_item_index(has_back_button) {
-                            // Get MenuItemId from centralized location
-                            let Some(menu_item_id) = menu_type.get_menu_item_id(item_index) else {
-                                return; // Invalid index
-                            };
-                            
+                        } else if let Some(menu_item_id) = resolved {
+
                             // Handle menu item activation
                             match menu_item_id {
                                 MenuItemId::SettingsWifiProvisioning => {
@@ -702,7 +722,7 @@ where
                                         config_type: ConfigEditType::BoilerTemperature,
                                         current_value: current_temp,
                                         previous_menu_type: menu_type,
-                                        previous_menu_state: *menu_state,
+                                        previous_menu_state: *nav,
                                     };
                                 },
                                 MenuItemId::SettingsSteamTemperature => {
@@ -719,21 +739,20 @@ where
                                         config_type: ConfigEditType::SteamTemperature,
                                         current_value: current_temp,
                                         previous_menu_type: menu_type,
-                                        previous_menu_state: *menu_state,
+                                        previous_menu_state: *nav,
                                     };
                                 },
                                 MenuItemId::PidTerm(term) => {
                                     // We need to know which PID type we're in
                                     if let ListMenuType::PidConfig(pid_type) = menu_type {
-                                        let new_menu_state = ListMenuState::new();
-                                        // Store parent menu state
-                                        let parent_state = Some(Box::new((menu_type, *menu_state)));
-                                        self.status.state = UIState::ListMenu(
+                                        // Store parent menu state, so backing out lands on the
+                                        // row that was left rather than on row 0.
+                                        let parent_state = Some(Box::new((menu_type, *nav)));
+                                        self.status.state = enter_list_menu(
                                             ListMenuType::PidTermConfig(pid_type, term),
-                                            new_menu_state,
+                                            self.routine_repository,
                                             parent_state,
-                                            None
-                                        );
+                                        ).await;
                                     }
                                 },
                                 MenuItemId::PidResetParameters => {
@@ -817,7 +836,7 @@ where
                                             config_type: ConfigEditType::PidParameter(pid_type, term, component),
                                             current_value,
                                             previous_menu_type: menu_type,
-                                            previous_menu_state: *menu_state,
+                                            previous_menu_state: *nav,
                                         };
                                     }
                                 },
@@ -830,6 +849,15 @@ where
                                     }
                                 }
                             }
+                        } else {
+                            // Deliberately not a `return`. This is inside `task`'s loop, and
+                            // returning from here is what made selecting a routine kill the
+                            // encoder until the next power cycle -- `main.rs` joins these futures,
+                            // so a completed one is an input task that never runs again. With the
+                            // item cache unpopulated, `get_menu_item_id` returned `None`
+                            // unconditionally for `Routines`, so that path was reached every
+                            // single time.
+                            warn!("Menu: row {} resolved to no item; ignoring", selected_row);
                         }
                     }
                     UIState::ScaleSettings(substate) => {
@@ -845,7 +873,7 @@ where
                             }
                             ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
                                 // Go back to Settings menu
-                                self.status.state = UIState::ListMenu(ListMenuType::Settings, ListMenuState::default(), None, None);
+                                self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
                             }
                         }
                     }
@@ -867,8 +895,7 @@ where
                     }
                     UIState::SettingsInformation | UIState::SettingsDebugInfo => {
                         // Go back to settings menu
-                        let menu_state = ListMenuState::new();
-                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
+                        self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
                     }
                     UIState::WifiProvisioning => {
                         // Closed explicitly rather than left to expire. Leaving the screen is
@@ -876,8 +903,7 @@ where
                         // more minutes of connectable advertising shares one antenna with
                         // Wi-Fi and with the live link to the scale.
                         self.command_sender.send(MachineCommand::CloseWifiProvisioningWindow).await;
-                        let menu_state = ListMenuState::new();
-                        self.status.state = UIState::ListMenu(ListMenuType::Settings, menu_state, None, None);
+                        self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
                     }
                     UIState::RoutineExecution => {
                         // Cancel the currently running routine
@@ -888,31 +914,36 @@ where
                         let routine_index = *routine_index;
                         let mut repo = self.routine_repository.lock().await;
                         if let Some(routine) = repo.get_routine(routine_index).await {
-                            if edit_state.is_back_button_selected() {
-                                // Back button selected - return to routine menu
-                                let menu_state = ListMenuState::new();
-                                self.status.state = UIState::ListMenu(ListMenuType::Routines, menu_state, None, None);
-                            } else if edit_state.is_execute_selected(routine) {
-                                // Execute button selected - run routine with current parameters
-                                let runtime_params = if edit_state.parameter_values.is_empty() {
-                                    None
-                                } else {
-                                    Some(edit_state.parameter_values.clone())
-                                };
-                                self.command_sender.send(MachineCommand::RunRoutine(routine_index, runtime_params)).await;
-                                self.status.state = UIState::RoutineExecution;
-                            } else if let Some(param_index) = edit_state.get_selected_param_index(routine) {
-                                // Parameter selected - enter manipulation mode
-                                if let Some(param) = routine.parameters().iter().find(|p| p.index == param_index) {
-                                    let current_value = edit_state.parameter_values.get(&param_index).copied().unwrap_or(param.default);
-                                    self.status.state = UIState::ParameterManipulation {
-                                        edit_state: edit_state.clone(),
-                                        routine_index,
-                                        param_index,
-                                        current_value,
-                                        param_name: param.name.clone(),
-                                        param_unit: param.unit,
+                            let params = routine.parameters();
+                            match edit_state.row_kind(edit_state.nav.selected(), params.len()) {
+                                RowKind::Back => {
+                                    // Back button selected - return to routine menu
+                                    self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None).await;
+                                }
+                                RowKind::Execute => {
+                                    // Execute button selected - run routine with current parameters
+                                    let runtime_params = if edit_state.parameter_values.is_empty() {
+                                        None
+                                    } else {
+                                        Some(edit_state.parameter_values.clone())
                                     };
+                                    self.command_sender.send(MachineCommand::RunRoutine(routine_index, runtime_params)).await;
+                                    self.status.state = UIState::RoutineExecution;
+                                }
+                                RowKind::Parameter(i) => {
+                                    // Parameter selected - enter manipulation mode
+                                    if let Some(param) = params.get(i) {
+                                        let param_index = param.index;
+                                        let current_value = edit_state.parameter_values.get(&param_index).copied().unwrap_or(param.default);
+                                        self.status.state = UIState::ParameterManipulation {
+                                            edit_state: edit_state.clone(),
+                                            routine_index,
+                                            param_index,
+                                            current_value,
+                                            param_name: param.name.clone(),
+                                            param_unit: param.unit,
+                                        };
+                                    }
                                 }
                             }
                         }
@@ -1047,8 +1078,12 @@ where
                             }
                         }
                         
-                        // Return to previous menu
-                        self.status.state = UIState::ListMenu(*previous_menu_type, *previous_menu_state, None, None);
+                        // Return to previous menu, on the row it was left on -- so not
+                        // `enter_list_menu`, which starts a fresh menu at the top.
+                        let previous_menu_type = *previous_menu_type;
+                        let previous_nav = *previous_menu_state;
+                        let items = previous_menu_type.get_items(Some(self.routine_repository), None).await;
+                        self.status.state = UIState::ListMenu(previous_menu_type, previous_nav, None, Some(items));
                     }
                     _ => {
                         self.status.state = UIState::Idle(IdleSubState::NoMenuItemSelected);

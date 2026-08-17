@@ -4,6 +4,7 @@ use alloc::{string::{String, ToString}};
 use defmt::Format;
 use variegated_controller_types::{Status, RoutineIndex};
 use variegated_controller_lib::routine::RoutineRepository as RoutineRepositoryTrait;
+use variegated_menu::{ListGeometry, ListNav};
 use crate::RoutineRepository;
 
 #[derive(Debug, Clone, Copy, PartialEq, Format)]
@@ -114,73 +115,42 @@ const SETTINGS_MENU_ITEMS: &[SettingsMenuDefinition] = &[
 #[derive(Debug, Clone)]
 pub struct ListMenuItem {
     pub label: String,
-    /// **Currently never read, and that is a bug rather than dead weight.**
+    /// What activating this row does.
     ///
-    /// Activation in `rotary.rs` resolves the selected row through
-    /// [`ListMenuType::get_menu_item_id`], which maps a position to an id from static
-    /// tables. That works for every menu except `Routines`, whose ids carry a
-    /// `RoutineIndex` that cannot be recovered from a row number -- so it returns `None`
-    /// there and the caller bails with a bare `return`. The effect is that **selecting a
-    /// routine from the Routines menu does nothing at all.**
-    ///
-    /// This field, together with the `Option<Vec<ListMenuItem>>` in `UIState::ListMenu`,
-    /// is the mechanism that was meant to close that gap -- `get_menu_item_id`'s own
-    /// comment says "caller should use cached menu items instead". Neither half was ever
-    /// wired up. Kept, and deliberately not deleted, because deleting them would remove
-    /// the only trace of the intended fix and leave the dead menu looking intentional.
-    #[allow(dead_code)]
+    /// This is what activation resolves through, and it is the only way a routine row can be
+    /// resolved at all: [`ListMenuType::get_menu_item_id`] maps a *position* to an id from
+    /// static tables, and for `Routines` there is nothing to map to -- a `RoutineIndex` cannot
+    /// be recovered from a row number, so it returns `None` unconditionally. The id is captured
+    /// here when the items are fetched, while the index is still in hand.
     pub id: MenuItemId,
 }
 
-// State only contains navigation state, not the items
-#[derive(Debug, Clone, Copy, Default, Format, PartialEq)]
-pub struct ListMenuState {
-    pub selected_index: usize,
-    pub scroll_offset: usize,
-}
+/// Rows on screen at once on the 128x64 panel.
+pub const VISIBLE_ROWS: usize = 5;
 
-impl ListMenuState {
-    pub const VISIBLE_ITEMS: usize = 5;
-    
-    pub fn new() -> Self {
-        Self {
-            selected_index: 0,
-            scroll_offset: 0,
+impl ListMenuType {
+    /// Every row the user can land on: the back row plus one per item.
+    ///
+    /// **This is the whole fix.** The old code counted the back button in the bounds check
+    /// and excluded it from the render window, which over-scrolled by one at the end of every
+    /// list, left a permanently blank bottom row, and drove the scrollbar thumb off the
+    /// bottom of a 64-pixel panel. One index space, counted once.
+    pub fn geometry(&self, item_count: usize) -> ListGeometry {
+        ListGeometry {
+            total_rows: item_count + if self.has_back_button() { 1 } else { 0 },
+            visible_rows: VISIBLE_ROWS,
+            // A knob does not need wrapping, and wrapping a long settings list on one is
+            // disorienting. The GS3 wraps because it has one button per direction.
+            wrap: false,
         }
     }
-    
-    pub fn navigate_up(&mut self) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            
-            // Adjust scroll offset if needed
-            if self.selected_index < self.scroll_offset + 1 && self.scroll_offset > 0 {
-                self.scroll_offset -= 1;
-            }
-        }
-    }
-    
-    pub fn navigate_down(&mut self, total_items: usize) {
-        if self.selected_index < total_items - 1 {
-            self.selected_index += 1;
-            
-            // Adjust scroll offset if needed
-            if self.selected_index >= self.scroll_offset + Self::VISIBLE_ITEMS - 1 
-               && self.scroll_offset + Self::VISIBLE_ITEMS < total_items {
-                self.scroll_offset += 1;
-            }
-        }
-    }
-    
-    pub fn is_back_button_selected(&self) -> bool {
-        self.selected_index == 0
-    }
-    
-    pub fn get_selected_item_index(&self, has_back_button: bool) -> Option<usize> {
-        if has_back_button && self.selected_index == 0 {
-            None // Back button is selected
+
+    /// The item a row refers to, or `None` for the back row.
+    pub fn item_index(&self, row: usize) -> Option<usize> {
+        if self.has_back_button() {
+            row.checked_sub(1)
         } else {
-            Some(self.selected_index - (if has_back_button { 1 } else { 0 }))
+            Some(row)
         }
     }
 }
@@ -223,11 +193,11 @@ impl ListMenuType {
             ListMenuType::Settings => crate::rotary::UIState::Idle(crate::rotary::IdleSubState::SettingsMenuSelected),
             ListMenuType::PidConfig(_) => {
                 // Go back to Settings menu
-                crate::rotary::UIState::ListMenu(ListMenuType::Settings, ListMenuState::new(), None, None)
+                crate::rotary::UIState::ListMenu(ListMenuType::Settings, ListNav::new(), None, None)
             },
             ListMenuType::PidTermConfig(pid_type, _) => {
                 // Go back to PID Config menu for this PID type
-                crate::rotary::UIState::ListMenu(ListMenuType::PidConfig(*pid_type), ListMenuState::new(), None, None)
+                crate::rotary::UIState::ListMenu(ListMenuType::PidConfig(*pid_type), ListNav::new(), None, None)
             },
         }
     }

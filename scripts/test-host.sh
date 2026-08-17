@@ -54,6 +54,14 @@ run "variegated-controller-types" -p variegated-controller-types --no-default-fe
 # the MbedTLS feature set change.
 run "variegated-shot-upload" -p variegated-shot-upload "$@"
 run "variegated-debug-codec" -p variegated-debug-codec "$@"
+# The menu navigation model, shared by both firmwares. No `--no-default-features` needed:
+# this crate's `defmt` is opt-in precisely so that a plain `cargo test` links.
+run "variegated-menu" -p variegated-menu "$@"
+# Press/chord/hold recognition from raw button samples. Same opt-in `defmt` as
+# `variegated-menu`, and host-testable for the same reason: it takes milliseconds as a
+# plain `u64` rather than an `embassy_time::Instant`, so a test binary has no
+# `_embassy_time_now` to link against.
+run "variegated-buttons" -p variegated-buttons "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"
 run "variegated-instrumentation" -p variegated-instrumentation --features instrumentation "$@"

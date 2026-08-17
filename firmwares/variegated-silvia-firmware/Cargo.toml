@@ -48,6 +48,7 @@ variegated-gravity-driver = { version = "0.1.0", path = "../../crates/variegated
 variegated-adc-tools = { version = "0.1.0", path = "../../crates/variegated-adc-tools" }
 variegated-controller-lib = { version = "0.1.0", path = "../../crates/variegated-controller-lib" }
 variegated-controller-types = { version = "0.1.0", path = "../../crates/variegated-controller-types" }
+variegated-menu = { version = "0.1.0", path = "../../crates/variegated-menu", features = ["defmt"] }
 variegated-instrumentation = { version = "0.1.0", path = "../../crates/variegated-instrumentation", features = ["instrumentation"] }
 variegated-checkin = { version = "0.1.0", path = "../../crates/variegated-checkin", features = ["defmt"] }
 variegated-debug = { version = "0.1.0", path = "../../crates/variegated-debug", features = ["usb-cdc-rp", "instrumentation", "defmt", "source-application", "rp235xb"] }

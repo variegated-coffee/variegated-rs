@@ -1,41 +1,72 @@
-//! Button controller for dual boiler espresso machine
+//! The GS3's front panel.
 //!
-//! This module provides button control functionality using MCP23017 I2C GPIO expander.
-//! Handles 6 buttons with the following mappings:
-//! - Buttons 1-4 (Pins 0-3): Trigger/cancel routines 0-3
-//!   - When no routine is running: starts the corresponding routine
-//!   - When a routine is running: any of these buttons cancels it
-//! - Button 5 (Pin 4): Toggle brewing (start/stop brewing for the single group)
-//! - Button 6 (Pin 5): Toggle water dispensing (start/stop pumping to water tap)
+//! # The pins
+//!
+//! MCP23017 Port A. Pins 0-5 are the six panel buttons, numbered 1-6 on the machine. Pin 6
+//! is the MP paddle switch and is **masked out** -- nothing in this firmware reads it, and
+//! an engaged paddle used to land in every `ButtonSet` and silently turn every press into a
+//! two-button set. Pin 7 is the on-board button, acted on only under `pwm-steam-valve`,
+//! where it cycles the steam valve. See `ACTIVE_BUTTON_MASK`.
+//!
+//! # Normal mode
+//!
+//! | Input | Action |
+//! |---|---|
+//! | Tap 1-4 | Run routine 0-3; cancel the running one |
+//! | Tap 5 | Toggle brew |
+//! | Tap 6 | Toggle water dispensing |
+//! | Tap 5 + 3 | Toggle machine power: `On -> Off`, anything else (incl. `PowerSaveStandby`) `-> On` |
+//! | Hold 5, 1.5 s | Enter menu mode |
+//! | Hold 6, 3 s | `TagDoseFromScale(GroupScale(SingleGroup))` |
+//!
+//! `{5,3}` is the *only* power control on the panel. The old "any button while Off turns it
+//! On" rule is gone -- it made every button a power button, which is exactly what makes a
+//! deliberate chord worth having.
+//!
+//! **Dispatch is on exact button sets**, so a chord is never a superset match: `{5,3}` powers
+//! the machine and does not also start a brew, and `{5,6}` does nothing at all rather than
+//! doing two things.
+//!
+//! Both long holds are measured **from finger-down**, not from the hold event. The recognizer
+//! emits `PressAndHoldStart` at `SETTLING_DELAY_MS + PRESS_AND_HOLD_THRESHOLD_MS` (550 ms)
+//! after the button goes down, so that offset is subtracted in `check_long_hold` and the
+//! thresholds there are the numbers a user actually experiences.
+//!
+//! # Menu mode
+//!
+//! Entered by holding button 5. It captures the **six panel buttons**; the on-board
+//! steam-valve button is not one of them and keeps working, because the menu can be opened
+//! mid-steam and losing valve control behind a menu is not acceptable.
+//!
+//! | Input | Action |
+//! |---|---|
+//! | Tap 1 | Selection **down**, wrapping |
+//! | Tap 2 | Selection **up**, wrapping |
+//! | Tap 3 | Activate |
+//! | Tap 4 | Pop; popping the root leaves menu mode |
+//!
+//! Buttons 5 and 6 are inert here, holds included. Entry is refused while brewing,
+//! dispensing or running a routine, but is **not** gated on machine mode -- provisioning a
+//! machine should not require heating it. The menu's content lives in [`crate::menu`]; this
+//! module owns only the input half.
 //!
 //! # Architecture
 //!
-//! The button controller is split into three main components:
+//! 1. **Event Recognition** lives in [`variegated_buttons`], not here. It turns samples into
+//!    `Press` / `PressAndHoldStart` / `PressAndHoldChange` / `PressAndHoldStop`, groups
+//!    near-simultaneous presses over 50 ms, and separates press from hold at 500 ms. It is in
+//!    its own crate so it can be host-tested: it takes milliseconds as a `u64`, because a test
+//!    binary that links `embassy-time` without a time driver fails at link on
+//!    `_embassy_time_now`.
 //!
-//! 1. **Event Recognition** (`ButtonEventRecognizer`): Recognizes button events from raw GPIO state
-//!    - Detects: Press, PressAndHoldStart, PressAndHoldChange, PressAndHoldStop
-//!    - 50ms settling delay to group simultaneous button presses
-//!    - 500ms threshold to distinguish press from hold
-//!    - Press events are sent immediately on release (no artificial delay)
+//!    A recognised hold never also emits a `Press`, which is what lets a held button 5 open
+//!    the menu without also toggling the brew.
 //!
-//! 2. **Event Handling** (`ButtonEventHandler`): Translates events to machine commands
-//!    - Maintains machine state for toggle behavior
-//!    - Maps button events to appropriate machine commands
-//!    - Supports single and multi-button combinations
+//! 2. **Event Handling** (`ButtonEventHandler`): events to machine commands, and the menu's
+//!    position, which this task owns because it owns input
 //!
-//! 3. **Main Task** (`button_controller_task`): Coordinates the components
-//!    - Interrupt-driven button state reading
-//!    - Updates recognizer with current state
-//!    - Handles events and sends commands
-//!
-//! # Features
-//!
-//! - No debouncing - relies solely on hardware interrupts
-//! - Simultaneous button press detection (50ms grouping window)
-//! - Press-and-hold detection (500ms threshold)
-//! - Button combination changes during hold
-//! - State tracking via status subscription for toggle behavior
-//! - Integration with the machine command system
+//! 3. **Main Task** (`button_controller_task`): coordinates the two, and publishes the menu
+//!    over `MENU_WATCH` for the read-only display tasks
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -48,13 +79,14 @@ use embassy_sync::channel::Sender;
 use variegated_rp235x_atomic_raw_mutex::AtomicRawMutex;
 use embassy_time::{Instant, Timer};
 use variegated_controller_types::{
-    MachineCommand, MachineMode, RoutineIndex, SingleGroupControllerGroups, Status,
+    MachineCommand, MachineMode, RoutineIndex, ScaleSelector, SingleGroupControllerGroups, Status,
 };
 use variegated_mcp23017::{Mcp23017, Port, InterruptMode};
+use variegated_buttons::{
+    ButtonEvent, ButtonEventRecognizer, ButtonSet, PRESS_AND_HOLD_THRESHOLD_MS, SETTLING_DELAY_MS,
+};
 use crate::StatusSubscriber;
-
-/// Number of buttons on the controller
-const NUM_BUTTONS: usize = 8;
+use crate::menu::{self, GsMenu, MenuActivation, MenuContext, MenuId, MenuSender};
 
 /// Button indices for routine control (buttons 0-3)
 const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
@@ -70,186 +102,38 @@ const MP_PADDLE_SWITCH_BUTTON: usize = 6;
 
 const ON_BOARD_BUTTON: usize = 7;
 
-/// Timing constants for event recognition
-const SETTLING_DELAY_MS: u64 = 50;           // Time to group simultaneous button presses
-const PRESS_AND_HOLD_THRESHOLD_MS: u64 = 500; // Time to distinguish press from hold
+const SET_ROUTINE_0: ButtonSet = ButtonSet::from_bits(1 << ROUTINE_BUTTON_0);
+const SET_ROUTINE_1: ButtonSet = ButtonSet::from_bits(1 << ROUTINE_BUTTON_1);
+const SET_ROUTINE_2: ButtonSet = ButtonSet::from_bits(1 << ROUTINE_BUTTON_2);
+const SET_ROUTINE_3: ButtonSet = ButtonSet::from_bits(1 << ROUTINE_BUTTON_3);
+const SET_BREW: ButtonSet = ButtonSet::from_bits(1 << BREWING_BUTTON);
+const SET_WATER_TAP: ButtonSet = ButtonSet::from_bits(1 << WATER_TAP_BUTTON);
+/// Buttons 5 and 3 together: the only way to wake or sleep the machine from the panel.
+const SET_POWER: ButtonSet =
+    ButtonSet::from_bits((1 << BREWING_BUTTON) | (1 << ROUTINE_BUTTON_2));
+#[cfg(feature = "pwm-steam-valve")]
+const SET_STEAM_VALVE: ButtonSet = ButtonSet::from_bits(1 << ON_BOARD_BUTTON);
 
-// ============================================================================
-// Event Types
-// ============================================================================
+/// The pins `handle_press` acts on.
+///
+/// Pin 6 is the MP paddle switch and pin 7 is the on-board button. Both were landing in
+/// every `ButtonSet`, because this masked with `0xFF` while its own comment said six
+/// buttons. With `count() == 1` gating every action, an engaged paddle switch turned every
+/// button press into a two-button set and dropped it in silence -- and now that chords mean
+/// something, `{paddle, 5}` would be one bit away from a real one.
+///
+/// Nothing else in the firmware reads pin 6; the only other mention of it is its pull-up
+/// below, which stays, because a floating input on an interrupt-on-change port is noise.
+#[cfg(not(feature = "pwm-steam-valve"))]
+const ACTIVE_BUTTON_MASK: u8 = 0b0011_1111;
+/// Bit 7 is the on-board button, which cycles the steam valve in this configuration and only
+/// in this one.
+#[cfg(feature = "pwm-steam-valve")]
+const ACTIVE_BUTTON_MASK: u8 = 0b1011_1111;
 
-/// Represents a set of buttons as a bit-packed u8
-/// Each bit corresponds to a button index (0-5)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
-pub struct ButtonSet(u8);
-
-// Deliberately narrow: a `ButtonSet` is only ever built from a GPIO sample and then
-// queried. Constructors and mutators for building one up by hand (`new`, `from_bits`,
-// `insert`, `remove`) existed and were never called, so they are gone rather than
-// carried as dead weight -- add them back if something ever needs to synthesize a set.
-impl ButtonSet {
-    /// Create a button set from raw GPIO state (active low)
-    pub const fn from_gpio_state(state: u8) -> Self {
-        // Invert bits since buttons are active low, then mask to 6 buttons
-        Self(!state & 0xFF)
-    }
-
-    /// Check if a specific button is in the set
-    pub const fn contains(&self, button_index: usize) -> bool {
-        if button_index >= NUM_BUTTONS {
-            return false;
-        }
-        (self.0 & (1 << button_index)) != 0
-    }
-
-    /// Check if the set is empty
-    pub const fn is_empty(&self) -> bool {
-        self.0 == 0
-    }
-
-    /// Count the number of buttons in the set
-    pub const fn count(&self) -> u32 {
-        self.0.count_ones()
-    }
-}
-
-/// Button events recognized by the event recognizer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
-pub enum ButtonEvent {
-    /// Short press of button(s) - emitted on release if held <500ms
-    Press(ButtonSet),
-    /// Started holding button(s) - emitted at 500ms mark
-    PressAndHoldStart(ButtonSet),
-    /// Changed buttons while holding
-    PressAndHoldChange { old: ButtonSet, new: ButtonSet },
-    /// Released held button(s)
-    PressAndHoldStop(ButtonSet),
-}
-
-// ============================================================================
-// Event Recognition
-// ============================================================================
-
-/// State of the button event recognizer
-#[derive(Debug, Clone, Copy)]
-enum RecognizerState {
-    /// No buttons pressed
-    Idle,
-    /// Buttons just pressed, waiting to group simultaneous presses
-    Settling { buttons: ButtonSet, since: Instant },
-    /// Tracking whether it becomes a press or hold
-    Tracking { buttons: ButtonSet, since: Instant },
-    /// Confirmed hold (≥500ms)
-    Holding { buttons: ButtonSet },
-}
-
-/// Recognizes button events from raw button state changes
-/// Separates event recognition from event handling
-pub struct ButtonEventRecognizer {
-    state: RecognizerState,
-}
-
-impl ButtonEventRecognizer {
-    /// Create a new button event recognizer
-    pub fn new() -> Self {
-        Self {
-            state: RecognizerState::Idle,
-        }
-    }
-
-    /// Update the recognizer with current button state and time
-    /// Returns an optional event if one should be emitted
-    pub fn update(&mut self, current_buttons: ButtonSet, now: Instant) -> Option<ButtonEvent> {
-        match self.state {
-            RecognizerState::Idle => {
-                if !current_buttons.is_empty() {
-                    // Buttons pressed, enter settling state
-                    self.state = RecognizerState::Settling {
-                        buttons: current_buttons,
-                        since: now,
-                    };
-                }
-                None
-            }
-
-            RecognizerState::Settling { buttons, since } => {
-                let elapsed = now.saturating_duration_since(since).as_millis();
-
-                // Check if settling period has elapsed
-                if elapsed >= SETTLING_DELAY_MS {
-                    if current_buttons.is_empty() {
-                        // Buttons were pressed and released during settling - emit Press
-                        self.state = RecognizerState::Idle;
-                        return Some(ButtonEvent::Press(buttons));
-                    } else {
-                        // Buttons still held after settling - move to tracking
-                        self.state = RecognizerState::Tracking {
-                            buttons: current_buttons,
-                            since,
-                        };
-                        return None;
-                    }
-                }
-
-                // Still within settling period
-                if current_buttons != buttons {
-                    // Button set changed during settling, restart settling period
-                    self.state = RecognizerState::Settling {
-                        buttons: current_buttons,
-                        since: now,
-                    };
-                }
-                None
-            }
-
-            RecognizerState::Tracking { buttons, since } => {
-                if current_buttons.is_empty() {
-                    // Released before hold threshold - it's a press!
-                    self.state = RecognizerState::Idle;
-                    return Some(ButtonEvent::Press(buttons));
-                }
-
-                if current_buttons != buttons {
-                    // Button set changed during tracking - restart from settling
-                    self.state = RecognizerState::Settling {
-                        buttons: current_buttons,
-                        since: now,
-                    };
-                    return None;
-                }
-
-                // Check if hold threshold has been reached
-                let total_time = now.saturating_duration_since(since).as_millis();
-                if total_time >= (SETTLING_DELAY_MS + PRESS_AND_HOLD_THRESHOLD_MS) {
-                    // It's a hold!
-                    self.state = RecognizerState::Holding { buttons };
-                    return Some(ButtonEvent::PressAndHoldStart(buttons));
-                }
-                None
-            }
-
-            RecognizerState::Holding { buttons } => {
-                if current_buttons.is_empty() {
-                    // Released from hold
-                    self.state = RecognizerState::Idle;
-                    return Some(ButtonEvent::PressAndHoldStop(buttons));
-                }
-
-                if current_buttons != buttons {
-                    // Button set changed during hold
-                    let old_buttons = buttons;
-                    self.state = RecognizerState::Holding {
-                        buttons: current_buttons,
-                    };
-                    return Some(ButtonEvent::PressAndHoldChange {
-                        old: old_buttons,
-                        new: current_buttons,
-                    });
-                }
-                None
-            }
-        }
-    }
+/// Read a sample from Port A, dropping the pins this build does not act on.
+fn button_set_from_port_a(sample: u8) -> ButtonSet {
+    ButtonSet::from_active_low(sample, ACTIVE_BUTTON_MASK)
 }
 
 // ============================================================================
@@ -317,9 +201,15 @@ pub struct ButtonEventHandler {
     routine_executing: bool,
     /// Current machine mode (from status subscription)
     machine_mode: MachineMode,
-    /// Tracks when button 5 hold started (for 3-second hold to turn off)
+    /// The projection of `Status` the menu reads, refreshed by `update_status`.
+    menu_context: MenuContext,
+    /// Where the menu is. Owned here rather than by the display because this task owns
+    /// input, and a selection that lived on the far side of a channel would move a frame
+    /// after the button that moved it.
+    menu: GsMenu,
+    /// When the current hold of exactly button 5 started, for the menu long hold.
     button_5_hold_start: Option<Instant>,
-    /// Tracks when button 6 hold started (for 5-second hold to open Wi-Fi setup)
+    /// When the current hold of exactly button 6 started, for the dose-tag long hold.
     button_6_hold_start: Option<Instant>,
 }
 
@@ -333,6 +223,8 @@ impl ButtonEventHandler {
             steam_valve_state: SteamValveState::Off,
             routine_executing: false,
             machine_mode: MachineMode::Off,
+            menu_context: MenuContext::default(),
+            menu: GsMenu::closed(),
             button_5_hold_start: None,
             button_6_hold_start: None,
         }
@@ -362,38 +254,121 @@ impl ButtonEventHandler {
 
         // Update machine mode from status
         self.machine_mode = status.mode;
+
+        self.menu_context = MenuContext::from_status(status);
+
+        // The menu is a full-screen takeover, and the machine can become busy underneath it --
+        // a schedule can start a routine, and so can the comms processor. The busy condition is
+        // not only an entry gate.
+        if self.menu.is_open() && self.machine_is_busy() {
+            defmt::info!("Menu: closing, the machine became busy");
+            self.menu.close();
+        }
+    }
+
+    /// Brewing, dispensing or running a routine. Not a mode check: the menu is reachable while
+    /// the machine is Off, because provisioning it should not require heating it.
+    fn machine_is_busy(&self) -> bool {
+        self.brewing_active || self.water_dispensing_active || self.routine_executing
+    }
+
+    fn clear_hold_deadlines(&mut self) {
+        self.button_5_hold_start = None;
+        self.button_6_hold_start = None;
+    }
+
+    /// Where the menu is, for publication.
+    pub fn menu_nav(&self) -> GsMenu {
+        self.menu
     }
 
     /// Handle a button event and return the appropriate machine command
     pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Vec<MachineCommand> {
+        // The menu captures the six panel buttons. Routed here rather than inside `handle_press`
+        // so that hold events cannot leak past it: with the menu open, a hold of button 5 must
+        // not re-open it and a hold of button 6 must not tag a dose.
+        if self.menu.is_open() {
+            return match event {
+                ButtonEvent::Press(buttons) => self.handle_menu_press(buttons),
+                // A hold that began before the menu opened ends up here. Both deadlines have to
+                // be cleared, or a hold that straddled the transition fires out of
+                // `check_long_hold`.
+                _ => {
+                    self.clear_hold_deadlines();
+                    vec![]
+                }
+            };
+        }
+
         match event {
             ButtonEvent::Press(buttons) => self.handle_press(buttons),
             ButtonEvent::PressAndHoldStart(buttons) => {
-                // Track button 5 hold for 3-second turn-off feature
-                if buttons.contains(BREWING_BUTTON) {
+                // Exact sets, so holding {5,6} arms neither.
+                if buttons == SET_BREW {
                     self.button_5_hold_start = Some(now);
-                    defmt::debug!("Button 5 hold started at {:?}", now);
-                }
-                if buttons.contains(WATER_TAP_BUTTON) {
+                } else if buttons == SET_WATER_TAP {
                     self.button_6_hold_start = Some(now);
-                    defmt::debug!("Button 6 hold started at {:?}", now);
                 }
                 vec![]
             }
+            // The held set changed, so it is no longer a hold of exactly one of them. Cancelled
+            // rather than restarted: {6} -> {6,1} -> {6} must not accumulate into a tag.
             ButtonEvent::PressAndHoldChange { .. } => {
-                // Could be used for special functions in the future
+                self.clear_hold_deadlines();
                 vec![]
             }
-            ButtonEvent::PressAndHoldStop(buttons) => {
-                // Clear button 5 hold tracking when released
-                if buttons.contains(BREWING_BUTTON) {
-                    self.button_5_hold_start = None;
-                    defmt::debug!("Button 5 hold stopped");
+            ButtonEvent::PressAndHoldStop(_) => {
+                self.clear_hold_deadlines();
+                vec![]
+            }
+        }
+    }
+
+    fn handle_menu_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
+        let Some(frame) = self.menu.top() else { return vec![] };
+        let geo = menu::geometry(frame.id);
+
+        match buttons {
+            SET_ROUTINE_0 => {
+                if let Some(frame) = self.menu.top_mut() {
+                    frame.nav.down(geo);
                 }
-                if buttons.contains(WATER_TAP_BUTTON) {
-                    self.button_6_hold_start = None;
-                    defmt::debug!("Button 6 hold stopped");
+                vec![]
+            }
+            SET_ROUTINE_1 => {
+                if let Some(frame) = self.menu.top_mut() {
+                    frame.nav.up(geo);
                 }
+                vec![]
+            }
+            SET_ROUTINE_2 => self.activate_selected(),
+            SET_ROUTINE_3 => {
+                self.menu.pop();
+                vec![]
+            }
+            // The on-board button is not one of the six panel buttons. The menu can be opened
+            // mid-steam, and losing valve control behind a menu is not acceptable.
+            #[cfg(feature = "pwm-steam-valve")]
+            SET_STEAM_VALVE => self.cycle_steam_valve(),
+            // Buttons 5 and 6, and every chord, are inert here.
+            _ => vec![],
+        }
+    }
+
+    fn activate_selected(&mut self) -> Vec<MachineCommand> {
+        let Some(frame) = self.menu.top() else { return vec![] };
+        // `.get`, not `[..]`: the selection cannot be out of range here, but a renderer and a
+        // handler reading the same table at different moments is exactly where that stops being
+        // true.
+        let Some(item) = menu::items(frame.id).get(frame.nav.selected()) else { return vec![] };
+
+        match menu::activate(item, &self.menu_context) {
+            MenuActivation::Command(command) => {
+                defmt::info!("Menu: activated {}", item.label);
+                vec![command]
+            }
+            MenuActivation::Pop => {
+                self.menu.pop();
                 vec![]
             }
         }
@@ -401,124 +376,119 @@ impl ButtonEventHandler {
 
     /// Handle a button press event
     fn handle_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
-        // Check if machine is Off - any button press should turn it On
-        if self.machine_mode == MachineMode::Off {
-            return vec![MachineCommand::SetMachineMode(MachineMode::On)];
-        }
-
-        // Single button presses for routine control (buttons 0-3)
-        if buttons.count() == 1 {
-            for button_idx in [ROUTINE_BUTTON_0, ROUTINE_BUTTON_1, ROUTINE_BUTTON_2, ROUTINE_BUTTON_3] {
-                if buttons.contains(button_idx) {
-                    let command = if self.routine_executing {
-                        defmt::info!("Button {} pressed - cancelling routine", button_idx + 1);
-                        MachineCommand::CancelRoutine
-                    } else {
-                        defmt::info!("Button {} pressed - starting routine {}", button_idx + 1, button_idx);
-                        MachineCommand::RunRoutine(RoutineIndex::Function(button_idx as u32), None)
-                    };
-                    return vec![command];
-                }
-            }
-
-            // Button 5: Brewing toggle
-            if buttons.contains(BREWING_BUTTON) {
+        // The "any button while Off turns it On" rule is gone: it made every button on the panel
+        // a power button, which is exactly what makes `{5,3}` worth having. The controller
+        // already refuses `RunRoutine`, `StartBrewing` and `StartPumpingToWaterTap` while not in
+        // `On` (dual_boiler_single_group.rs:1787, 1811, 1832), so a press on a cold machine costs
+        // a log line and nothing else, and a mode gate here would be the same rule in two places.
+        match buttons {
+            SET_ROUTINE_0 => self.routine_command(ROUTINE_BUTTON_0),
+            SET_ROUTINE_1 => self.routine_command(ROUTINE_BUTTON_1),
+            SET_ROUTINE_2 => self.routine_command(ROUTINE_BUTTON_2),
+            SET_ROUTINE_3 => self.routine_command(ROUTINE_BUTTON_3),
+            SET_BREW => {
                 let group_index = SingleGroupControllerGroups::SingleGroup.as_index();
-                let command = if self.brewing_active {
+                vec![if self.brewing_active {
                     MachineCommand::StopBrewing(group_index)
                 } else {
                     MachineCommand::StartBrewing(group_index)
-                };
-                defmt::info!("Button 5 pressed - sending brewing command: {:?}", command);
-                return vec![command];
+                }]
             }
-
-            // Button 6: Water tap toggle
-            if buttons.contains(WATER_TAP_BUTTON) {
-                let water_tap_index = 0;
-                let command = if self.water_dispensing_active {
-                    MachineCommand::StopPumpingToWaterTap(water_tap_index)
-                } else {
-                    MachineCommand::StartPumpingToWaterTap(water_tap_index)
-                };
-                defmt::info!("Button 6 pressed - sending water tap command: {:?}", command);
-                return vec![command];
-            }
-
-            // Button 7: Steam valve cycling
+            SET_WATER_TAP => vec![if self.water_dispensing_active {
+                MachineCommand::StopPumpingToWaterTap(0)
+            } else {
+                MachineCommand::StartPumpingToWaterTap(0)
+            }],
+            SET_POWER => vec![MachineCommand::SetMachineMode(match self.machine_mode {
+                // Anything that is not On becomes On -- `PowerSaveStandby` included, so the one
+                // chord is the one way back from either resting state.
+                MachineMode::On => MachineMode::Off,
+                _ => MachineMode::On,
+            })],
             #[cfg(feature = "pwm-steam-valve")]
-            if buttons.contains(ON_BOARD_BUTTON) {
-                let next_state = self.steam_valve_state.next();
-                defmt::info!("Steam button pressed - cycling to: {:?}", next_state);
-
-                self.steam_valve_state = next_state;
-
-                return if matches!(next_state, SteamValveState::Off) {
-                    vec![MachineCommand::StopSteaming(0)]
-                } else {
-                    vec![
-                        MachineCommand::StartSteaming(0),
-                        MachineCommand::SetSteamValveOpenness(0, next_state.to_valve_openness())
-                    ]
-                };
-            }
-
+            SET_STEAM_VALVE => self.cycle_steam_valve(),
+            _ => vec![],
         }
-
-        // Multi-button combinations can be added here in the future
-        // For example: buttons 1+6 could trigger a specific routine or function
-
-        vec![]
     }
 
-    /// Check for long hold conditions and return appropriate command
+    fn routine_command(&self, button_idx: usize) -> Vec<MachineCommand> {
+        vec![if self.routine_executing {
+            MachineCommand::CancelRoutine
+        } else {
+            MachineCommand::RunRoutine(RoutineIndex::Function(button_idx as u32), None)
+        }]
+    }
+
+    #[cfg(feature = "pwm-steam-valve")]
+    fn cycle_steam_valve(&mut self) -> Vec<MachineCommand> {
+        let next_state = self.steam_valve_state.next();
+        defmt::info!("Steam button pressed - cycling to: {:?}", next_state);
+
+        self.steam_valve_state = next_state;
+
+        if matches!(next_state, SteamValveState::Off) {
+            vec![MachineCommand::StopSteaming(0)]
+        } else {
+            vec![
+                MachineCommand::StartSteaming(0),
+                MachineCommand::SetSteamValveOpenness(0, next_state.to_valve_openness())
+            ]
+        }
+    }
+
+    /// Fire the two long holds.
     ///
-    /// Button 5 held >= 3 seconds turns the machine off; button 6 held >= 5 seconds opens the
-    /// Improv provisioning window.
+    /// Button 5 held opens the menu; button 6 held tags the group scale's reading as the dose
+    /// for the next shot.
     ///
-    /// Neither can also fire the button's normal press action: the recognizer emits `Press`
-    /// only out of `Tracking`, and once a hold is recognised the release produces
-    /// `PressAndHoldStop` and nothing else (see `RecognizerState::Holding` above).
+    /// **Both are measured from finger-down, not from the hold event.** The deadlines are armed
+    /// at `PressAndHoldStart`, which the recognizer emits `SETTLING_DELAY_MS +
+    /// PRESS_AND_HOLD_THRESHOLD_MS` after the button went down, so that offset is subtracted
+    /// here and the constants below are the numbers a user experiences. The hold this replaces
+    /// had the same off-by-550 and nobody noticed, because nobody was timing five seconds.
+    ///
+    /// 1.5 s on button 5 rather than the recognizer's own 550 ms hold event, because button 5 is
+    /// the *brew* button: `RecognizerState::Holding` never also emits a `Press`, so a 550 ms
+    /// menu would mean a 0.6 s press opens the menu instead of starting a shot, and 0.6 s is an
+    /// ordinary press for someone reaching across a machine. 3 s on button 6 because a wrong
+    /// dose silently replaces one that may have been set from the app and is not correctable
+    /// from the panel.
     pub fn check_long_hold(&mut self, now: Instant) -> Option<MachineCommand> {
-        const LONG_HOLD_THRESHOLD_MS: u64 = 3000; // 3 seconds
-        // Longer than button 5's, because this one is reached by holding the *water tap*
-        // button, and someone who wanted water and held on a moment too long should not find
-        // the machine advertising itself over Bluetooth.
-        const PROVISIONING_HOLD_THRESHOLD_MS: u64 = 5000; // 5 seconds
-        // Five minutes. Long enough to fetch a phone and type a password, short enough that a
-        // window opened by accident closes itself long before anyone would notice it was open.
-        const PROVISIONING_WINDOW_MS: u32 = 300_000;
+        const MENU_HOLD_MS: u64 = 1500;
+        const DOSE_TAG_HOLD_MS: u64 = 3000;
+        const HOLD_EVENT_OFFSET_MS: u64 = SETTLING_DELAY_MS + PRESS_AND_HOLD_THRESHOLD_MS;
 
-        if let Some(hold_start) = self.button_5_hold_start {
-            let elapsed = now.saturating_duration_since(hold_start).as_millis();
+        // With the menu open the six panel buttons belong to the menu, holds included.
+        if self.menu.is_open() {
+            self.clear_hold_deadlines();
+            return None;
+        }
 
-            if elapsed >= LONG_HOLD_THRESHOLD_MS {
-                // Clear the tracking to avoid repeated commands
+        if let Some(started) = self.button_5_hold_start {
+            let held = now.saturating_duration_since(started).as_millis();
+            if held >= MENU_HOLD_MS - HOLD_EVENT_OFFSET_MS {
+                // Cleared as it fires, or this re-runs on every 10 ms poll until release.
                 self.button_5_hold_start = None;
-                defmt::info!("Button 5 held for {}ms - turning machine off", elapsed);
-                return Some(MachineCommand::SetMachineMode(MachineMode::Off));
+                // Checked here rather than when the deadline was armed: 1.5 s is long enough for
+                // a schedule to have started a routine in the meantime.
+                if self.machine_is_busy() {
+                    defmt::info!("Menu: refused, the machine is busy");
+                } else {
+                    defmt::info!("Menu: opened");
+                    self.menu = GsMenu::open(MenuId::Root);
+                }
+                return None;
             }
         }
 
-        if let Some(hold_start) = self.button_6_hold_start {
-            let elapsed = now.saturating_duration_since(hold_start).as_millis();
-
-            if elapsed >= PROVISIONING_HOLD_THRESHOLD_MS {
-                // Cleared for the same reason as above: this runs on a 10 ms poll, and without
-                // it the request would be re-sent a hundred times a second until release.
+        if let Some(started) = self.button_6_hold_start {
+            let held = now.saturating_duration_since(started).as_millis();
+            if held >= DOSE_TAG_HOLD_MS - HOLD_EVENT_OFFSET_MS {
                 self.button_6_hold_start = None;
-                defmt::info!(
-                    "Button 6 held for {}ms - opening the Wi-Fi provisioning window",
-                    elapsed
-                );
-                // Deliberately not gated on `machine_mode`. Provisioning a machine should not
-                // require heating it, and a hold produces no `Press`, so this cannot collide
-                // with the any-button-turns-it-on rule in `handle_press`. The controller
-                // refuses the request while the machine is busy, which is the check that
-                // matters and is the only place that knows coffee is being made.
-                return Some(MachineCommand::OpenWifiProvisioningWindow {
-                    duration_ms: PROVISIONING_WINDOW_MS,
-                });
+                defmt::info!("Button 6 held - tagging the dose from the group scale");
+                return Some(MachineCommand::TagDoseFromScale(ScaleSelector::GroupScale(
+                    SingleGroupControllerGroups::SingleGroup.as_index(),
+                )));
             }
         }
 
@@ -534,6 +504,7 @@ pub async fn button_controller_task(
     command_sender: Sender<'static, AtomicRawMutex, MachineCommand, 10>,
     mut status_receiver: StatusSubscriber,
     checkin: variegated_checkin::CheckinHandle,
+    menu_sender: MenuSender,
 ) {
     let mut recognizer = ButtonEventRecognizer::new();
     let mut handler = ButtonEventHandler::new();
@@ -564,8 +535,11 @@ pub async fn button_controller_task(
         // between a working machine and one that ignores its buttons.
         checkin.good();
 
+        let menu_before = handler.menu_nav();
+
         // Update status if available
         if let Some(new_status) = status_receiver.try_next_message_pure() {
+            // Can close the menu, if the machine became busy underneath it.
             handler.update_status(&new_status);
         }
 
@@ -604,11 +578,13 @@ pub async fn button_controller_task(
 
         // Process button state through recognizer and handler
         if let Some(raw_state) = button_state_opt {
-            let button_set = ButtonSet::from_gpio_state(raw_state);
+            let button_set = button_set_from_port_a(raw_state);
             let now = Instant::now();
 
             // Update recognizer and check for events
-            if let Some(event) = recognizer.update(button_set, now) {
+            // Milliseconds, not an `Instant`: the recognizer is host-testable precisely
+            // because it never sees an `embassy_time` type.
+            if let Some(event) = recognizer.update(button_set, now.as_millis()) {
                 defmt::debug!("Button event: {:?}", event);
 
                 // Handle the event and get commands
@@ -619,12 +595,21 @@ pub async fn button_controller_task(
                 }
             }
 
-            // Check for long hold conditions (e.g., button 5 held for 3 seconds)
+            // Check for long hold conditions (button 5 opens the menu, button 6 tags the dose)
             if let Some(command) = handler.check_long_hold(now) {
                 if let Err(_) = command_sender.try_send(command) {
                     defmt::warn!("Failed to send long hold command - channel full");
                 }
             }
+        }
+
+        // Outside the `if let Some(raw_state)` block above, so a menu closed by `update_status`
+        // is published even on an iteration with no button sample. Only on change: a redundant
+        // send makes every display's `try_changed()` fire for nothing, and `MenuStack: PartialEq`
+        // makes the test free.
+        let menu_after = handler.menu_nav();
+        if menu_after != menu_before {
+            menu_sender.send(menu_after);
         }
     }
 }

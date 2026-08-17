@@ -176,7 +176,7 @@ pub async fn start(
                             ApplicationProcessorToCommsProcessorMessage::Configuration(config) => {
                                 config_publisher.publish_immediate(config);
                                 CONFIG_RECEIVED.store(true, Ordering::Relaxed);
-                                log_info!("Received configuration update - stopping periodic requests");
+                                //log_info!("Received configuration update - stopping periodic requests");
                             }
                             ApplicationProcessorToCommsProcessorMessage::Hello(_) => {
                                 log_info!("Received Hello message");
@@ -608,7 +608,7 @@ pub async fn start(
                     tx.write_async(&serialized_message).await
                         .expect("Failed to write UART");
 
-                    log_info!("Sent CommsStatus");
+                    //log_info!("Sent CommsStatus");
                 }
                 // The Improv service reporting what its radio established. A distinct message
                 // from a `MachineCommand` on purpose -- see the note on `ImprovReport`.

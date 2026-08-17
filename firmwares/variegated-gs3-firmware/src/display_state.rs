@@ -9,9 +9,13 @@ use alloc::string::{String, ToString};
 use core::time::Duration;
 use embassy_time::Instant;
 use variegated_controller_types::{MachineMode, Status, SingleGroupControllerGroups};
+use crate::menu::GsMenu;
 
 /// Duration to display post-brew summary after brewing completes (milliseconds)
 const POST_BREW_DISPLAY_DURATION_MS: u64 = 3000;
+
+/// How long the dose popup stays up.
+const DOSE_POPUP_DURATION_MS: u64 = 5000;
 
 /// Display mode enum representing the current state of the machine UI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +49,18 @@ pub struct DisplayState {
     /// as dead if the LCD stops using it too.
     #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     last_update: Instant,
+    /// Where the menu is, cached from `MENU_WATCH` by whichever display task owns this.
+    pub menu: GsMenu,
+    /// The dose on the pending annotations as of the previous status.
+    previous_dose_weight: Option<f32>,
+    /// Whether any status has been seen yet.
+    ///
+    /// Without it the first status after boot -- which carries whatever the controller was
+    /// already holding -- reads as a fresh capture and pops for a dose tagged before this task
+    /// existed.
+    dose_tracking_initialized: bool,
+    /// When the dose popup expires, if one is up.
+    dose_popup_until: Option<Instant>,
 }
 
 impl DisplayState {
@@ -55,7 +71,21 @@ impl DisplayState {
             last_brew_time: None,
             was_brewing: false,
             last_update: Instant::now(),
+            menu: GsMenu::closed(),
+            previous_dose_weight: None,
+            dose_tracking_initialized: false,
+            dose_popup_until: None,
         }
+    }
+
+    /// Whether the dose popup is on screen right now.
+    pub fn dose_popup_active(&self) -> bool {
+        self.dose_popup_until.map(|until| Instant::now() < until).unwrap_or(false)
+    }
+
+    /// The dose it is showing.
+    pub fn dose_popup_weight(&self) -> Option<f32> {
+        self.previous_dose_weight
     }
 
     /// Check if an update is needed (1Hz rate limiting)
@@ -85,6 +115,23 @@ impl DisplayState {
             }
         }
         self.was_brewing = current_brewing;
+
+        let new_dose = new_status.pending_shot_annotations.dose_weight();
+        if !self.dose_tracking_initialized {
+            self.dose_tracking_initialized = true;
+        } else if let Some(grams) = new_dose {
+            // Only a transition *to* a value, and only to a different one. `Some -> None` is the
+            // post-shot clear (dual_boiler_single_group.rs:2806) and is not a capture; `Some(v) ->
+            // Some(v)` is the same dose re-reported by the next status and is not one either.
+            // `is_finite` because NaN never compares equal to itself, and a NaN dose would otherwise
+            // re-arm this on every single status, forever.
+            if grams.is_finite() && self.previous_dose_weight != Some(grams) {
+                self.dose_popup_until = Some(
+                    Instant::now() + embassy_time::Duration::from_millis(DOSE_POPUP_DURATION_MS),
+                );
+            }
+        }
+        self.previous_dose_weight = new_dose;
 
         self.status = new_status;
     }

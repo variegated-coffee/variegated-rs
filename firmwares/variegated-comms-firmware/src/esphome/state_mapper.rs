@@ -334,7 +334,7 @@ fn update_machine_configuration(
         state: machine_config.heating_element_interlock,
     }));
 
-    log_info!("Updated machine configuration: heating_element_interlock={}", machine_config.heating_element_interlock);
+    //log_info!("Updated machine configuration: heating_element_interlock={}", machine_config.heating_element_interlock);
 }
 
 fn update_boiler_configuration(
@@ -528,7 +528,7 @@ fn update_boiler_configuration(
         missing_state: false,
     }));
 
-    log_info!("Updated boiler {} configuration", boiler_index);
+//    log_info!("Updated boiler {} configuration", boiler_index);
 }
 
 fn update_group_configuration(
@@ -592,7 +592,7 @@ fn update_group_configuration(
         }));
     }
 
-    log_info!("Updated group {} configuration", group_index);
+    //log_info!("Updated group {} configuration", group_index);
 }
 
 fn update_water_tap_configuration(
@@ -640,7 +640,7 @@ fn update_water_tap_configuration(
         }));
     }
 
-    log_info!("Updated water tap {} configuration", water_tap_index);
+    //log_info!("Updated water tap {} configuration", water_tap_index);
 }
 
 fn update_steam_wand_configuration(
@@ -711,7 +711,7 @@ fn update_steam_wand_configuration(
         state: steam_wand_config.auto_purge_enabled,
     }));
 
-    log_info!("Updated steam wand {} configuration", steam_wand_index);
+    //log_info!("Updated steam wand {} configuration", steam_wand_index);
 }
 
 fn update_tank_configuration(
@@ -733,5 +733,5 @@ fn update_tank_configuration(
         }));
     }
 
-    log_info!("Updated tank {} configuration", tank_index);
+    //log_info!("Updated tank {} configuration", tank_index);
 }

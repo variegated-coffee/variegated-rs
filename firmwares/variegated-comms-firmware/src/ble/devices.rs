@@ -762,7 +762,7 @@ async fn acaia_measurement_loop(
                                             Ok(event) => {
                                                 match event {
                                                     ScaleEvent::Weight(w) => {
-                                                        log_info!("Scale Weight: {} g", w.weight);
+                                                        //log_info!("Scale Weight: {} g", w.weight);
 
                                                         // `try_send`, where the Belka loop awaits.
                                                         //

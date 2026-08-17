@@ -1,0 +1,17 @@
+[package]
+name = "variegated-menu"
+version = "0.1.0"
+edition = "2024"
+description = "Navigation and value-editing model for button- and encoder-driven machine menus"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Opt-in, not default. A `Format` impl monomorphized on a host has no `_defmt_acquire`
+# to link against, and the failure reads "Too many sections!" -- so a crate whose whole
+# point is that it can be host-tested must not turn defmt on by itself. The firmwares
+# enable it; `cargo test` does not.
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt"]

@@ -27,12 +27,13 @@ use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::single_boiler_state;
 use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit, RoutineRepository as RoutineRepositoryTrait};
-use crate::rotary::{RoutineParameterEditState};
+use crate::rotary::{RoutineParameterEditState, RowKind};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
 use crate::rotary::{ControlMode, IdleSubState, ScaleSettingsSubState, UIState, UIStatus, ConfigEditType};
-use crate::list_menu::{ListMenuType, ListMenuState};
+use crate::list_menu::{ListMenuItem, ListMenuType};
+use variegated_menu::{ListGeometry, ListNav};
 
 pub type DisplayBus = Mutex<NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>>;
 pub type DisplayInterface = SPIInterface<SpiDevice<'static, NoopRawMutex, Spi<'static, crate::DisplayPeripheralsSpi, embassy_rp::spi::Async>, Output<'static>>, Output<'static>>;
@@ -97,36 +98,25 @@ impl DisplayController {
     }
     
     /// Renders a vertical scroll bar on the right side of the display
-    /// 
+    ///
+    /// The geometry comes from [`ListNav::thumb`], which is host-tested and guarantees
+    /// `y + height <= track_px` for every reachable offset. The arithmetic this replaced was
+    /// fed `items.len()` while the offset had been advanced against a row count that *included*
+    /// the back button, so the ratio could exceed 1 and the thumb was drawn past the bottom of
+    /// a 64-pixel panel.
+    ///
     /// # Arguments
-    /// * `total_items` - Total number of items in the list
-    /// * `visible_items` - Number of items visible at once
-    /// * `scroll_offset` - Index of the first visible item (None if no scrolling)
+    /// * `nav` - Where the selection and viewport are
+    /// * `geo` - The list's row count and window size
     /// * `y_start` - Starting Y coordinate for the scroll area
     /// * `y_end` - Ending Y coordinate for the scroll area
-    fn render_scroll_bar(&mut self, total_items: usize, visible_items: usize, scroll_offset: Option<usize>, y_start: i32, y_end: i32) {
-        if total_items <= visible_items {
-            return; // No scroll bar needed
-        }
-        
-        let scrollable_area_height = y_end - y_start;
-        let min_bar_height = 4; // Minimum height for visibility
-        
-        // Calculate scroll bar height based on visible/total ratio
-        let bar_height = ((visible_items as f32 / total_items as f32) * scrollable_area_height as f32).max(min_bar_height as f32) as i32;
-        
-        // Use the scroll offset directly
-        let first_visible_index = scroll_offset.unwrap_or(0);
-        
-        // Calculate scroll position
-        let max_scroll_items = total_items - visible_items;
-        let scroll_ratio = if max_scroll_items > 0 {
-            first_visible_index as f32 / max_scroll_items as f32
-        } else {
-            0.0
-        };
-        let scroll_position = ((scrollable_area_height - bar_height) as f32 * scroll_ratio) as i32;
-        
+    fn render_scroll_bar(&mut self, nav: ListNav, geo: ListGeometry, y_start: i32, y_end: i32) {
+        let track_px = (y_end - y_start).max(0) as u32;
+        let Some((y, height)) = nav.thumb(geo, track_px) else { return };
+        let thumb_y = y_start + y as i32;
+
+        // The hard-coded 126 track and 125/width-3 thumb stay: the 128-pixel width is genuinely
+        // panel-specific, and it is why `render_list_menu`'s highlight is 123 wide.
         // Draw scroll track
         Line::new(Point::new(126, y_start), Point::new(126, y_end))
             .into_styled(PrimitiveStyleBuilder::new()
@@ -138,7 +128,7 @@ impl DisplayController {
         
         // Draw scroll bar
         RoundedRectangle::with_equal_corners(
-            Rectangle::new(Point::new(125, y_start + scroll_position), Size::new(3, bar_height as u32)),
+            Rectangle::new(Point::new(125, thumb_y), Size::new(3, height)),
             Size::new(1, 1) // Corner radius of 1px
         )
             .into_styled(PrimitiveStyleBuilder::new()
@@ -190,8 +180,8 @@ impl DisplayController {
             UIState::Idle(substate) => {
                 self.render_idle_state(substate).await;
             }
-            UIState::ListMenu(menu_type, menu_state, _, _) => {
-                self.render_list_menu(menu_type, menu_state).await;
+            UIState::ListMenu(menu_type, nav, _, cached_items) => {
+                self.render_list_menu(menu_type, nav, cached_items.as_deref()).await;
             }
             UIState::SettingsInformation => {
                 self.render_settings_information().await;
@@ -228,7 +218,12 @@ impl DisplayController {
         self.display.flush().await.expect("Failed to flush display");
     }
 
-    async fn render_list_menu(&mut self, menu_type: ListMenuType, menu_state: ListMenuState) {
+    async fn render_list_menu(
+        &mut self,
+        menu_type: ListMenuType,
+        nav: ListNav,
+        cached_items: Option<&[ListMenuItem]>,
+    ) {
         // Render title from menu type
         Text::with_text_style(menu_type.get_title(), Point::new(64, 0), self.text_style_medium_small, 
             TextStyleBuilder::new()
@@ -247,51 +242,27 @@ impl DisplayController {
             .draw(&mut self.display)
             .unwrap();
 
-        let has_back_button = menu_type.has_back_button();
-        
-        // Draw back button if enabled
-        if has_back_button {
-            let back_selected = menu_state.is_back_button_selected();
-            let back_color = if back_selected {
-                Rectangle::new(Point::new(0, 0), Size::new(20, 10))
-                    .into_styled(PrimitiveStyleBuilder::new()
-                        .fill_color(BinaryColor::On)
-                        .build())
-                    .draw(&mut self.display)
-                    .unwrap();
-                BinaryColor::Off
-            } else {
-                BinaryColor::On
-            };
-
-            self.text_style_medium_small.set_text_color(Some(back_color));
-            Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small, 
-                TextStyleBuilder::new()
-                    .alignment(Alignment::Left)
-                    .baseline(Baseline::Top)
-                    .build())
-                .draw(&mut self.display)
-                .unwrap();
-            self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
-        }
-
-        // Get menu items from centralized location
-        let items = menu_type.get_items(Some(self.routine_repository), Some(&self.status)).await;
-
-        // Render menu items
-        let visible_items = ListMenuState::VISIBLE_ITEMS;
-        let first_item_index = if has_back_button { 1 } else { 0 };
-        
-        for i in 0..visible_items {
-            let item_index = menu_state.scroll_offset + i;
-            if item_index >= items.len() {
-                break;
+        // Prefer the cache. This loop runs on a 1 us delay, and the fetch takes the routine
+        // repository mutex and re-allocates a `Vec<String>` every time round -- once per frame,
+        // for a list that only changes when the menu is entered.
+        let fetched;
+        let items: &[ListMenuItem] = match cached_items {
+            Some(items) => items,
+            None => {
+                fetched = menu_type.get_items(Some(self.routine_repository), Some(&self.status)).await;
+                &fetched
             }
-            
-            let y = 12 + i as i32 * 10;
-            let is_selected = menu_state.selected_index == item_index + first_item_index;
-            
-            let text_color = if is_selected {
+        };
+
+        // One index space: the back row is a row like any other, so it scrolls with the list
+        // rather than sitting permanently in the header while the selection index counted it
+        // anyway. `item_index` is what maps a row back to an item.
+        let geo = menu_type.geometry(items.len());
+
+        for (screen_row, row) in nav.visible_range(geo).enumerate() {
+            let y = 12 + screen_row as i32 * 10;
+
+            let text_color = if row == nav.selected() {
                 Rectangle::new(Point::new(0, y), Size::new(123, 10))
                     .into_styled(PrimitiveStyleBuilder::new()
                         .fill_color(BinaryColor::On)
@@ -302,10 +273,18 @@ impl DisplayController {
             } else {
                 BinaryColor::On
             };
-            
+
+            let label: &str = match menu_type.item_index(row) {
+                None => "<-",
+                Some(i) => match items.get(i) {
+                    Some(item) => &item.label,
+                    None => continue,
+                },
+            };
+
             self.text_style_medium_small.set_text_color(Some(text_color));
-            Text::with_text_style(&items[item_index].label, Point::new(2, y), 
-                self.text_style_medium_small, 
+            Text::with_text_style(label, Point::new(2, y),
+                self.text_style_medium_small,
                 TextStyleBuilder::new()
                     .alignment(Alignment::Left)
                     .baseline(Baseline::Top)
@@ -315,16 +294,7 @@ impl DisplayController {
             self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
         }
 
-        // Draw scroll bar
-        if items.len() > visible_items {
-            self.render_scroll_bar(
-                items.len(),
-                visible_items,
-                Some(menu_state.scroll_offset),
-                12,
-                64
-            );
-        }
+        self.render_scroll_bar(nav, geo, 12, 64);
     }
 
     /// The Improv provisioning window, entered from the settings menu.
@@ -1447,48 +1417,37 @@ impl DisplayController {
             .draw(&mut self.display)
             .unwrap();
 
-        // Back button in upper left (EXACT same code as list menu)
-        let back_selected = edit_state.is_back_button_selected();
-        let back_color = if back_selected {
-            Rectangle::new(Point::new(0, 0), Size::new(20, 10))
-                .into_styled(PrimitiveStyleBuilder::new()
-                    .fill_color(BinaryColor::On)
-                    .build())
-                .draw(&mut self.display)
-                .unwrap();
-            BinaryColor::Off
-        } else {
-            BinaryColor::On
-        };
-
-        self.text_style_medium_small.set_text_color(Some(back_color));
-        Text::with_text_style("<-", Point::new(0, 0), self.text_style_medium_small, 
-            TextStyleBuilder::new()
-                .alignment(Alignment::Left)
-                .baseline(Baseline::Top)
-                .build())
-            .draw(&mut self.display)
-            .unwrap();
-        self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
-
         // Get routine to display parameters
         let mut repo = self.routine_repository.lock().await;
         if let Some(routine) = repo.get_routine(routine_index).await {
-            // Main content area starts at y=12 (same as list menu)
-            let visible_items = RoutineParameterEditState::VISIBLE_ITEMS;
-            
-            // Display parameters with current values
-            for i in 0..visible_items {
-                let param_index = edit_state.scroll_offset + i;
-                if param_index >= routine.parameters().len() {
-                    break; // No more parameters
-                }
-                
-                let y = 12 + i as i32 * 10;
-                let item_index = param_index + 1; // +1 for back button
-                let is_selected = edit_state.selected_index == item_index;
-                
-                let text_color = if is_selected {
+            let params = routine.parameters();
+            let geo = edit_state.geometry(params.len());
+
+            // Row space, like the list menu. The old loop drew parameters at
+            // `p - scroll_offset` (an item-space index) and Execute at
+            // `execute_index - scroll_offset` where `execute_index = params.len() + 1` (a
+            // selection-space index), which left a two-row gap before "Execute Routine". Both
+            // are the same index now, so the gap closes.
+            for (screen_row, row) in edit_state.nav.visible_range(geo).enumerate() {
+                let y = 12 + screen_row as i32 * 10;
+
+                let label = match edit_state.row_kind(row, params.len()) {
+                    RowKind::Back => "<-".to_string(),
+                    RowKind::Execute => "Execute Routine".to_string(),
+                    RowKind::Parameter(i) => match params.get(i) {
+                        Some(param) => {
+                            let current_value = edit_state.parameter_values
+                                .get(&param.index)
+                                .copied()
+                                .unwrap_or(param.default);
+                            let value_str = self.format_parameter_value(current_value, param.unit);
+                            format!("{} ({})", param.name, value_str)
+                        }
+                        None => continue,
+                    },
+                };
+
+                let text_color = if row == edit_state.nav.selected() {
                     Rectangle::new(Point::new(0, y), Size::new(123, 10))
                         .into_styled(PrimitiveStyleBuilder::new()
                             .fill_color(BinaryColor::On)
@@ -1499,16 +1458,10 @@ impl DisplayController {
                 } else {
                     BinaryColor::On
                 };
-                
-                // Format parameter with current value in parentheses
-                let param = &routine.parameters()[param_index];
-                let current_value = edit_state.parameter_values.get(&param.index).copied().unwrap_or(param.default);
-                let value_str = self.format_parameter_value(current_value, param.unit);
-                let param_text = format!("{} ({})", param.name, value_str);
-                
+
                 self.text_style_medium_small.set_text_color(Some(text_color));
-                Text::with_text_style(&param_text, Point::new(2, y), 
-                    self.text_style_medium_small, 
+                Text::with_text_style(&label, Point::new(2, y),
+                    self.text_style_medium_small,
                     TextStyleBuilder::new()
                         .alignment(Alignment::Left)
                         .baseline(Baseline::Top)
@@ -1517,49 +1470,8 @@ impl DisplayController {
                     .unwrap();
                 self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
             }
-            
-            // Show "Execute Routine" at bottom if visible
-            let execute_index = routine.parameters().len() + 1; // After back + parameters
-            let visible_end = edit_state.scroll_offset + visible_items;
-            if execute_index >= edit_state.scroll_offset && execute_index < visible_end {
-                let y = 12 + (execute_index - edit_state.scroll_offset) as i32 * 10;
-                let is_selected = edit_state.selected_index == execute_index;
-                
-                let text_color = if is_selected {
-                    Rectangle::new(Point::new(0, y), Size::new(123, 10))
-                        .into_styled(PrimitiveStyleBuilder::new()
-                            .fill_color(BinaryColor::On)
-                            .build())
-                        .draw(&mut self.display)
-                        .unwrap();
-                    BinaryColor::Off
-                } else {
-                    BinaryColor::On
-                };
-                
-                self.text_style_medium_small.set_text_color(Some(text_color));
-                Text::with_text_style("Execute Routine", Point::new(2, y), 
-                    self.text_style_medium_small, 
-                    TextStyleBuilder::new()
-                        .alignment(Alignment::Left)
-                        .baseline(Baseline::Top)
-                        .build())
-                    .draw(&mut self.display)
-                    .unwrap();
-                self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
-            }
-            
-            // Draw scroll bar if needed (same logic as list menu)
-            let total_items = edit_state.get_total_items(routine);
-            if total_items > visible_items {
-                self.render_scroll_bar(
-                    total_items,
-                    visible_items,
-                    Some(edit_state.scroll_offset),
-                    12,
-                    64
-                );
-            }
+
+            self.render_scroll_bar(edit_state.nav, geo, 12, 64);
         }
     }
     

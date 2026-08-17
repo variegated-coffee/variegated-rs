@@ -87,6 +87,7 @@ mod lcd_pins;
 mod mcp23017_hd44780;
 mod display;
 mod buttons;
+mod menu;
 #[cfg(feature = "pwm-leds")]
 mod led_controller;
 mod backlight_controller;
@@ -895,6 +896,9 @@ fn main() -> ! {
         let identify_receiver_tft = IDENTIFY_WATCH
             .receiver()
             .expect("the identify watch is sized for both display receivers");
+        let menu_receiver_tft = MENU_WATCH
+            .receiver()
+            .expect("the menu watch is sized for both display receivers");
 
         paint_core1_stack();
         spawn_core1(
@@ -941,6 +945,7 @@ fn main() -> ! {
                         reset,
                         status_channel.subscriber().expect("Failed to get TFT status subscriber"),
                         identify_receiver_tft,
+                        menu_receiver_tft,
                         MONITOR.claim(CheckinId::GraphicalDisplay)
                     )));
 
@@ -1181,6 +1186,19 @@ static SHOT_UPLOAD_CONFIG_WATCH: StaticCell<Watch<SyncSendRawMutex, ShotUploadCo
 /// which builds the controller. A `StaticCell` can only hand its reference to whoever calls
 /// `init`, so it would have forced the sender through `main_task`'s argument list for no gain.
 static IDENTIFY_WATCH: Watch<SyncSendRawMutex, Instant, 2> = Watch::new();
+/// Where the button task publishes the menu's position for the displays to draw.
+///
+/// A `Watch`, mirroring `IDENTIFY_WATCH` above: only the latest position matters, both
+/// display tasks want it, and they straddle cores. A plain `static` for the same reason --
+/// `Watch::new` is `const`, and the ends are reached from different functions -- the TFT
+/// receiver from `main`, the sender and the LCD receiver from `main_task`.
+///
+/// The payload is *navigation*, not a rendered view. Activating "Wi-Fi Setup" sends a
+/// command whose effect lands in `comms_status.improv` about a second later, with no button
+/// pressed in between; a pre-rendered row would read OFF until the user pressed something
+/// unrelated. See `menu::MenuActivation`.
+static MENU_WATCH: Watch<SyncSendRawMutex, menu::GsMenu, { menu::MENU_WATCH_RECEIVERS }> =
+    Watch::new();
 /// Raised by `AppDebugOp::ClearWifiCredentials`, drained by the controller.
 ///
 /// A `Signal` rather than a channel, like `SD_SELF_TEST_REQUEST` above and for the same
@@ -3309,11 +3327,15 @@ async fn main_task(
         let identify_receiver_lcd = IDENTIFY_WATCH
             .receiver()
             .expect("the identify watch is sized for both display receivers");
+        let menu_receiver_lcd = MENU_WATCH
+            .receiver()
+            .expect("the menu watch is sized for both display receivers");
         spawner.spawn(unwrap!(lcd_display_task(
             lcd_device,
             display_status_receiver,
             routine_repository_ref,
             identify_receiver_lcd,
+            menu_receiver_lcd,
             MONITOR.claim(CheckinId::LcdDisplay)
         )));
     }
@@ -3323,7 +3345,7 @@ async fn main_task(
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, MONITOR.claim(CheckinId::ButtonController))));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender())));
 
     // Create status subscriber for LED controller and spawn the task.
     //

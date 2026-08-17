@@ -1303,7 +1303,7 @@ impl<
                     // configured maximum both reach the host in `Status` and
                     // `Configuration`; what only this line can say is *which*
                     // interlock tripped.
-                    log_warn!("Brew boiler heating disabled: temperature at or above configured maximum");
+                    //log_warn!("Brew boiler heating disabled: temperature at or above configured maximum");
                     brew_demand = 0.0;
                 }
             }
@@ -1315,7 +1315,7 @@ impl<
                 if current_pressure >= max_pressure {
                     // Constant text, for the reason given on the temperature
                     // interlock above.
-                    log_warn!("Brew boiler heating disabled: pressure at or above configured maximum");
+                    //log_warn!("Brew boiler heating disabled: pressure at or above configured maximum");
                     brew_demand = 0.0;
                 }
             }
@@ -1324,7 +1324,7 @@ impl<
         // Dry-run protection: disable heating if water level too low
         let brew_boiler_level = self.brew_boiler.get_water_level();
         if !Self::is_boiler_level_safe(brew_boiler_level, &self.brew_boiler_config) {
-            log_warn!("Brew boiler heating disabled: water level below minimum safe level");
+            //log_warn!("Brew boiler heating disabled: water level below minimum safe level");
             brew_demand = 0.0;
         }
 
@@ -1372,7 +1372,7 @@ impl<
                 if current_temp >= max_temp {
                     // Constant text, for the reason given on the brew boiler's
                     // temperature interlock.
-                    log_warn!("Steam boiler heating disabled: temperature at or above configured maximum");
+                    //log_warn!("Steam boiler heating disabled: temperature at or above configured maximum");
                     steam_demand = 0.0;
                 }
             }
@@ -1384,7 +1384,7 @@ impl<
                 if current_pressure >= max_pressure {
                     // Constant text, for the reason given on the brew boiler's
                     // temperature interlock.
-                    log_warn!("Steam boiler heating disabled: pressure at or above configured maximum");
+                    //log_warn!("Steam boiler heating disabled: pressure at or above configured maximum");
                     steam_demand = 0.0;
                 }
             }
@@ -1393,7 +1393,7 @@ impl<
         // Dry-run protection: disable heating if water level too low
         let steam_boiler_level = self.steam_boiler.get_water_level();
         if !Self::is_boiler_level_safe(steam_boiler_level, &self.steam_boiler_config) {
-            log_warn!("Steam boiler heating disabled: water level below minimum safe level");
+            //log_warn!("Steam boiler heating disabled: water level below minimum safe level");
             steam_demand = 0.0;
         }
 

@@ -69,6 +69,17 @@ pub type IdentifyReceiver = embassy_sync::watch::Receiver<
     2,
 >;
 
+/// The receiver each display task takes for the button menu's position.
+///
+/// Sized and named like [`IdentifyReceiver`] above, and for the same reasons.
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
+pub type MenuReceiver = embassy_sync::watch::Receiver<
+    'static,
+    variegated_hal::SyncSendRawMutex,
+    crate::menu::GsMenu,
+    { crate::menu::MENU_WATCH_RECEIVERS },
+>;
+
 #[cfg(feature = "character-display")]
 pub mod lcd_renderer;
 
@@ -102,6 +113,7 @@ pub async fn lcd_display_task(
     mut status_receiver: StatusSubscriber,
     routine_repository: &'static crate::RoutineRepositoryMutex,
     mut identify_receiver: IdentifyReceiver,
+    mut menu_receiver: MenuReceiver,
     checkin: variegated_checkin::CheckinHandle,
 ) {
     // Initialize the HD44780 LCD controller configuration
@@ -164,6 +176,12 @@ pub async fn lcd_display_task(
         // means.
         if let Some(requested_at) = identify_receiver.try_changed() {
             display_state.identify_until = Some(requested_at + IDENTIFY_FLASH_DURATION);
+        }
+
+        // `try_changed`, not `changed`, for the reason spelled out above the identify block: this
+        // loop has to keep rendering whether or not the menu moved.
+        if let Some(nav) = menu_receiver.try_changed() {
+            display_state.shared_state.menu = nav;
         }
 
         // Update cached routine when routine execution changes
@@ -234,6 +252,7 @@ pub async fn graphical_display_task(
     mut reset: Output<'static>,
     mut status_receiver: StatusSubscriber,
     mut identify_receiver: IdentifyReceiver,
+    mut menu_receiver: MenuReceiver,
     checkin: variegated_checkin::CheckinHandle,
 ) {
     use crate::display::GraphicalDisplayState;
@@ -302,6 +321,12 @@ pub async fn graphical_display_task(
         // so a repeated Identify extends the flash rather than queueing behind it.
         if let Some(requested_at) = identify_receiver.try_changed() {
             display_state.identify_until = Some(requested_at + IDENTIFY_FLASH_DURATION);
+        }
+
+        // `try_changed`, not `changed`, for the reason spelled out above the identify block: this
+        // loop has to keep rendering whether or not the menu moved.
+        if let Some(nav) = menu_receiver.try_changed() {
+            display_state.shared_state.menu = nav;
         }
 
         // Query schedule store periodically (every ~1 second = 100 * 10ms)

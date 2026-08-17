@@ -13,6 +13,7 @@ use variegated_timekeeping::TimeKeeper;
 use variegated_controller_lib::routine::RoutineRepository;
 
 use crate::display_state::{DisplayState, DisplayMode};
+use crate::menu::{self, MenuContext};
 use crate::RoutineRepositoryMutex;
 
 /// LCD-specific display state with buffer tracking
@@ -101,6 +102,22 @@ impl LcdDisplayState {
                 let lit = (now.as_millis() / 250) % 2 == 0;
                 let row = if lit { "*".repeat(16) } else { String::new() };
                 return (row.clone(), row);
+            }
+        }
+
+        // After the identify flash and ahead of the provisioning rows and the mode match, for the
+        // reasons in `graphical_renderer::render`. Ahead of the provisioning rows specifically
+        // because the menu's own value column says whether the window is open, and replacing a menu
+        // the user is navigating with "Ready to pair" strands them.
+        if self.shared_state.menu.is_open() {
+            return self.menu_rows();
+        }
+
+        // A dose the user just captured, for five seconds. Ahead of the provisioning rows because it
+        // is direct feedback for an action taken a second ago.
+        if self.shared_state.dose_popup_active() {
+            if let Some(grams) = self.shared_state.dose_popup_weight() {
+                return ("  Dose captured ".to_string(), format!("     {:.1} g", grams));
             }
         }
 
@@ -251,7 +268,37 @@ impl LcdDisplayState {
 
     /// Format off mode row 2: Empty
     pub fn format_off_row2(&self) -> String {
-        "                ".to_string()
+        // The 2x16 equivalent of the TFT's Off-screen hint: with the any-button-wakes rule gone,
+        // this is the one place that can say how to power the machine on. Exactly 16 characters.
+        "Press 3+5 for on".to_string()
+    }
+
+    /// The button menu's two rows.
+    ///
+    /// Only one item row fits, so the selected item is the only one drawn and no `>` marker is
+    /// needed. `"Wi-Fi Setup"` is 11 characters and `"OFF"` is 3, so the `{:<12}{:>4}` split fits
+    /// exactly -- which is why `menu.rs` labels it `"Wi-Fi Setup"` rather than
+    /// `"Wi-Fi Provisioning"`. Both rows must stay <= 16: `pad_or_truncate_to_16` truncates
+    /// silently, mid-word.
+    fn menu_rows(&self) -> (String, String) {
+        let Some(frame) = self.shared_state.menu.top() else {
+            return ("                ".to_string(), "                ".to_string());
+        };
+        let items = menu::items(frame.id);
+        let Some(item) = items.get(frame.nav.selected()) else {
+            return ("                ".to_string(), "                ".to_string());
+        };
+
+        let ctx = MenuContext::from_status(&self.shared_state.status);
+        let value = menu::value_text(item, &ctx).unwrap_or("");
+
+        // ASCII for the same reason as the TFT: the HD44780 A00 ROM has no up/down triangle
+        // glyphs (U+25B2/U+25BC), and `pad_or_truncate_to_16` would push a multi-byte char
+        // through `write_char` unmodified.
+        (
+            format!("{:<12}{:>4}", item.label, value),
+            "1v 2^ 3sel 4bck".to_string(),
+        )
     }
 
     /// Format power save standby mode row 1: "Standby" centered

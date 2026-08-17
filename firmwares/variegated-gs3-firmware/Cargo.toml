@@ -59,6 +59,8 @@ variegated-comms = { version = "0.1.0", path = "../../crates/variegated-comms" }
 variegated-log = { version = "0.1.0", path = "../../crates/variegated-log", features = ["debug-bus", "rp235xb"] }
 variegated-timekeeping = { version = "0.1.0", path = "../../crates/variegated-timekeeping", features = ["defmt"] }
 variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../../crates/variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
+variegated-menu = { version = "0.1.0", path = "../../crates/variegated-menu", features = ["defmt"] }
+variegated-buttons = { version = "0.1.0", path = "../../crates/variegated-buttons", features = ["defmt"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal.workspace = true

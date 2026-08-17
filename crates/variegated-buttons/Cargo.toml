@@ -1,0 +1,17 @@
+[package]
+name = "variegated-buttons"
+version = "0.1.0"
+edition = "2024"
+description = "Press, chord and press-and-hold recognition from raw button samples"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Opt-in, not default, for the same reason as `variegated-menu`: a `Format` impl
+# monomorphized on a host has no `_defmt_acquire` to link against, and the failure reads
+# "Too many sections!". This crate exists to be host-tested, so it must not turn defmt on
+# by itself. The firmware enables it; `cargo test` does not.
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt"]

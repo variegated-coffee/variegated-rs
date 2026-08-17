@@ -4912,6 +4912,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-buttons"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+]
+
+[[package]]
 name = "variegated-checkin"
 version = "0.1.0"
 dependencies = [
@@ -5198,6 +5205,7 @@ dependencies = [
  "variegated-adc-tools",
  "variegated-ads124s08",
  "variegated-board-cfg",
+ "variegated-buttons",
  "variegated-checkin",
  "variegated-comms",
  "variegated-controller-lib",
@@ -5209,6 +5217,7 @@ dependencies = [
  "variegated-instrumentation",
  "variegated-log",
  "variegated-mcp23017",
+ "variegated-menu",
  "variegated-nv3007",
  "variegated-rp235x-atomic-raw-mutex",
  "variegated-timekeeping",
@@ -5315,6 +5324,13 @@ dependencies = [
  "embassy-futures",
  "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "variegated-menu"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
 ]
 
 [[package]]
@@ -5469,6 +5485,7 @@ dependencies = [
  "variegated-instrumentation",
  "variegated-log",
  "variegated-mcp9600",
+ "variegated-menu",
  "variegated-timekeeping",
  "w25q32jv",
 ]

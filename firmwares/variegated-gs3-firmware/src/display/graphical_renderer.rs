@@ -28,6 +28,7 @@ use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupContro
 use variegated_controller_types::wifi::ImprovState;
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
+use crate::menu::{self, MenuContext};
 #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
 use crate::GROUP_SCALE_PERIPHERAL_ID;
 #[cfg(feature = "belka")]
@@ -179,6 +180,22 @@ impl GraphicalDisplayState {
             }
         }
 
+        // After the identify flash and before the mode match.
+        //
+        // After the flash, because Improv Identify exists to answer "which of these machines am I
+        // talking to" for someone standing in the room, and the machine most likely to be asked that
+        // is the one whose menu is open -- the menu is where the provisioning window gets opened in
+        // the first place. A menu that suppressed the flash would give the wrong answer on exactly
+        // the machine being identified. It costs three seconds of a menu that comes back intact,
+        // because the navigation lives in the button task and not in this renderer.
+        //
+        // Before the mode match, because this is a takeover rather than an overlay: returning here
+        // also means `render_provisioning_banner` does not draw over the hint row, which is right --
+        // the menu's own value column already says whether the window is open.
+        if self.shared_state.menu.is_open() {
+            return self.render_menu(display);
+        }
+
         // === Effective area ===
 /*        Rectangle::new(Point::new(EFFECTIVE_X, EFFECTIVE_Y), Size::new(EFFECTIVE_WIDTH as u32, EFFECTIVE_HEIGHT as u32))
             .into_styled(PrimitiveStyleBuilder::new()
@@ -203,6 +220,157 @@ impl GraphicalDisplayState {
         // After the mode renderer, not before: this is an overlay, and drawing it last puts it
         // on top in every mode rather than in the ones that happened to be considered.
         self.render_provisioning_banner(display).ok();
+
+        // Last of all, for the same reason the banner is drawn after the mode renderer.
+        self.render_dose_popup(display).ok();
+
+        Ok(())
+    }
+
+    /// The button menu, drawn instead of the machine screen rather than over it.
+    fn render_menu<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        const MENU_ROW_HEIGHT: i32 = 18;
+        const MENU_FIRST_ROW_Y: i32 = EFFECTIVE_Y + 21;
+        const MENU_SEPARATOR_Y: i32 = EFFECTIVE_Y + 17;
+        const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 16;
+
+        let Some(frame) = self.shared_state.menu.top() else { return Ok(()) };
+
+        let font = FontRenderer::new::<u8g2_font_helvB12_tr>();
+
+        font.render_aligned(
+            format_args!("Menu"),
+            Point::new(EFFECTIVE_X + 4, EFFECTIVE_Y + 1),
+            VerticalPosition::Top,
+            HorizontalAlignment::Left,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
+
+        Line::new(
+            Point::new(EFFECTIVE_X, MENU_SEPARATOR_Y),
+            Point::new(EFFECTIVE_X + EFFECTIVE_WIDTH - 1, MENU_SEPARATOR_Y),
+        )
+        .into_styled(PrimitiveStyleBuilder::new()
+            .stroke_color(Rgb565::WHITE)
+            .stroke_width(1)
+            .build())
+        .draw(display).ok();
+
+        let geo = menu::geometry(frame.id);
+        let all = menu::items(frame.id);
+        let ctx = MenuContext::from_status(&self.shared_state.status);
+
+        for (screen_row, row) in frame.nav.visible_range(geo).enumerate() {
+            let Some(item) = all.get(row) else { continue };
+            let row_y = MENU_FIRST_ROW_Y + screen_row as i32 * MENU_ROW_HEIGHT;
+
+            let text_color = if row == frame.nav.selected() {
+                Rectangle::new(
+                    Point::new(EFFECTIVE_X, row_y),
+                    Size::new(EFFECTIVE_WIDTH as u32, MENU_ROW_HEIGHT as u32),
+                )
+                .into_styled(PrimitiveStyleBuilder::new().fill_color(Rgb565::WHITE).build())
+                .draw(display).ok();
+                // `FontColor::Transparent` paints only glyph pixels, so it composes over the fill.
+                Rgb565::BLACK
+            } else {
+                Rgb565::WHITE
+            };
+
+            font.render_aligned(
+                format_args!("{}", item.label),
+                Point::new(EFFECTIVE_X + 6, row_y + 2),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(text_color),
+                display
+            ).ok();
+
+            if let Some(value) = menu::value_text(item, &ctx) {
+                font.render_aligned(
+                    format_args!("{}", value),
+                    Point::new(EFFECTIVE_X + EFFECTIVE_WIDTH - 6, row_y + 2),
+                    VerticalPosition::Top,
+                    HorizontalAlignment::Right,
+                    FontColor::Transparent(text_color),
+                    display
+                ).ok();
+            }
+        }
+
+        // ASCII, not arrows, and this is a correctness matter rather than a style one. Every font
+        // here is `_tr` -- glyphs 32..127. U+25B2/U+25BC produce `LookupError::GlyphNotFound`, and
+        // because `render_aligned` resolves the bounding box before drawing anything, the *whole*
+        // string is dropped rather than just the arrow -- and every call site here `.ok()`s the
+        // result, so it fails as a silently blank row. Naming the button is also the information a
+        // user actually needs: these buttons are numbered and unlabelled, and an arrow says which
+        // way the selection moves but not which finger moves it.
+        font.render_aligned(
+            format_args!("1 Down   2 Up   3 Select   4 Back"),
+            Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
+
+        Ok(())
+    }
+
+    /// The dose the user just captured, for five seconds.
+    ///
+    /// Drawn unconditionally, including during a brew:
+    ///
+    /// Not suppressed during Brewing/RoutineExecution the way the provisioning banner is.
+    /// Long-press 6 is not gated on brewing, and withholding feedback for an action the user just
+    /// took is worse than briefly covering the shot numbers. The banner takes the opposite choice
+    /// because nobody asked for it.
+    fn render_dose_popup<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        if !self.shared_state.dose_popup_active() { return Ok(()); }
+        let Some(grams) = self.shared_state.dose_popup_weight() else { return Ok(()) };
+
+        const BOX_WIDTH: i32 = 200;
+        const BOX_HEIGHT: i32 = 60;
+        let box_left = EFFECTIVE_CENTER_X - BOX_WIDTH / 2;
+        let box_top = EFFECTIVE_CENTER_Y - BOX_HEIGHT / 2;
+
+        // The box bottom lands at y=121 and the provisioning banner starts at 133, so they do
+        // not overlap.
+        Rectangle::new(
+            Point::new(box_left, box_top),
+            Size::new(BOX_WIDTH as u32, BOX_HEIGHT as u32),
+        )
+        .into_styled(PrimitiveStyleBuilder::new()
+            .fill_color(Rgb565::BLACK)
+            .stroke_color(Rgb565::WHITE)
+            .stroke_width(2)
+            .build())
+        .draw(display).ok();
+
+        FontRenderer::new::<u8g2_font_helvB12_tr>().render_aligned(
+            format_args!("Dose captured"),
+            Point::new(EFFECTIVE_CENTER_X, box_top + 8),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
+
+        FontRenderer::new::<u8g2_font_logisoso18_tr>().render_aligned(
+            format_args!("{:.1} g", grams),
+            Point::new(EFFECTIVE_CENTER_X, box_top + 28),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
 
         Ok(())
     }
@@ -548,6 +716,18 @@ impl GraphicalDisplayState {
                 display
             ).ok();
         }
+
+        // Removing the any-button-wakes rule leaves someone pressing button 5 on a dark machine
+        // with nothing happening and no route to discovering the chord; this screen is the one
+        // place that can tell them.
+        small_font.render_aligned(
+            format_args!("Press 3 + 5 to power on"),
+            Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_Y + EFFECTIVE_HEIGHT - 16),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
 
         Ok(())
     }
