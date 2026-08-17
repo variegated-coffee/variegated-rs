@@ -192,7 +192,7 @@ impl GraphicalDisplayState {
         // Before the mode match, because this is a takeover rather than an overlay: returning here
         // also means `render_provisioning_banner` does not draw over the hint row, which is right --
         // the menu's own value column already says whether the window is open.
-        if self.shared_state.menu.is_open() {
+        if self.shared_state.menu.stack.is_open() {
             return self.render_menu(display);
         }
 
@@ -237,7 +237,7 @@ impl GraphicalDisplayState {
         const MENU_SEPARATOR_Y: i32 = EFFECTIVE_Y + 17;
         const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 16;
 
-        let Some(frame) = self.shared_state.menu.top() else { return Ok(()) };
+        let Some(frame) = self.shared_state.menu.stack.top() else { return Ok(()) };
 
         let font = FontRenderer::new::<u8g2_font_helvB12_tr>();
 
@@ -262,7 +262,10 @@ impl GraphicalDisplayState {
 
         let geo = menu::geometry(frame.id);
         let all = menu::items(frame.id);
-        let ctx = MenuContext::from_status(&self.shared_state.status);
+        let ctx = MenuContext::from_status(
+            &self.shared_state.status,
+            self.shared_state.menu.wifi_pending,
+        );
 
         for (screen_row, row) in frame.nav.visible_range(geo).enumerate() {
             let Some(item) = all.get(row) else { continue };

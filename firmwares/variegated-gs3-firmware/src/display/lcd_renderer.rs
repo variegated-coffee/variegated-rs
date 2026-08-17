@@ -109,7 +109,7 @@ impl LcdDisplayState {
         // reasons in `graphical_renderer::render`. Ahead of the provisioning rows specifically
         // because the menu's own value column says whether the window is open, and replacing a menu
         // the user is navigating with "Ready to pair" strands them.
-        if self.shared_state.menu.is_open() {
+        if self.shared_state.menu.stack.is_open() {
             return self.menu_rows();
         }
 
@@ -281,7 +281,7 @@ impl LcdDisplayState {
     /// `"Wi-Fi Provisioning"`. Both rows must stay <= 16: `pad_or_truncate_to_16` truncates
     /// silently, mid-word.
     fn menu_rows(&self) -> (String, String) {
-        let Some(frame) = self.shared_state.menu.top() else {
+        let Some(frame) = self.shared_state.menu.stack.top() else {
             return ("                ".to_string(), "                ".to_string());
         };
         let items = menu::items(frame.id);
@@ -289,7 +289,10 @@ impl LcdDisplayState {
             return ("                ".to_string(), "                ".to_string());
         };
 
-        let ctx = MenuContext::from_status(&self.shared_state.status);
+        let ctx = MenuContext::from_status(
+            &self.shared_state.status,
+            self.shared_state.menu.wifi_pending,
+        );
         let value = menu::value_text(item, &ctx).unwrap_or("");
 
         // ASCII for the same reason as the TFT: the HD44780 A00 ROM has no up/down triangle

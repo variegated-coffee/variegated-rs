@@ -9,7 +9,7 @@ use alloc::string::{String, ToString};
 use core::time::Duration;
 use embassy_time::Instant;
 use variegated_controller_types::{MachineMode, Status, SingleGroupControllerGroups};
-use crate::menu::GsMenu;
+use crate::menu::MenuSnapshot;
 
 /// Duration to display post-brew summary after brewing completes (milliseconds)
 const POST_BREW_DISPLAY_DURATION_MS: u64 = 3000;
@@ -50,7 +50,7 @@ pub struct DisplayState {
     #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     last_update: Instant,
     /// Where the menu is, cached from `MENU_WATCH` by whichever display task owns this.
-    pub menu: GsMenu,
+    pub menu: MenuSnapshot,
     /// The dose on the pending annotations as of the previous status.
     previous_dose_weight: Option<f32>,
     /// Whether any status has been seen yet.
@@ -71,7 +71,7 @@ impl DisplayState {
             last_brew_time: None,
             was_brewing: false,
             last_update: Instant::now(),
-            menu: GsMenu::closed(),
+            menu: MenuSnapshot::closed(),
             previous_dose_weight: None,
             dose_tracking_initialized: false,
             dose_popup_until: None,

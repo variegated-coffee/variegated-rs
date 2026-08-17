@@ -76,7 +76,7 @@ pub type IdentifyReceiver = embassy_sync::watch::Receiver<
 pub type MenuReceiver = embassy_sync::watch::Receiver<
     'static,
     variegated_hal::SyncSendRawMutex,
-    crate::menu::GsMenu,
+    crate::menu::MenuSnapshot,
     { crate::menu::MENU_WATCH_RECEIVERS },
 >;
 

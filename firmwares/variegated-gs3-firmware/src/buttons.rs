@@ -86,7 +86,10 @@ use variegated_buttons::{
     ButtonEvent, ButtonEventRecognizer, ButtonSet, PRESS_AND_HOLD_THRESHOLD_MS, SETTLING_DELAY_MS,
 };
 use crate::StatusSubscriber;
-use crate::menu::{self, GsMenu, MenuActivation, MenuContext, MenuId, MenuSender};
+use crate::menu::{
+    self, GsMenu, MenuActivation, MenuContext, MenuId, MenuItemKind, MenuSender, MenuSnapshot,
+    WifiRequest,
+};
 
 /// Button indices for routine control (buttons 0-3)
 const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
@@ -207,6 +210,10 @@ pub struct ButtonEventHandler {
     /// input, and a selection that lived on the far side of a channel would move a frame
     /// after the button that moved it.
     menu: GsMenu,
+    /// A provisioning command that has been sent and not yet confirmed by a `Status`.
+    ///
+    /// Owned here for the same reason the menu is: this task is the one that sent it.
+    wifi_request: Option<WifiRequest>,
     /// When the current hold of exactly button 5 started, for the menu long hold.
     button_5_hold_start: Option<Instant>,
     /// When the current hold of exactly button 6 started, for the dose-tag long hold.
@@ -225,6 +232,7 @@ impl ButtonEventHandler {
             machine_mode: MachineMode::Off,
             menu_context: MenuContext::default(),
             menu: GsMenu::closed(),
+            wifi_request: None,
             button_5_hold_start: None,
             button_6_hold_start: None,
         }
@@ -255,7 +263,15 @@ impl ButtonEventHandler {
         // Update machine mode from status
         self.machine_mode = status.mode;
 
-        self.menu_context = MenuContext::from_status(status);
+        // Read `improv` first, then let it retire an outstanding request: a change in either
+        // direction is the confirmation we were waiting for.
+        let improv = MenuContext::from_status(status, false).improv;
+        if let Some(request) = self.wifi_request {
+            if !request.is_outstanding(improv, Instant::now()) {
+                self.wifi_request = None;
+            }
+        }
+        self.menu_context = MenuContext::from_status(status, self.wifi_request.is_some());
 
         // The menu is a full-screen takeover, and the machine can become busy underneath it --
         // a schedule can start a routine, and so can the comms processor. The busy condition is
@@ -277,9 +293,25 @@ impl ButtonEventHandler {
         self.button_6_hold_start = None;
     }
 
-    /// Where the menu is, for publication.
-    pub fn menu_nav(&self) -> GsMenu {
-        self.menu
+    /// Retire an outstanding provisioning request that nothing is going to confirm.
+    ///
+    /// Called every loop iteration rather than only when a `Status` arrives, because the
+    /// deadline exists precisely for the case where no `Status` ever reports the change --
+    /// `update_status` would be the one place guaranteed not to run.
+    pub fn tick(&mut self, now: Instant) {
+        if let Some(request) = self.wifi_request {
+            // A closed menu draws nothing, so a request outliving it would only surface as a
+            // stale "..." on the next entry.
+            if !self.menu.is_open() || !request.is_outstanding(self.menu_context.improv, now) {
+                self.wifi_request = None;
+                self.menu_context.wifi_pending = false;
+            }
+        }
+    }
+
+    /// Where the menu is and what it is waiting for, for publication.
+    pub fn menu_snapshot(&self) -> MenuSnapshot {
+        MenuSnapshot { stack: self.menu, wifi_pending: self.wifi_request.is_some() }
     }
 
     /// Handle a button event and return the appropriate machine command
@@ -365,6 +397,13 @@ impl ButtonEventHandler {
         match menu::activate(item, &self.menu_context) {
             MenuActivation::Command(command) => {
                 defmt::info!("Menu: activated {}", item.label);
+                if item.kind == MenuItemKind::WifiProvisioning {
+                    // The window takes about a second to open or close. Until it does, the
+                    // value column reads "..." rather than the state we just asked to leave.
+                    self.wifi_request =
+                        Some(WifiRequest::new(self.menu_context.improv, Instant::now()));
+                    self.menu_context.wifi_pending = true;
+                }
                 vec![command]
             }
             MenuActivation::Pop => {
@@ -535,13 +574,18 @@ pub async fn button_controller_task(
         // between a working machine and one that ignores its buttons.
         checkin.good();
 
-        let menu_before = handler.menu_nav();
+        let menu_before = handler.menu_snapshot();
 
         // Update status if available
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             // Can close the menu, if the machine became busy underneath it.
             handler.update_status(&new_status);
         }
+
+        // Every iteration, not only the ones with a button sample: a provisioning command
+        // that is refused outright is never confirmed by any `Status`, and its deadline is
+        // the only thing that retires it.
+        handler.tick(Instant::now());
 
         // Wait for either button interrupt or timeout for state machine updates
         let button_state_opt = match select(
@@ -607,7 +651,7 @@ pub async fn button_controller_task(
         // is published even on an iteration with no button sample. Only on change: a redundant
         // send makes every display's `try_changed()` fire for nothing, and `MenuStack: PartialEq`
         // makes the test free.
-        let menu_after = handler.menu_nav();
+        let menu_after = handler.menu_snapshot();
         if menu_after != menu_before {
             menu_sender.send(menu_after);
         }

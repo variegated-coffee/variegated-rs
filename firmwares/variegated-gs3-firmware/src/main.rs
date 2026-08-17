@@ -1197,7 +1197,7 @@ static IDENTIFY_WATCH: Watch<SyncSendRawMutex, Instant, 2> = Watch::new();
 /// command whose effect lands in `comms_status.improv` about a second later, with no button
 /// pressed in between; a pre-rendered row would read OFF until the user pressed something
 /// unrelated. See `menu::MenuActivation`.
-static MENU_WATCH: Watch<SyncSendRawMutex, menu::GsMenu, { menu::MENU_WATCH_RECEIVERS }> =
+static MENU_WATCH: Watch<SyncSendRawMutex, menu::MenuSnapshot, { menu::MENU_WATCH_RECEIVERS }> =
     Watch::new();
 /// Raised by `AppDebugOp::ClearWifiCredentials`, drained by the controller.
 ///
