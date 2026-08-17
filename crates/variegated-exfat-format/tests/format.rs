@@ -33,6 +33,10 @@ const SECTOR: usize = 512;
 struct MemDevice {
     sectors: std::collections::BTreeMap<u32, [u8; SECTOR]>,
     total_sectors: u64,
+    /// Sectors written, counting rewrites. Distinct from `sectors.len()`, which counts
+    /// distinct addresses -- and it is the *issued* count that a format's duration tracks,
+    /// so it is the one `Geometry::sectors_written` has to predict.
+    sectors_written: u32,
 }
 
 impl MemDevice {
@@ -40,6 +44,7 @@ impl MemDevice {
         Self {
             sectors: std::collections::BTreeMap::new(),
             total_sectors,
+            sectors_written: 0,
         }
     }
 
@@ -94,6 +99,7 @@ impl BlockDevice<SECTOR> for MemDevice {
                 return Err(OutOfRange);
             }
             self.sectors.insert(index, **block);
+            self.sectors_written += 1;
         }
         Ok(())
     }
@@ -108,6 +114,68 @@ fn formatted(megabytes: u64) -> MemDevice {
     let mut device = MemDevice::new(sectors);
     block_on(format(&mut device, "VARIEGATED", 0x1234_5678)).expect("format must succeed");
     device
+}
+
+/// `Geometry::sectors_written` predicts exactly what a format issues.
+///
+/// This exists because a caller sizes a **timeout** from that number, and both directions
+/// of error are expensive: too low and a real format is abandoned part-written, which is a
+/// destroyed volume; too high and the bound stops being one. An estimate maintained
+/// separately from the writers would drift the first time a structure gained a sector, and
+/// nothing else in the tree would notice.
+///
+/// Exact rather than an upper bound, deliberately. A `>=` assertion would pass just as well
+/// if the formatter stopped writing the FAT altogether, which is precisely the regression
+/// worth catching here.
+///
+/// Sizes chosen to straddle the layout steps the geometry tests already pin: the
+/// 4 KiB -> 32 KiB cluster change at 256 MB, the FAT alignment change at 4 GB, and the
+/// 32 KiB -> 128 KiB change at 32 GB. The per-cluster terms scale with cluster size, so a
+/// single size would miss a mistake in any of them.
+#[test]
+fn sectors_written_matches_the_format() {
+    for mb in [16u64, 64, 192, 256, 1024, 4096, 16384, 32768, 65536] {
+        let sectors = mb * 1024 * 1024 / SECTOR as u64;
+        let geo = geometry(sectors).expect("reference sizes must produce a geometry");
+
+        let mut device = MemDevice::new(sectors);
+        block_on(format(&mut device, "VARIEGATED", 0x1234_5678)).expect("format must succeed");
+
+        assert_eq!(
+            geo.sectors_written(),
+            device.sectors_written,
+            "predicted vs issued sector writes at {mb} MB"
+        );
+    }
+}
+
+/// The figures in `sectors_written`'s own doc comment.
+///
+/// Pinned because a caller reads that table to pick a per-sector allowance, and a table
+/// that has quietly drifted is worse than none -- it reads as measured when it is not.
+/// Formatting a 1 TB volume in `sectors_written_matches_the_format` would mean a 1 TB
+/// image, so these are checked against the geometry alone.
+///
+/// The 16 GB row is the one worth having: it is **larger** than the 32 GB row, because the
+/// 32 KiB -> 128 KiB cluster step quarters the FAT. Anyone who "fixes" this table by making
+/// it monotonic will fail here.
+#[test]
+fn the_documented_sector_counts_are_current() {
+    // (gigabytes, cluster KiB, sectors written)
+    let cases = [
+        (16u64, 32u32, 4_376u32),
+        (32, 128, 2_840),
+        (128, 128, 8_984),
+        (512, 128, 34_328),
+        (1024, 128, 68_120),
+    ];
+
+    for (gb, cluster_kib, written) in cases {
+        let sectors = gb * 1024 * 1024 * 1024 / SECTOR as u64;
+        let geo = geometry(sectors).expect("documented sizes must produce a geometry");
+        assert_eq!(geo.bytes_per_cluster() / 1024, cluster_kib, "cluster size at {gb} GB");
+        assert_eq!(geo.sectors_written(), written, "documented sector count at {gb} GB");
+    }
 }
 
 fn le32(bytes: &[u8], at: usize) -> u32 {

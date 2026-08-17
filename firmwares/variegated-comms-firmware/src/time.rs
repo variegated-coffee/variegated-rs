@@ -3,9 +3,9 @@
 use core::net::{IpAddr, SocketAddr};
 
 use variegated_log::log_info;
-use embassy_futures::select::select;
+use embassy_futures::select::{select, Either};
 use embassy_net::{dns::DnsQueryType, udp::{PacketMetadata, UdpSocket}};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_hal::rtc_cntl::Rtc;
 use portable_atomic::Ordering;
 use sntpc::{get_time, NtpContext, NtpTimestampGenerator, NtpUdpSocket};
@@ -153,8 +153,15 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
     // consumer. Nor may a resolved address be kept forever, or a pool member that goes
     // away takes SNTP with it. Both are retried, on the short interval below.
     let mut ntp_addr: Option<IpAddr> = None;
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::Sntp);
 
     loop {
+        // Deliberately reported as `Good` even on a failed sync. A failed sync is not a
+        // failed *task* -- retrying is this loop working correctly -- and the condition a
+        // host wants is already carried by `SntpFailed` and by `sntp_synced_ms_ago` going
+        // stale. Colouring the row on it would double-report one fault under two names.
+        checkin.good();
+
         if ntp_addr.is_none() {
             log_info!("Resolving NTP server: {}", NTP_SERVER);
             ntp_addr = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
@@ -248,10 +255,29 @@ pub async fn sntp_task(rtc: &'static Rtc<'static>, stack: embassy_net::Stack<'st
         } else {
             RETRY_INTERVAL_SECS
         };
-        let _ = select(
-            Timer::after(Duration::from_secs(interval)),
-            SNTP_RESYNC_REQUEST.wait(),
-        )
-        .await;
+        // Chunked, so the row's deadline is a heartbeat rather than the sync interval.
+        //
+        // That interval is an hour when the clock is healthy. Checking in once per pass
+        // would mean declaring a three-hour period, which is a deadline that would not
+        // notice this task dying until long after anything else had. Chunking the wait is
+        // the strong form -- the loop body genuinely turns over -- and it is safe to cancel
+        // and rebuild because both arms are a timer and a signal, neither of which loses
+        // anything by being re-awaited. Absolute deadline, so the chunks cannot stretch the
+        // interval they are chunking.
+        let deadline = Instant::now() + Duration::from_secs(interval);
+        loop {
+            checkin.good();
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let step = (deadline - now).min(variegated_checkin::HEARTBEAT);
+            if let Either::Second(_) =
+                select(Timer::after(step), SNTP_RESYNC_REQUEST.wait()).await
+            {
+                // An explicit resync request short-circuits the wait, as it did before.
+                break;
+            }
+        }
     }
 }

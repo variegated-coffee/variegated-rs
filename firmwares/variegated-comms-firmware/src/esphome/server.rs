@@ -73,7 +73,9 @@ pub async fn esphome_server_task(
     let machine_command_sender = machine_command_channel.sender();
 
     // Run all ESPHome tasks concurrently
-    join4(
+    variegated_checkin::watch(
+        crate::checkin::MONITOR.claim(crate::checkin::CheckinId::EsphomeServer),
+        join4(
         // Status task - converts Status updates to StateChange messages
         status_task(state_change_sender.clone(), status_subscriber, entities, machine_def),
 
@@ -85,7 +87,7 @@ pub async fn esphome_server_task(
 
         // TCP server loop - accepts connections and handles ESPHome protocol
         tcp_server_loop(stack, device_config, entities, state_change_channel, client_event_channel),
-    ).await;
+    )).await;
 }
 
 /// Minimum interval between reported ESPHome session event *pairs*.

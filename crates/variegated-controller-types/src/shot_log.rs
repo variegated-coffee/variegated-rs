@@ -552,6 +552,20 @@ pub enum ShotLogStorageError {
     /// It is what stops an edit from rewriting an older shot into the current format and
     /// silently discarding whatever the old format carried that this one does not.
     UnsupportedVersion,
+    /// The operation held the bus but stopped making progress, and was abandoned.
+    ///
+    /// Appended, not inserted, for the reason [`Self::UnsupportedVersion`] gives.
+    ///
+    /// The third distinct way an operation can fail to happen, and the three want different
+    /// responses: [`Self::CardNotPresent`] is nothing to talk to, [`Self::BusUnavailable`]
+    /// is the bus never obtained, and this is the bus obtained and then a transfer that
+    /// never returned. Only the last one means the machine was *stuck* -- the other two
+    /// leave everything else running -- so collapsing it into either would hide the one
+    /// outcome worth chasing.
+    ///
+    /// A caller's response is the same as for any other failure: retry. The card is
+    /// re-identified first, because a command abandoned mid-transfer leaves it out of step.
+    OperationTimedOut,
 }
 
 /// A listing, plus whether it is the whole card.

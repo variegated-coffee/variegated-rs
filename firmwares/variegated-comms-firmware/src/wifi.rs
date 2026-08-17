@@ -389,7 +389,11 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
     let (mut current, mut just_associated) =
         park_until_provisioned(&mut controller, &mut credentials_rx).await;
 
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::WifiConnection);
+
     loop {
+        checkin.good();
+
         // `just_associated` is consulted alongside the controller's own view because
         // `is_connected()` **lags** a fresh association. A candidate that has just succeeded
         // would otherwise be found disconnected here, take the reconnect path, and call
@@ -400,6 +404,13 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
             just_associated = false;
             // While connected, periodically update RSSI and wait for disconnect.
             loop {
+                // Inside the *inner* loop, not the outer one. A connected machine never
+                // leaves this loop, so a check-in at the top of the outer loop would run
+                // once at association and then not again until the link dropped -- the row
+                // would age forever on a machine whose Wi-Fi is working perfectly. The 1 s
+                // RSSI arm below is what gives this its cadence.
+                checkin.good();
+
                 // The reconnect request is the last arm, so it can never displace an
                 // actual disconnect notification or an RSSI sample that was ready at
                 // the same instant.
@@ -677,5 +688,12 @@ pub async fn connection_task(mut controller: WifiController<'static>) {
 pub async fn net_task(
     mut runner: NetRunner<'static, crate::instrumentation::CountingDriver<Interface<'static>>>,
 ) {
-    runner.run().await
+    // Poll-liveness is the only thing available here -- the loop is inside smoltcp -- and it
+    // is worth having: every socket on this board goes quiet when this stops being polled,
+    // and nothing else on the table would say why.
+    variegated_checkin::watch(
+        crate::checkin::MONITOR.claim(crate::checkin::CheckinId::Net),
+        runner.run(),
+    )
+    .await
 }

@@ -111,6 +111,21 @@ pub enum AppDebugOp {
     /// machine that silently lost its network mid-session would be blamed on the provisioning
     /// code, which is the most expensive way for this to go wrong.
     ClearWifiCredentials { confirm: u32 },
+    /// **Dump the SD card's SPI and DMA state** to the log.
+    ///
+    /// Appended, not inserted -- see the note on the enum above.
+    ///
+    /// Read-only and idempotent, so unlike its two neighbours it needs no `confirm` guard:
+    /// the worst a corrupted discriminant can do here is print.
+    ///
+    /// Exists for a failure that cannot be diagnosed after the fact. A shot-log download
+    /// would stop with the storage task parked inside a DMA transfer while still holding
+    /// the display's bus lease -- and the moment anything times out and drops that
+    /// transfer, the channel is aborted and the registers that explain it are cleared. The
+    /// storage path dumps this automatically when its own transfer failsafe fires; this is
+    /// the same reading on demand, for a stall that no failsafe covers or one an operator
+    /// wants to catch while it is still happening.
+    SdBusState,
 }
 
 /// The value [`AppDebugOp::ClearWifiCredentials`] requires.
@@ -177,6 +192,7 @@ impl DebugCommand {
             DebugCommand::App(AppDebugOp::SdListShots) => "sd_list_shots",
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => "sd_format_card",
             DebugCommand::App(AppDebugOp::ClearWifiCredentials { .. }) => "clear_wifi_credentials",
+            DebugCommand::App(AppDebugOp::SdBusState) => "sd_bus_state",
             DebugCommand::Comms(CommsDebugOp::ReconnectWifi) => "reconnect_wifi",
             DebugCommand::Comms(CommsDebugOp::ResyncSntp) => "resync_sntp",
             DebugCommand::Comms(CommsDebugOp::RescanBle) => "rescan_ble",

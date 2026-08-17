@@ -5,12 +5,15 @@
 //! `DebugFrame`; a separate crate would make the dependency circular.
 //!
 //! Sizing matters: an enum is as large as its largest variant, and a bus of these
-//! is static RAM on both MCUs. `CounterSamples` is the largest at 16 * 8 bytes, so
-//! `DebugFrame` lands around 150 bytes. Keep it that way -- in particular, metric
-//! names are sent one at a time via `MetricName` rather than as a table, which is
-//! also what lets a late-attaching client learn them under always-on emission, and
-//! `Status` is carried behind a `Box` rather than inline. `debug_frame_stays_small`
-//! in `variegated-debug-codec` guards the bound.
+//! is static RAM on both MCUs -- the bus is a 16-slot channel, so every byte here
+//! is sixteen bytes of RAM per device. `CounterSamples` is the largest at
+//! `MAX_SAMPLES * 8` plus a length, i.e. 200 bytes, which puts `DebugFrame` at
+//! around 224 against the `< 256` bound. `CheckinReport` is sized to match it
+//! exactly rather than to exceed it. Keep it that way -- in particular, metric and
+//! check-in names are sent one at a time via `MetricName`/`CheckinSlotInfo` rather
+//! than as a table, which is also what lets a late-attaching client learn them under
+//! always-on emission, and `Status` is carried behind a `Box` rather than inline.
+//! `debug_frame_stays_small` in `variegated-debug-codec` guards the bound.
 
 use heapless::{String, Vec};
 
@@ -134,7 +137,23 @@ use crate::Status;
 ///   this bump is not optional in either direction: postcard is positional, so a host built
 ///   against the older shape reads the new `enabled` byte as the start of whatever it
 ///   thought came next. `Configuration` reaches the debug wire inside `Status`.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x90;
+/// * `0x91` -- task check-ins. `DebugPayload` gained `CheckinReport` and `CheckinSlotInfo`,
+///   both appended, and `FirmwareInfo` gained a trailing `checkins` field. The appended
+///   variants are the usual device-outbound case an older host merely fails to decode. The
+///   `FirmwareInfo` field is not: it is a *struct*, and although the new field is last,
+///   postcard has no length prefix to resynchronise on, so an older host reads the count byte
+///   as the start of the next frame's content. That is the same shape as the `CommsStatus`
+///   break at `0x8B`, and it is what makes this bump mandatory rather than courteous.
+/// * `0x92` -- SD stall diagnosis. `AppDebugOp` gained `SdBusState` and
+///   `ShotLogStorageError` gained `OperationTimedOut`, both appended. Device-inbound and
+///   device-outbound respectively, so this bump covers both directions at once.
+///
+///   The second one is the reason it is not optional. `ShotLogStorageError` travels on the
+///   *inter-processor* link inside `ApplicationProcessorToCommsProcessorMessage::ShotLogError`
+///   as well as reaching a host, so a comms processor flashed from an older build decodes an
+///   unknown discriminant on a reply it is waiting for -- and the answer it fails to decode
+///   is precisely the one that says the card stalled. Flash both ends together.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x92;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///
@@ -204,6 +223,147 @@ pub enum MetricKind {
     Indicator,
 }
 
+/// Maximum check-in slots carried in one [`DebugPayload::CheckinReport`].
+///
+/// 24, and the number is arithmetic rather than taste. [`CheckinEntry`] is 8 bytes, so
+/// `Vec<CheckinEntry, 24>` is 200 -- byte-for-byte the size of `Vec<u64, MAX_SAMPLES>`,
+/// which is what `DebugFrame` is already sized by. This payload therefore costs the
+/// frame nothing, and `debug_frame_stays_small` in `variegated-debug-codec` reports the
+/// same number before and after it was added.
+///
+/// Raising it is not like raising [`MAX_SAMPLES`], which was free for the same reason
+/// this is: there, 24 u64s still fit under the existing largest variant. Here 24 *is*
+/// the largest variant, so 25 grows `DebugFrame` and every one of the bus's 16 slots
+/// with it. 27 is the last value that fits under 256 at all. Widening [`CheckinEntry`]
+/// has the same effect three crates away from where it would be edited, which is what
+/// the `size_of` assertion beside it is for.
+///
+/// A firmware with more monitorable tasks than this does not get a bigger frame: it
+/// picks the 24 worth watching. A slot that is never overdue is a slot that taught you
+/// nothing.
+pub const MAX_CHECKINS: usize = 24;
+
+/// Why a check-in slot is not reporting [`CheckinStatus::Good`].
+///
+/// Deliberately coarse, for the reason `ShotLogStorageError` gives: a host cannot do
+/// anything differently for "the ADS returned CRC error 0x3" than for "the ADS timed
+/// out", and the underlying error is logged with its full detail at the point it
+/// occurs. What the wire carries is the *kind* of trouble; the `log_warn!` at the site
+/// carries which.
+///
+/// What deliberately does not appear here:
+///
+/// * *Which* device failed. That is the slot's name, already on the wire via
+///   [`DebugPayload::CheckinSlotInfo`].
+/// * The driver's own error value -- logged at the site.
+/// * A faulted sensor as an *event*: [`DebugEvent::SensorFault`].
+/// * An interlock refusal: [`DebugEvent::InterlockTripped`]. An interlock is the machine
+///   correctly declining to do something unsafe, and this enum is for faults.
+/// * A task that never started: [`DebugEvent::SpawnFailed`], already emitted at the
+///   spawn site.
+/// * How long an overrun took -- that is an indicator, and both firmwares already carry
+///   `*TimeMs` indicators of exactly that shape.
+///
+/// There is no `Other`, and there is no numeric sub-code. An `Other` is where a closed
+/// enum goes to die: the point of the type is that a host can act on it, and nobody can
+/// act on `Other`. A sub-code is worse -- a private namespace on a shared wire,
+/// renderable only by someone holding the firmware source, and once it exists every new
+/// distinction goes there instead of into this enum. `DebugEvent::ShotUploadFailed` is
+/// the counter-example in this file: its doc has to enumerate the valid reasons in prose
+/// because its type does not. If a distinction must be machine-readable, it earns a
+/// variant, and the version bump that costs is the feature -- it is what tells an old
+/// host it is old. For a per-task namespace, declare more slots; they are 8 bytes each
+/// and need no protocol change.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CheckinDetail {
+    /// A device on a local bus did not answer. Look at the board.
+    ///
+    /// Split from [`Self::PeerUnresponsive`] because the two send you to different
+    /// places: "the ADC came loose" and "the comms processor rebooted" must not render
+    /// identically on a host.
+    PeripheralUnresponsive,
+    /// The far end of a link did not answer. Look at the other end.
+    PeerUnresponsive,
+    /// A mutex, bus lease or shared device could not be taken in time.
+    ///
+    /// The distinction `ShotLogStorageError::BusUnavailable` also draws: the thing may
+    /// be perfectly healthy and merely unreachable from here, and conflating that with
+    /// absence sends you looking at the wrong component.
+    ResourceUnavailable,
+    /// A send was refused because a queue was full. Work is being dropped **now**.
+    ///
+    /// The one detail that reports active data loss rather than slowness, which is why
+    /// it is not folded into [`Self::Degraded`].
+    QueueFull,
+    /// The cycle ran but could do nothing: no clock, no credentials, no card.
+    ///
+    /// From outside, a loop in this state is indistinguishable from a healthy one -- it
+    /// wakes on schedule forever and produces nothing.
+    PreconditionUnmet,
+    /// Running, but on a retry or fallback path.
+    ///
+    /// The state between clean and dead: one failure into a retry budget, backed off to
+    /// a long reconnect interval, or running on a substituted default because the stored
+    /// settings would not load. Worth seeing *before* a shot goes wrong, which is why it
+    /// is not merged into the unresponsive variants.
+    Degraded,
+    /// The cycle took longer than its declared period.
+    Overrun,
+    /// The future returned when it was supposed to run forever.
+    ///
+    /// Produced by `variegated_checkin::watch` and by nothing else.
+    TaskExited,
+}
+
+/// The state of one check-in slot.
+///
+/// [`Self::NotStarted`] is a variant rather than a sentinel age because a slot is in that
+/// state from boot until its task first runs -- and forever on a task that never runs,
+/// which is precisely the condition worth reporting. Encoding it as an out-of-range
+/// `age_ms` would be the `watchdog_fed_ms_ago` trap in reverse: a plausible-looking value
+/// where an honest absent one belongs. Encoding it by making the age an `Option<u32>`
+/// would widen [`CheckinEntry`] to 12 bytes and, at [`MAX_CHECKINS`], grow `DebugFrame`
+/// past its bound. As a variant it costs nothing.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CheckinStatus {
+    /// Declared, but never reached. Produced by the monitor's initial state, never by a
+    /// task; the accompanying `age_ms` is meaningless alongside it.
+    NotStarted,
+    Good,
+    Warning(CheckinDetail),
+    Error(CheckinDetail),
+}
+
+/// One slot's line in a [`DebugPayload::CheckinReport`], positional by slot id.
+///
+/// The id is the index, not a field: the report is the whole table in declaration order,
+/// so carrying an id per entry would be a byte a slot spent restating the position it is
+/// already in.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct CheckinEntry {
+    pub status: CheckinStatus,
+    /// Milliseconds since this slot last checked in, as of the carrying frame's
+    /// `uptime_ms`.
+    ///
+    /// An age rather than an absolute uptime, and the difference is wire bytes: a healthy
+    /// 100 ms slot varint-encodes an age in two, where an absolute uptime after a day
+    /// takes five. Times [`MAX_CHECKINS`], every second, on a link the relay is only
+    /// allowed 5% of. The host reconstructs the absolute value from the frame's own
+    /// `uptime_ms`, which it has anyway.
+    ///
+    /// Meaningless when `status` is [`CheckinStatus::NotStarted`].
+    pub age_ms: u32,
+}
+
 /// One framed unit of debug output. `seq` is per-source and monotonic, so a host
 /// can tell dropped frames from quiet periods; `uptime_ms` is that device's own
 /// uptime -- the two devices boot independently, so it is not a shared clock.
@@ -240,6 +400,12 @@ pub enum DebugPayload {
         firmware: Name,
         counters: u8,
         indicators: u8,
+        /// How many check-in slots this firmware declares.
+        ///
+        /// Lets a host size its table before any `CheckinSlotInfo` arrives, the same
+        /// service the two counts above perform. Zero from a firmware that declares
+        /// none, which is honest: there is no slot whose name is merely late.
+        checkins: u8,
     },
     /// The machine's full published status, boxed.
     ///
@@ -271,6 +437,38 @@ pub enum DebugPayload {
     /// `postcard` serializes `Box<T>` transparently, so the wire encoding is just
     /// `Status`'s own.
     Status(alloc::boxed::Box<Status>),
+    /// Every check-in slot's current state, positional by slot id.
+    ///
+    /// **Level triggered**, and that is the point: a host attaching mid-session sees the
+    /// whole table on the next tick rather than waiting for something to change. The
+    /// edge-triggered alternative would also be indistinguishable from a dropped frame on
+    /// a bus that drops frames under load, which is the failure this payload exists to
+    /// report on.
+    CheckinReport(Vec<CheckinEntry, MAX_CHECKINS>),
+    /// Names one check-in slot and declares how often it expects to check in.
+    ///
+    /// Re-sent periodically for the reason `MetricName` is, and separate from it for one
+    /// `MetricName` cannot serve: `period_ms` is meaningless for a counter or an
+    /// indicator. Folding this in as a third `MetricKind` would put an `Option` on the
+    /// wire that conflates "this slot has no period" with "this kind has no periods",
+    /// which is the distinction `CommsState::wifi_ip` is documented for.
+    CheckinSlotInfo {
+        id: u8,
+        label: Name,
+        /// How often this slot expects to check in, or `None` if it is event-driven.
+        ///
+        /// The device never reads this. It ships the number and the host decides what
+        /// counts as overdue, exactly as `COMMS_STATUS_STALE_AFTER` splits the threshold
+        /// from the measurement. A single global threshold could not work here: the
+        /// periods in one firmware span three orders of magnitude, so one number would
+        /// leave something permanently red.
+        ///
+        /// `None` means the slot only checks in when work arrives -- a task parked on
+        /// `receive().await` is healthy, and the host must not age it. This is what
+        /// replaces an `Idle` variant of `CheckinStatus`, and it is what keeps
+        /// [`CheckinDetail`] describing only problems.
+        period_ms: Option<u32>,
+    },
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -582,4 +780,31 @@ pub struct CommsState {
     /// and false claim about the network, and the host shows `unknown` instead. Same
     /// discipline as `wifi_rssi` and `ApplicationState::watchdog_fed_ms_ago`.
     pub wifi_ip: Option<[u8; 4]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bound the check-in report is sized against, asserted where it can be edited.
+    ///
+    /// `Vec<CheckinEntry, MAX_CHECKINS>` is the largest `DebugPayload` variant it can
+    /// become, and it only avoids growing `DebugFrame` because 24 * 8 lands exactly on
+    /// `MAX_SAMPLES * 8`. Widening `CheckinEntry` -- an `Option<u32>` age, a per-entry id,
+    /// a second detail byte that pushes past the alignment -- costs nothing here and
+    /// breaks `debug_frame_stays_small` in `variegated-debug-codec`, two crates away from
+    /// the edit. This says so at the edit instead.
+    #[test]
+    fn a_checkin_entry_is_eight_bytes() {
+        assert_eq!(
+            core::mem::size_of::<CheckinEntry>(),
+            8,
+            "CheckinEntry grew; see MAX_CHECKINS for what that costs DebugFrame"
+        );
+        assert_eq!(
+            core::mem::size_of::<[CheckinEntry; MAX_CHECKINS]>(),
+            core::mem::size_of::<[u64; MAX_SAMPLES]>(),
+            "the check-in report must stay no larger than the sample payload it is sized against"
+        );
+    }
 }

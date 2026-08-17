@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use core::ops::{DerefMut, Range};
 use chrono::{Datelike, Duration};
 use variegated_log::{log_info, log_warn};
-use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_controller_types::debug::{name, CheckinDetail, CheckinStatus, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Sender};
 use embassy_sync::mutex::Mutex;
@@ -74,11 +74,25 @@ fn calculate_next_trigger(trigger: &variegated_controller_types::ScheduleTrigger
     }
 }
 
-pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleStore, const CH_N: usize>(store: &Mutex<M1, ScheduleStoreT>, command_channel: Sender<'static, M2, MachineCommand, CH_N>) -> () {
+/// Fire scheduled actions, forever.
+///
+/// `checkin` reports what each pass could actually do. The distinction it carries is the one
+/// this loop is otherwise silent about: with no wall clock -- no RTC, or an RTC that has
+/// never been set -- it wakes on schedule and fires nothing, and from outside that is
+/// indistinguishable from a machine with nothing scheduled. Pass
+/// [`variegated_checkin::CheckinHandle::none`] to opt out.
+pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleStore, const CH_N: usize>(store: &Mutex<M1, ScheduleStoreT>, command_channel: Sender<'static, M2, MachineCommand, CH_N>, checkin: variegated_checkin::CheckinHandle) -> () {
     loop {
         log_info!("Running schedule task");
 
         let now = TimeKeeper::now_local();
+        // Reported before the work rather than after it, because the branch below is where
+        // the answer is already known and the tail of this loop has two exits.
+        checkin.record(match now {
+            Some(_) => CheckinStatus::Good,
+            None => CheckinStatus::Warning(CheckinDetail::PreconditionUnmet),
+        });
+
         if let Some(now) = now {
             let mut store_guard = store.lock().await;
             let schedules = store_guard.schedules_triggering_at(now).await;
@@ -281,7 +295,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
 
     pub async fn load_from_flash(&mut self) -> Result<(), &'static str> {
         if self.cache_initialized {
-            log_info!("Schedule store cache already initialized, skipping load");
+            //log_info!("Schedule store cache already initialized, skipping load");
             return Ok(());
         }
 

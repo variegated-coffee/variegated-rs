@@ -5,7 +5,7 @@ use embassy_net::tcp::{TcpSocket, TcpReader, TcpWriter};
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Channel, Sender};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use edge_ws::{FrameHeader, FrameType};
 use embedded_io_async::Write;
 use variegated_log::{log_info, log_warn, log_error, log_debug};
@@ -52,16 +52,32 @@ pub async fn websocket_server_task(
     let mut tx_buffer = [0u8; 4096];
 
     let command_sender = machine_command_channel.sender();
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::WebsocketServer);
 
     loop {
+        checkin.good();
+
         // Create a new socket for each connection
         let mut socket = TcpSocket::new(*stack, &mut rx_buffer, &mut tx_buffer);
         socket.set_timeout(Some(Duration::from_secs(120)));
 
         log_info!("WebSocket server listening on port 8080");
 
-        // Accept a connection
-        match socket.accept(8080).await {
+        // Accept a connection, giving up periodically so this loop turns over on an idle
+        // machine and the row has a period at all.
+        //
+        // Cancelling an `accept` drops the listener with it, which sounds like it should lose
+        // a connection arriving in that instant -- it does not. The loop top re-creates the
+        // socket and calls `accept` again with no `await` in between, and on a cooperative
+        // executor the net task cannot run in that gap, so smoltcp never processes a packet
+        // while there is no listener. The timeout is free.
+        let Ok(accepted) =
+            with_timeout(variegated_checkin::HEARTBEAT, socket.accept(8080)).await
+        else {
+            continue;
+        };
+
+        match accepted {
             Ok(()) => {
                 log_info!("Accepted WebSocket connection");
 
@@ -73,6 +89,7 @@ pub async fn websocket_server_task(
                     &mut routine_subscriber,
                     &mut shot_log_event_subscriber,
                     command_sender.clone(),
+                    &checkin,
                 ).await;
 
                 match result {
@@ -96,6 +113,7 @@ async fn handle_websocket_connection(
     routine_subscriber: &mut ApplicationRoutineSubscriber,
     shot_log_event_subscriber: &mut ShotLogEventSubscriber,
     command_sender: Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
+    checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), &'static str> {
     // Perform WebSocket handshake.
     //
@@ -198,6 +216,13 @@ async fn handle_websocket_connection(
             // Update handler - sends updates until frame is received
             async {
                 loop {
+                    // **This is where this task lives while a client is connected**, so it
+                    // is where the check-in has to be. The accept loop outside runs once per
+                    // connection, so a check-in there reported every 5 s with nobody
+                    // attached and then stopped the moment someone did -- a row that went
+                    // stale precisely when the server started doing its job.
+                    checkin.good();
+
                     // Encode inside the match, send outside it.
                     //
                     // The scrutinee here is `Either<(), Either<Status,
@@ -213,19 +238,36 @@ async fn handle_websocket_connection(
                     // crosses the await below is a `Vec` handle. This is the same
                     // reasoning as the buffer sizes above, applied to the values rather
                     // than the buffers, and it is worth several times more.
-                    let encoded: Option<Result<Vec<u8>, &'static str>> = match select(
-                        frame_done.wait(),
+                    //
+                    // Timed out as well as checked in: every arm below is a subscriber, so
+                    // on a machine whose application processor has gone quiet none of them
+                    // ever fire and this loop would park with a client attached and the
+                    // socket perfectly healthy. All five are cancel-safe -- a pubsub
+                    // subscriber does not advance its position until it takes a message, and
+                    // `Signal::wait` does not consume on cancel -- so rebuilding them each
+                    // pass loses nothing.
+                    let Ok(selected) = with_timeout(
+                        variegated_checkin::HEARTBEAT,
                         select(
-                            status_subscriber.next_message_pure(),
+                            frame_done.wait(),
                             select(
-                                config_subscriber.next_message_pure(),
+                                status_subscriber.next_message_pure(),
                                 select(
-                                    routine_subscriber.next_message_pure(),
-                                    shot_log_event_subscriber.next_message_pure(),
+                                    config_subscriber.next_message_pure(),
+                                    select(
+                                        routine_subscriber.next_message_pure(),
+                                        shot_log_event_subscriber.next_message_pure(),
+                                    ),
                                 ),
                             ),
                         ),
-                    ).await {
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
+
+                    let encoded: Option<Result<Vec<u8>, &'static str>> = match selected {
                         Either::First(()) => {
                             log_debug!("Update handler: frame_done received, exiting");
                             break;

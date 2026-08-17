@@ -533,6 +533,7 @@ pub async fn button_controller_task(
     mut button_interrupt: embassy_rp::gpio::Input<'static>,
     command_sender: Sender<'static, AtomicRawMutex, MachineCommand, 10>,
     mut status_receiver: StatusSubscriber,
+    checkin: variegated_checkin::CheckinHandle,
 ) {
     let mut recognizer = ButtonEventRecognizer::new();
     let mut handler = ButtonEventHandler::new();
@@ -558,6 +559,11 @@ pub async fn button_controller_task(
 
     // Main button event-driven loop
     loop {
+        // Reports the body ran. This loop shares I2C1 with the LEDs and the LCD, and it is
+        // the machine's only front-panel input, so a wedged expander here is the difference
+        // between a working machine and one that ignores its buttons.
+        checkin.good();
+
         // Update status if available
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             handler.update_status(&new_status);

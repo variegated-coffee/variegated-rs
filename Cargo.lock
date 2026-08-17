@@ -4912,6 +4912,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-checkin"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt 1.1.1",
+ "embassy-time",
+ "pin-project-lite",
+ "variegated-controller-types",
+]
+
+[[package]]
 name = "variegated-comms"
 version = "0.1.0"
 dependencies = [
@@ -4981,6 +4992,7 @@ dependencies = [
  "trouble-host",
  "variegated-adc-tools",
  "variegated-belka-portal-trouble-driver",
+ "variegated-checkin",
  "variegated-comms-api-types",
  "variegated-controller-types",
  "variegated-debug",
@@ -5032,6 +5044,7 @@ dependencies = [
  "sdio",
  "sequential-storage",
  "serde",
+ "variegated-checkin",
  "variegated-control-algorithm",
  "variegated-controller-types",
  "variegated-exfat-format",
@@ -5069,6 +5082,7 @@ dependencies = [
  "heapless 0.9.3",
  "portable-atomic",
  "postcard",
+ "variegated-checkin",
  "variegated-controller-types",
  "variegated-debug-codec",
  "variegated-instrumentation",
@@ -5184,6 +5198,7 @@ dependencies = [
  "variegated-adc-tools",
  "variegated-ads124s08",
  "variegated-board-cfg",
+ "variegated-checkin",
  "variegated-comms",
  "variegated-controller-lib",
  "variegated-controller-types",
@@ -5223,6 +5238,7 @@ dependencies = [
  "static_cell",
  "variegated-adc-tools",
  "variegated-ads124s08",
+ "variegated-checkin",
  "variegated-controller-types",
  "variegated-fdc1004",
  "variegated-gravity-driver",
@@ -5442,6 +5458,7 @@ dependencies = [
  "variegated-adc-tools",
  "variegated-ads124s08",
  "variegated-board-cfg",
+ "variegated-checkin",
  "variegated-comms",
  "variegated-controller-lib",
  "variegated-controller-types",

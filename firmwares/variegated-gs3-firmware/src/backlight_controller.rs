@@ -19,6 +19,7 @@
 use embassy_rp::gpio::{Level, Output};
 use defmt::info;
 use embassy_rp::Peri;
+use embassy_time::Timer;
 
 #[variegated_board_cfg::board_cfg("backlight_peripherals")]
 pub(crate) struct BacklightPeripherals {
@@ -32,10 +33,26 @@ pub(crate) struct BacklightPeripherals {
 /// * `backlight_p` - Peripheral resources for the backlight pin
 #[cfg(feature = "tft-display")]
 #[embassy_executor::task]
-pub async fn backlight_task(backlight_p: BacklightPeripherals) {
+pub async fn backlight_task(
+    backlight_p: BacklightPeripherals,
+    checkin: variegated_checkin::CheckinHandle,
+) {
     let _backlight = Output::new(backlight_p.pin, Level::High);
     info!("TFT backlight on");
 
     // Never returns: the task's only job is to keep `_backlight` alive.
-    core::future::pending::<()>().await
+    //
+    // A heartbeat rather than `pending()`, so the row has a period like everything else. The
+    // old shape was polled once and never again, which meant the host was told never to age
+    // it -- and a row that can never be late is a row that cannot report core 1 having
+    // stopped scheduling. Waking every few seconds to store two words is free next to the
+    // 100 Hz renderer sharing this core.
+    //
+    // If this loop is ever left, the `Output` guard above goes with it and the backlight
+    // physically turns off. That is the one explanation for a dark panel that is not the
+    // renderer, and the row now reports it as a stale age rather than not at all.
+    loop {
+        checkin.good();
+        Timer::after(variegated_checkin::HEARTBEAT).await;
+    }
 }

@@ -88,8 +88,15 @@ pub fn log_reset_reason() {
 /// hang and mask exactly the fault this is here to catch.
 #[embassy_executor::task]
 pub async fn watchdog_task(mut wdt: Wdt<TIMG1<'static>>) -> ! {
+    // The one slot whose silence the hardware already acts on. Carried anyway, because the
+    // check-in table survives into the next boot's debug stream in a way a reset does not:
+    // a host watching this sees which slot went stale *before* the watchdog fired, which is
+    // the difference between "the board reset" and "the board reset because X wedged".
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::Watchdog);
+
     loop {
         wdt.feed();
+        checkin.good();
         embassy_time::Timer::after(FEED_INTERVAL).await;
     }
 }

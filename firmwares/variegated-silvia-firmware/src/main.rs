@@ -26,6 +26,7 @@ use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
+use variegated_checkin::watch;
 use variegated_hal::{Boiler, Group, WithTask, PeripheralRegistry, SensorReading};
 use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement, GpioBinaryHeatingElementControl};
 use variegated_hal::noop::NoopOutputPin;
@@ -70,6 +71,7 @@ use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_controller_types::debug::DebugEvent;
 use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
 use variegated_debug::bus;
+use variegated_debug::checkin::CheckinReporter;
 use variegated_debug::sampler::{set_sample_interval_ms, Sampler};
 use variegated_debug::usb_cdc::{self, DebugUsbResources};
 use crate::rotary::{UIStatus};
@@ -149,7 +151,15 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // The two trailing `None`s are the shot-log query and reply halves: this board has no
     // card reader, so the transceiver refuses shot-log requests outright rather than
     // forwarding them to a storage task that does not exist.
-    esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)).await;
+    // One slot for nine futures: `esp_transceiver_main` is a `join5` with a nested `join4`
+    // inside this single task, and `watch` here can only see the outermost one being
+    // polled. Splitting them needs handles threaded into `variegated-comms`, which is a
+    // later change to that crate; until then this row means "the link task is being woken",
+    // not "all nine arms are alive".
+    watch(
+        MONITOR.claim(CheckinId::EspTransceiver),
+        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)),
+    ).await;
 }
 
 #[variegated_board_cfg::board_cfg("display_peripherals")]
@@ -296,6 +306,64 @@ define_indicators! {
 static COUNTERS: PerformanceCounters<2> = PerformanceCounters::new();
 static INDICATORS: PerformanceIndicators<2> = PerformanceIndicators::new();
 
+// Check-in slots. Ten of these are arms of the `join_all` in `main_task`, which is the
+// reason the whole mechanism exists: they share one task's poll frame, so the executor
+// cannot tell one of them wedging from all of them running, and the watchdog -- fed from
+// inside the controller's own loop, one of these very arms -- would keep being fed.
+//
+// **The periods are deliberately generous.** Nothing on-device reads them; they are a hint
+// the host uses to colour a row, and this firmware has never measured its own loop
+// cadences, so a tight number here would be a guess that cries wolf. `_` means
+// event-driven, which is the honest answer wherever the loop only runs when work arrives
+// -- or where the real period is simply not known yet. Tighten them from what Checkpoint 1
+// actually shows, not from what the source appears to promise.
+variegated_checkin::define_checkins! {
+    pub enum CheckinId {
+        /// The 100 ms control loop. Also the only thing that feeds the watchdog.
+        Controller = 0 => 1_000,
+        /// PT100 over the shared ADS124S08. Shares a bus lease with the pressure sensor,
+        /// so its cadence is whatever contention leaves it.
+        TempSensor = 1 => 2_000,
+        /// The pressure transducer, on the same ADS and the same lease.
+        PressureSensor = 2 => 2_000,
+        /// 100 ms pulse-counting window.
+        FlowMeter = 3 => 1_000,
+        /// The same counter, on the pump.
+        PumpFrequencyCounter = 4 => 1_000,
+        /// 10 ms GPIO poll for the brew switch.
+        BrewAction = 5 => 1_000,
+        /// The same, for steam.
+        SteamAction = 6 => 1_000,
+        /// Parked on a `select4` of the encoder, the button and two channels.
+        RotaryAction = 7 => _,
+        /// Soft PWM. Reports every second *within* a phase rather than once per three-second
+        /// cycle, because the window worth watching is between energising the element and
+        /// de-energising it. See `CHECKIN_INTERVAL` in `gpio_binary_heating_element`.
+        HeatingElement = 8 => 3_000,
+        /// I2C scale, 100 ms poll, reporting through its reconnect backoff rather than
+        /// either side of it. Stays `NotStarted` on a machine with no scale fitted, which is
+        /// what that variant is for.
+        GravityDevice = 9 => 15_000,
+        /// The inter-processor link: nine futures inside one task, all under this one row
+        /// until they get their own.
+        EspTransceiver = 10 => 5_000,
+        /// The UI.
+        Display = 11 => _,
+        /// USB CDC; idle until a host attaches.
+        DebugUsb = 12 => _,
+        /// 500 ms sampler.
+        DebugSampler = 13 => 2_000,
+        /// 1 Hz snapshot.
+        DebugSnapshot = 14 => 3_000,
+        /// Drains injected debug commands, with a `HEARTBEAT` timeout so it turns over on a
+        /// machine no host is attached to.
+        DebugCommand = 15 => 15_000,
+    }
+}
+
+static MONITOR: variegated_checkin::Monitor<{ CheckinId::COUNT }> =
+    variegated_checkin::Monitor::new();
+
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
@@ -432,8 +500,10 @@ async fn main_task(spawner: Spawner) -> ! {
         ConversionParameters::linear_conversion(0.001, 0.0),
         gravity_command_channel.receiver(),
         Duration::from_millis(100),
-    ).with_connected_signal(gravity_connected_sig));
-    
+    )
+    .with_connected_signal(gravity_connected_sig)
+    .with_checkin(MONITOR.claim(CheckinId::GravityDevice)));
+
     info!("Gravity sensor initialized - will attempt connection with retry");
 
     let scale_controller: Option<Box<dyn ScaleController>> = Some(Box::new(GravityController::new(
@@ -521,7 +591,8 @@ async fn main_task(spawner: Spawner) -> ! {
         -2.95,
         Some(COUNTERS.handle(CounterId::BoilerTemperatureReading)),
         Some(INDICATORS.handle(IndicatorId::BoilerTemperatureReadingTimeMs)),
-    );
+    )
+    .with_checkin(MONITOR.claim(CheckinId::TempSensor));
 
     let prs_sig: &'static Watch<_, _, 3> = PRESSURE_SIGNAL.init(Watch::new());
     let mut pressure_sensor = Ads124S08Sensor::new(
@@ -538,13 +609,15 @@ async fn main_task(spawner: Spawner) -> ! {
         0.0,
         Some(COUNTERS.handle(CounterId::BoilerPressureReading)),
         Some(INDICATORS.handle(IndicatorId::BoilerPressureReadingTimeMs)),
-    );
+    )
+    .with_checkin(MONITOR.claim(CheckinId::PressureSensor));
 
     let mechanism_p = mechanism_peripherals!(p);
 
     let sig: &'static Signal<_, _> = HE_SIGNAL.init(Signal::new());
 
-    let mut he = GpioBinaryHeatingElement::new(Output::new(mechanism_p.pin_he, Low), sig);
+    let mut he = GpioBinaryHeatingElement::new(Output::new(mechanism_p.pin_he, Low), sig)
+        .with_checkin(MONITOR.claim(CheckinId::HeatingElement));
     let he_control = GpioBinaryHeatingElementControl::new(sig);
 
     let boiler = Boiler::new(
@@ -787,7 +860,8 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(identify_watch.sender()),
         &CLEAR_WIFI_CREDENTIALS_REQUEST,
-    );
+    )
+    .with_checkin(MONITOR.claim(CheckinId::Controller));
 
     // Controller will publish configuration automatically in its task loop
 
@@ -866,6 +940,7 @@ async fn main_task(spawner: Spawner) -> ! {
         ui_status_channel.receiver(),
         routine_repository_ref,
         identify_watch.receiver().expect("the identify watch has a receiver slot for the display"),
+        MONITOR.claim(CheckinId::Display),
     ).unwrap());
 
     info!("Creating esp transceiver task");
@@ -889,6 +964,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let usb_debug_p = usb_debug_peripherals!(p);
     spawner.spawn(debug_usb_task(usb_debug_p, debug_command_sender).unwrap());
     spawner.spawn(debug_sampler_task().unwrap());
+    spawner.spawn(debug_checkin_task().unwrap());
     // Fifth status subscriber -- see STATUS_RECEIVERS.
     let debug_status_receiver = status_channel.subscriber().unwrap();
     spawner.spawn(debug_snapshot_task(psram_heap, debug_status_receiver).unwrap());
@@ -896,25 +972,49 @@ async fn main_task(spawner: Spawner) -> ! {
 
     info!("Creating huge future join task");
 
+    // Every arm gets its own check-in slot. This is the whole point of `watch`: these nine
+    // futures share one task's poll frame, so one of them ceasing to be woken is invisible
+    // to the executor -- and the watchdog is fed from inside `controller.task()`, which is
+    // itself one of these arms, so a hang in any of the others does not even stop the feed.
+    //
+    // `watch` reports poll-liveness only. When one of these grows a handle of its own and
+    // starts saying *why*, its wrapper here comes off -- the two are alternatives for a
+    // slot, not layers.
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
         vec![
+            // The two ADS sensors report for themselves -- `with_checkin` above -- so they
+            // are not wrapped: a `watch` would stamp `Good` on every poll and erase the
+            // `PeripheralUnresponsive` a failed conversion had just published.
             Box::pin(temp_sensor.task()),
-            Box::pin(brew_action.task()),
-            Box::pin(steam_action.task()),
-            Box::pin(flow_meter.task()),
-            Box::pin(rotary_action.task()),
+            Box::pin(watch(MONITOR.claim(CheckinId::BrewAction), brew_action.task())),
+            Box::pin(watch(MONITOR.claim(CheckinId::SteamAction), steam_action.task())),
+            Box::pin(watch(MONITOR.claim(CheckinId::FlowMeter), flow_meter.task())),
+            Box::pin(watch(MONITOR.claim(CheckinId::RotaryAction), rotary_action.task())),
             Box::pin(pressure_sensor.task()),
+            // Not wrapped: reports every second inside a phase rather than once per cycle.
             Box::pin(he.task()),
-            Box::pin(pump_frequency_counter.task()),
+            Box::pin(watch(
+                MONITOR.claim(CheckinId::PumpFrequencyCounter),
+                pump_frequency_counter.task(),
+            )),
+            // Not wrapped: the controller reports for itself now -- see `with_checkin` --
+            // and one writer per slot means a `watch` here would stamp `Good` on every
+            // poll and erase the `Degraded` it had just published.
             Box::pin(controller.task()),
         ];
 
     if let Some(ref mut g) = gravity_device {
+        // Not wrapped: the device reports for itself, and here that matters more than
+        // elsewhere -- a disconnected scale backs off to a 30 s reconnect, so poll-liveness
+        // alone would read as a row that has gone quiet, which is exactly what a wedged one
+        // looks like.
         futures.push(Box::pin(g.task()));
     }
 
     join_all(futures).await;
 
+    // Every arm's slot now reads `Error(TaskExited)`, which is the first time this line has
+    // been visible anywhere but a probe.
     info!("For some reason we got here");
 
     loop {
@@ -930,19 +1030,38 @@ async fn debug_usb_task(
 ) {
     let driver = embassy_rp::usb::Driver::new(usb_p.usb, Irqs);
     let resources = DEBUG_USB.init(DebugUsbResources::new());
-    usb_cdc::run(driver, resources, sink).await;
+    watch(MONITOR.claim(CheckinId::DebugUsb), usb_cdc::run(driver, resources, sink)).await;
 }
 
 // A thin wrapper, because `#[embassy_executor::task]` cannot be generic and `Sampler` is
 // generic over its metric counts. Same split as `esp_transceiver_task` above.
 #[embassy_executor::task]
 async fn debug_sampler_task() {
-    variegated_debug::sampler::run(Sampler::new(
-        &COUNTERS,
-        &INDICATORS,
-        CounterId::NAMES,
-        IndicatorId::NAMES,
-        "variegated-silvia-firmware",
+    watch(
+        MONITOR.claim(CheckinId::DebugSampler),
+        variegated_debug::sampler::run(
+            Sampler::new(
+                &COUNTERS,
+                &INDICATORS,
+                CounterId::NAMES,
+                IndicatorId::NAMES,
+                "variegated-silvia-firmware",
+            )
+            .with_checkins(CheckinId::COUNT as u8),
+        ),
+    )
+    .await
+}
+
+// The reader half. Deliberately has no slot of its own: a row that is fresh by construction
+// -- this loop is what publishes the table -- reports nothing, and if it does die the
+// absence of frames says so far more clearly than a stale row could.
+#[embassy_executor::task]
+async fn debug_checkin_task() {
+    variegated_debug::checkin::run(CheckinReporter::new(
+        &MONITOR,
+        CheckinId::NAMES,
+        CheckinId::PERIODS,
     ))
     .await
 }
@@ -960,7 +1079,11 @@ async fn debug_snapshot_task(psram_heap: bool, status_receiver: StatusSubscriber
     // copy of this loop tracked one and this copy did not, which is the kind of thing two
     // copies of the same forty lines drift into.
     PSRAM_HEAP.store(psram_heap, core::sync::atomic::Ordering::Relaxed);
-    variegated_debug::snapshot::run(sample_snapshot, status_receiver).await
+    watch(
+        MONITOR.claim(CheckinId::DebugSnapshot),
+        variegated_debug::snapshot::run(sample_snapshot, status_receiver),
+    )
+    .await
 }
 
 /// Whether the heap ended up in PSRAM, for [`sample_snapshot`] to read.
@@ -992,8 +1115,19 @@ async fn debug_command_task(
     command_sender: embassy_sync::channel::Sender<'static, NoopRawMutex, MachineCommand, 10>,
     psram_heap: bool,
 ) {
+    // A handle rather than a `watch` wrapper: the loop body is right here, so it can report
+    // that it *ran* rather than merely that it was polled. Nothing here fails in a way worth
+    // a `CheckinDetail` yet -- an unrecognised command is answered, not dropped.
+    let checkin = MONITOR.claim(CheckinId::DebugCommand);
+
     loop {
-        let command = receiver.receive().await;
+        checkin.good();
+
+        let Ok(command) =
+            embassy_time::with_timeout(variegated_checkin::HEARTBEAT, receiver.receive()).await
+        else {
+            continue;
+        };
         bus::emit_event(DebugEvent::CommandReceived {
             label: variegated_controller_types::debug::name(command.label()),
         });
@@ -1021,6 +1155,9 @@ async fn debug_command_task(
             }
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
                 warn!("SD format requested, but this board has no SD card");
+            }
+            DebugCommand::App(AppDebugOp::SdBusState) => {
+                warn!("SD bus state requested, but this board has no SD card");
             }
             DebugCommand::App(AppDebugOp::ClearWifiCredentials { confirm }) => {
                 // Guarded here, so a refused command never reaches the code that can forget

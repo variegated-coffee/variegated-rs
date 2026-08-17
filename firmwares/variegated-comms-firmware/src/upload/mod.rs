@@ -226,11 +226,27 @@ pub async fn shot_upload_task(
         .receiver()
         .expect("the upload config watch is sized for this receiver");
     let mut config: Option<Box<ShotUploadConfig>> = None;
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::ShotUpload);
 
     loop {
+        checkin.good();
+
         // Both at once: a config arriving mid-wait must be picked up, and a shot arriving
         // while unconfigured must not block the config from landing.
-        match select(config_rx.changed(), events.next_message()).await {
+        //
+        // Timed out as well, because both of those are quiet for hours on an idle machine
+        // and a row that only ticks on a finished shot cannot report this task stuck in a
+        // TLS handshake -- which is where it would actually stick.
+        let Ok(event) = with_timeout(
+            variegated_checkin::HEARTBEAT,
+            select(config_rx.changed(), events.next_message()),
+        )
+        .await
+        else {
+            continue;
+        };
+
+        match event {
             Either::First(new_config) => {
                 // Logged here, on change, rather than per shot. A machine with uploads
                 // deliberately switched off should say so once, not narrate it over every

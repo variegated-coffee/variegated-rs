@@ -228,8 +228,11 @@ pub fn publish_snapshot() {
 /// this firmware can find the bus unsubscribed. See [`crate::debug::BusSubscriber`].
 #[embassy_executor::task]
 pub async fn snapshot_task() {
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::DebugSnapshot);
+
     loop {
         publish_snapshot();
+        checkin.good();
         Timer::after_secs(1).await;
     }
 }

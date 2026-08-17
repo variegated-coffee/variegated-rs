@@ -177,6 +177,7 @@ impl LedBreathingState {
 pub async fn led_controller_task(
     mut tlc59108: Tlc59108<I2cDevice<'static, NoopRawMutex, I2c<'static, embassy_rp::peripherals::I2C1, Async>>, embassy_time::Delay>,
     mut status_receiver: StatusSubscriber,
+    checkin: variegated_checkin::CheckinHandle,
 ) {
     let mut led_state = LedBreathingState::new();
 
@@ -184,6 +185,10 @@ pub async fn led_controller_task(
 
     // Main LED animation loop
     loop {
+        // Reports that the body ran, which is more than poll-liveness would say: this loop
+        // shares I2C1 with the buttons and the LCD, so a wedged bus stops it here.
+        checkin.good();
+
         // Update status if available
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             led_state.update_status(&new_status);

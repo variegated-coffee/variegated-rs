@@ -1,0 +1,40 @@
+[package]
+name = "variegated-checkin"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+bench = false
+
+[dependencies]
+# `default-features = false`, and no features enabled: this crate needs the three
+# check-in types and nothing else. It must impose neither `defmt` nor a machine shape
+# on its consumers -- `variegated-hal` and `variegated-controller-lib` both depend on
+# it, and the latter's host gate runs `--no-default-features`, where a defaulted
+# `defmt` reaching it through this edge fails the link with "Too many sections!".
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false }
+embassy-time = { workspace = true }
+# `watch` is a hand-written future, and this is what keeps the projection safe. Already in
+# this workspace's lockfile via embassy, so it costs no new compilation. See `Watch` for why
+# it is not an `async fn`: that version stored the wrapped future twice.
+pin-project-lite = "0.2"
+defmt = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `CheckinHandle::record` reads `Instant::now()`, so the test binary needs a time driver
+# to link -- `_embassy_time_now` is an extern symbol with no default. This is why
+# `record_at` exists as the primitive and every test uses it: the driver is here to satisfy
+# the linker, not to be depended on. A dev-dependency, so no firmware build sees it.
+embassy-time = { workspace = true, features = ["mock-driver"] }
+# And the mock driver in turn wants a `critical_section::Impl` registered at link time,
+# which on real hardware comes from embassy-rp's `critical-section-impl` via the firmware
+# binary -- never from a library crate. Dev-only for the same reason, and the same note
+# `variegated-debug` carries.
+critical-section = { version = "1.2", features = ["std"] }
+
+[features]
+# No feature gates the check-in path itself. See the crate docs for why; the short
+# version is that a build with monitoring compiled out is a build where the one
+# question you need in the field cannot be asked.
+default = []
+defmt = ["dep:defmt", "variegated-controller-types/defmt"]

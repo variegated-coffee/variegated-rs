@@ -18,6 +18,9 @@ extern crate alloc;
 extern crate std;
 
 pub mod bus;
+// Ungated, unlike `snapshot`: both processors have tasks worth watching, and neither the
+// table nor its payloads say anything source-specific.
+pub mod checkin;
 pub mod commands;
 pub mod rate;
 pub mod relay;

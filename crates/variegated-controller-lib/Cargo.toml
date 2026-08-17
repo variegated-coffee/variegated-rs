@@ -56,6 +56,11 @@ cfg-if.workspace = true
 variegated-hal = { version = "0.1.0", path = "../variegated-hal", optional = true }
 variegated-control-algorithm = { version = "0.1.0", path = "../variegated-control-algorithm", features = ["serde"] }
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "sequential-storage"] }
+# Unconditional, like `variegated-instrumentation` in `variegated-hal`: this crate has no
+# `variegated-debug` dependency by design (see the note above), and `variegated-checkin` is
+# in the same class -- no source feature, no `compile_error!`, and it builds under the
+# `--no-default-features` host gate.
+variegated-checkin = { version = "0.1.0", path = "../variegated-checkin" }
 variegated-timekeeping = { version = "0.1.0", path = "../variegated-timekeeping" }
 chrono.workspace = true
 

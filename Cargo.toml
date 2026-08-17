@@ -8,6 +8,7 @@ members = [
     "firmwares/variegated-gs3-firmware",
 
     "crates/variegated-adc-tools",
+    "crates/variegated-checkin",
     "crates/variegated-controller-lib",
     "crates/variegated-controller-types",
     "crates/variegated-control-algorithm",
@@ -72,6 +73,7 @@ default-members = [
     "firmwares/variegated-silvia-firmware",
     "firmwares/variegated-gs3-firmware",
     "crates/variegated-adc-tools",
+    "crates/variegated-checkin",
     "crates/variegated-controller-lib",
     "crates/variegated-controller-types",
     "crates/variegated-control-algorithm",

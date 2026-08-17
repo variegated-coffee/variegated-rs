@@ -11,6 +11,7 @@ use variegated_adc_tools::ConversionParameters;
 use variegated_ads124s08::{ADS124S08, ADS124S08Error};
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, PGAGain, ReferenceInput};
 use variegated_ads124s08::registers::Mux;
+use variegated_checkin::{CheckinDetail, CheckinStatus};
 use variegated_instrumentation::{async_task_loop, CounterHandle, IndicatorHandle};
 use crate::{WithTask, SensorReading};
 
@@ -33,7 +34,14 @@ pub struct Ads124S08Sensor<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: Input
     reset_count: u32,
     reset_backoff_ms: u32,
     counter: Option<CounterHandle<I>>,
-    time_indicator: Option<IndicatorHandle<J>>
+    time_indicator: Option<IndicatorHandle<J>>,
+    /// Where this sensor reports its own health. See [`Self::with_checkin`].
+    ///
+    /// A bare handle rather than an `Option`, unlike the two above, and **not** generic --
+    /// which is the point. `CounterHandle` and `IndicatorHandle` are generic over their
+    /// tables' sizes, and that is the entire reason this type carries the `I` and `J`
+    /// parameters; a check-in handle adds none.
+    checkin: variegated_checkin::CheckinHandle,
 }
 
 impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs, const N: usize, const I: usize, const J: usize> Ads124S08Sensor<'a, M, SpiDevT, InputPinT, D, N, I, J> {
@@ -59,7 +67,18 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
             reset_backoff_ms: 100,
             counter,
             time_indicator,
+            checkin: variegated_checkin::CheckinHandle::none(),
         }
+    }
+
+    /// Report this sensor's health into a check-in slot.
+    ///
+    /// A caller that sets this must **not** also wrap [`WithTask::task`] in
+    /// `variegated_checkin::watch`: one writer per slot, and this reports strictly more --
+    /// a `watch` sees the future being polled, this sees whether the chip answered.
+    pub fn with_checkin(mut self, checkin: variegated_checkin::CheckinHandle) -> Self {
+        self.checkin = checkin;
+        self
     }
 
     pub async fn measure(&mut self) {
@@ -123,8 +142,20 @@ impl<'a, M: RawMutex, SpiDevT: SpiDevice, InputPinT: InputPin + Wait, D: DelayNs
                 };
 
                 self.signal.send(sensor_reading);
+                self.checkin.good();
             }
             Err(e) => {
+                // The gradient the retry budget already tracks, reported rather than only
+                // logged: below `max_consecutive_failures` the chip is missing samples but
+                // recovering, at or above it the reading this machine controls on is not
+                // arriving. A PT100 that has come loose spends a moment in the first state
+                // and then stays in the second.
+                self.checkin.record(if self.consecutive_failures + 1 >= self.max_consecutive_failures {
+                    CheckinStatus::Error(CheckinDetail::PeripheralUnresponsive)
+                } else {
+                    CheckinStatus::Warning(CheckinDetail::Degraded)
+                });
+
                 // Check if this is a read timeout error
                 if matches!(e, ADS124S08Error::ReadTimeoutError) {
                     self.consecutive_failures += 1;

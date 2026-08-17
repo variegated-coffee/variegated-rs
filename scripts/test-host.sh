@@ -57,10 +57,24 @@ run "variegated-debug-codec" -p variegated-debug-codec "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"
 run "variegated-instrumentation" -p variegated-instrumentation --features instrumentation "$@"
+# No feature flags: `variegated-checkin` gates nothing behind a feature -- deliberately, see
+# its crate docs -- and its `default` set is empty, so the plain invocation compiles
+# everything it has. The time driver and `critical_section::Impl` its test binary needs to
+# link are dev-dependencies of the crate rather than flags here.
+run "variegated-checkin" -p variegated-checkin "$@"
 # `--no-default-features` turns `hardware` and `defmt` off, which compiles code none of the
 # five on-target gate configurations sees. CLAUDE.md's "Zero warnings" section calls this
 # the configuration people forget.
 run "variegated-controller-lib" -p variegated-controller-lib --no-default-features --features std,serde,double_boiler,single_group "$@"
+# The exFAT formatter. A crate of its own precisely so it can be tested on a host -- the
+# storage layer that uses it lives behind `sd-card-storage`, which implies `hardware` and a
+# Cortex-M PAC, so nothing there can run here. Its `fsck_accepts_the_volume` test skips
+# itself when the host has no `fsck_exfat`; the other ten always run.
+#
+# It was missing from this list until the SD stall work added `Geometry::sectors_written`,
+# whose whole job is to size a timeout that can destroy a card if it is wrong -- exactly the
+# kind of arithmetic that must not be verified by hand once and then left.
+run "variegated-exfat-format" -p variegated-exfat-format "$@"
 # A proc-macro crate cannot invoke its own macros, so `variegated-board-cfg`'s tests live
 # in this fixture crate. It is an ordinary std crate and is not a workspace default member.
 run "variegated-board-cfg-tests" -p variegated-board-cfg-tests "$@"

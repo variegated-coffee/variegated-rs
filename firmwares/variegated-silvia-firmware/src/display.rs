@@ -1707,6 +1707,7 @@ pub async fn display_task(
     ui_status_receiver: Receiver<'static, NoopRawMutex, UIStatus, 10>,
     routine_repository: &'static RoutineRepository,
     identify_receiver: IdentifyReceiver,
+    checkin: variegated_checkin::CheckinHandle,
 ) {
     let spi_config = embassy_rp::spi::Config::default();
     let spi = Spi::new(
@@ -1776,5 +1777,9 @@ pub async fn display_task(
         identify_receiver,
     );
 
-    controller.render_loop().await;
+    // Wrapped rather than checked in from inside `render_loop`, which is a long function in
+    // this file with several exit-shaped branches; the wrapper reports poll-liveness for all
+    // of them and, if it ever returns, says so. The handle comes in as a parameter because a
+    // spawned task's future cannot be wrapped at the spawn site.
+    variegated_checkin::watch(checkin, controller.render_loop()).await;
 }

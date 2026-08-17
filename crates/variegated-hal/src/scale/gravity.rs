@@ -7,12 +7,13 @@ use defmt::Format;
 // `core::fmt::Display`, so the `log` half of `log_*!` will not compile for them.
 // That is every `info!` in this file, which is why only `log_error` is imported.
 use variegated_log::log_error;
+use variegated_checkin::{CheckinDetail, CheckinStatus};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver, Sender as ChannelSender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::Sender as WatchSender;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embedded_hal_async::i2c::I2c;
 use variegated_adc_tools::ConversionParameters;
 use variegated_gravity_driver::{Channel, Error, Gravity, WeighingConfig};
@@ -42,6 +43,8 @@ pub struct GravityDevice<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: u
     retry_delay: Duration,
     max_retry_delay: Duration,
     is_connected: bool,
+    /// Where this device reports its own health. See [`Self::with_checkin`].
+    checkin: variegated_checkin::CheckinHandle,
 }
 
 impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<'a, M, CM, I2cDevT, N> {
@@ -68,11 +71,24 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> GravityDevice<
             retry_delay: Duration::from_secs(1),
             max_retry_delay: Duration::from_secs(30),
             is_connected: false,
+            checkin: variegated_checkin::CheckinHandle::none(),
         }
     }
 
     pub fn with_connected_signal(mut self, signal: &'a Signal<NoopRawMutex, bool>) -> Self {
         self.connected_signal = Some(signal);
+        self
+    }
+
+    /// Report this device's health into a check-in slot.
+    ///
+    /// A caller that sets this must **not** also wrap [`WithTask::task`] in
+    /// `variegated_checkin::watch` -- one writer per slot. It matters more here than
+    /// elsewhere: a disconnected scale backs off to a 30 s reconnect, so poll-liveness
+    /// alone would read as a slot that has gone quiet, which is indistinguishable from a
+    /// wedged one. This says which.
+    pub fn with_checkin(mut self, checkin: variegated_checkin::CheckinHandle) -> Self {
+        self.checkin = checkin;
         self
     }
 
@@ -115,8 +131,30 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
                         // Drop any pending commands to avoid stale commands being executed after reconnect
                         self.command_signal.clear();
 
-                        // Exponential backoff
-                        Timer::after(current_retry_delay).await;
+                        // Exponential backoff, reported *through* rather than either side of.
+                        //
+                        // The delay reaches 30 s. Checking in once before it and once after
+                        // would leave a row half a minute stale on a device retrying exactly
+                        // as designed, and the only way to tell that from a genuinely wedged
+                        // I2C transaction would be to declare a 30 s period -- which would
+                        // then be the deadline for every other state this loop can be in.
+                        // Reporting on the way through keeps the period tied to the loop's
+                        // real cadence instead of to its slowest sleep.
+                        //
+                        // Absolute deadline, so chunking does not lengthen the backoff it is
+                        // chunking. `Warning`, not `Error` -- a machine with no scale fitted
+                        // sits here permanently and is not faulty.
+                        let deadline = Instant::now() + current_retry_delay;
+                        loop {
+                            self.checkin.record(CheckinStatus::Warning(
+                                CheckinDetail::PeripheralUnresponsive,
+                            ));
+                            let now = Instant::now();
+                            if now >= deadline {
+                                break;
+                            }
+                            Timer::after((deadline - now).min(variegated_checkin::HEARTBEAT)).await;
+                        }
                         current_retry_delay = (current_retry_delay * 2).min(self.max_retry_delay);
                         continue; // Skip rest of loop iteration
                     }
@@ -170,12 +208,14 @@ impl<'a, M: RawMutex, CM: RawMutex, I2cDevT: I2c, const N: usize> WithTask for G
             let status = dev.read_channel_status(self.channel).await;
             
             if let Ok(status) = status {
+                self.checkin.good();
+
                 // Ensure we're still connected after successful read
                 if !self.is_connected {
                     self.update_connection_status(true).await;
                     current_retry_delay = self.retry_delay; // Reset retry delay
                 }
-                
+
                 if let Some(ref weight_signal) = self.weight_signal {
                     if status.zero {
                         let raw_value = 0i32;

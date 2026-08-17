@@ -50,8 +50,8 @@ mod tests {
     use alloc::boxed::Box;
     use heapless::Vec;
     use variegated_controller_types::debug::{
-        name, text, DebugEvent, DebugFrame, DebugPayload, DebugSource, MetricKind, Severity,
-        MAX_SAMPLES,
+        name, text, CheckinDetail, CheckinEntry, CheckinStatus, DebugEvent, DebugFrame,
+        DebugPayload, DebugSource, MetricKind, Severity, MAX_CHECKINS, MAX_SAMPLES,
     };
     use variegated_controller_types::Status;
 
@@ -60,8 +60,14 @@ mod tests {
         REFERENCE_BAUD,
     };
 
-    /// `variegated-silvia-firmware`'s link: five times slower than the reference, and with no
-    /// hardware flow control. It is the binding case for anything sized in bytes.
+    /// A deliberately pessimistic link: five times slower than the reference.
+    ///
+    /// **Not any board's current link.** Both firmwares configure 576 000 baud today
+    /// (`variegated-silvia-firmware/src/main.rs` sets it explicitly, above a comment about
+    /// the 115 200 it used to run). This is kept as a standing margin rather than retired:
+    /// it is the rate the Silvia shipped at, it is what `BURST_BYTES` was sized against,
+    /// and a budget that only holds at the fastest link the tree has ever used is a budget
+    /// that fails the first time someone lowers one.
     const SLOW_BAUD: u32 = 115_200;
 
     fn frame(payload: DebugPayload) -> DebugFrame {
@@ -77,6 +83,17 @@ mod tests {
         for i in 0..4u64 {
             let _ = samples.push(i * 1_000_000);
         }
+        // Deliberately *full*, unlike the sample vectors above. This is the widest frame
+        // the relay will ever see in steady state -- a firmware reports every slot it has,
+        // every second, whether or not anything is wrong -- so the byte-budget tests below
+        // must be sized against a table at capacity, not a token one.
+        let mut checkins: Vec<CheckinEntry, MAX_CHECKINS> = Vec::new();
+        for i in 0..MAX_CHECKINS {
+            let _ = checkins.push(CheckinEntry {
+                status: CheckinStatus::Good,
+                age_ms: 100 + i as u32,
+            });
+        }
         std::vec![
             DebugPayload::CounterSamples(samples.clone()),
             DebugPayload::IndicatorSamples(samples),
@@ -87,7 +104,18 @@ mod tests {
                 id: 0,
                 label: name("ControllerLoops"),
             },
-            DebugPayload::FirmwareInfo { firmware: name("variegated-gs3-firmware"), counters: 4, indicators: 4 },
+            DebugPayload::FirmwareInfo {
+                firmware: name("variegated-gs3-firmware"),
+                counters: 4,
+                indicators: 4,
+                checkins: MAX_CHECKINS as u8,
+            },
+            DebugPayload::CheckinReport(checkins),
+            DebugPayload::CheckinSlotInfo {
+                id: 0,
+                label: name("Controller"),
+                period_ms: Some(100),
+            },
         ]
     }
 
@@ -114,6 +142,9 @@ mod tests {
         let mut filtered = 0usize;
         let mut rate_limited = 0usize;
 
+        // Counted rather than spelled: a payload added to `every_other_payload` should
+        // widen this test's coverage, not fail its arithmetic.
+        let others = every_other_payload().len();
         let mut stream = std::vec::Vec::new();
         for payload in every_other_payload() {
             stream.push(frame(payload));
@@ -133,8 +164,8 @@ mod tests {
             }
         }
 
-        assert_eq!(filtered, 6, "one Status per other payload");
-        assert_eq!(relayed, 6, "every non-Status frame fits the bucket");
+        assert_eq!(filtered, others, "one Status per other payload");
+        assert_eq!(relayed, others, "every non-Status frame fits the bucket");
         assert_eq!(rate_limited, 0);
     }
 
@@ -196,6 +227,7 @@ mod tests {
             firmware: name("variegated-gs3-firmware"),
             counters: 4,
             indicators: 4,
+            checkins: MAX_CHECKINS as u8,
         });
         for kind in [MetricKind::Counter, MetricKind::Indicator] {
             for id in 0..4u8 {
@@ -206,22 +238,54 @@ mod tests {
                 });
             }
         }
+        // The check-in schema rides the same burst, one frame per slot, and there are far
+        // more slots than metrics -- so this is the larger half of it. At full capacity,
+        // which is the case worth measuring.
+        for id in 0..MAX_CHECKINS as u8 {
+            schema += wrapped_len(DebugPayload::CheckinSlotInfo {
+                id,
+                label: name("CoordinatedHeatingElement"),
+                period_ms: Some(u32::MAX),
+            });
+        }
 
-        // Per second: 2 sample frames every 500 ms, 1 snapshot, 1/5 of a schema burst.
-        let per_second = 2 * (counters + indicators) + snapshot + schema / 5;
+        // A full table, every entry aged into a two-byte varint, which is what a healthy
+        // machine actually emits. Ages are the only part that varies, and they only get
+        // shorter as periods get tighter.
+        let mut checkins: Vec<CheckinEntry, MAX_CHECKINS> = Vec::new();
+        for i in 0..MAX_CHECKINS {
+            let _ = checkins.push(CheckinEntry {
+                status: CheckinStatus::Warning(CheckinDetail::Degraded),
+                age_ms: 60_000 + i as u32,
+            });
+        }
+        let checkin_report = wrapped_len(DebugPayload::CheckinReport(checkins));
+
+        // Per second: 2 sample frames every 500 ms, 1 snapshot, 1 check-in report,
+        // 1/5 of a schema burst.
+        let per_second =
+            2 * (counters + indicators) + snapshot + checkin_report + schema / 5;
         std::println!(
             "relay steady state: counters={counters} indicators={indicators} \
-             snapshot={snapshot} schema_burst={schema} => {per_second} B/s \
-             (budget {DEBUG_RELAY_BYTES_PER_SEC} B/s)"
+             snapshot={snapshot} checkins={checkin_report} schema_burst={schema} \
+             => {per_second} B/s (budget {DEBUG_RELAY_BYTES_PER_SEC} B/s)"
         );
         assert!(
             per_second < DEBUG_RELAY_BYTES_PER_SEC as usize,
             "steady-state relay traffic {per_second} B/s exceeds the {DEBUG_RELAY_BYTES_PER_SEC} B/s budget"
         );
 
-        // The same traffic has to fit `variegated-silvia-firmware`'s much slower link too,
-        // since that firmware also carries the sampler and the log bridge. It is the
-        // binding case and it is the one nobody would think to check.
+        // The same traffic against the pessimistic link. It is the binding case and the one
+        // nobody would think to check.
+        //
+        // **This is now tight: ~573 of 576 B/s.** The check-in report is a full table once
+        // a second and is the largest single item here after the schema burst; adding it
+        // consumed almost all of what was left. No board runs 115 200 today -- both links
+        // are 576 kbaud, where this is 20% -- so nothing is broken, but the next payload
+        // added to steady state will not fit at this rate. When that happens the knob is
+        // `checkin::REPORT_INTERVAL_MS`: halving the report's cadence buys back 64 B/s and
+        // costs a host one second of resolution on a table whose fastest slot is already
+        // sampled far more often than it changes.
         let slow_budget = bytes_per_sec_for_baud(SLOW_BAUD) as usize;
         std::println!("  against the 115200-baud link: {per_second} B/s of {slow_budget} B/s");
         assert!(
@@ -240,7 +304,8 @@ mod tests {
             ("counters", counters),
             ("indicators", indicators),
             ("snapshot", snapshot),
-            ("largest schema frame", schema / 9),
+            ("checkin report", checkin_report),
+            ("largest schema frame", schema / (9 + MAX_CHECKINS)),
             ("maximum-length text", text),
         ] {
             assert!(

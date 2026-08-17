@@ -35,6 +35,7 @@ pub struct Sampler<const NC: usize, const NI: usize> {
     counter_names: &'static [&'static str],
     indicator_names: &'static [&'static str],
     firmware: &'static str,
+    checkins: u8,
 }
 
 impl<const NC: usize, const NI: usize> Sampler<NC, NI> {
@@ -52,7 +53,22 @@ impl<const NC: usize, const NI: usize> Sampler<NC, NI> {
         assert!(NI <= MAX_SAMPLES, "too many indicators for one frame");
         assert!(counter_names.len() == NC, "counter name table does not match NC");
         assert!(indicator_names.len() == NI, "indicator name table does not match NI");
-        Self { counters, indicators, counter_names, indicator_names, firmware }
+        Self { counters, indicators, counter_names, indicator_names, firmware, checkins: 0 }
+    }
+
+    /// Declare how many check-in slots this firmware has, for `FirmwareInfo`.
+    ///
+    /// A builder rather than a sixth `new` parameter because the count comes from a
+    /// different subsystem than everything else here -- the sampler neither reads the
+    /// check-in table nor publishes it, and pretending otherwise in the constructor would
+    /// suggest it does. `FirmwareInfo` carries the number regardless because it is the
+    /// one frame that describes the firmware's shape, and a host wants to size its table
+    /// before the first `CheckinSlotInfo` arrives.
+    ///
+    /// Left unset the count is 0, which is honest for a firmware that declares no slots.
+    pub fn with_checkins(mut self, checkins: u8) -> Self {
+        self.checkins = checkins;
+        self
     }
 
     pub fn counter_payload(&self) -> DebugPayload {
@@ -74,6 +90,7 @@ impl<const NC: usize, const NI: usize> Sampler<NC, NI> {
             firmware: name(self.firmware),
             counters: NC as u8,
             indicators: NI as u8,
+            checkins: self.checkins,
         });
 
         let counters = self.counter_names.iter().enumerate().map(|(id, label)| {

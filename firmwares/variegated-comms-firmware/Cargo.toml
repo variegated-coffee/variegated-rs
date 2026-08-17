@@ -63,6 +63,7 @@ variegated-debug-codec = { path = "../../crates/variegated-debug-codec", default
 # `define_counters!`/`define_indicators!` expand to `$crate::…` paths that only
 # resolve if the crate is nameable here.
 variegated-instrumentation = { path = "../../crates/variegated-instrumentation", features = ["instrumentation"] }
+variegated-checkin = { path = "../../crates/variegated-checkin", features = ["defmt"] }
 # For `ConversionParameters`' median and Kalman filters, which smooth the gravimetric
 # flow rate derived in `ble::devices`. Nothing here converts an ADC count -- the crate
 # is named for its main use on the application processor, but the filters are the

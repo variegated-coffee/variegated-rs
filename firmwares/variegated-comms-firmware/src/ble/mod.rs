@@ -29,8 +29,15 @@ pub async fn ble_runner_task(
     // which without them.
     let mut failures: u32 = 0;
     let mut last_failure: Option<Instant> = None;
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::BleRunner);
 
     loop {
+        // Each pass is one `run_with_handler`, which only returns on error -- so a check-in
+        // here means "the runner restarted", not "the runner is healthy". The counter below
+        // is what distinguishes the two, and the row's age is what says how long the current
+        // attempt has been running.
+        checkin.good();
+
         // Run the BLE host runner with event handler
         // This processes HCI events and delivers scan reports to the printer
         //

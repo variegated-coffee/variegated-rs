@@ -25,6 +25,10 @@ variegated-mcp9600 = { version = "0.1.0", path = "../variegated-mcp9600", featur
 variegated-adc-tools = { version = "0.1.0", path = "../variegated-adc-tools" }
 variegated-gravity-driver = { version = "0.1.0", path = "../variegated-gravity-driver", features = ["defmt"] }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
+# Unconditional, for the same reason `variegated-instrumentation` above is: no source
+# feature, no `compile_error!`, so it imposes nothing on a consumer -- unlike
+# `variegated-debug`, which this crate deliberately does not depend on (see below).
+variegated-checkin = { version = "0.1.0", path = "../variegated-checkin" }
 defmt.workspace = true
 async-trait.workspace = true
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types" }

@@ -208,11 +208,17 @@ pub async fn ble_devices_task(
 ) {
     let handle = manager.handle();
 
-    join(
-        manager.run(scanner),
+    // One row for four joined loops. Wrapping the arms individually would need four slots
+    // and this table has one spare, so it stays coarse until something makes a case for
+    // spending them.
+    variegated_checkin::watch(
+        crate::checkin::MONITOR.claim(crate::checkin::CheckinId::BleDevices),
         join(
-            reconcile_associations_loop(),
-            join(reconnect_request_loop(handle.clone()), scan_request_loop(manager)),
+            manager.run(scanner),
+            join(
+                reconcile_associations_loop(),
+                join(reconnect_request_loop(handle.clone()), scan_request_loop(manager)),
+            ),
         ),
     )
     .await;
@@ -327,7 +333,14 @@ pub async fn ble_slot_task(
 
     let mut current: Option<BluetoothSlotAssignment> = None;
 
+    // Indexed by the peripheral slot this instance was given. Four instances of this task
+    // run at once (`pool_size`), so a shared row would break the one-writer-per-slot
+    // contract and report whichever scale happened to write last.
+    let checkin = crate::checkin::ble_slot(slot);
+
     loop {
+        checkin.good();
+
         // Read the authoritative value rather than relying on having been notified.
         // Change notifications are what wake this loop, but they are not what it trusts:
         // re-reading here means a slot that missed one -- because it was busy tearing a
@@ -365,6 +378,12 @@ pub async fn ble_slot_task(
 
         let Some(assignment) = current else {
             // Idle. Nothing to run, so park until this slot is given something.
+            //
+            // Heartbeating *this* wait would be sound on its own -- parked-for-an-assignment
+            // is the healthy state and there is nothing else here to be stuck in -- but it
+            // would buy nothing, because the same slot's other state (below) cannot be
+            // heartbeated honestly. One declared period has to describe both, and a period
+            // that fits the idle case makes every connected scale render red.
             assignments.changed_and(|all| all[slot] != current).await;
             continue;
         };
@@ -429,6 +448,17 @@ pub async fn ble_slot_task(
         // that reassigns a *different* slot re-parks this one instead of cancelling a
         // working driver. Without that, editing any association would interrupt every
         // peripheral on the machine.
+        // **Deliberately not heartbeated.** This `select` is where the task spends nearly all
+        // its life -- it completes only when the assignment changes -- so a timer beside it
+        // would be the only thing keeping this row fresh, and it would keep firing whether or
+        // not the driver inside was making progress. A driver deadlocked on a notification
+        // that never arrives would render green forever.
+        //
+        // A row that says "never aged" is honest about knowing nothing. A row that says
+        // "checked in 1 s ago" because a timer fired next to a wedged driver is worse than
+        // both a red row and a stale one. The fix is a check-in *inside* the driver loops --
+        // `belka_measurement_loop` and the scale drivers already have their own cadences to
+        // hang one on -- not a timer out here. Until then this slot declares no period.
         select(driver, assignments.changed_and(|all| all[slot] != current)).await;
     }
 }

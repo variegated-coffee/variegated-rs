@@ -481,10 +481,15 @@ pub async fn sampler_task() -> ! {
         CounterId::NAMES,
         IndicatorId::NAMES,
         "comms",
-    );
+    )
+    .with_checkins(crate::checkin::CheckinId::COUNT as u8);
+
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::DebugSampler);
 
     let mut since_schema_ms = SCHEMA_INTERVAL_MS;
     loop {
+        checkin.good();
+
         if since_schema_ms >= SCHEMA_INTERVAL_MS {
             for payload in sampler.schema_payloads() {
                 bus::publish(payload);

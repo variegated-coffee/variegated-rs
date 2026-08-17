@@ -70,6 +70,14 @@ fn shot_log_error_message(error: ShotLogStorageError) -> &'static str {
         ShotLogStorageError::CardNotPresent => "No SD card in the machine",
         ShotLogStorageError::NotExfat => "The SD card is not formatted exFAT",
         ShotLogStorageError::BusUnavailable => "The machine is busy; try again",
+        // Same advice as `BusUnavailable`, different situation, and the wording is chosen
+        // to be honest about which: that one means the request never got the card's
+        // attention, this one means it did and the card stopped answering mid-operation.
+        // A retry is still the right move -- the machine re-identifies the card first --
+        // but "busy" would understate a fault worth mentioning if it keeps happening.
+        ShotLogStorageError::OperationTimedOut => {
+            "The SD card stopped responding; the machine is retrying it"
+        }
         ShotLogStorageError::NotFound => "No such shot",
         ShotLogStorageError::CrcError => "That shot is corrupt on the card",
         // Not corruption, and worth saying so: the file is intact, it was just written in
@@ -1967,8 +1975,11 @@ pub async fn cache_update_task(
     mut config_subscriber: ApplicationConfigurationSubscriber,
 ) {
     log_info!("Cache update task started");
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::CacheUpdate);
 
     loop {
+        checkin.good();
+
         match select(
             status_subscriber.next_message_pure(),
             config_subscriber.next_message_pure(),
@@ -2017,7 +2028,16 @@ pub async fn http_server_task(
     match tcp_stack.bind(bind_addr).await {
         Ok(acceptor) => {
             log_info!("HTTP server bound to port 80");
-            if let Err(e) = server.run(None, acceptor, handler).await {
+            // `server.run` never returns on success, so this row's whole job is to catch
+            // the two ways it goes quiet: the bind failing above (the slot stays
+            // `NotStarted` and the log line says why), or `run` returning, which lands on
+            // `TaskExited` and is currently only visible in a log nobody is watching.
+            if let Err(e) = variegated_checkin::watch(
+                crate::checkin::MONITOR.claim(crate::checkin::CheckinId::HttpServer),
+                server.run(None, acceptor, handler),
+            )
+            .await
+            {
                 log_error!("HTTP server error: {:?}", e);
             }
         }

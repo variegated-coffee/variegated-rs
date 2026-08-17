@@ -237,13 +237,25 @@ pub async fn improv_task(
     >,
 ) {
     log_info!("Improv provisioning task started, window closed");
+    let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::Improv);
 
     loop {
+        checkin.good();
+
         // A zero is a close for a window that is not open. The application processor sends one
         // on `CloseWifiProvisioningWindow` regardless of what it believes is open, and
         // treating it as "advertise for 0 ms" would spin.
+        // Timed out rather than parked. This signal is silent for the entire life of a
+        // machine nobody is provisioning, so without a timeout the row could never report
+        // this task wedged -- and it holds a BLE peripheral, so a wedge here is a radio that
+        // will not advertise when someone finally does hold the button down.
         let duration_ms = loop {
-            let requested = WIFI_PROVISIONING_WINDOW.wait().await;
+            checkin.good();
+            let Ok(requested) =
+                with_timeout(variegated_checkin::HEARTBEAT, WIFI_PROVISIONING_WINDOW.wait()).await
+            else {
+                continue;
+            };
             if requested > 0 {
                 break requested;
             }

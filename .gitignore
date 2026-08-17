@@ -4,6 +4,7 @@
 # at the same path makes every invocation rebuild the world.
 /target-docker
 test-bin
+crates/*/target
 
 # `/debug/` is anchored, unlike the unanchored `debug/` this used to be in
 # variegated-comms-rs. Unanchored it matched *any* directory named `debug` at any

@@ -257,6 +257,39 @@ where
     Ok(0)
 }
 
+/// How long one SPI transfer may take before it is abandoned as stalled.
+///
+/// **A failsafe, not a budget.** The largest transfer this bus ever runs is 512 bytes --
+/// `sdio`'s `read_high` chunks to that -- which at the 10 MHz operating clock is 410 µs of
+/// clock. A second is three orders of magnitude above that, so it cannot fire on a card
+/// that is merely slow, on a bus that is merely contended, or at the 400 kHz
+/// identification clock (where the same transfer is 10 ms).
+///
+/// # Why the failsafe is here and not around the filesystem operation
+///
+/// The failure this exists to catch is a `Transfer` future that never completes: core 1's
+/// executor keeps scheduling, but the storage task is parked forever *holding the display's
+/// bus lease*, so the panel stops too and nothing recovers short of a power cycle. The
+/// stall is a property of one transfer, so this is the granularity that catches it -- in
+/// about a second, rather than after a whole operation's worth of patience, and with one
+/// constant covering download, store, format, self-test and identification alike.
+///
+/// It is also the only placement that keeps the lease safe. Everything above this holds
+/// the `MutexGuard` in [`SharedSpiBus`], which outlives any operation future, so a timeout
+/// applied from outside would strand the bus permanently rather than free it (see
+/// [`reacquire_sd_card`]). Here we are *inside* the guard's owner: the error propagates
+/// out through `sdio` as an ordinary I/O failure and the caller's existing path reaches
+/// `release()`.
+///
+/// # This is containment, not a fix
+///
+/// The stall's root cause is **not known**. It is one of an RX FIFO overrun or a lost
+/// cross-core DMA wakeup -- the same symptom with opposite fixes -- and the reading that
+/// separates them has never been captured on hardware. `docs/sd-transfer-stall.md` has the
+/// evidence, both hypotheses, and what to do if it recurs. Read it before changing this
+/// constant, the DMA bindings, or `SD_OPERATING_HZ`.
+pub const TRANSFER_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(1);
+
 /// Failures the lease itself can produce, as distinct from the card's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // Derived unconditionally: this crate depends on defmt outright and has no `defmt`
@@ -271,6 +304,15 @@ pub enum SpiLeaseError {
     NotLeased,
     /// The underlying SPI peripheral reported an error.
     Bus,
+    /// A single transfer did not complete within [`TRANSFER_TIMEOUT`].
+    ///
+    /// Distinct from [`Self::Bus`], and the distinction is the whole reason this variant
+    /// exists: `Bus` is the peripheral *answering* with an error, which is an ordinary
+    /// marginal-signal outcome that a retry usually clears. This one is the DMA transfer
+    /// never finishing at all -- no error, no completion, the future simply pending
+    /// forever. Reporting the second as the first would bury the one fault that takes the
+    /// whole of core 1 down with it.
+    Stalled,
 }
 
 impl SpiError for SpiLeaseError {
@@ -296,6 +338,9 @@ pub struct SharedSpiBus<'a, M: RawMutex, BUS> {
     /// Kept so `set_hz` can rebuild a full `Config` -- embassy-rp has no
     /// frequency-only setter, and defaulting the rest would silently drop the mode.
     base_config: RefCell<SpiConfig>,
+    /// Called when a transfer exceeds [`TRANSFER_TIMEOUT`]. See
+    /// [`with_stall_report`](Self::with_stall_report).
+    stall_report: Option<fn()>,
 }
 
 impl<'a, M: RawMutex, BUS> SharedSpiBus<'a, M, BUS> {
@@ -305,30 +350,54 @@ impl<'a, M: RawMutex, BUS> SharedSpiBus<'a, M, BUS> {
             bus,
             held: RefCell::new(None),
             base_config: RefCell::new(base_config),
+            stall_report: None,
         }
     }
 
-    /// Take the bus and hold it until [`release`](Self::release).
+    /// Run `report` when a transfer exceeds [`TRANSFER_TIMEOUT`].
+    ///
+    /// The point is *when* it runs, not what it does: timing out drops the transfer future,
+    /// and `embassy_rp`'s `Transfer::drop` aborts the DMA channel -- so by the time a caller
+    /// sees the error, the channel state that explains the stall has already been cleared.
+    /// This fires while the losing future is still alive and its channel still armed, which
+    /// is the only moment the evidence exists.
+    ///
+    /// A bare `fn()` rather than a closure or a generic: what to read is board knowledge
+    /// (which DMA channels, which SPI instance) and belongs in the firmware, but making
+    /// this crate generic over a reporter would push a type parameter through
+    /// `SharedSpiBus`, `SpiBusLease`, `SdCardBlockDevice` and every alias built on them.
+    /// `Ads124S08Sensor`'s two const parameters that exist only to name handle types are
+    /// what that costs; a function pointer costs a word.
+    pub fn with_stall_report(mut self, report: fn()) -> Self {
+        self.stall_report = Some(report);
+        self
+    }
+
+    /// Report a stalled transfer, if a reporter was installed.
+    fn report_stall(&self) {
+        log_warn!(
+            "SD: SPI transfer stalled past {} ms; abandoning it",
+            TRANSFER_TIMEOUT.as_millis()
+        );
+        if let Some(report) = self.stall_report {
+            report();
+        }
+    }
+
+    /// Take the bus and hold it until [`release`](Self::release), or give up.
     ///
     /// Await this once around a whole filesystem operation, never per command. It is
     /// idempotent: leasing an already-leased bus is a no-op rather than a deadlock,
     /// so a nested helper cannot hang the caller that already holds it.
-    pub async fn lease(&self) {
-        if self.held.borrow().is_some() {
-            return;
-        }
-        let guard = self.bus.lock().await;
-        *self.held.borrow_mut() = Some(guard);
-    }
-
-    /// [`lease`](Self::lease), but give up rather than wait forever.
     ///
-    /// Returns whether the bus was obtained. This exists because an unbounded wait here
-    /// is not a slow path, it is a wedged task: `embassy_sync::mutex::Mutex` holds a
+    /// Returns whether the bus was obtained. **There is deliberately no unbounded
+    /// variant.** There was one, with a single caller, and an unbounded wait here is not a
+    /// slow path, it is a wedged task: `embassy_sync::mutex::Mutex` holds a
     /// single `WakerRegistration`, so a second waiter displaces the first, and a holder
     /// that re-locks promptly in a loop -- which the 10 ms display task does -- can
     /// starve a waiter indefinitely. The waiter has no way to tell that apart from a
-    /// holder that has stopped releasing at all.
+    /// holder that has stopped releasing at all. Deleting it is what stops the next caller
+    /// reaching for the shorter name.
     ///
     /// Cancelling the `lock()` future is safe: it only deregisters the waker, and the
     /// guard is only stored once actually acquired, so a timeout cannot leave the bus
@@ -376,16 +445,33 @@ impl<'a, M: RawMutex, BUS> ErrorType for SpiBusLease<'a, M, BUS> {
     type Error = SpiLeaseError;
 }
 
-/// Run `$op` against the leased bus, mapping both failure modes onto `SpiLeaseError`.
+/// Run `$op` against the leased bus, mapping every failure mode onto `SpiLeaseError`.
 ///
 /// The `RefMut` is deliberately held across the await: the borrow *is* the exclusive
 /// access, and dropping it mid-transfer would let another borrower see a bus that is
 /// halfway through a command.
+///
+/// # The timeout is the point
+///
+/// This is the single choke point every byte the card moves passes through -- `sdio` calls
+/// back into it for each command frame, each R1 poll, each data token and each block -- so
+/// one bound here covers every SD operation there is. See [`TRANSFER_TIMEOUT`] for why the
+/// failsafe belongs at this granularity and not around the filesystem operation.
+///
+/// The stall is reported *before* the match arm ends, because the `with_timeout` future --
+/// and with it the DMA transfer whose state explains the stall -- is dropped when this
+/// block does.
 macro_rules! with_bus {
     ($self:expr, |$bus:ident| $op:expr) => {{
         let mut held = $self.shared.held.borrow_mut();
         let $bus = held.as_mut().ok_or(SpiLeaseError::NotLeased)?;
-        $op.await.map_err(|_| SpiLeaseError::Bus)
+        match embassy_time::with_timeout(TRANSFER_TIMEOUT, $op).await {
+            Ok(result) => result.map_err(|_| SpiLeaseError::Bus),
+            Err(_) => {
+                $self.shared.report_stall();
+                Err(SpiLeaseError::Stalled)
+            }
+        }
     }};
 }
 

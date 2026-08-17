@@ -25,14 +25,48 @@ pub struct GpioBinaryHeatingElement<O: OutputPin, M: RawMutex + 'static> {
     output: O,
     soft_pwm: SoftPwm,
     signal: &'static Signal<M, DutyCycleType>,
+    checkin: variegated_checkin::CheckinHandle,
 }
+
+/// The longest this element will go without checking in.
+///
+/// Same reasoning and same value as the dual-boiler's coordinated device: the cycle is three
+/// seconds, and the window worth watching is between energising the element and de-energising
+/// it, not the boundary between cycles.
+const CHECKIN_INTERVAL: Duration = Duration::from_secs(1);
 
 impl<O: OutputPin, M: RawMutex + 'static> GpioBinaryHeatingElement<O, M> {
     pub fn new(output: O, signal: &'static Signal<M, DutyCycleType>) -> Self {
         GpioBinaryHeatingElement {
             output,
             soft_pwm: SoftPwm::new(Duration::from_secs(3), 0),
-            signal: &signal
+            signal: &signal,
+            checkin: variegated_checkin::CheckinHandle::none(),
+        }
+    }
+
+    /// Report this element's liveness into a check-in slot.
+    ///
+    /// A caller that sets this must **not** also wrap [`WithTask::task`] in
+    /// `variegated_checkin::watch` -- one writer per slot.
+    pub fn with_checkin(mut self, checkin: variegated_checkin::CheckinHandle) -> Self {
+        self.checkin = checkin;
+        self
+    }
+
+    /// Sleep for `duration`, checking in at least every [`CHECKIN_INTERVAL`].
+    ///
+    /// Absolute deadline, so the chunking cannot lengthen the phase it is chunking -- drift
+    /// here is a duty cycle that is not the one the controller asked for.
+    async fn sleep_reporting(&self, duration: Duration) {
+        let deadline = embassy_time::Instant::now() + duration;
+        loop {
+            self.checkin.good();
+            let now = embassy_time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            Timer::after((deadline - now).min(CHECKIN_INTERVAL)).await;
         }
     }
 }
@@ -62,17 +96,21 @@ impl<O: OutputPin, M: RawMutex + 'static> WithTask for GpioBinaryHeatingElement<
                 }
             }
 
+            // Checked in unconditionally, so a duty of exactly 0% or 100% -- where one of the
+            // two phases below is skipped entirely -- still reports once per cycle.
+            self.checkin.good();
+
             let cycle = self.soft_pwm.get_cycle();
             if cycle.on_duration > Duration::from_millis(1) {
                 // Only set the pin high if the on duration is greater than 1ms
                 self.output.set_high().expect("Failed to set pin high");
-                Timer::after(cycle.on_duration).await;
+                self.sleep_reporting(cycle.on_duration).await;
             }
-            
+
             if cycle.off_duration > Duration::from_millis(1) {
                 // Only set the pin low if the off duration is greater than 1ms
                 self.output.set_low().expect("Failed to set pin low");
-                Timer::after(cycle.off_duration).await;
+                self.sleep_reporting(cycle.off_duration).await;
             }
         })
     }

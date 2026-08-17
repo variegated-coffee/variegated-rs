@@ -28,12 +28,12 @@ use {defmt_rtt as _, panic_probe as _};
 use variegated_ads124s08::{WaitStrategy, ADS124S08};
 use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank, SensorReading};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_rp::uart::Uart;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
-use embassy_time::{Delay, Duration, Instant, Timer};
+use embassy_time::{with_timeout, Delay, Duration, Instant, Timer};
 use variegated_adc_tools::ConversionParameters;
 use variegated_ads124s08::registers::{IDACMagnitude, IDACMux, Mux, PGAGain, ReferenceInput};
 use variegated_hal::adc::ads124s08::Ads124S08Sensor;
@@ -75,7 +75,7 @@ use variegated_controller_lib::{SdShotLogStorage, ShotLogStorage};
 use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
 #[cfg(feature = "sd-card-storage")]
 use variegated_controller_lib::shot_log_storage::{
-    ShotLogStorageError, BUS_LEASE_TIMEOUT, SHOT_LOG_CHUNK_LEN,
+    format_budget, ShotLogStorageError, BUS_LEASE_TIMEOUT, SHOT_LOG_CHUNK_LEN,
 };
 #[cfg(feature = "sd-card-storage")]
 use variegated_controller_lib::exfat_format;
@@ -141,6 +141,8 @@ use variegated_instrumentation::{PerformanceCounters, PerformanceIndicators, def
 use variegated_controller_types::debug::DebugEvent;
 use variegated_controller_types::debug_command::{AppDebugOp, DebugCommand};
 use variegated_debug::bus;
+use variegated_checkin::watch;
+use variegated_debug::checkin::CheckinReporter;
 use variegated_debug::sampler::{set_sample_interval_ms, Sampler};
 use variegated_debug::usb_cdc::{self, DebugUsbResources};
 
@@ -275,7 +277,14 @@ async fn esp_transceiver_task(
     let (shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver) =
         (None, None, None);
 
-    esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver).await;
+    // One slot for nine futures: `esp_transceiver_main` is a `join5` with a nested `join4`,
+    // all inside this single task, and `watch` here sees only the outermost being polled.
+    // Splitting them needs handles threaded into `variegated-comms`; until then this row
+    // means "the link task is being woken", not "all nine arms are alive".
+    watch(
+        MONITOR.claim(CheckinId::EspTransceiver),
+        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver),
+    ).await;
 }
 
 
@@ -576,6 +585,140 @@ define_indicators! {
 static COUNTERS: PerformanceCounters<4> = PerformanceCounters::new();
 static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
 
+// Check-in slots, and this board is why the mechanism exists: seven of these are arms of
+// the `join_all` at the end of `main_task`, sharing one task's poll frame, and one of them
+// -- `Controller` -- is the only thing that feeds the watchdog. A hang in any of the other
+// six leaves the executor healthy and the watchdog fed.
+//
+// **Twenty-three slots against a [`MAX_CHECKINS`] of 24**, so there is one spare and no
+// more. `backlight_task` was nearly the one left out, on the grounds that it set a pin high
+// and then awaited `pending()` forever -- a row that cannot change teaches nothing. It was
+// given a heartbeat loop and a slot instead, and that turned out to be the most useful row
+// on the board: it is on core 1 and touches no shared peripheral, so it is the only thing
+// that distinguishes "core 1 has stopped scheduling" from "the two tasks on the display's
+// SPI bus are both stuck behind it". That distinction is what diagnosed the download stall.
+//
+// **The feature-gated slots are declared unconditionally**, so an id means the same thing
+// in every build configuration and two boards' tables can be read side by side. In a build
+// without the feature the slot simply stays `NotStarted`, which is the honest report:
+// nothing ever reached it.
+//
+// Periods are deliberately loose, for the reason the Silvia's are: nothing on-device reads
+// them, and a number tighter than this firmware has ever measured is a guess that cries
+// wolf. `_` means event-driven and is never aged by a host.
+variegated_checkin::define_checkins! {
+    pub enum CheckinId {
+        /// The 100 ms dual-boiler control loop, and the only watchdog feed on this board.
+        Controller = 0 => 1_000,
+        /// Sequences every ADS124S08 channel; the four brew and steam sensors are its
+        /// output, so all four counters stop moving together when this one stops.
+        AdsCoordinator = 1 => 2_000,
+        /// 100 ms pulse-counting window.
+        FlowMeter = 2 => 1_000,
+        /// The FDC1004, reporting for **both** capacitive level channels -- steam boiler on
+        /// CIN3 and tank on CIN4.
+        ///
+        /// One row for the chip rather than one per channel: `I2CError` and
+        /// `MeasurementNotComplete` are properties of the part and the bus, so two rows
+        /// spent two of this board's twenty-four slots reporting the same fault twice. What
+        /// it gives up is naming *which* probe on the one error that is per-channel
+        /// (`UnableToFindCapdacSetting`), and that is already in the log line at the failure
+        /// site -- the row would have carried the channel, not the fault, since both errors
+        /// reach the wire as the same two `CheckinDetail` values either way.
+        WaterLevel = 3 => 2_000,
+        /// Re-anchors the clock from the DS3231 once a minute.
+        Rtc = 4 => 90_000,
+        /// The routine scheduler. Wakes on its own cadence and usually fires nothing.
+        Scheduler = 5 => 90_000,
+        /// Gear-pump tachometer. `gear-pump`.
+        PumpTacho = 6 => 1_000,
+        /// I2C scale, 100 ms poll. Reports *through* its reconnect backoff rather than
+        /// either side of it, so a missing scale keeps a fresh row at `Warning` instead of a
+        /// stale one that cannot be told from a wedged I2C transaction. `gravity`.
+        GravityDevice = 7 => 15_000,
+        /// Soft PWM across both elements, including the interlock between them.
+        ///
+        /// The tightest deadline on the board, and deliberately: its cycle is three seconds
+        /// but it checks in every second *within* a phase, so a stall between energising an
+        /// element and de-energising it shows up inside that window rather than at the end
+        /// of the cycle. See `CHECKIN_INTERVAL` in `coordinated_dual_heating_element`.
+        CoordinatedHeatingElement = 8 => 3_000,
+        /// Drains the storage command channel, with a `HEARTBEAT` timeout so it turns over
+        /// even on a machine nobody is configuring.
+        Storage = 9 => 15_000,
+        /// The inter-processor link: nine futures under this one row until they get
+        /// their own.
+        EspTransceiver = 10 => 5_000,
+        /// External temperature and EC sensor. `belka`.
+        Belka = 11 => _,
+        /// Bluetooth scale. `bluetooth-group-1-scale`.
+        BluetoothScale = 12 => _,
+        /// MCP23017 button matrix. Already `select`s its interrupt against a 10 ms timer, so
+        /// it turns over on a cadence whether or not anyone presses anything.
+        ButtonController = 13 => 1_000,
+        /// TLC59108 breathing animation, ~30 Hz. `pwm-leds`.
+        LedController = 14 => 1_000,
+        /// HD44780 over the LCD expander, 10 ms loop. `character-display`.
+        LcdDisplay = 15 => 1_000,
+        /// The NV3007 TFT, on **core 1**. Renders at roughly 100 Hz.
+        GraphicalDisplay = 16 => 1_000,
+        /// SD shot-log storage, also on core 1. A fifth `HEARTBEAT` arm on its `select` lets
+        /// it turn over on an idle machine, so a wedge on the shared display SPI bus is
+        /// distinguishable from nobody having pulled a shot. `sd-card-storage` +
+        /// `tft-display`.
+        ///
+        /// Read it against its two neighbours on core 1 -- this is a three-row diagnosis,
+        /// not a one-row one:
+        ///
+        /// | this | `GraphicalDisplay` | `Backlight` | means |
+        /// |---|---|---|---|
+        /// | stale | stale | stale | core 1 has stopped scheduling |
+        /// | stale | stale | fresh | parked inside a card operation, holding the bus lease |
+        /// | stale | fresh | fresh | parked without the bus, or in the `select` itself |
+        ///
+        /// The middle row is the one that took a download and a power cycle to see, and
+        /// `sd_card::TRANSFER_TIMEOUT` is what now turns it into a logged error instead.
+        ShotLogStorage = 17 => 15_000,
+        /// USB CDC; idle until a host attaches.
+        DebugUsb = 18 => _,
+        /// 500 ms sampler.
+        DebugSampler = 19 => 2_000,
+        /// 1 Hz snapshot.
+        DebugSnapshot = 20 => 3_000,
+        /// Drains injected debug commands, with a `HEARTBEAT` timeout.
+        DebugCommand = 21 => 15_000,
+        /// Holds the TFT backlight on, on **core 1**.
+        ///
+        /// A bare `HEARTBEAT` loop -- it owns the `Output` and has nothing else to do -- so
+        /// three times `HEARTBEAT`, per the rule in that constant's docs. The cheapest row
+        /// on the board, and the most diagnostic one.
+        ///
+        /// **It is the core-1 liveness signal**, and that is not incidental to it being
+        /// cheap: it is the only thing on core 1 that touches no shared peripheral. The
+        /// other two tasks there -- `GraphicalDisplay` and `ShotLogStorage` -- both contend
+        /// for the display's SPI bus, so when they go stale together this row is what says
+        /// whether the executor stopped or whether one of them is parked holding the lease.
+        /// It answered exactly that question for the shot-log download stall: still ticking,
+        /// so core 1 was fine and the storage task was stuck inside a DMA transfer.
+        ///
+        /// It also carries two things nothing else does: the `NotStarted` -> `Good`
+        /// transition is proof that core 1 got as far as spawning it and that the pin was
+        /// driven high, and `TaskExited` is the one explanation for a dark panel that is not
+        /// the renderer -- the `Output` guard lives in that task's frame, so if it returns
+        /// the backlight goes out.
+        Backlight = 22 => 15_000,
+    }
+}
+
+/// The check-in table.
+///
+/// Read by the reporting task on core 0 and written from **both** cores -- the TFT and the
+/// shot-log storage run on core 1. That is exactly what the slots' relaxed atomics are for:
+/// there is no lock to take, no critical section on either core, and nothing on the RP2350's
+/// two Cortex-M33s to order these stores against.
+static MONITOR: variegated_checkin::Monitor<{ CheckinId::COUNT }> =
+    variegated_checkin::Monitor::new();
+
 /// Report *why* a HardFault happened, instead of parking silently.
 ///
 /// TEMPORARY (2026-08-10). `cortex-m-rt`'s default handler just loops, which is why every
@@ -797,11 +940,15 @@ fn main() -> ! {
                         dc,
                         reset,
                         status_channel.subscriber().expect("Failed to get TFT status subscriber"),
-                        identify_receiver_tft
+                        identify_receiver_tft,
+                        MONITOR.claim(CheckinId::GraphicalDisplay)
                     )));
 
                     log_info!("Spawning backlight task on core 1");
-                    spawner.spawn(unwrap!(backlight_task(backlight_p)));
+                    spawner.spawn(unwrap!(backlight_task(
+                        backlight_p,
+                        MONITOR.claim(CheckinId::Backlight)
+                    )));
 
                     // Spawn SD card storage task on core 1 (shares the display SPI bus)
                     #[cfg(feature = "sd-card-storage")]
@@ -821,7 +968,12 @@ fn main() -> ! {
                         // already allocates its display buffers this way.
                         let shared_bus: &'static SharedSpiBus<'static, NoopRawMutex, _> =
                             alloc::boxed::Box::leak(alloc::boxed::Box::new(
-                                SharedSpiBus::new(spi_bus, spi_config.clone()),
+                                SharedSpiBus::new(spi_bus, spi_config.clone())
+                                    // Runs if a single SPI transfer exceeds
+                                    // `TRANSFER_TIMEOUT`, which is the failure that used to
+                                    // take this core's display down with the card. See
+                                    // `report_sd_bus_state`.
+                                    .with_stall_report(report_sd_bus_state),
                             ));
 
                         log_info!("Spawning shot log storage task on core 1");
@@ -830,6 +982,7 @@ fn main() -> ! {
                             shared_bus,
                             Output::new(sd_card_p.pin_cs, High),
                             Input::new(sd_card_p.pin_det, Pull::Up),
+                            MONITOR.claim(CheckinId::ShotLogStorage),
                         )));
                     }
                 });
@@ -902,6 +1055,12 @@ static DISPLAY_SPI_BUS: StaticCell<DisplayBus> = StaticCell::new();
 
 static ADS_MUTEX: StaticCell<AdsMutex> = StaticCell::new();
 static FDC_MUTEX: StaticCell<FdcMutex> = StaticCell::new();
+/// The FDC1004's check-in row, shared by both level channels.
+///
+/// One per chip, not one per channel -- see `CheckinId::WaterLevel`. A `StaticCell` because
+/// it has to outlive both sensors and hold a handle claimed at runtime.
+static FDC_HEALTH: StaticCell<variegated_hal::cap_adc::fdc1004::Fdc1004Health> =
+    StaticCell::new();
 #[cfg(feature = "gravity")]
 static GRAVITY_MUTEX: StaticCell<GravityMutex> = StaticCell::new();
 
@@ -1137,6 +1296,8 @@ async fn coordinated_heating_element_task(
         CriticalSectionRawMutex,
     >
 ) {
+    // Not wrapped: the device reports for itself, every second inside a phase rather than
+    // once per three-second cycle.
     device.task().await;
 }
 
@@ -1171,6 +1332,90 @@ const SD_INIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// from a settled line, instead of once per bounce.
 #[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
 const SD_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// The display SPI's DMA channels, from `board-cfg.toml`'s `eyespi_display_peripherals`.
+///
+/// Named here rather than derived, because the PAC reads below take a channel *number* and
+/// nothing checks it against the `DMA_CH6`/`DMA_CH7` types the peripherals struct hands to
+/// `Spi::new`. If those entries move, these move with them.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+const DISPLAY_DMA_TX: usize = 6;
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+const DISPLAY_DMA_RX: usize = 7;
+
+/// Dump the display SPI's DMA and peripheral state.
+///
+/// # Why this exists, and why it runs when it runs
+///
+/// A shot-log download would reliably stop with `ShotLogStorage` *and* `GraphicalDisplay`
+/// both stale while `Backlight` kept checking in -- so core 1's executor was still
+/// scheduling, and the storage task was parked inside a card operation with the bus lease
+/// held. On the read path the only thing there is to park on is an `embassy-rp` SPI DMA
+/// transfer, so one of those was not completing. This says which way.
+///
+/// **`trans_count` is the number to read first.** It counts transfers *remaining*:
+///
+/// * **Non-zero** -- the transfer stalled part-way. With `rorris` set alongside it, that is
+///   an RX FIFO overrun: the RX DMA was starved, the 8-entry FIFO overflowed, and the
+///   channel is waiting for bytes that were dropped. The fix is on the DMA priority or the
+///   bus clock.
+/// * **Zero with `busy` clear** -- the transfer finished and the *wake* was lost. Nothing is
+///   wrong with the SPI at all; the fix is in the cross-core wake path. `DMA_IRQ_0` is
+///   enabled on both cores' NVICs here (core 0 creates CH0/CH1 and CH4/CH5, core 1 creates
+///   these two inside the `spawn_core1` closure), so a core-1 task's waker can be fired
+///   from core 0's ISR.
+///
+/// Those are the same symptom and opposite fixes, which is the whole reason for reading
+/// registers rather than guessing.
+///
+/// Passed to `SharedSpiBus::with_stall_report` so it runs *inside* the timeout arm, while
+/// the losing future is still alive. A moment later `Transfer::drop` issues `CHAN_ABORT`
+/// and every number below is gone.
+///
+/// **This has never fired on hardware.** The stall stopped reproducing once the containment
+/// went in, which is itself ambiguous -- a contained stall and a vanished one look identical
+/// from outside, and the difference is exactly whether this function has run. If a log ever
+/// carries these lines, that reading is the whole investigation:
+/// `docs/sd-transfer-stall.md`.
+#[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+fn report_sd_bus_state() {
+    use embassy_rp::pac;
+
+    let tx = pac::DMA.ch(DISPLAY_DMA_TX);
+    let rx = pac::DMA.ch(DISPLAY_DMA_RX);
+    let sr = pac::SPI0.sr().read();
+    let ris = pac::SPI0.ris().read();
+
+    log_error!(
+        "SD bus state: DMA tx(ch{}) remaining={} busy={} | rx(ch{}) remaining={} busy={}",
+        DISPLAY_DMA_TX,
+        tx.trans_count().read().count(),
+        tx.ctrl_trig().read().busy(),
+        DISPLAY_DMA_RX,
+        rx.trans_count().read().count(),
+        rx.ctrl_trig().read().busy(),
+    );
+    log_error!(
+        "SD bus state: DMA inte0={:#010x} ints0={:#010x} intr0={:#010x}",
+        pac::DMA.inte(0).read(),
+        pac::DMA.ints(0).read(),
+        pac::DMA.intr(0).read(),
+    );
+    // `rorris` is the overrun flag, and the one that decides between the two diagnoses
+    // above. `bsy` and the FIFO flags say whether the peripheral thinks it is mid-frame.
+    log_error!(
+        "SD bus state: SPI0 bsy={} rne={} rff={} tfe={} tnf={} | raw irq ror={} rt={} rx={} tx={}",
+        sr.bsy(),
+        sr.rne(),
+        sr.rff(),
+        sr.tfe(),
+        sr.tnf(),
+        ris.rorris(),
+        ris.rtris(),
+        ris.rxris(),
+        ris.txris(),
+    );
+}
 
 /// Bring the card up if it is not already, returning whether it is usable.
 ///
@@ -1225,7 +1470,17 @@ async fn ensure_card_ready(
 
     // Find where the volume actually starts before handing the card to the filesystem.
     // Held under one lease for the whole probe, same as any other card operation.
-    shared_bus.lease().await;
+    //
+    // Bounded, like every other lease. This was the one unbounded `lease()` in the tree,
+    // and it is the difference between "the display is holding the bus" arriving as a
+    // logged refusal and arriving as a task that never comes back. The probe itself is a
+    // single block read, so `sdio`'s own counters bound it -- the wait for the bus was the
+    // unbounded half.
+    if !shared_bus.lease_within(BUS_LEASE_TIMEOUT).await {
+        log_warn!("SD: could not take the SPI bus to probe the partition table");
+        *parked = Some(device);
+        return false;
+    }
     let start = probe_volume_start(&mut device).await;
     shared_bus.release();
 
@@ -1292,6 +1547,7 @@ async fn shot_log_storage_task(
     >,
     cs: Output<'static>,
     mut det: Input<'static>,
+    checkin: variegated_checkin::CheckinHandle,
 ) {
     log_info!("Shot log storage task started");
 
@@ -1323,19 +1579,33 @@ async fn shot_log_storage_task(
     let mut parked: Option<SdDevice> = Some(new_sd_card_device(shared_bus, cs));
 
     loop {
+        checkin.good();
+
         // Store first, deliberately. `select` polls in declaration order, so a completed
         // shot beats a query whenever both are ready -- which is what keeps a bulk
         // download from delaying the one operation that cannot be retried. Each query
         // below is a single bracketed filesystem operation, so the loop returns here
         // between chunks and a download can hold a store up by at most one chunk.
-        match select4(
-            shot_log_receiver.receive(),
-            SHOT_LOG_QUERY_CHANNEL.receive(),
-            SD_SELF_TEST_REQUEST.wait(),
-            det.wait_for_any_edge(),
+        //
+        // The fifth arm is a heartbeat and does nothing but let the loop turn over. It is
+        // last for the same declaration-order reason: it must never displace real work that
+        // was ready at the same instant. Without it this task parks indefinitely on a
+        // machine nobody has pulled a shot on, and its row could not tell that from a task
+        // wedged on the shared display SPI bus mid-transfer -- which, sharing that bus with
+        // a 100 Hz renderer, is the failure actually worth catching here.
+        match select(
+            select4(
+                shot_log_receiver.receive(),
+                SHOT_LOG_QUERY_CHANNEL.receive(),
+                SD_SELF_TEST_REQUEST.wait(),
+                det.wait_for_any_edge(),
+            ),
+            Timer::after(variegated_checkin::HEARTBEAT),
         )
         .await
         {
+            Either::Second(_) => continue,
+            Either::First(event) => match event {
             Either4::First(shot_log) => {
                 if !ensure_card_ready(shared_bus, &mut storage, &mut parked, &mut det).await {
                     log_warn!("SD: card unavailable, dropping a completed shot log");
@@ -1490,17 +1760,32 @@ async fn shot_log_storage_task(
                             parked = Some(device);
                             continue;
                         }
-                        let result = exfat_format::format(&mut device, "VARIEGATED", serial).await;
+
+                        // The failsafe, sized from what this particular card's layout will
+                        // actually make the formatter write -- see `format_budget`. Taken
+                        // inside the lease, because reading the card's size is a card
+                        // operation like any other.
+                        let budget = format_budget(&mut device).await;
+
+                        let result = embassy_time::with_timeout(
+                            budget,
+                            exfat_format::format(&mut device, "VARIEGATED", serial),
+                        )
+                        .await;
                         shared_bus.release();
 
                         match result {
-                            Ok(geo) => log_info!(
+                            Ok(Ok(geo)) => log_info!(
                                 "SD format: done -- {} clusters of {} bytes, root at {}",
                                 geo.cluster_count,
                                 geo.bytes_per_cluster(),
                                 geo.first_cluster_of_root
                             ),
-                            Err(e) => log_error!("SD format: failed: {:?}", e),
+                            Ok(Err(e)) => log_error!("SD format: failed: {:?}", e),
+                            Err(_) => log_error!(
+                                "SD format: abandoned after {} s; the card is now unformatted",
+                                budget.as_secs()
+                            ),
                         }
 
                         // Parked rather than remounted here, either way. The next request
@@ -1536,6 +1821,7 @@ async fn shot_log_storage_task(
                     parked = storage_take(&mut storage);
                 }
             }
+            },
         }
     }
 }
@@ -1680,8 +1966,20 @@ async fn storage_task(
 
     log_info!("Storage task started");
 
+    let checkin = MONITOR.claim(CheckinId::Storage);
+
     loop {
-        let cmd = storage_command_receiver.receive().await;
+        checkin.good();
+
+        // Timed out rather than parked: this channel is silent for hours on a machine nobody
+        // is configuring, and a row that only ticks when work arrives cannot tell "idle" from
+        // "stuck on the flash mutex mid-erase" -- which is the one thing that would actually
+        // wedge this loop.
+        let Ok(cmd) =
+            with_timeout(variegated_checkin::HEARTBEAT, storage_command_receiver.receive()).await
+        else {
+            continue;
+        };
         log_info!("Storage task received command: {:?}", cmd);
 
         match cmd {
@@ -1776,7 +2074,7 @@ impl ExternalSensorDispatcher for ExternalDeviceDispatcher {
 async fn belka_task(
     mut device: BelkaDevice<'static, CriticalSectionRawMutex, 3, 10>,
 ) {
-    device.task().await;
+    watch(MONITOR.claim(CheckinId::Belka), device.task()).await;
 }
 
 // Bluetooth scale device task
@@ -1785,31 +2083,28 @@ async fn belka_task(
 async fn bluetooth_group_1_scale_task(
     mut device: BluetoothScale<'static, CriticalSectionRawMutex, 3, 10>,
 ) {
-    device.task().await;
+    watch(MONITOR.claim(CheckinId::BluetoothScale), device.task()).await;
 }
 
 #[embassy_executor::task]
 async fn configuration_debug_logger(mut configuration_receiver: ConfigurationSubscriber) {
-    let mut last_config: Option<Configuration> = None;
-
+    // No slot, deliberately: nothing here can fail in a way anything depends on. See below
+    // for what "here" currently amounts to.
+    //
+    // **This task no longer logs anything.** Its three `defmt::debug!` lines were commented
+    // out and the binding they read was left behind, which is what the `unused_variable`
+    // warning on `config` was pointing at -- so all that remains is draining the subscriber
+    // so it does not lag, which the drain below still does.
+    //
+    // Kept rather than deleted because the drain is real and removing a task mid-investigation
+    // is not a change worth bundling. If the logging is ever restored, the note that came
+    // with it is worth keeping: all three lines have to be `defmt::debug!` rather than
+    // `log_debug!`, because `Configuration` has no `core::fmt::Debug` and the `log` half
+    // will not compile for it -- and putting the delimiters on `log_debug!` while the
+    // payload stayed on defmt sent two `=== ... ===` lines wrapped around nothing to the
+    // bus, which is worse than not carrying the block at all.
     loop {
-        // Try to get the latest configuration (non-blocking)
-        while let Some(config) = configuration_receiver.try_next_message_pure() {
-            last_config = Some(config.clone());
-        }
-
-        // Log the current configuration every 10 seconds
-        if let Some(ref config) = last_config {
-            // All three stay on `defmt`. The payload has to: `Configuration` has
-            // no `core::fmt::Debug`, so the `log` half of `log_debug!` will not
-            // compile for it. Had the delimiters stayed on `log_debug!` the bus
-            // would have received two `=== ... ===` lines wrapped around nothing
-            // at all, which is worse than not carrying the block.
-            defmt::debug!("=== Current Configuration ===");
-            defmt::debug!("{:?}", config);
-            defmt::debug!("============================");
-        }
-
+        while configuration_receiver.try_next_message_pure().is_some() {}
         Timer::after_secs(10).await;
     }
 }
@@ -1821,19 +2116,38 @@ async fn debug_usb_task(
 ) {
     let driver = embassy_rp::usb::Driver::new(usb_p.usb, Irqs);
     let resources = DEBUG_USB.init(DebugUsbResources::new());
-    usb_cdc::run(driver, resources, sink).await;
+    watch(MONITOR.claim(CheckinId::DebugUsb), usb_cdc::run(driver, resources, sink)).await;
 }
 
 // A thin wrapper, because `#[embassy_executor::task]` cannot be generic and `Sampler` is
 // generic over its metric counts. Same split as `esp_transceiver_task` below.
 #[embassy_executor::task]
 async fn debug_sampler_task() {
-    variegated_debug::sampler::run(Sampler::new(
-        &COUNTERS,
-        &INDICATORS,
-        CounterId::NAMES,
-        IndicatorId::NAMES,
-        "variegated-gs3-firmware",
+    watch(
+        MONITOR.claim(CheckinId::DebugSampler),
+        variegated_debug::sampler::run(
+            Sampler::new(
+                &COUNTERS,
+                &INDICATORS,
+                CounterId::NAMES,
+                IndicatorId::NAMES,
+                "variegated-gs3-firmware",
+            )
+            .with_checkins(CheckinId::COUNT as u8),
+        ),
+    )
+    .await
+}
+
+// The reader half. Deliberately has no slot of its own: a row that is fresh by construction
+// -- this loop is what publishes the table -- reports nothing, and if it does die the
+// absence of frames says so far more clearly than a stale row could.
+#[embassy_executor::task]
+async fn debug_checkin_task() {
+    variegated_debug::checkin::run(CheckinReporter::new(
+        &MONITOR,
+        CheckinId::NAMES,
+        CheckinId::PERIODS,
     ))
     .await
 }
@@ -1847,7 +2161,11 @@ async fn debug_snapshot_task(psram_heap: bool, status_receiver: StatusSubscriber
     // `#[embassy_executor::task]` future has to be nameable, and a closure capturing
     // `psram_heap` is not.
     PSRAM_HEAP.store(psram_heap, core::sync::atomic::Ordering::Relaxed);
-    variegated_debug::snapshot::run(sample_snapshot, status_receiver).await
+    watch(
+        MONITOR.claim(CheckinId::DebugSnapshot),
+        variegated_debug::snapshot::run(sample_snapshot, status_receiver),
+    )
+    .await
 }
 
 /// Whether the heap ended up in PSRAM, for [`sample_snapshot`] to read.
@@ -1882,8 +2200,17 @@ async fn debug_command_task(
     command_sender: embassy_sync::channel::Sender<'static, SyncSendRawMutex, MachineCommand, 10>,
     psram_heap: bool,
 ) {
+    // A handle rather than a `watch` wrapper: the loop body is right here, so it can report
+    // that it *ran* rather than merely that it was polled.
+    let checkin = MONITOR.claim(CheckinId::DebugCommand);
+
     loop {
-        let command = receiver.receive().await;
+        checkin.good();
+
+        let Ok(command) = with_timeout(variegated_checkin::HEARTBEAT, receiver.receive()).await
+        else {
+            continue;
+        };
         bus::emit_event(DebugEvent::CommandReceived {
             label: variegated_controller_types::debug::name(command.label()),
         });
@@ -1920,6 +2247,18 @@ async fn debug_command_task(
             #[cfg(not(feature = "sd-card-storage"))]
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
                 log_warn!("SD self-test requested, but this build has no SD storage");
+            }
+            #[cfg(all(feature = "sd-card-storage", feature = "tft-display"))]
+            DebugCommand::App(AppDebugOp::SdBusState) => {
+                // Run here on core 0, and that is the whole point: this reads global
+                // peripheral registers, so it works while core 1's storage task is parked
+                // inside the very transfer being asked about. Signalling core 1 to do it
+                // would be asking the wedged task to describe its own wedge.
+                report_sd_bus_state();
+            }
+            #[cfg(not(all(feature = "sd-card-storage", feature = "tft-display")))]
+            DebugCommand::App(AppDebugOp::SdBusState) => {
+                log_warn!("SD bus state requested, but this build has no card on the display bus");
             }
             #[cfg(feature = "sd-card-storage")]
             DebugCommand::App(AppDebugOp::SdListShots) => {
@@ -2151,7 +2490,9 @@ async fn main_task(
         ConversionParameters::linear_conversion(0.001, 0.0),
         gravity_command_channel.receiver(),
         Duration::from_millis(100),
-    ).with_connected_signal(gravity_connected_sig));
+    )
+    .with_connected_signal(gravity_connected_sig)
+    .with_checkin(MONITOR.claim(CheckinId::GravityDevice)));
 
     #[cfg(feature = "gravity")]
     log_info!("Gravity sensor initialized - will attempt connection with retry");
@@ -2221,6 +2562,11 @@ async fn main_task(
     let fdc1004 = FDC1004::new(fdc1004_dev, 0x50, OutputRate::SPS100, Delay);
 
     let fdc1004 = FDC_MUTEX.init(Mutex::new(fdc1004));
+    // Claimed once, here, and shared by both channel sensors below. The slot has exactly one
+    // writer -- this object -- which is what lets two tasks report into one row.
+    let fdc1004_health: &'static _ = FDC_HEALTH.init(
+        variegated_hal::cap_adc::fdc1004::Fdc1004Health::new(MONITOR.claim(CheckinId::WaterLevel)),
+    );
 
 
     let button_interrupt = Input::new(button_mux_p.pin_interrupt, Pull::Up);
@@ -2480,7 +2826,8 @@ async fn main_task(
         steam_boiler_water_level_watch.sender(),
         water_level_transformer,
         CIN3
-    );
+    )
+    .with_health(fdc1004_health);
 
     let tank_water_level_watch: &'static Watch<_, _, 3>  = TANK_WATER_LEVEL_WATCH.init(Watch::new());
     let mut tank_water_level = Fdc1004Sensor::new(
@@ -2488,7 +2835,8 @@ async fn main_task(
         tank_water_level_watch.sender(),
         water_level_transformer,
         CIN4
-    );
+    )
+    .with_health(fdc1004_health);
 
     let tank = Tank::new(
         Some(tank_water_level_watch.receiver().unwrap()),
@@ -2511,7 +2859,8 @@ async fn main_task(
         steam_duty_signal,
         interlock_enabled_signal,
         contention_strategy_signal,
-    );
+    )
+    .with_checkin(MONITOR.claim(CheckinId::CoordinatedHeatingElement));
 
     spawner.spawn(unwrap!(coordinated_heating_element_task(coordinated_heating_device)));
 
@@ -2944,7 +3293,8 @@ async fn main_task(
         shot_log_query_sender,
         Some(IDENTIFY_WATCH.sender()),
         &CLEAR_WIFI_CREDENTIALS_REQUEST,
-    );
+    )
+    .with_checkin(MONITOR.claim(CheckinId::Controller));
 
     // Create status subscriber for LCD display and spawn the task.
     //
@@ -2963,7 +3313,8 @@ async fn main_task(
             lcd_device,
             display_status_receiver,
             routine_repository_ref,
-            identify_receiver_lcd
+            identify_receiver_lcd,
+            MONITOR.claim(CheckinId::LcdDisplay)
         )));
     }
 
@@ -2972,7 +3323,7 @@ async fn main_task(
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver)));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, MONITOR.claim(CheckinId::ButtonController))));
 
     // Create status subscriber for LED controller and spawn the task.
     //
@@ -2984,7 +3335,7 @@ async fn main_task(
         let led_status_receiver = status_channel
             .subscriber()
             .expect("Failed to get LED status subscriber");
-        spawner.spawn(unwrap!(led_controller_task(tlc, led_status_receiver)));
+        spawner.spawn(unwrap!(led_controller_task(tlc, led_status_receiver, MONITOR.claim(CheckinId::LedController))));
     }
 
     // Create status and configuration subscribers for ESP transceiver and spawn the task
@@ -3029,6 +3380,7 @@ async fn main_task(
     // created further up, next to the ESP transceiver that also feeds it.
     spawner.spawn(unwrap!(debug_usb_task(usb_debug_p, debug_command_sender)));
     spawner.spawn(unwrap!(debug_sampler_task()));
+    spawner.spawn(unwrap!(debug_checkin_task()));
     // Seventh status subscriber -- see STATUS_RECEIVERS.
     let debug_status_receiver = status_channel.subscriber().expect("Failed to get debug status subscriber");
     spawner.spawn(unwrap!(debug_snapshot_task(psram_heap, debug_status_receiver)));
@@ -3036,31 +3388,52 @@ async fn main_task(
 
     log_info!("Creating huge future join task");
 
-    let scheduler = run_schedule(schedule_store_ref, command_channel.sender());
+    let scheduler = run_schedule(
+        schedule_store_ref,
+        command_channel.sender(),
+        MONITOR.claim(CheckinId::Scheduler),
+    );
 
     let rtc_future = sync_rtc(&mut rtc);
 
+    // One slot per arm. These seven futures share a single task's poll frame, so the
+    // executor cannot distinguish one of them wedging from all of them running -- and
+    // `controller.task()` is both an arm here and the sole watchdog feed, so a hang in any
+    // of the other six does not even stop the board being told it is healthy.
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
         vec![
-            Box::pin(ads_coordinator.task()),
-            Box::pin(flow_meter.task()),
+            Box::pin(watch(MONITOR.claim(CheckinId::AdsCoordinator), ads_coordinator.task())),
+            Box::pin(watch(MONITOR.claim(CheckinId::FlowMeter), flow_meter.task())),
+            // Both FDC1004 channels report for themselves -- `with_checkin` above -- so
+            // they are not wrapped: one writer per slot.
             Box::pin(steam_boiler_water_level.task()),
             Box::pin(tank_water_level.task()),
+            // The controller and the scheduler report for themselves -- see
+            // `with_checkin` and `run_schedule` -- so they are **not** wrapped: one
+            // writer per slot, and a `watch` here would stamp `Good` on every poll and
+            // erase the `ResourceUnavailable` or `PreconditionUnmet` they had just
+            // published.
             Box::pin(controller.task()),
-            Box::pin(rtc_future),
+            Box::pin(watch(MONITOR.claim(CheckinId::Rtc), rtc_future)),
             Box::pin(scheduler),
         ];
 
     #[cfg(feature = "gear-pump")]
-    futures.push(Box::pin(pump_tacho.task()));
+    futures.push(Box::pin(watch(MONITOR.claim(CheckinId::PumpTacho), pump_tacho.task())));
 
     #[cfg(feature = "gravity")]
     if let Some(ref mut g) = gravity_device {
+        // Not wrapped: the device reports for itself, and here that matters more than
+        // elsewhere -- a disconnected scale backs off to a 30 s reconnect, so poll-liveness
+        // alone would read as a row that has gone quiet, which is exactly what a wedged one
+        // looks like.
         futures.push(Box::pin(g.task()));
     }
 
     join_all(futures).await;
 
+    // Every arm's slot now reads `Error(TaskExited)`, which is the first time this line has
+    // been visible anywhere but a probe.
     log_info!("For some reason we got here");
 
     loop {

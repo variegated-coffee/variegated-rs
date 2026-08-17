@@ -14,6 +14,7 @@ heapless.workspace = true
 variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false, features = ["serde", "double_boiler", "single_group"] }
 variegated-debug-codec = { version = "0.1.0", path = "../variegated-debug-codec" }
 variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
+variegated-checkin = { version = "0.1.0", path = "../variegated-checkin" }
 defmt = { workspace = true, optional = true }
 embassy-usb = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
@@ -21,7 +22,7 @@ embassy-rp = { workspace = true, optional = true }
 
 [features]
 default = []
-defmt = ["dep:defmt", "variegated-controller-types/defmt", "variegated-debug-codec/defmt"]
+defmt = ["dep:defmt", "variegated-controller-types/defmt", "variegated-debug-codec/defmt", "variegated-checkin/defmt"]
 instrumentation = ["variegated-instrumentation/instrumentation"]
 # RP2350 USB CDC-ACM transport (Task 4).
 usb-cdc-rp = ["dep:embassy-usb", "dep:embassy-futures", "dep:embassy-rp"]

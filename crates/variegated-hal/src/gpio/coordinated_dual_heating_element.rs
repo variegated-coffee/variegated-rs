@@ -76,7 +76,17 @@ pub struct CoordinatedDualHeatingElementDevice<O1: OutputPin, O2: OutputPin, M: 
     steam_duty_signal: &'static Signal<M, DutyCycleType>,
     interlock_enabled_signal: &'static Signal<M, bool>,
     contention_strategy_signal: &'static Signal<M, HeatingElementContentionStrategy>,
+    checkin: variegated_checkin::CheckinHandle,
 }
+
+/// The longest this device will go without checking in.
+///
+/// Deliberately far tighter than the loop's own cadence, and tighter than any other slot in
+/// this tree. A cycle is seconds long -- three, on the dual boiler -- so one check-in per
+/// iteration would mean a row that cannot report a stall until several seconds after it
+/// happened. This is the task holding both elements' interlock, and the failure worth
+/// catching is it stopping *between* setting a pin high and setting it low again.
+const CHECKIN_INTERVAL: Duration = Duration::from_secs(1);
 
 impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeatingElementDevice<O1, O2, M> {
     pub fn new(
@@ -96,6 +106,36 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeating
             steam_duty_signal,
             interlock_enabled_signal,
             contention_strategy_signal,
+            checkin: variegated_checkin::CheckinHandle::none(),
+        }
+    }
+
+    /// Report this device's liveness into a check-in slot.
+    ///
+    /// A caller that sets this must **not** also wrap [`WithTask::task`] in
+    /// `variegated_checkin::watch` -- one writer per slot, and the wrapper would report only
+    /// once per cycle where this reports every [`CHECKIN_INTERVAL`].
+    pub fn with_checkin(mut self, checkin: variegated_checkin::CheckinHandle) -> Self {
+        self.checkin = checkin;
+        self
+    }
+
+    /// Sleep for `duration`, checking in at least every [`CHECKIN_INTERVAL`].
+    ///
+    /// **Against an absolute deadline, not by repeatedly subtracting from a remainder.** The
+    /// point of chunking is to report often; the point of the deadline is that chunking must
+    /// not change the timing it is chunking. Each pass recomputes the remaining time from
+    /// `deadline`, so the wakeups add no cumulative error -- this is a heating element's
+    /// on-phase, and drift here is a duty cycle that is not the one the controller asked for.
+    async fn sleep_reporting(&self, duration: Duration) {
+        let deadline = embassy_time::Instant::now() + duration;
+        loop {
+            self.checkin.good();
+            let now = embassy_time::Instant::now();
+            if now >= deadline {
+                return;
+            }
+            Timer::after((deadline - now).min(CHECKIN_INTERVAL)).await;
         }
     }
 
@@ -178,22 +218,25 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeating
     /// Execute the heating schedule by controlling the GPIO pins
     async fn execute_coordinated_schedule(&mut self, schedule: &HeatingSchedule) {
         // Sequential execution - no overlap
+        // `sleep_reporting`, not `Timer::after`: each of these is a single sleep of up to a
+        // whole cycle with an element energised, and it is exactly the window in which a
+        // stall matters most. Same duration, same edges, just awake often enough to say so.
         if schedule.brew_duration > Duration::from_millis(1) {
             self.brew_output.set_high().ok();
             self.steam_output.set_low().ok();
-            Timer::after(schedule.brew_duration).await;
+            self.sleep_reporting(schedule.brew_duration).await;
         }
 
         if schedule.steam_duration > Duration::from_millis(1) {
             self.brew_output.set_low().ok();
             self.steam_output.set_high().ok();
-            Timer::after(schedule.steam_duration).await;
+            self.sleep_reporting(schedule.steam_duration).await;
         }
 
         if schedule.idle_duration > Duration::from_millis(1) {
             self.brew_output.set_low().ok();
             self.steam_output.set_low().ok();
-            Timer::after(schedule.idle_duration).await;
+            self.sleep_reporting(schedule.idle_duration).await;
         }
 
         // Ensure both are off at end of cycle
@@ -227,6 +270,9 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeating
 
         // Main timing loop - turn off elements as their time expires
         loop {
+            // Already a 10 ms loop, so this only has to be in it -- no chunking needed.
+            self.checkin.good();
+
             let now = embassy_time::Instant::now();
 
             // Check if brew should turn off

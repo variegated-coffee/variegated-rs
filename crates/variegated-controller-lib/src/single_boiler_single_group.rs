@@ -2,7 +2,7 @@ extern crate alloc;
 
 use crc::{Crc, CRC_32_ISCSI};
 use variegated_log::{log_debug, log_error, log_info, log_warn};
-use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_controller_types::debug::{name, CheckinDetail, CheckinStatus, DebugEvent};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
@@ -337,6 +337,9 @@ pub struct SingleBoilerSingleGroupController<
     shot_upload_config_loaded: bool,
     shot_upload_publish_pending: bool,
     shot_upload_config_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, ShotUploadConfig, 2>>,
+
+    /// Where this loop reports its own health. See `with_checkin`.
+    checkin: variegated_checkin::CheckinHandle,
 }
 
 impl<
@@ -469,7 +472,19 @@ impl<
             shot_upload_config_loaded: false,
             shot_upload_publish_pending: false,
             shot_upload_config_publisher,
+            checkin: variegated_checkin::CheckinHandle::none(),
         }
+    }
+
+    /// Report this loop's health into a check-in slot.
+    ///
+    /// Not an `Option`: [`variegated_checkin::CheckinHandle::none`] points at a slot nothing
+    /// reads, so an unwired controller runs the same code with no branch. A caller that sets
+    /// this must **not** also wrap `task()` in `variegated_checkin::watch` -- one writer per
+    /// slot, and this reports strictly more than the wrapper would.
+    pub fn with_checkin(mut self, checkin: variegated_checkin::CheckinHandle) -> Self {
+        self.checkin = checkin;
+        self
     }
 
     /// The published view of the configuration.
@@ -549,7 +564,22 @@ impl<
         let mut last_configuration_publish = Instant::MIN;
 
         loop {
-            self.persistent_configuration = self.configuration_store.load_settings().await.unwrap_or_default();
+            // Recomputed from scratch each pass, so a condition that clears is reported as
+            // cleared on the next tick rather than latching.
+            let mut health = CheckinStatus::Good;
+
+            self.persistent_configuration = match self.configuration_store.load_settings().await {
+                Ok(settings) => settings,
+                Err(_) => {
+                    // Substituting a `Default` is this loop continuing to run on a
+                    // configuration the operator did not choose. Survivable -- hence a
+                    // warning -- but it is the difference between a machine that is set up
+                    // and one that looks set up, and until now it said so nowhere at all:
+                    // the `unwrap_or_default` this replaces discarded the error silently.
+                    health = CheckinStatus::Warning(CheckinDetail::Degraded);
+                    Default::default()
+                }
+            };
 
             // Repairs the stored `Off` that made the steam switch change the mode and then
             // stop the heating. Applied to the loaded value rather than written back: it is
@@ -750,6 +780,11 @@ impl<
             if let Some(ref mut watchdog) = self.watchdog {
                 watchdog.feed(crate::WATCHDOG_TIMEOUT);
             }
+
+            // Beside the watchdog feed, and after it, so a pass that reached the feed is a
+            // pass that reported. The check-in is the one of the two that can distinguish
+            // *this* loop running from the executor running.
+            self.checkin.record(health);
 
             Timer::after_millis(100).await;
         }
@@ -1441,7 +1476,7 @@ impl<
                 }
             }
             MachineCommand::UpdateCommsStatus(status) => {
-                log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
+                //log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }

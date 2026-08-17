@@ -102,6 +102,7 @@ pub async fn lcd_display_task(
     mut status_receiver: StatusSubscriber,
     routine_repository: &'static crate::RoutineRepositoryMutex,
     mut identify_receiver: IdentifyReceiver,
+    checkin: variegated_checkin::CheckinHandle,
 ) {
     // Initialize the HD44780 LCD controller configuration
     let initial_config = InitialConfig {
@@ -150,6 +151,8 @@ pub async fn lcd_display_task(
 
     // Main display loop
     loop {
+        checkin.good();
+
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);
@@ -231,6 +234,7 @@ pub async fn graphical_display_task(
     mut reset: Output<'static>,
     mut status_receiver: StatusSubscriber,
     mut identify_receiver: IdentifyReceiver,
+    checkin: variegated_checkin::CheckinHandle,
 ) {
     use crate::display::GraphicalDisplayState;
 
@@ -284,6 +288,11 @@ pub async fn graphical_display_task(
 
     // Main display loop
     async_task_loop!("Display task", Some(Duration::from_millis(10)), {
+        // The only check-in written from core 1 besides the shot-log task's. Nothing about
+        // that needs handling: the slot is two relaxed atomics, so a cross-core write costs
+        // no lock and no critical section on either core.
+        checkin.good();
+
         // Update status
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             display_state.shared_state.update_status(new_status);

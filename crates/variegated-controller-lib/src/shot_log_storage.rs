@@ -36,8 +36,9 @@ use variegated_controller_types::{
     ShotAnnotations, ShotLog, ShotLogDayFilter, ShotLogList, ShotLogListEntry,
     ShotLogListRequest, SHOT_LOG_FORMAT_VERSION, SHOT_LOG_LIST_BUDGET,
 };
-use variegated_log::{log_debug, log_warn};
+use variegated_log::{log_debug, log_error, log_warn};
 
+use crate::exfat_format;
 use crate::sd_card::SharedSpiBus;
 
 /// Bytes per block. exFAT calls these sectors; the card calls them blocks.
@@ -92,6 +93,105 @@ pub const SHOT_LOG_ANNOTATION_PREFIX_LEN: usize = 1024;
 /// itself over 100 ms and must not be mistaken for a stuck bus -- but finite, because an
 /// unbounded wait here wedges the storage task with no diagnostic at all.
 pub const BUS_LEASE_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(2);
+
+/// How long one filesystem operation may hold the bus before it is abandoned.
+///
+/// # A backstop, not the detector
+///
+/// The stall this exists against is caught a layer down, by
+/// [`crate::sd_card::TRANSFER_TIMEOUT`], which bounds every individual SPI transfer at one
+/// second. That is where a hung DMA transfer -- the failure that took core 1 down with the
+/// display still holding the lease -- actually gets caught, and it catches it in about a
+/// second rather than after a whole operation's worth of patience.
+///
+/// This one covers what that cannot: a stall *between* transfers, in `exfat-slim`'s own
+/// logic. Nothing known does that, which is exactly why the number is so loose. It is a
+/// failsafe against a fault nobody has seen, and the cost of it being generous is a slower
+/// recovery from something that today needs a power cycle; the cost of it being tight is
+/// abandoning a working operation.
+///
+/// Two orders of magnitude above the real worst case, which is a maximal shot: 3,000
+/// samples (`ShotLoggerConfig::max_samples`) at roughly 80 bytes each is about 240 kB,
+/// which at the ~340 kB/s implied by [`SELF_TEST_PATTERN_LEN`]'s note is a second of bus
+/// time.
+///
+/// Fixed rather than scaled with the card, because none of these operations grow with it: a
+/// store is bounded by `max_samples`, a chunk by [`SHOT_LOG_CHUNK_LEN`], a listing by how
+/// many shots are on the card. [`FORMAT_SECTOR_ALLOWANCE`] is the one that does scale.
+pub const OPERATION_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(120);
+
+/// The same backstop for [`SdShotLogStorage::self_test`].
+///
+/// Its own, and larger, because the self-test writes [`SELF_TEST_PATTERN_LEN`] and reads it
+/// all back, then runs seek probes, a listing and a delete on top -- several times the work
+/// of any single operation above. Still fixed, because that pattern is a constant and does
+/// not grow with the card.
+pub const SELF_TEST_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_secs(300);
+
+/// The size-independent part of a format's budget.
+///
+/// Mount, geometry, the up-case table and both boot regions: a fixed cost whatever the card.
+pub const FORMAT_SETUP_ALLOWANCE: embassy_time::Duration = embassy_time::Duration::from_secs(60);
+
+/// Budget per sector a format writes, on top of [`FORMAT_SETUP_ALLOWANCE`].
+///
+/// A format is single-block writes throughout, so its duration tracks the sector count --
+/// which is what `variegated_exfat_format::Geometry::sectors_written` reports, and which is
+/// **not** proportional to card size (a 16 GB card writes more sectors than a 32 GB one;
+/// see that method's table). Deriving the budget from that figure rather than from capacity
+/// is the difference between a bound and a guess.
+///
+/// A second per sector against a real cost near a millisecond is roughly 500x, and
+/// deliberately the loosest number here. A format that gets abandoned half-written is a
+/// destroyed volume, and unlike every other operation on this card there is no retry that
+/// recovers what was there -- so this errs as far as it can toward never firing. On a
+/// 512 GB card it works out at about nine and a half hours, against a real format of under
+/// a minute.
+pub const FORMAT_SECTOR_ALLOWANCE: embassy_time::Duration =
+    embassy_time::Duration::from_secs(1);
+
+/// How long a format of `device` may take before it is abandoned.
+///
+/// [`FORMAT_SETUP_ALLOWANCE`] plus [`FORMAT_SECTOR_ALLOWANCE`] for every sector the
+/// formatter will write, which it asks the geometry rather than guessing from capacity --
+/// the two do not track each other, because the cluster-size step at 32 GB quarters the FAT
+/// and so a 16 GB card writes *more* sectors than a 32 GB one.
+///
+/// Lives here rather than at the call site so the arithmetic sits with the constants it
+/// uses, and so the firmware does not have to name the `sdio`/`exfat-slim` tower that
+/// `SdCardBlockDevice` exists to name once.
+///
+/// # Both failure paths return a budget rather than refusing
+///
+/// A card whose size cannot be read gets the largest budget this can express, and a size
+/// `geometry` rejects gets the setup allowance -- enough for [`exfat_format::format`] to
+/// reach its own `BadSize`/`TooSmall` and say so. Neither refuses the format outright,
+/// because a failsafe that declines to run the operation has stopped being a failsafe. This
+/// is also the one operation on the card with no recovery: a format abandoned part-written
+/// is a destroyed volume, so where this has to be wrong it is wrong in the loose direction.
+pub async fn format_budget<BD>(device: &mut BD) -> embassy_time::Duration
+where
+    BD: BlockDevice<BLOCK_SIZE>,
+{
+    let Ok(bytes) = device.size().await else {
+        log_warn!("SD format: could not read the card size; using the maximum budget");
+        return FORMAT_SETUP_ALLOWANCE + FORMAT_SECTOR_ALLOWANCE * u32::MAX;
+    };
+
+    match exfat_format::geometry(bytes / BLOCK_SIZE as u64) {
+        Ok(geo) => {
+            let sectors = geo.sectors_written();
+            let budget = FORMAT_SETUP_ALLOWANCE + FORMAT_SECTOR_ALLOWANCE * sectors;
+            log_debug!(
+                "SD format: {} sectors to write, budget {} s",
+                sectors,
+                budget.as_secs()
+            );
+            budget
+        }
+        Err(_) => FORMAT_SETUP_ALLOWANCE,
+    }
+}
 
 /// Re-exported from its home in `variegated-controller-types`.
 ///
@@ -454,9 +554,21 @@ where
             // -- which is exactly what happened.
             return SelfTestReport::default();
         }
-        let report = self.self_test_inner().await;
+        let result = embassy_time::with_timeout(SELF_TEST_TIMEOUT, self.self_test_inner()).await;
+        // Unconditional, and on the timeout path especially: the guard lives in the
+        // `'static` `SharedSpiBus`, not in the future being abandoned, so nothing else
+        // would ever give the display its bus back. See `reacquire_sd_card`.
         self.release();
-        report
+        match result {
+            Ok(report) => report,
+            Err(_) => {
+                log_error!("SD self-test: abandoned after {} s", SELF_TEST_TIMEOUT.as_secs());
+                // The default report, for the same reason the bus-unavailable path above
+                // returns one: every flag false says "it stopped", and the high-water
+                // reading of where is the log line, not a flag this type has.
+                SelfTestReport::default()
+            }
+        }
     }
 
     async fn self_test_inner(&mut self) -> SelfTestReport {
@@ -1241,6 +1353,41 @@ where
     }
 }
 
+/// Run one bracketed filesystem operation: refuse, lease, bound, release.
+///
+/// All six trait methods below are this same shape, and it is a shape with an invariant
+/// worth taking out of each one's hands: **`release()` must run on every path out**,
+/// including the timeout. The guard does not live in the operation's future -- it lives in
+/// the `'static` [`crate::sd_card::SharedSpiBus`] -- so abandoning the future frees
+/// nothing, and a single method that forgot would strand the display's bus until the next
+/// power cycle. Writing it once means there is no per-method path to get wrong.
+///
+/// `$what` names the operation for the log line. `$op` is evaluated after the lease is
+/// taken, so an argument that borrows `self` is fine.
+macro_rules! bracketed {
+    ($self:ident, $timeout:expr, $what:expr, $op:expr) => {{
+        if !$self.available {
+            return Err(ShotLogStorageError::CardNotPresent);
+        }
+        if !$self.lease().await {
+            return Err(ShotLogStorageError::BusUnavailable);
+        }
+        let result = embassy_time::with_timeout($timeout, $op).await;
+        $self.release();
+        match result {
+            Ok(inner) => inner,
+            Err(_) => {
+                log_error!(
+                    "SD: {} abandoned after {} s with the bus held; card will be re-identified",
+                    $what,
+                    $timeout.as_secs()
+                );
+                Err(ShotLogStorageError::OperationTimedOut)
+            }
+        }
+    }};
+}
+
 impl<'a, BD, M, BUS> ShotLogStorage for SdShotLogStorage<'a, BD, M, BUS>
 where
     BD: BlockDevice<BLOCK_SIZE>,
@@ -1248,47 +1395,31 @@ where
     M: embassy_sync::blocking_mutex::raw::RawMutex,
 {
     async fn store_shot(&mut self, shot: &ShotLog) -> Result<StoredShot, ShotLogStorageError> {
-        if !self.available {
-            return Err(ShotLogStorageError::CardNotPresent);
-        }
-        let id = current_shot_id(shot);
-
-        if !self.lease().await {
-            return Err(ShotLogStorageError::BusUnavailable);
-        }
-        let result = self.store_shot_inner(shot, id).await;
-        self.release();
-        result
+        bracketed!(
+            self,
+            OPERATION_TIMEOUT,
+            "store",
+            self.store_shot_inner(shot, current_shot_id(shot))
+        )
     }
 
     async fn list_shots(
         &mut self,
         request: ShotLogListRequest,
     ) -> Result<ShotLogList, ShotLogStorageError> {
-        if !self.available {
-            return Err(ShotLogStorageError::CardNotPresent);
-        }
-        if !self.lease().await {
-            return Err(ShotLogStorageError::BusUnavailable);
-        }
-        let result = self.list_shots_inner(request).await;
-        self.release();
-        result
+        bracketed!(self, OPERATION_TIMEOUT, "list", self.list_shots_inner(request))
     }
 
     async fn read_annotations(
         &mut self,
         id: ShotLogId,
     ) -> Result<ShotAnnotations, ShotLogStorageError> {
-        if !self.available {
-            return Err(ShotLogStorageError::CardNotPresent);
-        }
-        if !self.lease().await {
-            return Err(ShotLogStorageError::BusUnavailable);
-        }
-        let result = self.read_annotations_inner(id).await;
-        self.release();
-        result
+        bracketed!(
+            self,
+            OPERATION_TIMEOUT,
+            "annotation read",
+            self.read_annotations_inner(id)
+        )
     }
 
     async fn set_annotations(
@@ -1296,15 +1427,12 @@ where
         id: ShotLogId,
         annotations: ShotAnnotations,
     ) -> Result<(), ShotLogStorageError> {
-        if !self.available {
-            return Err(ShotLogStorageError::CardNotPresent);
-        }
-        if !self.lease().await {
-            return Err(ShotLogStorageError::BusUnavailable);
-        }
-        let result = self.set_annotations_inner(id, annotations).await;
-        self.release();
-        result
+        bracketed!(
+            self,
+            OPERATION_TIMEOUT,
+            "annotation write",
+            self.set_annotations_inner(id, annotations)
+        )
     }
 
     async fn read_chunk(
@@ -1313,27 +1441,16 @@ where
         offset: u32,
         buf: &mut [u8],
     ) -> Result<ChunkRead, ShotLogStorageError> {
-        if !self.available {
-            return Err(ShotLogStorageError::CardNotPresent);
-        }
-        if !self.lease().await {
-            return Err(ShotLogStorageError::BusUnavailable);
-        }
-        let result = self.read_chunk_inner(id, offset, buf).await;
-        self.release();
-        result
+        bracketed!(
+            self,
+            OPERATION_TIMEOUT,
+            "chunk read",
+            self.read_chunk_inner(id, offset, buf)
+        )
     }
 
     async fn delete_shot(&mut self, id: ShotLogId) -> Result<(), ShotLogStorageError> {
-        if !self.available {
-            return Err(ShotLogStorageError::CardNotPresent);
-        }
-        if !self.lease().await {
-            return Err(ShotLogStorageError::BusUnavailable);
-        }
-        let result = self.delete_shot_inner(id).await;
-        self.release();
-        result
+        bracketed!(self, OPERATION_TIMEOUT, "delete", self.delete_shot_inner(id))
     }
 
     fn is_available(&self) -> bool {

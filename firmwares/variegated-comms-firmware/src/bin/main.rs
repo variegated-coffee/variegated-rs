@@ -14,7 +14,7 @@ use variegated_log::log_info;
 use edge_nal_embassy::{Tcp, TcpBuffers};
 use embassy_executor::Spawner;
 use embassy_net::StackResources;
-use embassy_time::{Duration, Timer};
+use embassy_time::{with_timeout, Duration, Timer};
 use esp_alloc as _;
 use esp_backtrace::Backtrace;
 use esp_hal::{
@@ -39,9 +39,11 @@ use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
 
 // Library imports
+use variegated_checkin::watch;
 use variegated_comms_firmware::{
     application_processor,
     ble::{ble_devices_task, ble_runner_task, ble_slot_task, ScanPrinter},
+    checkin::{checkin_task, CheckinId, MONITOR},
     channels::{
         ApplicationConfigurationChannel, ApplicationStatusChannel, ApplicationRoutineChannel,
         ShotLogEventChannel, SHOT_LOG_EVENT_CHANNEL,
@@ -225,11 +227,23 @@ pub extern "Rust" fn _esp_println_timestamp() -> u64 {
 #[embassy_executor::task]
 async fn status_listener_task(status_channel: &'static ApplicationStatusChannel) {
     let mut subscriber = status_channel.subscriber().unwrap();
+    let checkin = MONITOR.claim(CheckinId::StatusListener);
     log_info!("Status listener task is started");
     loop {
+        checkin.good();
+
         // Drained, not used. A pubsub subscriber that never reads lags and then drops
         // messages for every other subscriber on the channel.
-        let _ = subscriber.next_message_pure().await;
+        //
+        // Timed out so the row has a period. Status arrives about once a second while the
+        // link is up, so in practice the timeout never fires -- but "the link is up" is
+        // exactly the assumption a check-in must not make, and with a bare `await` this row
+        // would go stale on a dead link rather than reporting that the *listener* is fine.
+        let _ = with_timeout(
+            variegated_checkin::HEARTBEAT,
+            subscriber.next_message_pure(),
+        )
+        .await;
     }
 }
 
@@ -254,7 +268,13 @@ async fn comms_status_signaller_task(
     use portable_atomic::Ordering;
 
     log_info!("CommsStatus signaller task started");
+    let checkin = MONITOR.claim(CheckinId::CommsStatusSignaller);
     loop {
+        // The one slot whose staleness the *machine* already reacts to: the application
+        // processor ages this report against `COMMS_STATUS_STALE_AFTER`, so a stale row
+        // here has a visible consequence at the other end of the link.
+        checkin.good();
+
         // Get real WiFi connection status
         let wifi_connected = WIFI_CONNECTED.load(Ordering::Relaxed);
 
@@ -334,7 +354,11 @@ async fn debug_uart_task(
     sink: debug::CommandSink,
     subscriber: Option<debug::BusSubscriber>,
 ) {
-    debug::uart::run(debug_rx, debug_tx, sink, subscriber).await;
+    watch(
+        MONITOR.claim(CheckinId::DebugUart),
+        debug::uart::run(debug_rx, debug_tx, sink, subscriber),
+    )
+    .await;
 }
 
 /// The structured debug stream's network transport: one client at a time on 9090,
@@ -349,7 +373,7 @@ async fn debug_tcp_task(
     subscriber: Option<debug::BusSubscriber>,
     sink: debug::CommandSink,
 ) {
-    debug::tcp::run(stack, subscriber, sink).await;
+    watch(MONITOR.claim(CheckinId::DebugTcp), debug::tcp::run(stack, subscriber, sink)).await;
 }
 
 #[embassy_executor::task]
@@ -387,17 +411,24 @@ async fn application_processor_task(
     let command_receiver = command_channel.receiver();
     let sensor_reading_receiver = sensor_reading_channel.receiver();
 
-    application_processor::start(
-        rx,
-        tx,
-        status_publisher,
-        config_publisher,
-        routine_publisher,
-        shot_log_event_publisher,
-        command_receiver,
-        sensor_reading_receiver,
-        debug_command_receiver,
-        scanner.results(),
+    // One row for a `join` of a reader and a sender, each nesting several `select4`s. The
+    // period is loose because the sender's slowest arm is a 15 s routine request: this
+    // reports "the link task is being woken", and nothing finer until the arms get slots
+    // of their own.
+    watch(
+        MONITOR.claim(CheckinId::ApplicationProcessor),
+        application_processor::start(
+            rx,
+            tx,
+            status_publisher,
+            config_publisher,
+            routine_publisher,
+            shot_log_event_publisher,
+            command_receiver,
+            sensor_reading_receiver,
+            debug_command_receiver,
+            scanner.results(),
+        ),
     )
     .await;
 }
@@ -653,6 +684,7 @@ async fn main(spawner: Spawner) -> ! {
     // Wi-Fi stack finishes coming up. It also emits the schema, which a host needs before
     // any sample means anything.
     spawn_or_report!(spawner, "debug_sampler", instrumentation::sampler_task());
+    spawn_or_report!(spawner, "checkin", checkin_task());
     log_info!("Debug USB-Serial-JTAG transport spawned");
 
     // Initialize ESPHome channels

@@ -807,11 +807,11 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::RequestRoutines => {
-                                    info!("Routine summaries requested by ESP32");
+                                   //info!("Routine summaries requested by ESP32");
 
                                     if let Some(output) = build_routine_summaries(routine_repository).await {
                                         let _ = tx_sender.send(output).await;
-                                        info!("Sent routine summaries to ESP32");
+                                        //info!("Sent routine summaries to ESP32");
                                         bus::emit_event(DebugEvent::RoutinesSent);
                                     }
                                 }
@@ -1144,7 +1144,7 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
 
                 if let Some(output) = output {
                     let _ = tx_sender.send(output).await;
-                    info!("Sent updated configuration to ESP32");
+                    //info!("Sent updated configuration to ESP32");
 
                     if bluetooth_changed {
                         let response = ApplicationProcessorToCommsProcessorMessage::BluetoothPeripherals(

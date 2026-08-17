@@ -4,7 +4,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use crc::{Crc, CRC_32_ISCSI};
 use variegated_log::{log_debug, log_error, log_info, log_warn};
-use variegated_controller_types::debug::{name, DebugEvent};
+use variegated_controller_types::debug::{name, CheckinDetail, CheckinStatus, DebugEvent};
 use embassy_rp::watchdog::Watchdog;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Receiver, Sender};
@@ -624,6 +624,9 @@ pub struct DualBoilerSingleGroupController<
     /// Whether the currently open shot log was opened by `start_brewing` rather than by a
     /// routine. Only that kind is closed by `stop_brewing`; see `finish_manual_shot_log`.
     manual_shot_active: bool,
+
+    /// Where this loop reports its own health. See [`Self::with_checkin`].
+    checkin: variegated_checkin::CheckinHandle,
 }
 
 impl<
@@ -808,7 +811,19 @@ impl<
             shot_state: crate::ShotStateTracker::new(),
             input_volume_at_first_drop: None,
             manual_shot_active: false,
+            checkin: variegated_checkin::CheckinHandle::none(),
         }
+    }
+
+    /// Report this loop's health into a check-in slot.
+    ///
+    /// Not an `Option`: [`variegated_checkin::CheckinHandle::none`] points at a slot nothing
+    /// reads, so an unwired controller runs the same code with no branch. A caller that sets
+    /// this must **not** also wrap `task()` in `variegated_checkin::watch` -- one writer per
+    /// slot, and this reports strictly more than the wrapper would.
+    pub fn with_checkin(mut self, checkin: variegated_checkin::CheckinHandle) -> Self {
+        self.checkin = checkin;
+        self
     }
 
     /// Record what a scale currently reads as the dose for the next shot.
@@ -1054,10 +1069,32 @@ impl<
                 }
             }
 
+            // What this pass will report, downgraded as it goes. Starts clean and only ever
+            // gets worse within a pass, so the order of the checks below does not matter --
+            // and it is recomputed from scratch each pass, so a condition that clears is
+            // reported as cleared on the next tick rather than latching.
+            let mut health = CheckinStatus::Good;
+
             // Try to load settings with timeout to avoid blocking if optimization is running
             self.configuration.persistent = match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                Ok(mut store) => store.load_settings().await.unwrap_or_default(),
+                Ok(mut store) => match store.load_settings().await {
+                    Ok(settings) => settings,
+                    Err(_) => {
+                        // Substituting a `Default` is this loop continuing to run on a
+                        // configuration the operator did not choose. It is survivable --
+                        // which is why it is a warning and not an error -- but it is the
+                        // difference between a machine that is set up and one that looks
+                        // set up, and until now it said so only in a log line.
+                        health = CheckinStatus::Warning(CheckinDetail::Degraded);
+                        Default::default()
+                    }
+                },
                 Err(_) => {
+                    // The store is busy -- `optimize_storage` holds this lock across a
+                    // flash erase. Reported rather than silently kept, because the machine
+                    // is now running on a snapshot rather than on what is stored, and if
+                    // the lock is *never* released this is the only place that would say so.
+                    health = CheckinStatus::Warning(CheckinDetail::ResourceUnavailable);
                     // If we can't acquire the lock, keep current configuration
                     self.configuration.persistent.clone()
                 }
@@ -1166,7 +1203,7 @@ impl<
             if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
                 let current_config = self.configuration.clone();
                 self.publish_general_configuration().await;
-                log_info!("Periodic configuration published");
+                //log_info!("Periodic configuration published");
                 last_configuration_publish = now;
                 last_published_configuration = current_config;
             }
@@ -1175,6 +1212,12 @@ impl<
             if let Some(ref mut watchdog) = self.watchdog {
                 watchdog.feed(crate::WATCHDOG_TIMEOUT);
             }
+
+            // Recorded beside the watchdog feed, and that adjacency is the point: these are
+            // the two things this loop says about its own liveness, and the check-in is the
+            // one that can distinguish *this* loop running from the executor running. It
+            // goes after the feed so a pass that reached the feed is a pass that reported.
+            self.checkin.record(health);
 
             Timer::after_millis(100).await;
         }
@@ -2102,7 +2145,7 @@ impl<
                 }
             }
             MachineCommand::UpdateCommsStatus(status) => {
-                log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
+                //log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }

@@ -162,6 +162,47 @@ impl Geometry {
     fn clusters_for(&self, bytes: u32) -> u32 {
         bytes.div_ceil(self.bytes_per_cluster()).max(1)
     }
+
+    /// Sectors [`format`] writes for this layout.
+    ///
+    /// Exposed so a caller can size a timeout for a format it is about to run. The
+    /// formatter writes one sector at a time throughout -- `put` is a single-block write --
+    /// so duration tracks the *sector count*, not the byte count, and the FAT dominates it:
+    ///
+    /// | card | cluster size | sectors written |
+    /// |---|---|---|
+    /// | 16 GB | 32 KiB | 4,376 |
+    /// | 32 GB | 128 KiB | 2,840 |
+    /// | 128 GB | 128 KiB | 8,984 |
+    /// | 512 GB | 128 KiB | 34,328 |
+    /// | 1 TB | 128 KiB | 68,120 |
+    ///
+    /// A single constant is therefore wrong at both ends -- generous enough for the large
+    /// card and it is no bound at all on the small one; tight enough for the small card
+    /// and it aborts the large one part-written, which is a destroyed volume.
+    ///
+    /// Note that the sequence is **not monotonic in card size**: a 16 GB card writes more
+    /// sectors than a 32 GB one, because the 32 KiB -> 128 KiB cluster step at 32 GB
+    /// quarters the cluster count and so quarters the FAT. Anything scaling a bound by
+    /// capacity rather than by this figure gets that backwards.
+    ///
+    /// This is the same arithmetic the writers use rather than an independent estimate, so
+    /// the two cannot drift. `sectors_written_matches_the_format` holds that in place: it
+    /// counts what a real format actually issues and requires this to be an exact match.
+    pub fn sectors_written(&self) -> u32 {
+        let fat = self.fat_length;
+        let bitmap = self.clusters_for(self.bitmap_length) * self.sectors_per_cluster();
+        let upcase = self.clusters_for(UPCASE_TABLE.len() as u32) * self.sectors_per_cluster();
+        // The root is one cluster: the entry sector plus the rest zeroed behind it.
+        let root = self.sectors_per_cluster();
+        // Main and backup, each a full boot region plus its checksum sector.
+        let boot = BOOT_REGION_SECTORS * 2;
+
+        fat.saturating_add(bitmap)
+            .saturating_add(upcase)
+            .saturating_add(root)
+            .saturating_add(boot)
+    }
 }
 
 /// Sectors per cluster for a volume of `sectors` 512-byte sectors.
