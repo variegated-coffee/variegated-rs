@@ -163,6 +163,20 @@ impl Status {
     pub fn get_tank_status(&self, tank_index: TankIndex) -> Option<&TankStatus> {
         self.tank_statuses.get(&tank_index)
     }
+
+    /// Whether any water tap is dispensing.
+    ///
+    /// Any-tap rather than tap 0, so a consumer asking "is the machine putting water out of
+    /// a tap right now" does not bake in the single-tap layout every machine here happens to
+    /// have today. Same for [`Status::any_steam_wand_steaming`].
+    pub fn any_water_tap_dispensing(&self) -> bool {
+        self.water_tap_statuses.values().any(|status| status.is_dispensing)
+    }
+
+    /// Whether any steam wand is steaming.
+    pub fn any_steam_wand_steaming(&self) -> bool {
+        self.steam_wand_statuses.values().any(|status| status.is_steaming)
+    }
 }
 
 #[cfg(feature = "defmt")]
@@ -426,4 +440,58 @@ pub struct SteamWandStatus {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TankStatus {
     pub water_level: Option<WaterLevelType>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unconfigured machine reports no taps and no wands at all, and that has to read as
+    /// "not dispensing" rather than panicking or defaulting to true -- `Status::default()` is
+    /// what every display holds until the first status arrives.
+    #[test]
+    fn no_taps_or_wands_is_not_active() {
+        let status = Status::default();
+        assert!(!status.any_water_tap_dispensing());
+        assert!(!status.any_steam_wand_steaming());
+    }
+
+    #[test]
+    fn an_idle_tap_or_wand_is_not_active() {
+        let mut status = Status::default();
+        status.water_tap_statuses.insert(0, WaterTapStatus { is_dispensing: false }).ok();
+        status.steam_wand_statuses.insert(0, SteamWandStatus::default()).ok();
+
+        assert!(!status.any_water_tap_dispensing());
+        assert!(!status.any_steam_wand_steaming());
+    }
+
+    #[test]
+    fn an_active_tap_or_wand_is_active() {
+        let mut status = Status::default();
+        status.water_tap_statuses.insert(0, WaterTapStatus { is_dispensing: true }).ok();
+        status.steam_wand_statuses.insert(0, SteamWandStatus {
+            is_steaming: true,
+            valve_openness: 100,
+        }).ok();
+
+        assert!(status.any_water_tap_dispensing());
+        assert!(status.any_steam_wand_steaming());
+    }
+
+    /// The point of `any_`: a second tap dispensing has to count even when tap 0 is idle.
+    #[test]
+    fn a_later_tap_or_wand_counts() {
+        let mut status = Status::default();
+        status.water_tap_statuses.insert(0, WaterTapStatus { is_dispensing: false }).ok();
+        status.water_tap_statuses.insert(1, WaterTapStatus { is_dispensing: true }).ok();
+        status.steam_wand_statuses.insert(0, SteamWandStatus::default()).ok();
+        status.steam_wand_statuses.insert(1, SteamWandStatus {
+            is_steaming: true,
+            valve_openness: 50,
+        }).ok();
+
+        assert!(status.any_water_tap_dispensing());
+        assert!(status.any_steam_wand_steaming());
+    }
 }

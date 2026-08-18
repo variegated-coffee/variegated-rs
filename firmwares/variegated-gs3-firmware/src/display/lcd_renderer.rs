@@ -121,6 +121,17 @@ impl LcdDisplayState {
             }
         }
 
+        // What the machine is doing, for as long as it is doing it. Behind the dose popup,
+        // which is five seconds of news, and ahead of the provisioning rows, which are an
+        // invitation that will still be there afterwards.
+        //
+        // A takeover here where the TFT gets an overlay, because 2x16 has no third row to put
+        // this on -- but `activity_overlay` already declines during a brew or a routine, which
+        // is where taking the panel over would cost the most.
+        if let Some(activity) = self.shared_state.activity_overlay() {
+            return (Self::center_16(activity.label()), String::new());
+        }
+
         // Ahead of the mode match rather than inside it: the window can be open in any mode,
         // and a copy of this check in each arm is a copy that will be missed when an arm is
         // added.
@@ -211,6 +222,21 @@ impl LcdDisplayState {
         }
 
         Ok(())
+    }
+
+    /// Leading spaces enough to centre `text` in the 16 columns.
+    ///
+    /// No trailing padding: `pad_or_truncate_to_16` supplies that, and adding it here would
+    /// push a 16-character string past the row and lose its last character to the truncation.
+    fn center_16(text: &str) -> String {
+        let width = text.chars().count();
+        let leading = (16usize.saturating_sub(width)) / 2;
+        let mut out = String::new();
+        for _ in 0..leading {
+            out.push(' ');
+        }
+        out.push_str(text);
+        out
     }
 
     /// Helper function to pad or truncate text to exactly 16 characters

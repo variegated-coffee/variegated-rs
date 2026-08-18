@@ -221,6 +221,10 @@ impl GraphicalDisplayState {
         // on top in every mode rather than in the ones that happened to be considered.
         self.render_provisioning_banner(display).ok();
 
+        // Same reasoning, and before the dose popup: the two share a box, and a dose the user
+        // just tagged is newer news than a tap that has been running for ten seconds.
+        self.render_activity_overlay(display).ok();
+
         // Last of all, for the same reason the banner is drawn after the mode renderer.
         self.render_dose_popup(display).ok();
 
@@ -324,6 +328,69 @@ impl GraphicalDisplayState {
         Ok(())
     }
 
+    /// The bordered box the popups share, centred on the effective area.
+    ///
+    /// Returns its top edge, which is what callers position text against. One helper rather
+    /// than one copy per popup so that two boxes appearing back to back -- a dose tagged while
+    /// the tap is running -- are the same box in the same place rather than two that nearly
+    /// agree.
+    ///
+    /// The bottom lands at y=121 and the provisioning banner starts at 133, so they do not
+    /// overlap.
+    fn draw_popup_box<D>(display: &mut D) -> i32
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        const BOX_WIDTH: i32 = 200;
+        const BOX_HEIGHT: i32 = 60;
+        let box_left = EFFECTIVE_CENTER_X - BOX_WIDTH / 2;
+        let box_top = EFFECTIVE_CENTER_Y - BOX_HEIGHT / 2;
+
+        Rectangle::new(
+            Point::new(box_left, box_top),
+            Size::new(BOX_WIDTH as u32, BOX_HEIGHT as u32),
+        )
+        .into_styled(PrimitiveStyleBuilder::new()
+            .fill_color(Rgb565::BLACK)
+            .stroke_color(Rgb565::WHITE)
+            .stroke_width(2)
+            .build())
+        .draw(display).ok();
+
+        box_top
+    }
+
+    /// What the machine is doing, while it is doing it.
+    ///
+    /// The tap and the steam valve had no feedback on the panel at all: the machine either made
+    /// a noise or it did not. This is the same box as the dose popup, drawn just before it so a
+    /// dose tagged mid-dispense still wins the pixels for its five seconds and this returns
+    /// underneath when the popup expires.
+    ///
+    /// Suppression during a brew or a routine lives in `DisplayState::activity_overlay`, with the
+    /// character LCD, rather than here.
+    fn render_activity_overlay<D>(&self, display: &mut D) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let Some(activity) = self.shared_state.activity_overlay() else { return Ok(()) };
+
+        let box_top = Self::draw_popup_box(display);
+
+        // One line, centred in the box rather than at the dose popup's caption offset: there is
+        // no second row to leave room for.
+        FontRenderer::new::<u8g2_font_logisoso18_tr>().render_aligned(
+            format_args!("{}", activity.label()),
+            Point::new(EFFECTIVE_CENTER_X, box_top + 30),
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
+
+        Ok(())
+    }
+
     /// The dose the user just captured, for five seconds.
     ///
     /// Drawn unconditionally, including during a brew:
@@ -339,23 +406,7 @@ impl GraphicalDisplayState {
         if !self.shared_state.dose_popup_active() { return Ok(()); }
         let Some(grams) = self.shared_state.dose_popup_weight() else { return Ok(()) };
 
-        const BOX_WIDTH: i32 = 200;
-        const BOX_HEIGHT: i32 = 60;
-        let box_left = EFFECTIVE_CENTER_X - BOX_WIDTH / 2;
-        let box_top = EFFECTIVE_CENTER_Y - BOX_HEIGHT / 2;
-
-        // The box bottom lands at y=121 and the provisioning banner starts at 133, so they do
-        // not overlap.
-        Rectangle::new(
-            Point::new(box_left, box_top),
-            Size::new(BOX_WIDTH as u32, BOX_HEIGHT as u32),
-        )
-        .into_styled(PrimitiveStyleBuilder::new()
-            .fill_color(Rgb565::BLACK)
-            .stroke_color(Rgb565::WHITE)
-            .stroke_width(2)
-            .build())
-        .draw(display).ok();
+        let box_top = Self::draw_popup_box(display);
 
         FontRenderer::new::<u8g2_font_helvB12_tr>().render_aligned(
             format_args!("Dose captured"),

@@ -1863,11 +1863,18 @@ impl<
                     return;
                 }
 
-                if self.configuration.persistent.allow_simultaneous_operations || !self.water_tap_dispensing {
-                    self.start_brewing().await;
-                } else {
-                    log_warn!("Cannot start brewing while dispensing water (simultaneous operations disabled)");
+                // Unconditional, unlike the steam exclusion below. `allow_simultaneous_operations`
+                // is about running the two boilers at once -- brewing while steaming -- and the
+                // tap is not a boiler: it shares the pump and the same body of brew water with
+                // the group. There is no configuration under which starting a shot into a
+                // running tap is what the user meant.
+                if self.water_tap_dispensing {
+                    log_warn!("Cannot start brewing while dispensing water");
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tap_active") });
+                    return;
                 }
+
+                self.start_brewing().await;
             }
             MachineCommand::StopBrewing(_) => {
                 self.stop_brewing().await;
@@ -1884,11 +1891,29 @@ impl<
                     return;
                 }
 
-                if self.configuration.persistent.allow_simultaneous_operations || !self.group_brewing {
-                    self.start_water_tap_dispensing().await;
-                } else {
-                    log_warn!("Cannot start water tap while brewing (simultaneous operations disabled)");
+                // The other half of the brew/tap exclusion above, and unconditional for the same
+                // reason.
+                if self.group_brewing {
+                    log_warn!("Cannot start water tap while brewing");
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_brewing_active") });
+                    return;
                 }
+
+                // Steam blocks the tap but the tap does not block steam, and the asymmetry is
+                // deliberate. Steam is a valve the user is holding a jug under; refusing to open
+                // it leaves the panel button doing nothing, and the GS3's steam button carries
+                // its own three-position `steam_valve_state` (gs3-firmware/src/buttons.rs) which
+                // is not derived from `Status` and would silently desync from the machine if a
+                // `StartSteaming` were dropped here. Refusing the tap has neither problem: its
+                // button reads `is_dispensing` back out of `Status` every cycle.
+                #[cfg(feature = "pwm-steam-valve")]
+                if self.steam_wand.get_steaming_state() {
+                    log_warn!("Cannot start water tap while steaming");
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_steaming_active") });
+                    return;
+                }
+
+                self.start_water_tap_dispensing().await;
             }
             MachineCommand::StopPumpingToWaterTap(_) => {
                 self.stop_water_tap_dispensing().await;
@@ -1897,6 +1922,15 @@ impl<
             MachineCommand::StartSteaming(_) => {
                 if self.configuration.ephemeral.mode != MachineMode::On {
                     log_warn!("Cannot start steaming while not in On mode");
+                    return;
+                }
+
+                // The one thing `allow_simultaneous_operations` actually names: both boilers
+                // working at once. Inert at the default, which is `true` on every configuration
+                // in this tree -- brewing and steaming together is the point of a dual boiler.
+                if !self.configuration.persistent.allow_simultaneous_operations && self.group_brewing {
+                    log_warn!("Cannot start steaming while brewing (simultaneous operations disabled)");
+                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("steam_brewing_active") });
                     return;
                 }
 

@@ -34,6 +34,12 @@ impl Default for DualBoilerConfig {
 /// Kept with an `#[allow]` rather than deleted, because deleting them would erase the
 /// record that this enum is meant to cover those two cases. Wiring the assignments up is a
 /// change to state tracking, not a warnings fix.
+///
+/// `BrewingAndDispensingWater` is unconstructed too, but for the opposite reason: brewing
+/// and dispensing share the one pump and are now mutually exclusive, so it is a state the
+/// machine is not allowed to reach rather than one the bookkeeping forgot to record. It
+/// stays because `get_dispensing_state` reads it, and because a variant that names a
+/// forbidden state is a cheaper record of the rule than a comment alone.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, Format)]
 enum DualBoilerMechanismState {
@@ -95,9 +101,9 @@ impl<'a> DualBoilerMechanism<'a> {
             DualBoilerMechanismState::SteamingOnly if self.config.allow_simultaneous_operations => {
                 self.state = DualBoilerMechanismState::BrewingAndSteaming;
             }
-            DualBoilerMechanismState::DispensingWater if self.config.allow_simultaneous_operations => {
-                self.state = DualBoilerMechanismState::BrewingAndDispensingWater;
-            }
+            // No `DispensingWater` arm: brewing and dispensing share the pump, so a shot started
+            // into a running tap gets half the flow it asked for. `allow_simultaneous_operations`
+            // does not reach this -- it is about the two boilers, not the one pump.
             _ => return, // Cannot start brewing in current state
         }
 
@@ -188,11 +194,12 @@ impl<'a> DualBoilerMechanism<'a> {
             if let Some(brew_duty) = self.brew_request {
                 // Brewing gets pump + group solenoid
                 // BLOCKS fill solenoid (safety - can't fill service boiler while brewing)
-                // Allows water/steam if configured
+                // BLOCKS water dispersal (resource conflict - one pump, two destinations)
+                // Allows steam if configured
                 (
                     brew_duty,
                     true,
-                    self.water_dispersal_request.is_some() && self.config.allow_simultaneous_operations,
+                    false, // Always block water dispersal during brew
                     false, // Always block fill during brew
                     self.steam_dispersal_request && self.config.allow_simultaneous_operations
                 )

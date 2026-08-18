@@ -34,6 +34,33 @@ pub enum DisplayMode {
     RoutineExecution,
 }
 
+/// Something the machine is doing that is worth putting a box on the screen for.
+///
+/// Brewing is not here: it has a whole [`DisplayMode`] of its own, with numbers a box would
+/// cover. This is for the two operations that had no feedback at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityOverlay {
+    /// The water tap is running.
+    HotWater,
+    /// The steam valve is open.
+    Steaming,
+}
+
+impl ActivityOverlay {
+    /// The one line the overlay draws.
+    ///
+    /// Short on purpose. The TFT box is 200px wide and every font in this firmware is a
+    /// `_tr` variant -- glyphs 32..127 -- and `render_aligned` resolves the whole bounding
+    /// box before drawing, so a string that overruns or carries a non-ASCII character is
+    /// dropped entirely and shows as an empty box. The character LCD has 16 columns.
+    pub fn label(self) -> &'static str {
+        match self {
+            ActivityOverlay::HotWater => "Hot Water",
+            ActivityOverlay::Steaming => "Steaming",
+        }
+    }
+}
+
 /// Shared display state tracker
 pub struct DisplayState {
     /// Current system status
@@ -86,6 +113,36 @@ impl DisplayState {
     /// The dose it is showing.
     pub fn dose_popup_weight(&self) -> Option<f32> {
         self.previous_dose_weight
+    }
+
+    /// What the machine is doing right now, if it is worth an overlay.
+    ///
+    /// Read straight out of the live `Status` each frame rather than edge-detected the way
+    /// the dose popup is: this has a duration of its own -- it is up exactly as long as the
+    /// tap or the valve is -- where a dose capture is an instant and needs a timer to be
+    /// visible at all.
+    ///
+    /// Suppressed while brewing or running a routine, exactly as the provisioning banner and
+    /// the provisioning rows suppress themselves, and for the same reason: the box lands on
+    /// the extraction numbers, and those are what the user is standing there watching. The
+    /// tap can no longer run during a brew at all, so in practice this is the steam-during-a-
+    /// shot case, which is the normal way to use a dual boiler.
+    pub fn activity_overlay(&self) -> Option<ActivityOverlay> {
+        match self.get_display_mode() {
+            DisplayMode::Brewing | DisplayMode::RoutineExecution => return None,
+            _ => {}
+        }
+
+        // Water first: the two are mutually exclusive by interlock in the direction that
+        // matters, but steam can still be opened on top of a running tap, and one box holds
+        // one label.
+        if self.status.any_water_tap_dispensing() {
+            Some(ActivityOverlay::HotWater)
+        } else if self.status.any_steam_wand_steaming() {
+            Some(ActivityOverlay::Steaming)
+        } else {
+            None
+        }
     }
 
     /// Check if an update is needed (1Hz rate limiting)
