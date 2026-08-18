@@ -1947,6 +1947,7 @@ mod tests {
                             started_at_millis: u64::MAX,
                             stopped_at_millis: u64::MAX,
                         }),
+                        pump_rpm: Some(f32::MAX),
                     },
                 )
                 .unwrap();

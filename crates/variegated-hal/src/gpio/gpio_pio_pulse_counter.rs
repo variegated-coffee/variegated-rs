@@ -344,16 +344,20 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                         let elapsed_seconds = elapsed.as_micros() as f32 / 1_000_000.0;
 
                         if elapsed_seconds >= 0.5 {
+                            // No plausibility ceiling here. There was one -- 1000 Hz,
+                            // commented "for flow meter" -- but this driver is generic and
+                            // the GS3 runs two of them: the flow meter on SM0 and the pump
+                            // tacho on SM1. A gear pump rated 300-5000 rpm at 32 pulses per
+                            // revolution is 160-2667 Hz, so the flow meter's bound rejected
+                            // the pump running normally, and rejection published 0.0 rather
+                            // than holding the last value -- reading as "stopped" exactly
+                            // when the pump was fastest.
+                            //
+                            // If noise ever needs bounding again, it belongs in a
+                            // constructor parameter, per instance. A single constant cannot
+                            // be right for both inputs.
                             let pulse_count = total_pulses.saturating_sub(start_pulses);
-                            let freq = pulse_count as f32 / elapsed_seconds;
-
-                            // Sanity check for flow meter (< 1000 Hz)
-                            if freq <= 1000.0 {
-                                freq
-                            } else {
-                                log_info!("Rejecting impossible frequency: {} Hz", freq);
-                                0.0
-                            }
+                            pulse_count as f32 / elapsed_seconds
                         } else {
                             0.0
                         }

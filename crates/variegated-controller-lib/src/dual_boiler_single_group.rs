@@ -1662,6 +1662,7 @@ impl<
             pump_output: pump_output.clone(),
             control_state: self.configuration.ephemeral.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
+            pump_rpm: self.group.get_pump_rpm(),
         };
 
         // Calculate current timestamp if we have comms_status

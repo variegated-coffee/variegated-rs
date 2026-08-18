@@ -154,6 +154,10 @@ impl ShotLogger {
                 shot_state: group_status.current_brew.as_ref().and_then(|b| b.shot_state),
                 extracted_solids: group_status.current_brew.as_ref().and_then(|b| b.extracted_solids),
                 output_volume: group_status.current_brew.as_ref().and_then(|b| b.output_volume),
+                // Straight off the status, not out of `current_brew`: the pump turns
+                // whether or not a brew is in flight, and a pre-infusion ramp is exactly
+                // the part worth having.
+                pump_rpm: group_status.pump_rpm,
             });
         }
 

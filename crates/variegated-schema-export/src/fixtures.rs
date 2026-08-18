@@ -178,6 +178,7 @@ fn status_maximal() -> Status {
                         started_at_millis: 1_000_000,
                         stopped_at_millis: 1_027_000,
                     }),
+                    pump_rpm: Some(1937.5),
                 },
             )
             .expect("fits");
@@ -315,6 +316,12 @@ fn status_maximal() -> Status {
                     ),
                 )
                 .expect("fits");
+            // A pending block can carry a note the same as a stored one, and this fixture
+            // is the maximal `Status`: leaving it `None` would exercise only the one-byte
+            // arm of the field that contributes 259 of the block's 804-byte worst case.
+            annotations.tasting_notes = Some(
+                heapless::String::try_from("Blackcurrant, tomato, syrupy").expect("fits"),
+            );
             annotations
         },
         // `Some(true)` here against `None` in the minimal fixture. A field carrying the
@@ -691,6 +698,13 @@ fn shot_annotations() -> ShotAnnotations {
             ShotAnnotationValue::Text(heapless::String::try_from("ZeroWater").expect("fits")),
         )
         .expect("fits");
+    // Not an entry -- a field beside them. Populated for the same reason the four above
+    // are: a `None` here would leave the schema's newest field unexercised by every
+    // generated fixture.
+    annotations.tasting_notes = Some(
+        heapless::String::try_from("Bergamot up front, red apple, long cocoa finish")
+            .expect("fits"),
+    );
     annotations
 }
 
@@ -749,6 +763,10 @@ pub fn canonical_shot() -> ShotLog {
         shot_state: Some(ShotState::Saturation),
         extracted_solids: Some(2.25),
         output_volume: Some(24.0),
+        // The field version 5 added, appended rather than filed beside `pump_output` --
+        // so unlike the version 3 three above, everything before it keeps its meaning in
+        // an older file.
+        pump_rpm: Some(1937.5),
     };
 
     let sample_at = |t: u64, brewing: bool, pressure: f32, flow_out: f32| {

@@ -726,7 +726,8 @@ export const SetShotUploadSettingsRequestSchema = struct({
 });
 
 export const ShotAnnotationsSchema = struct({
-  entries: seq(ShotAnnotationSchema)
+  entries: seq(ShotAnnotationSchema),
+  tasting_notes: option(string())
 });
 
 export const BoilerConfigurationSchema = struct({
@@ -770,7 +771,8 @@ export const GroupStatusSchema = struct({
   extraction_rate: option(f32()),
   pump_output: OutputSchema,
   control_state: GroupBrewControlStateSchema,
-  previous_brew: option(PreviousBrewInfoSchema)
+  previous_brew: option(PreviousBrewInfoSchema),
+  pump_rpm: option(f32())
 });
 
 export const RoutineExitSchema = struct({

@@ -120,17 +120,12 @@ impl<'a, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, cons
 
                         // Only calculate frequency if we have a reasonable time span (>= 500ms)
                         if elapsed_seconds >= 0.5 {
+                            // No plausibility ceiling here -- see the note in
+                            // `gpio_pio_pulse_counter.rs`. The same 1000 Hz flow-meter
+                            // constant lived here too. No firmware instantiates this type
+                            // today, but leaving one copy behind is how it comes back.
                             let pulse_count = self.total_pulses.saturating_sub(start_total_pulses);
-                            let calculated_frequency = pulse_count as f32 / elapsed_seconds;
-
-                            // Sanity check: reject frequencies that seem impossible (>1000 Hz for flow meter)
-                            if calculated_frequency <= 1000.0 {
-                                calculated_frequency
-                            } else {
-                                log_info!("Rejecting impossible frequency: {} Hz (pulse_count={}, elapsed={}s)",
-                                      calculated_frequency, pulse_count, elapsed_seconds);
-                                0.0
-                            }
+                            pulse_count as f32 / elapsed_seconds
                         } else {
                             // Not enough time elapsed, use previous frequency or 0
                             0.0

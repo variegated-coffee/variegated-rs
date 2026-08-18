@@ -168,7 +168,24 @@ use crate::Status;
 ///   `load_settings` maps that to `Default`, and every machine loses its endpoint and token
 ///   once. That is the second time -- see the field comment on `enabled` -- and it was again
 ///   accepted rather than paying for a fifth settings store.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x93;
+/// * `0x94` -- pump speed. [`crate::GroupStatus`] gained a trailing `pump_rpm`, and
+///   [`crate::shot_log::ShotAnnotations`] a trailing `tasting_notes`. Both reach the wire
+///   inside `Status`, the former directly and the latter as `pending_shot_annotations`.
+///
+///   Mandatory in both directions, and the same *struct* case as `0x90`, `0x91` and `0x93`:
+///   there is no length prefix to resynchronise on, so an older peer reads the first
+///   appended byte as the start of whatever it thought came next. `GroupStatus` sits inside
+///   a map inside `Status`, so the desync consumes the following group's key.
+///
+///   `ShotAnnotations` also arrives from a host inside `MachineCommand::SetShotAnnotations`
+///   and `SetPendingShotAnnotations`, which is what makes the inbound direction matter as
+///   well as the outbound one.
+///
+///   Unlike `0x93` this touches no stored settings blob. It does coincide with
+///   [`crate::shot_log::SHOT_LOG_FORMAT_VERSION`] going to 5, but the two are independent
+///   version spaces guarding different artifacts -- the wire and the card -- and only
+///   happen to move together here.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x94;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

@@ -19,7 +19,8 @@
     "discovered": []
   },
   "pending_shot_annotations": {
-    "entries": []
+    "entries": [],
+    "tasting_notes": null
   },
   "sd_card_present": null
 }
