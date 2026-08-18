@@ -59,12 +59,18 @@ run() {
 run gs3 -p variegated-gs3-firmware
 run gs3_pwm_steam_valve -p variegated-gs3-firmware --features=pwm-steam-valve
 run silvia -p variegated-silvia-firmware
-# Neither `character-display` nor `pwm-leds` is part of the GS3's default set, so without
-# this line the HD44780 driver, its renderer and the LED breathing controller would not be
-# compiled by any gate build -- and an optional feature nothing builds is one that rots.
-# They share a build rather than getting one each because the point is compile coverage of
-# the optional peripherals, not any particular combination of them.
+# `character-display` is not part of the GS3's default set, so without this line the
+# HD44780 driver and its renderer would not be compiled by any gate build -- and an
+# optional feature nothing builds is one that rots. `pwm-leds` is named too even though it
+# is now a default, so that this line keeps saying which optional peripherals it exists to
+# cover rather than quietly depending on the default set to carry one of them.
 run gs3_optional_peripherals -p variegated-gs3-firmware --features=character-display,pwm-leds
+# Also not covered, and newly so: the `not(pwm-leds)` arm in `main.rs` that parks the
+# TLC59108's eight channels off. Since `pwm-leds` joined the default set every gate build
+# compiles the animation instead, and reaching the parking arm needs
+# `--no-default-features` plus the whole set spelled out by hand -- the same shape of hole
+# as `gravity` below. Three lines, but they are the ones that run on a machine built
+# without the LEDs.
 # Not covered here: the GS3's `gravity` feature. It is mutually exclusive with the default
 # `bluetooth-group-1-scale`, so it needs `--no-default-features` and the rest of the set
 # spelled out by hand rather than riding along with the line above. That is a hole in the
