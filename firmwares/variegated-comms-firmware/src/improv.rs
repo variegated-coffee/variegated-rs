@@ -20,6 +20,7 @@ use embassy_futures::select::{select3, Either3};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_radio::ble::controller::BleConnector;
 use portable_atomic::Ordering;
+use static_cell::StaticCell;
 use trouble_host::prelude::*;
 use variegated_controller_types::wifi::wifi_credentials;
 use variegated_improv_trouble::codec::State;
@@ -193,6 +194,17 @@ async fn local_url() -> Option<Url> {
     }
 }
 
+/// The device name the GATT attribute table borrows, for the life of the task.
+///
+/// A `StaticCell` rather than a local because `ImprovServer<'values>` holds a reference to
+/// it, and the server now outlives the loop iteration that builds it.
+///
+/// Written through the task-local `gap_name: Option<&'static str>` and never directly, so
+/// that a failed server build -- which leaves `server` as `None` and comes back around --
+/// reuses the name already stored rather than initialising this a second time. That second
+/// initialisation is the same panic this whole arrangement exists to prevent.
+static GAP_NAME: StaticCell<heapless::String<MAX_NAME_LEN>> = StaticCell::new();
+
 /// The machine's name, for the advertisement and for `GET_DEVICE_INFO`.
 async fn device_name() -> heapless::String<MAX_NAME_LEN> {
     let name = MACHINE_DEFINITION
@@ -239,6 +251,11 @@ pub async fn improv_task(
     log_info!("Improv provisioning task started, window closed");
     let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::Improv);
 
+    // Both outlive the loop, because the GATT server below may only be built once. See the
+    // note at its construction for why that is a property of the server and not a choice.
+    let mut server: Option<ImprovServer<'static>> = None;
+    let mut gap_name: Option<&'static str> = None;
+
     loop {
         checkin.good();
 
@@ -272,20 +289,47 @@ pub async fn improv_task(
             crate::debug::snapshot::heap_free()
         );
 
-        // Built per window rather than once, because the attribute table borrows `name` and
-        // the machine can be renamed between windows. The characteristic value storage behind
-        // it is a `static_cell::StaticCell` per characteristic and is *not* rebuilt -- so this
-        // must not be reached twice concurrently, and it cannot be: one task, one loop.
-        let server = match ImprovServer::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-            name: name.as_str(),
-            appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
-        })) {
-            Ok(server) => server,
-            Err(error) => {
-                log_error!("Could not build the Improv GATT server: {}", error);
-                continue;
+        // Built once for the life of the task, on the first window that needs it.
+        //
+        // It used to be rebuilt per window, so that the attribute table could borrow a fresh
+        // `name` after a rename. That panicked on the *second* window: `#[gatt_service]`
+        // emits a `static_cell::StaticCell` per characteristic value buffer larger than
+        // eight bytes -- two of them here, `rpc_command` and `rpc_result` -- and initialises
+        // each with `StaticCell::init`, which panics rather than returns when the cell is
+        // already full. The comment that stood here reasoned it was safe because one task
+        // and one loop cannot reach it *concurrently*, which was true and beside the point:
+        // a `StaticCell` may be initialised once, not once at a time.
+        //
+        // Deferred to the first window rather than done at task start because the machine
+        // definition arrives over the link after boot, and a server built before it lands
+        // would hold the "Variegated" fallback in its GAP table forever.
+        if server.is_none() {
+            // Promoted to `'static` because the attribute table borrows it for as long as
+            // the server lives, which is now the whole task.
+            //
+            // Remembered separately from `server`, and that is the whole point of the
+            // `Option`: building the server can fail, and the `continue` below then brings
+            // us back here with `server` still `None`. Calling `GAP_NAME.init` again on
+            // that second pass would panic in precisely the way this block exists to fix.
+            // So the name is initialised at most once whatever the server does, and a
+            // retry reuses it.
+            let gap_name = *gap_name.get_or_insert_with(|| GAP_NAME.init(name.clone()).as_str());
+            match ImprovServer::new_with_config(GapConfig::Peripheral(PeripheralConfig {
+                name: gap_name,
+                appearance: &appearance::power_device::GENERIC_POWER_DEVICE,
+            })) {
+                Ok(built) => server = Some(built),
+                Err(error) => {
+                    log_error!("Could not build the Improv GATT server: {}", error);
+                    continue;
+                }
             }
-        };
+        }
+        // Fixed at the first window, unlike the advertised name below. A rename after that
+        // reaches every scanner and every Improv client -- both read the advertisement --
+        // but not the GAP Device Name characteristic, which no Improv client reads and
+        // which cannot be rewritten without rebuilding the table this cannot rebuild.
+        let server = server.as_ref().expect("built immediately above or `continue`d");
 
         let mut handler = MachineHandler { device_name: name.clone() };
 
