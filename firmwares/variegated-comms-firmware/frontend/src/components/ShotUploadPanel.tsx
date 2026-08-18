@@ -15,6 +15,23 @@ const TOKEN_MAX = 64;
 /** Length of a Noise key as provisioned — `SHOT_UPLOAD_KEY_LEN`. */
 const KEY_MAX = 53;
 
+/**
+ * Whether to offer the token, and the `https://` transport it belongs to.
+ *
+ * Both still work: the firmware stores a token, `saveShotUploadSettings` still carries one,
+ * and `Keep`/`Set`/`Clear` are untouched. Machines are provisioned over `http+noise://` with
+ * the two keys below, and a form offering two transports asks an operator to decide something
+ * they have no basis to decide.
+ *
+ * Gated rather than deleted for two reasons. It restores in one boolean; and `noUnusedLocals`
+ * is on for this build, with `build.rs` failing the firmware build if `tsc` does — so the
+ * state behind these controls has to stay referenced, which gating does and deleting does not.
+ *
+ * Hiding the field cannot clear a stored token: an untouched input leaves `token` empty and
+ * `clearToken` false, which `handleSave` sends as `Keep`.
+ */
+const SHOW_UPLOAD_TOKEN = false;
+
 const inputStyle = {
   width: '100%',
   padding: '0.4rem',
@@ -47,6 +64,9 @@ const inputStyle = {
  * form shows both sets rather than switching on the scheme, because a half-typed URL would
  * make the fields flicker, and because moving a machine between transports means editing
  * both at once.
+ *
+ * That is the shape of the form, and it is what returns when `SHOW_UPLOAD_TOKEN` goes back
+ * to true. As shipped only the Noise half is offered — see the constant.
  */
 export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
   const [endpoint, setEndpoint] = useState('');
@@ -131,34 +151,49 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
           type="url"
           value={endpoint}
           maxLength={ENDPOINT_MAX}
-          placeholder="https://plantlet.example/api/shots"
+          placeholder={
+            SHOW_UPLOAD_TOKEN
+              ? 'https://plantlet.example/api/shots'
+              : 'http+noise://plantlet.example/api/shots'
+          }
           onInput={(e) => setEndpoint((e.target as HTMLInputElement).value)}
           style={inputStyle}
         />
         <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          <code>https://</code> with a token, or <code>http+noise://</code> with the two keys
-          below. Leave blank to stop uploading.
+          {SHOW_UPLOAD_TOKEN ? (
+            <>
+              <code>https://</code> with a token, or <code>http+noise://</code> with the two
+              keys below. Leave blank to stop uploading.
+            </>
+          ) : (
+            <>
+              <code>http+noise://</code> with the two keys below. Leave blank to stop
+              uploading.
+            </>
+          )}
         </div>
       </label>
 
-      <label style={{ display: 'block', marginBottom: '0.75rem' }}>
-        <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Token</div>
-        <input
-          type="password"
-          value={token}
-          maxLength={TOKEN_MAX}
-          disabled={clearToken}
-          autoComplete="off"
-          placeholder={tokenStored ? 'Stored — leave blank to keep' : 'Not set'}
-          onInput={(e) => setToken((e.target as HTMLInputElement).value)}
-          style={{ ...inputStyle, backgroundColor: clearToken ? '#f0f0f0' : 'white' }}
-        />
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          The machine never sends its token back, so this cannot show the current one.
-        </div>
-      </label>
+      {SHOW_UPLOAD_TOKEN && (
+        <label style={{ display: 'block', marginBottom: '0.75rem' }}>
+          <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Token</div>
+          <input
+            type="password"
+            value={token}
+            maxLength={TOKEN_MAX}
+            disabled={clearToken}
+            autoComplete="off"
+            placeholder={tokenStored ? 'Stored — leave blank to keep' : 'Not set'}
+            onInput={(e) => setToken((e.target as HTMLInputElement).value)}
+            style={{ ...inputStyle, backgroundColor: clearToken ? '#f0f0f0' : 'white' }}
+          />
+          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
+            The machine never sends its token back, so this cannot show the current one.
+          </div>
+        </label>
+      )}
 
-      {tokenStored && (
+      {SHOW_UPLOAD_TOKEN && tokenStored && (
         <label
           style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}
         >
@@ -207,8 +242,9 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
           }}
         />
         <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          This machine's secret key, shown once when you generated it. Like the token, the
-          machine never sends it back.
+          This machine's secret key, shown once when you generated it.{' '}
+          {SHOW_UPLOAD_TOKEN ? 'Like the token, the machine' : 'The machine'} never sends it
+          back.
         </div>
       </label>
 
