@@ -12,6 +12,8 @@ interface ShotUploadPanelProps {
 const ENDPOINT_MAX = 255;
 /** Longest token the firmware will store — `SHOT_UPLOAD_TOKEN_LEN`. */
 const TOKEN_MAX = 64;
+/** Length of a Noise key as provisioned — `SHOT_UPLOAD_KEY_LEN`. */
+const KEY_MAX = 53;
 
 const inputStyle = {
   width: '100%',
@@ -33,12 +35,27 @@ const inputStyle = {
  * and a blank field means **keep the stored token**, not clear it. Clearing is a separate,
  * explicit action, because "I edited the endpoint" and "I want to de-provision this machine"
  * must not be the same gesture.
+ *
+ * The **device key** is the same kind of secret and gets exactly the same treatment. The
+ * **server key** is not — it is a public key, so it is sent to the browser and prefilled like
+ * the endpoint. That asymmetry is deliberate: "which server does this machine trust" is the
+ * question you most want to see the answer to when a handshake is being refused.
+ *
+ * # Two transports, one form
+ *
+ * An `https://` endpoint uses the token; an `http+noise://` endpoint uses the two keys. The
+ * form shows both sets rather than switching on the scheme, because a half-typed URL would
+ * make the fields flicker, and because moving a machine between transports means editing
+ * both at once.
  */
 export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
   const [endpoint, setEndpoint] = useState('');
   const [token, setToken] = useState('');
   const [enabled, setEnabled] = useState(false);
   const [clearToken, setClearToken] = useState(false);
+  const [serverKey, setServerKey] = useState('');
+  const [deviceKey, setDeviceKey] = useState('');
+  const [clearDeviceKey, setClearDeviceKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -49,12 +66,16 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
   // leaves an in-progress edit alone.
   const deviceEndpoint = shotUpload?.endpoint ?? '';
   const deviceEnabled = shotUpload?.enabled ?? false;
+  const deviceServerKey = shotUpload?.server_key ?? '';
   useEffect(() => {
     setEndpoint(deviceEndpoint);
     setEnabled(deviceEnabled);
+    setServerKey(deviceServerKey);
     setToken('');
     setClearToken(false);
-  }, [deviceEndpoint, deviceEnabled]);
+    setDeviceKey('');
+    setClearDeviceKey(false);
+  }, [deviceEndpoint, deviceEnabled, deviceServerKey]);
 
   if (!shotUpload) {
     return (
@@ -65,6 +86,7 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
   }
 
   const tokenStored = shotUpload.token_set;
+  const deviceKeyStored = shotUpload.device_key_set;
 
   const handleSave = async () => {
     setError(null);
@@ -81,10 +103,19 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
           : token === ''
             ? { type: 'Keep' }
             : { type: 'Set', value: token },
+        // Public, so it round-trips like the endpoint: what is in the box is what is stored.
+        server_key: serverKey.trim() === '' ? null : serverKey.trim(),
+        device_key: clearDeviceKey
+          ? { type: 'Clear' }
+          : deviceKey === ''
+            ? { type: 'Keep' }
+            : { type: 'Set', value: deviceKey.trim() },
       });
       setSaved(true);
       setToken('');
       setClearToken(false);
+      setDeviceKey('');
+      setClearDeviceKey(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed');
     } finally {
@@ -105,7 +136,8 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
           style={inputStyle}
         />
         <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          Must be HTTPS. Leave blank to stop uploading.
+          <code>https://</code> with a token, or <code>http+noise://</code> with the two keys
+          below. Leave blank to stop uploading.
         </div>
       </label>
 
@@ -136,6 +168,60 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
             onChange={(e) => setClearToken((e.target as HTMLInputElement).checked)}
           />
           <span style={{ fontSize: '0.85rem' }}>Clear the stored token</span>
+        </label>
+      )}
+
+      <label style={{ display: 'block', marginBottom: '0.75rem' }}>
+        <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Server key</div>
+        <input
+          type="text"
+          value={serverKey}
+          maxLength={KEY_MAX}
+          autoComplete="off"
+          spellcheck={false}
+          placeholder="Only for http+noise:// endpoints"
+          onInput={(e) => setServerKey((e.target as HTMLInputElement).value)}
+          style={{ ...inputStyle, fontFamily: 'monospace' }}
+        />
+        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
+          The upload server's public key. Not a secret — it is shown here so you can check
+          which server this machine trusts.
+        </div>
+      </label>
+
+      <label style={{ display: 'block', marginBottom: '0.75rem' }}>
+        <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Device key</div>
+        <input
+          type="password"
+          value={deviceKey}
+          maxLength={KEY_MAX}
+          disabled={clearDeviceKey}
+          autoComplete="off"
+          spellcheck={false}
+          placeholder={deviceKeyStored ? 'Stored — leave blank to keep' : 'Not set'}
+          onInput={(e) => setDeviceKey((e.target as HTMLInputElement).value)}
+          style={{
+            ...inputStyle,
+            fontFamily: 'monospace',
+            backgroundColor: clearDeviceKey ? '#f0f0f0' : 'white',
+          }}
+        />
+        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
+          This machine's secret key, shown once when you generated it. Like the token, the
+          machine never sends it back.
+        </div>
+      </label>
+
+      {deviceKeyStored && (
+        <label
+          style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}
+        >
+          <input
+            type="checkbox"
+            checked={clearDeviceKey}
+            onChange={(e) => setClearDeviceKey((e.target as HTMLInputElement).checked)}
+          />
+          <span style={{ fontSize: '0.85rem' }}>Clear the stored device key</span>
         </label>
       )}
 

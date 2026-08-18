@@ -1,14 +1,32 @@
-//! Uploading finished shot logs to a remote HTTPS endpoint -- the ESP32-C6 half.
+//! Uploading finished shot logs to a remote endpoint -- the ESP32-C6 half.
 //!
-//! The application processor holds the endpoint and token and pushes them over the link
-//! ([`channels::SHOT_UPLOAD_CONFIG`]); this side does the network. It also holds the shots
-//! -- there is no SD card on this processor -- so a shot is pulled 1 kB at a time over the
-//! UART link and written straight into the TLS session.
+//! The application processor holds the endpoint and the credentials and pushes them over the
+//! link ([`channels::SHOT_UPLOAD_CONFIG`]); this side does the network. It also holds the
+//! shots -- there is no SD card on this processor -- so a shot is pulled 1 kB at a time over
+//! the UART link and sealed straight onto the socket.
+//!
+//! # `http+noise://`, and why TLS is gone from this build
+//!
+//! This firmware speaks one transport: a `Noise_X` handshake followed by a stream of sealed
+//! frames, over plain HTTP. MbedTLS wanted about six kilobytes for a handshake against a heap
+//! measured at 424 bytes of headroom, and when it ran out it did not say so -- an allocation
+//! failure inside a signature check surfaced as `BADCERT_NOT_TRUSTED`, which reads as a
+//! certificate problem. The Noise path needs roughly 600 bytes and allocates nothing once the
+//! handshake is built.
+//!
+//! `variegated-shot-upload` still has its `tls` feature and its trust anchors, and
+//! `url::Scheme` still parses `https://` in every build -- so an endpoint this firmware
+//! cannot speak is reported as such rather than as a malformed URL. This binary simply does
+//! not enable that feature.
+//!
+//! Two things follow that are easy to miss. There is no wall clock in the upload path any
+//! more: Noise has no certificate validity dates, so **uploads work before SNTP answers**.
+//! And the SHA/RSA accelerators are no longer claimed here.
 //!
 //! # What is here, and what deliberately is not
 //!
 //! Everything in this module needs the chip: the embassy task, DNS and the TCP socket, the
-//! esp-hal SHA/RSA accelerator hooks, the SNTP-backed wall clock, and the shot-log link.
+//! true RNG behind the Noise ephemeral, and the shot-log link.
 //!
 //! Everything with a *decision* in it lives in [`variegated_shot_upload`], which is a
 //! separate crate for one reason: `variegated-comms-firmware` sets `[lib] harness = false`,
@@ -25,7 +43,6 @@
 //! and the browser's download is the recovery path.
 
 use alloc::{boxed::Box, vec};
-use core::sync::atomic::Ordering;
 
 use embassy_futures::select::{select, Either};
 use embassy_net::dns::DnsQueryType;
@@ -37,10 +54,11 @@ use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::shot_log::{ShotLogEvent, ShotLogId, ShotLogListEntry};
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_log::{log_info, log_warn};
-use variegated_shot_upload::body::{self, Chunk, ChunkSource};
+use variegated_shot_upload::body::{self, Chunk, ChunkSealer, ChunkSource};
+use variegated_shot_upload::noise::{self, Ephemeral, Hello, Keys, NoiseSender};
 use variegated_shot_upload::{
-    classify_status, parse_https_url, retry_delay, session, UploadOutcome, MAX_ATTEMPTS,
-    MAX_RETRY_AFTER_SECS,
+    classify_status, parse_url, retry_delay, temper, ResponseTrust, Scheme, UploadOutcome,
+    MAX_ATTEMPTS, MAX_RETRY_AFTER_SECS,
 };
 
 use crate::channels::{
@@ -91,80 +109,26 @@ const TCP_TX_LEN: usize = 4096;
 enum AttemptError {
     /// The endpoint string is not a usable HTTPS URL. Permanent until reconfigured.
     BadEndpoint,
-    /// DNS, TCP or TLS. Retryable.
+    /// DNS, TCP, or the handshake. Retryable.
+    ///
+    /// There is no `NoClock` beside this any more: it existed because X.509 validity dates
+    /// need a wall clock, and Noise has none. An upload no longer waits on SNTP.
     Network,
-    /// The clock has not been set, so no certificate can be validated. Retryable, and
-    /// self-clearing within a minute of the network coming up.
-    NoClock,
     /// The link went away, or answered something other than the chunk asked for.
     Link,
     /// The server answered. Carries what to do about it.
     Http(UploadOutcome),
-}
-
-/// The wall clock MbedTLS reads for X.509 validity dates.
-///
-/// A unit struct over two atomics, which is what makes it `Sync` without an `unsafe impl`.
-/// `esp_hal::rtc_cntl::Rtc<'d>` holds a peripheral singleton and is not `Sync`, so it cannot
-/// satisfy the `&'static (dyn MbedtlsWallClock + Send + Sync)` the hook wants -- and an
-/// *unset* RTC reads as a valid 1970 timestamp, which would fail closed only by accident.
-struct SyncedWallClock;
-
-static WALL_CLOCK: SyncedWallClock = SyncedWallClock;
-
-/// The monotonic clock, for handshake timeouts. Unrelated to the wall clock: MbedTLS keeps
-/// the two separate, and only the wall clock affects certificate validity.
-static TIMER: mbedtls_rs::sys::hook::backend::embassy::timer::EmbassyTimer =
-    mbedtls_rs::sys::hook::backend::embassy::timer::EmbassyTimer;
-
-impl mbedtls_rs::sys::hook::wall_clock::MbedtlsWallClock for SyncedWallClock {
-    /// `None` until SNTP has answered, which MbedTLS reads as the certificate being both
-    /// expired and not yet valid. That is intended: a machine with no idea what year it is
-    /// cannot meaningfully check a validity window, and the safe answer to "I don't know" is
-    /// to refuse.
-    fn instant(&self) -> Option<mbedtls_rs::sys::tm> {
-        if !channels::TIME_SYNCED.load(Ordering::Relaxed) {
-            return None;
-        }
-
-        // Anchor plus elapsed, rather than reading the `Rtc`: this is called from MbedTLS's
-        // C code with no context to hand one.
-        let anchor_secs = channels::SNTP_UNIX_SECS.load(Ordering::Relaxed) as i64;
-        let anchor_ms = channels::LAST_SNTP_SYNC_MS.load(Ordering::Relaxed);
-        let elapsed_secs =
-            embassy_time::Instant::now().as_millis().saturating_sub(anchor_ms) / 1000;
-        let unix = anchor_secs.saturating_add(elapsed_secs as i64);
-
-        let timestamp = jiff::Timestamp::from_second(unix).ok()?;
-        let dt = jiff::tz::TimeZone::UTC.to_datetime(timestamp);
-
-        Some(mbedtls_rs::sys::tm {
-            tm_sec: dt.second() as i32,
-            tm_min: dt.minute() as i32,
-            tm_hour: dt.hour() as i32,
-            tm_mday: dt.day() as i32,
-            // C counts months from zero and years from 1900. Getting either wrong shifts
-            // every certificate's validity window by a month or a century, and the symptom is
-            // a handshake failing on a date error against a perfectly good certificate.
-            tm_mon: dt.month() as i32 - 1,
-            tm_year: dt.year() as i32 - 1900,
-            tm_wday: dt.date().weekday().to_sunday_zero_offset() as i32,
-            tm_yday: dt.date().day_of_year() as i32 - 1,
-            // No DST in UTC, and MbedTLS's date comparison does not read this anyway.
-            tm_isdst: 0,
-        })
-    }
-}
-
-/// Install the clock hooks. Must run before the first handshake.
-///
-/// `unsafe` because the hooks are global state MbedTLS reads from C. Both arguments are
-/// `'static` unit structs, so there is nothing that can dangle.
-fn install_hooks() {
-    unsafe {
-        mbedtls_rs::sys::hook::timer::hook_timer(Some(&TIMER));
-        mbedtls_rs::sys::hook::wall_clock::hook_wall_clock(Some(&WALL_CLOCK));
-    }
+    /// The `http+noise://` keys are missing or do not decode. Permanent until reconfigured,
+    /// exactly like [`Self::BadEndpoint`] -- and kept distinct from it because "the URL is
+    /// wrong" and "the keys are wrong" send you to different places.
+    BadKeys,
+    /// The link handed back a chunk of the wrong size, so the Noise frames would not line up
+    /// with the `Content-Length` already on the wire.
+    ///
+    /// Its own arm rather than folded into [`Self::Link`] because it means the two processors
+    /// disagree about `SHOT_LOG_CHUNK_LEN` -- a build mismatch, not a transient fault, and
+    /// retrying it will fail identically three times.
+    ChunkShape,
 }
 
 /// Shot bytes, fetched a chunk at a time over the inter-processor link.
@@ -193,34 +157,21 @@ impl ChunkSource for LinkChunkSource {
 pub async fn shot_upload_task(
     stack: Stack<'static>,
     mut events: ShotLogEventSubscriber,
-    sha: esp_hal::peripherals::SHA<'static>,
-    rsa: esp_hal::peripherals::RSA<'static>,
 ) -> ! {
-    // Before the first handshake, and once: these are global hooks MbedTLS reads from C.
-    install_hooks();
-
-    // One `Tls` may exist at a time, and it owns the RNG for the program's life.
+    // The Noise ephemeral comes from here, one per attempt.
     //
-    // `Trng` rather than `Rng`: only `Trng` implements `TryCryptoRng`, which is what
-    // `Tls::new` requires. `try_new` succeeds because `esp_radio::wifi::new` has already
-    // bumped the entropy source counter by the time this task runs.
-    static RNG: static_cell::StaticCell<esp_hal::rng::Trng> = static_cell::StaticCell::new();
-    let tls = match esp_hal::rng::Trng::try_new() {
-        Ok(trng) => match mbedtls_rs::Tls::new(RNG.init(trng)) {
-            Ok(tls) => tls,
-            Err(_) => park("Shot upload: a Tls instance already exists", "tls").await,
-        },
-        Err(_) => park("Shot upload: no TRNG; uploads disabled", "rng").await,
+    // **`Trng`, not `Rng`.** The plain RNG is not cryptographically secure with the radio
+    // idle, and a predictable ephemeral does not weaken this handshake, it eliminates it:
+    // anyone who can guess `e` derives `es` from the compiled-in server public key and reads
+    // everything. `try_new` succeeds because `esp_radio::wifi::new` has already bumped the
+    // entropy-source counter by the time this task runs -- and the radio is by definition up
+    // during an upload.
+    //
+    // Held for the task's life rather than drawn per attempt: `Trng` is a peripheral
+    // singleton, and one uploader is the only consumer.
+    let Ok(mut rng) = esp_hal::rng::Trng::try_new() else {
+        park("Shot upload: no TRNG; uploads disabled", "rng").await
     };
-
-    // Scoped to the task rather than to an attempt: the queue must be alive across every
-    // handshake, and there is exactly one uploader.
-    //
-    // **Not optional.** Without the `exp_mod` hook, verifying an RSA-4096 root is software
-    // big-int on a 160 MHz core inside one call with no yield point -- long enough to trip
-    // the watchdog.
-    let mut accel = mbedtls_rs::sys::hook::backend::esp::EspAccel::new(sha, rsa);
-    let _accel_queue = accel.start();
 
     let mut config_rx = channels::SHOT_UPLOAD_CONFIG
         .receiver()
@@ -252,9 +203,11 @@ pub async fn shot_upload_task(
                 // deliberately switched off should say so once, not narrate it over every
                 // espresso -- and this line is the one that explains a quiet uploader.
                 log_info!(
-                    "Shot upload config updated (endpoint {}, token {}, uploads {})",
+                    "Shot upload config updated (endpoint {}, server key {}, \
+                     device key {}, uploads {})",
                     if new_config.endpoint.is_some() { "set" } else { "unset" },
-                    if new_config.token.is_some() { "set" } else { "unset" },
+                    if new_config.server_key.is_some() { "set" } else { "unset" },
+                    if new_config.device_key.is_some() { "set" } else { "unset" },
                     if new_config.enabled { "enabled" } else { "DISABLED" }
                 );
                 config = Some(new_config);
@@ -272,7 +225,7 @@ pub async fn shot_upload_task(
                 };
 
                 if let Some(config) = config.as_deref() {
-                    upload_shot(&tls, stack, config, &entry).await;
+                    upload_shot(&mut rng, stack, config, &entry).await;
                 }
             }
         }
@@ -292,19 +245,32 @@ async fn park(message: &str, reason: &'static str) -> ! {
 
 /// Upload one shot, retrying a bounded number of times.
 async fn upload_shot(
-    tls: &mbedtls_rs::Tls<'static>,
+    rng: &mut esp_hal::rng::Trng,
     stack: Stack<'_>,
     config: &ShotUploadConfig,
     entry: &ShotLogListEntry,
 ) {
-    // Switched off is a *configured* state, not a missing one -- the endpoint and token are
+    // Switched off is a *configured* state, not a missing one -- the endpoint and keys are
     // still there, waiting. Checked first and silently, because the reason was already
     // logged when the config arrived; saying it again per shot would be noise.
     if !config.enabled {
         return;
     }
 
-    let (Some(endpoint), Some(token)) = (config.endpoint.as_ref(), config.token.as_ref()) else {
+    let Some(endpoint) = config.endpoint.as_ref() else {
+        return;
+    };
+    // Named individually rather than through `has_noise_keys`, so a half-provisioned machine
+    // is told which half is missing. This is the single most common provisioning mistake and
+    // the one a generic "not configured" helps least with.
+    let (Some(server_key), Some(device_key)) =
+        (config.server_key.as_ref(), config.device_key.as_ref())
+    else {
+        log_warn!(
+            "Shot upload: not uploading -- server key {}, device key {}",
+            if config.server_key.is_some() { "set" } else { "MISSING" },
+            if config.device_key.is_some() { "set" } else { "MISSING" }
+        );
         return;
     };
 
@@ -326,7 +292,14 @@ async fn upload_shot(
     loop {
         let result = with_timeout(
             ATTEMPT_TIMEOUT,
-            attempt_upload(tls, stack, endpoint.as_str(), token.as_str(), entry.id),
+            attempt_upload(
+                rng,
+                stack,
+                endpoint.as_str(),
+                server_key.as_str(),
+                device_key.as_str(),
+                entry.id,
+            ),
         )
         .await;
 
@@ -350,13 +323,25 @@ async fn upload_shot(
         let delay_secs = match &error {
             // Nothing about sending the same bytes again changes any of these.
             AttemptError::BadEndpoint => {
-                log_warn!("Shot upload: endpoint is not a usable HTTPS URL");
+                log_warn!("Shot upload: endpoint is not a usable http+noise:// URL");
                 bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("endpoint") });
                 return;
             }
-            AttemptError::Http(UploadOutcome::Permanent) => {
-                log_warn!("Shot upload: refused; check the token and the endpoint");
-                bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("http") });
+            // Not retryable, and distinct from `BadEndpoint` because it sends you to a
+            // different field: the URL may be perfect and the keys still wrong.
+            AttemptError::BadKeys => {
+                log_warn!("Shot upload: the noise keys are not usable; re-provision the machine");
+                bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("keys") });
+                return;
+            }
+            // A build mismatch between the two processors, not a transient fault -- retrying
+            // would fail identically three times.
+            AttemptError::ChunkShape => {
+                log_warn!(
+                    "Shot upload: the link returned an unexpected chunk size; \
+                     the two processors disagree about SHOT_LOG_CHUNK_LEN"
+                );
+                bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("chunk") });
                 return;
             }
             AttemptError::Http(UploadOutcome::RateLimited { retry_after_secs }) => {
@@ -370,19 +355,16 @@ async fn upload_shot(
                 log_warn!("Shot upload: rate limited");
                 Some(*retry_after_secs)
             }
-            // Distinct from a network fault on purpose: this one clears itself once SNTP
-            // answers, and reading it as "the certificate is bad" sends you looking in the
-            // wrong place entirely.
-            AttemptError::NoClock => {
-                log_warn!("Shot upload: clock not set; cannot validate a certificate yet");
-                bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("clock") });
-                retry_delay(attempt)
-            }
             AttemptError::Link => {
                 log_warn!("Shot upload: the link did not deliver the whole shot");
                 bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("link") });
                 retry_delay(attempt)
             }
+            // **There is deliberately no `Http(Permanent)` arm any more.** On this transport
+            // the status line travels in the clear, so anyone on path can write one --
+            // `temper` therefore downgrades every refusal to `ServerError` before it gets
+            // here, and an injected `401` costs three bounded attempts instead of the shot.
+            // A genuinely revoked key looks the same, which is the accepted price.
             AttemptError::Network | AttemptError::Http(_) => {
                 bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("network") });
                 retry_delay(attempt)
@@ -403,19 +385,29 @@ async fn upload_shot(
 }
 
 /// One attempt: resolve, connect, hand over the shot, read the answer.
+///
+/// There is no clock check here, unlike the TLS path this replaced. Noise has no certificate
+/// validity dates, so an upload no longer waits on SNTP -- which also means a machine whose
+/// network is up but whose time server is not can still get its shots away.
 async fn attempt_upload(
-    tls: &mbedtls_rs::Tls<'static>,
+    rng: &mut esp_hal::rng::Trng,
     stack: Stack<'_>,
     endpoint: &str,
-    token: &str,
+    server_key: &str,
+    device_key: &str,
     id: ShotLogId,
 ) -> Result<(), AttemptError> {
-    let url = parse_https_url(endpoint).map_err(|_| AttemptError::BadEndpoint)?;
+    let url = parse_url(endpoint).map_err(|_| AttemptError::BadEndpoint)?;
 
-    // Checked before opening a socket rather than left to surface as a handshake failure, so
-    // the log line names the actual cause.
-    if !channels::TIME_SYNCED.load(Ordering::Relaxed) {
-        return Err(AttemptError::NoClock);
+    // Parsing is scheme-aware in every build, so an `https://` endpoint on a Noise-only
+    // firmware is reported as a build that cannot speak it -- not as a malformed URL, and not
+    // as a handshake that mysteriously fails.
+    if url.scheme != Scheme::Noise {
+        log_warn!(
+            "Shot upload: this firmware speaks http+noise:// only; that endpoint asks for {:?}",
+            url.scheme
+        );
+        return Err(AttemptError::BadEndpoint);
     }
 
     // Resolved every attempt, never cached. `time.rs` gives the reason on the one other
@@ -430,15 +422,42 @@ async fn attempt_upload(
         }
     };
 
-    // NUL-terminated, for SNI and the certificate's CN/SAN check. `parse_https_url` has
-    // already bounded the host to 253 bytes and rejected anything outside the host alphabet,
-    // so neither push can fail on a URL that got this far.
-    let mut server_name = heapless::String::<256>::new();
-    if server_name.push_str(url.host).is_err() || server_name.push('\0').is_err() {
-        return Err(AttemptError::BadEndpoint);
-    }
-    let server_name = core::ffi::CStr::from_bytes_with_nul(server_name.as_bytes())
-        .map_err(|_| AttemptError::BadEndpoint)?;
+    // Built before the socket, so a provisioning mistake costs no connection -- and so the
+    // log line says "keys" rather than something about the network.
+    let keys = Keys::from_crockford(device_key, server_key).map_err(|e| {
+        log_warn!("Shot upload: the noise keys did not decode: {:?}", e);
+        AttemptError::BadKeys
+    })?;
+
+    // Chunk zero before anything is built, so "no such shot" costs no handshake and stays
+    // distinguishable from "the link died".
+    let mut source = LinkChunkSource;
+    let first = source.chunk(id, 0).await.ok_or(AttemptError::Link)?;
+
+    // **A fresh ephemeral per attempt, and this is load-bearing.** The sending cipher is
+    // derived from the chaining key, which is derived from `e`; reusing one across the
+    // 5 s / 30 s retry schedule would encrypt different plaintext under the same key and
+    // nonce, which is a total break of ChaCha20-Poly1305 rather than a weakening -- and one
+    // that round-trips perfectly, so nothing would notice. `Ephemeral` is not `Clone` and
+    // `NoiseSender::begin` consumes it, so the only way to get here twice is to draw again.
+    //
+    // `Trng`, not `Rng`: the plain one is not a CSPRNG, and an ephemeral an attacker can
+    // guess removes all confidentiality, since `es` follows from it and the public server key.
+    let mut seed = [0u8; 32];
+    rng.read(&mut seed);
+    let hello = Hello::new(id, first.total);
+    let mut sender = NoiseSender::begin(&keys, Ephemeral::from_bytes(seed), &hello)
+        .map_err(|e| {
+            log_warn!("Shot upload: could not start a noise session: {:?}", e);
+            AttemptError::BadKeys
+        })?;
+
+    // The exact body length, handshake and per-frame tags included. Computed by the sealer
+    // that will produce the bytes, so the promise and the body cannot disagree.
+    let content_length = sender.content_length(first.total).ok_or_else(|| {
+        log_warn!("Shot upload: {} bytes is not a framable shot", first.total);
+        AttemptError::Link
+    })?;
 
     // `vec![0u8; n]` rather than `Box::new([0u8; n])`: the latter builds the array on the
     // stack first, and this task is polled on the one executor stack everything shares.
@@ -451,66 +470,54 @@ async fn attempt_upload(
         .await
         .map_err(|_| AttemptError::Network)?;
 
-    // Bracketing the heap around the session, the idiom `heap_free` exists for: the
-    // high-water line only moves up and cannot attribute, so the difference either side of a
-    // suspect region is the only way to cost it. This is the largest single heap demand in
-    // the firmware.
+    // Bracketed the way the TLS session used to be, and kept now that the number is small:
+    // the high-water line only moves up and cannot attribute, so the difference either side
+    // of the region is the only way to cost it. Logged on both paths, unlike before -- the
+    // failure case is precisely when the figure is worth having, and its absence is what made
+    // the original heap exhaustion an inference rather than a reading.
     let heap_before = crate::debug::snapshot::heap_free();
 
-    let mut tls_session = session::connect(tls.reference(), socket, server_name)
-        .await
-        .map_err(|e| {
-            log_warn!("Shot upload: TLS connect failed: {:?}", e);
-            AttemptError::Network
-        })?;
+    let head = noise::request_head(url.path, url.host, content_length);
+    let outcome = body::send_sealed(&mut socket, &mut source, &mut sender, id, first, &head).await;
 
     log_info!(
-        "TLS session: heap free {} -> {}",
+        "Noise upload: heap free {} -> {}",
         heap_before,
         crate::debug::snapshot::heap_free()
     );
 
-    // A machine that is not checking certificates must never be quiet about it. The flags
-    // are still populated under `AuthMode::None` -- MbedTLS parses the chain and records its
-    // opinion, it just does not abort -- so this reports what verification *would* have said
-    // while letting the rest of the upload proceed. That is the whole point of the build:
-    // it separates "the trust anchor is wrong" from "everything else is also broken".
-    if !session::VERIFIES_CERTIFICATES {
-        log_warn!(
-            "Shot upload: CERTIFICATE VERIFICATION IS DISABLED in this build. \
-             The chain would have been judged {:#x} (0x8 = NOT_TRUSTED, 0x4 = CN_MISMATCH, \
-             0x1 = EXPIRED). Do not ship this.",
-            tls_session.tls_verification_details()
-        );
-    }
-
-    // Chunk zero *before* a byte of the request goes out. Once `Content-Length` is on the
-    // wire we are committed to producing exactly that many bytes, and a card that turns out
-    // to be missing could then only be expressed by hanging up mid-body. Fetched here rather
-    // than inside `body::send` so "no such shot" and "the link died" stay distinguishable.
-    let mut source = LinkChunkSource;
-    let first = source.chunk(id, 0).await.ok_or(AttemptError::Link)?;
-
-    let head = body::request_head(url.path, url.host, token, first.total);
-
-    body::send(&mut tls_session, &mut source, id, first, &head)
-        .await
-        .map_err(|e| match e {
+    if let Err(e) = outcome {
+        // The request has an exact `Content-Length` on the wire and the body is short, so a
+        // clean close would leave the server waiting for bytes that are never coming. Reset
+        // instead: `body`'s docs are explicit that this is the caller's job.
+        socket.abort();
+        return Err(match e {
             body::BodyError::Source => AttemptError::Link,
             body::BodyError::Write => AttemptError::Network,
-        })?;
+            body::BodyError::ChunkShape => AttemptError::ChunkShape,
+            body::BodyError::Seal(_) => AttemptError::Link,
+        });
+    }
 
-    read_response(&mut tls_session).await
+    // Unauthenticated: the status line is plain HTTP on port 80, so anyone on path can write
+    // it. `temper` downgrades every refusal to a retryable one -- an injected `401` would
+    // otherwise abandon the shot, and under live-only scope that is permanent.
+    read_response(&mut socket, ResponseTrust::Unauthenticated).await
 }
 
 /// Read the status line and decide what it means.
 ///
+/// `Read` only, and generic over it: this is identical whatever carried the response, and
+/// naming no session type is what keeps it that way.
+///
 /// The body is never read: `Connection: close` means there is nothing to drain, and the only
 /// things worth knowing are the code and `Retry-After`. Note there is no branching on the
-/// code here -- [`classify_status`] owns that, and it is tested.
-async fn read_response<T>(session: &mut mbedtls_rs::Session<'_, T>) -> Result<(), AttemptError>
+/// code here -- [`classify_status`] owns that, and it is tested. Nor does this close the
+/// connection: closing is transport-specific, and the failure path must reset rather than
+/// close, which only the caller holding the concrete socket can do.
+async fn read_response<T>(session: &mut T, trust: ResponseTrust) -> Result<(), AttemptError>
 where
-    T: embedded_io_async::Read + embedded_io_async::Write,
+    T: embedded_io_async::Read,
 {
     let mut buf = vec::from_elem(0u8, 640);
     // Boxed so it never lands inline in the task future, where it would cost `.stack`. `16`
@@ -522,14 +529,9 @@ where
         return Err(AttemptError::Network);
     }
 
-    match classify_status(response.code, response.headers.get("Retry-After")) {
-        UploadOutcome::Created | UploadOutcome::Duplicate => {
-            // Only on a success path. On a failure the session is dropped, which resets the
-            // connection -- a graceful close after a short body would leave the server
-            // waiting for bytes that are never coming.
-            let _ = session.close().await;
-            Ok(())
-        }
+    let outcome = classify_status(response.code, response.headers.get("Retry-After"));
+    match temper(outcome, trust) {
+        UploadOutcome::Created | UploadOutcome::Duplicate => Ok(()),
         other => Err(AttemptError::Http(other)),
     }
 }

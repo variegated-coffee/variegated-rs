@@ -44,6 +44,107 @@ pub trait ChunkSource {
     async fn chunk(&mut self, id: ShotLogId, offset: u32) -> Option<Chunk>;
 }
 
+/// Why a chunk could not be turned into wire bytes.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealError {
+    /// The chunk was longer than the sealer's frame.
+    TooLong,
+    /// More frames than the sealer will produce for one body. For Noise this is the nonce
+    /// budget; it is unreachable under `MAX_UPLOAD_BYTES` and checked anyway, because the
+    /// alternative to a bound here is walking a nonce.
+    FrameBudget,
+}
+
+/// What turns a plaintext chunk into the bytes that go on the wire.
+///
+/// # Why this rather than a `Write` wrapper
+///
+/// The obvious shape is to wrap the socket in something that encrypts, and reuse [`send`]
+/// unchanged. It does not work: [`Write`] is byte-oriented and promises nothing about where
+/// one call ends, but a Noise body is a sequence of frames whose boundaries the responder
+/// derives arithmetically. One `write_all` split across two frames, or two chunks coalesced
+/// into one, and the body is undecodable. The head would also have to pass through
+/// *unsealed*, so the wrapper would need a mode flag, and `flush` would have to double as
+/// "that was the last frame".
+///
+/// What actually differs between the two transports is much smaller than a stream: a
+/// per-chunk transformation, a fixed preamble, and a length promise. That is this trait.
+///
+/// [`content_length`](Self::content_length) lives on the same object that produces the bytes
+/// on purpose -- it is what lets one test assert, for every implementation, that what the
+/// request head promised is what the body actually wrote.
+pub trait ChunkSealer {
+    /// The plaintext length every chunk but the last must have, or `None` for "any".
+    ///
+    /// `Some(n)` for a framed sealer: the responder derives its frame schedule from the
+    /// authenticated total alone, so a chunk of any other size silently shifts every
+    /// subsequent boundary. Checked in [`send_sealed`] rather than trusted, because the
+    /// chunk size is decided on the *other processor* and a change over there would
+    /// otherwise surface only on hardware, as a decode failure with no obvious cause.
+    const EXACT_CHUNK: Option<u32>;
+
+    /// Bytes written after the head and before the first sealed chunk.
+    ///
+    /// Empty for [`Plain`]. For Noise this is the handshake message, which is why it is a
+    /// slice the sealer already owns rather than something [`send_sealed`] builds.
+    fn preamble(&self) -> &[u8];
+
+    /// The exact body length for `total` plaintext bytes under this sealer, including
+    /// [`preamble`](Self::preamble). `None` if it does not fit or exceeds the sealer's
+    /// budget.
+    fn content_length(&self, total: u32) -> Option<u32>;
+
+    /// Turn one chunk into wire bytes.
+    ///
+    /// The shared lifetime is what lets [`Plain`] hand back its argument untouched while a
+    /// framed sealer hands back a borrow of its own scratch buffer -- neither allocates.
+    fn seal<'a>(&'a mut self, plain: &'a [u8]) -> Result<&'a [u8], SealError>;
+}
+
+/// The identity sealer: what `https://` uses.
+///
+/// Its reason for existing is that it makes [`send`] a special case of [`send_sealed`]
+/// rather than a second, separately-maintained implementation of the same invariants. A test
+/// asserts the two produce identical bytes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Plain;
+
+impl ChunkSealer for Plain {
+    const EXACT_CHUNK: Option<u32> = None;
+
+    fn preamble(&self) -> &[u8] {
+        &[]
+    }
+
+    fn content_length(&self, total: u32) -> Option<u32> {
+        Some(total)
+    }
+
+    fn seal<'a>(&'a mut self, plain: &'a [u8]) -> Result<&'a [u8], SealError> {
+        Ok(plain)
+    }
+}
+
+/// Refuse a chunk whose size would misalign the sealer's frames.
+///
+/// A no-op under [`Plain`], where bytes are bytes and a short chunk mid-stream merely means
+/// `written` advances less. Under a framed sealer the chunk boundary *is* the frame boundary,
+/// so a short non-final chunk changes the frame count and breaks the `Content-Length` that is
+/// already on the wire -- and it would not be noticed until the body ended early.
+fn check_chunk_shape<K: ChunkSealer>(chunk: &Chunk) -> Result<(), BodyError> {
+    let Some(exact) = K::EXACT_CHUNK else {
+        return Ok(());
+    };
+    let len = chunk.bytes.len() as u32;
+    let ok = if chunk.last { len <= exact } else { len == exact };
+    if ok {
+        Ok(())
+    } else {
+        Err(BodyError::ChunkShape)
+    }
+}
+
 /// Why the body could not be written as promised.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +156,14 @@ pub enum BodyError {
     Source,
     /// The stream would not take the bytes.
     Write,
+    /// A non-final chunk was not exactly [`ChunkSealer::EXACT_CHUNK`] bytes.
+    ///
+    /// Its own variant rather than folded into [`Self::Source`] because the two say very
+    /// different things: `Source` means the link misbehaved, this means the two processors
+    /// disagree about the chunk size and every frame after this one would be misaligned.
+    ChunkShape,
+    /// The sealer refused the chunk.
+    Seal(SealError),
 }
 
 /// The request head, up to and including the blank line.
@@ -100,12 +209,46 @@ where
     S: ChunkSource,
     W: Write,
 {
+    send_sealed(stream, source, &mut Plain, id, first, head).await
+}
+
+/// As [`send`], but each chunk goes through a [`ChunkSealer`] on the way out.
+///
+/// `head` must already declare `sealer.content_length(first.total)`; this function writes the
+/// body that matches it. Building the head is the caller's job because only the caller knows
+/// the path, the host and which headers the transport wants -- but the two have to agree, and
+/// a host test pins that they do.
+pub async fn send_sealed<S, W, K>(
+    stream: &mut W,
+    source: &mut S,
+    sealer: &mut K,
+    id: ShotLogId,
+    first: Chunk,
+    head: &str,
+) -> Result<(), BodyError>
+where
+    S: ChunkSource,
+    W: Write,
+    K: ChunkSealer,
+{
     stream.write_all(head.as_bytes()).await.map_err(|_| BodyError::Write)?;
+
+    // Before any chunk: for Noise this is the handshake, and the responder cannot read a
+    // single frame without it.
+    if !sealer.preamble().is_empty() {
+        let preamble = sealer.preamble();
+        stream.write_all(preamble).await.map_err(|_| BodyError::Write)?;
+    }
 
     let total = first.total;
     let mut written = first.bytes.len() as u32;
     let mut last = first.last;
-    stream.write_all(&first.bytes).await.map_err(|_| BodyError::Write)?;
+
+    check_chunk_shape::<K>(&first)?;
+    {
+        let sealed = sealer.seal(&first.bytes).map_err(BodyError::Seal)?;
+        stream.write_all(sealed).await.map_err(|_| BodyError::Write)?;
+    }
 
     while !last {
         let chunk = source.chunk(id, written).await.ok_or(BodyError::Source)?;
@@ -128,9 +271,11 @@ where
             return Err(BodyError::Source);
         }
 
-        stream.write_all(&chunk.bytes).await.map_err(|_| BodyError::Write)?;
+        check_chunk_shape::<K>(&chunk)?;
         written += chunk.bytes.len() as u32;
         last = chunk.last;
+        let sealed = sealer.seal(&chunk.bytes).map_err(BodyError::Seal)?;
+        stream.write_all(sealed).await.map_err(|_| BodyError::Write)?;
     }
 
     // `last` arriving early is the mirror of the overrun check above.

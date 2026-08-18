@@ -153,7 +153,22 @@ use crate::Status;
 ///   as well as reaching a host, so a comms processor flashed from an older build decodes an
 ///   unknown discriminant on a reply it is waiting for -- and the answer it fails to decode
 ///   is precisely the one that says the card stalled. Flash both ends together.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x92;
+/// * `0x93` -- `http+noise://` shot upload. `ShotUploadConfig` and `ShotUploadSettings` each
+///   gained a trailing `server_key` and `device_key`, and `ShotUploadKeyUpdate` is a new type
+///   inside the latter.
+///
+///   Mandatory in both directions, and for the same reason `0x90` was: these are *structs*,
+///   postcard has no length prefix to resynchronise on, and `ShotUploadConfig` crosses the
+///   inter-processor link inside `ApplicationProcessorToCommsProcessorMessage` while
+///   `ShotUploadSettings` arrives from a host inside a `MachineCommand`. An older peer reads
+///   the first appended byte as the start of whatever it thought came next.
+///
+///   Note this bump does **not** protect the stored settings blob, which carries no version
+///   at all: appending to `ShotUploadConfig` makes every previously stored one fail to decode,
+///   `load_settings` maps that to `Default`, and every machine loses its endpoint and token
+///   once. That is the second time -- see the field comment on `enabled` -- and it was again
+///   accepted rather than paying for a fifth settings store.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x93;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

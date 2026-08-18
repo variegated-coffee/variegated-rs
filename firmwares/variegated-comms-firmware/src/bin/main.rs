@@ -1117,15 +1117,15 @@ async fn main(spawner: Spawner) -> ! {
     // Shot-log upload. The second subscriber on the shot-log event channel -- see
     // `SHOT_LOG_EVENT_RECEIVERS`, which is the compile-time bound both of these draw from.
     //
-    // `SHA` and `RSA` are unclaimed everywhere else in this binary. They go to MbedTLS's
-    // accelerator hooks, without which an RSA-4096 chain verification is software big-int
-    // on a 160 MHz core and long enough to trip the watchdog.
+    // `SHA` and `RSA` used to go to MbedTLS's accelerator hooks and are no longer claimed by
+    // anything: the upload path is `http+noise://` now, and ChaCha20-Poly1305 and X25519 have
+    // no accelerator on this chip to route to. Both peripherals are now free.
+    //
+    // The task takes the `Trng` itself, for the Noise ephemeral.
     let upload_shot_log_subscriber = shot_log_event_channel.subscriber().unwrap();
     spawn_or_report!(spawner, "shot_upload", variegated_comms_firmware::upload::shot_upload_task(
         net_stack,
         upload_shot_log_subscriber,
-        peripherals.SHA,
-        peripherals.RSA,
     ));
     log_info!("Shot upload task spawned");
 

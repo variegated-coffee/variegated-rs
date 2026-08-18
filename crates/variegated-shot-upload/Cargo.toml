@@ -25,7 +25,44 @@ rust-version.workspace = true
 bench = false
 
 [features]
-default = []
+# `noise` is default-on and `tls` is not, and that asymmetry is this crate's whole test
+# story. `scripts/test-host.sh` runs `cargo test -p variegated-shot-upload` with no
+# `--features` at all, so a transport that is not in `default` is a transport the host gate
+# does not cover. Noise is pure Rust and builds for an Apple host. MbedTLS does not, for the
+# three reasons `tls` gives below.
+default = ["noise"]
+
+# The `http+noise://` transport: `Noise_X_25519_ChaChaPoly_SHA256` over plain HTTP.
+#
+# Optional rather than unconditional so `--no-default-features --features tls` still yields a
+# TLS-only build with no curve25519 in its flash. `url::Scheme` is deliberately *not* gated on
+# this -- parsing must give the same answer in every configuration, so a build that cannot
+# speak a scheme says so at dispatch rather than by calling the URL malformed.
+#
+# **X25519 does not come from `noise-rust-crypto`.** Its `X25519::genkey()` calls
+# `StaticSecret::random()`, which only exists when `x25519-dalek/getrandom` is on, and
+# `genkey` is a trait method so it is compiled whether or not it is ever called. getrandom has
+# no `riscv32imac-unknown-none-elf` backend, so that whole branch is unusable here and the
+# failure is a compile error inside someone else's crate:
+#
+#     error[E0599]: no function or associated item named `random` found for struct
+#     `StaticSecret` --> noise-rust-crypto-0.6.2/src/lib.rs:36:45
+#
+# `noise::X25519` is therefore ours, implemented over `x25519-dalek` directly, with a
+# `genkey` that panics rather than fabricating a key. That is better than the feature route
+# regardless of the bug: it makes "the ephemeral is always injected" a property of this crate
+# rather than of another crate's manifest, and every host test runs the path that would panic.
+# The handshake payload is hand-encoded fixed-width big-endian rather than postcard, so
+# neither serde nor postcard appears here. Two reasons, and the second is the real one:
+# a fixed 18 bytes is trivial to re-implement over a `DataView` on the server, and -- because
+# postcard varints are length-dependent -- a postcard payload would make the handshake
+# message's length a function of the shot's size, so `content_length` could not be computed
+# without serialising first. See `noise::Hello`.
+noise = [
+    "dep:noise-protocol",
+    "dep:noise-rust-crypto",
+    "dep:x25519-dalek",
+]
 # The TLS session and the trust-anchor tests.
 #
 # **Off by default because `mbedtls-rs-sys` does not build for an Apple host**, and this
@@ -72,6 +109,19 @@ danger-skip-verification = []
 
 [dependencies]
 defmt = { workspace = true, optional = true }
+# The Noise state machine. `default-features = false` drops `use_std`/`use_alloc`, leaving a
+# genuinely no_std crate whose only dependency is arrayvec -- already in the lock at 0.7.8.
+noise-protocol = { version = "0.2.1", optional = true, default-features = false }
+# ChaCha20-Poly1305, SHA-256 and `Sensitive` only. See the `noise` feature for why X25519 is
+# not taken from here.
+noise-rust-crypto = { version = "0.6.2", optional = true, default-features = false, features = [
+    "use-chacha20poly1305",
+    "use-sha2",
+] }
+x25519-dalek = { version = "2", optional = true, default-features = false, features = [
+    "static_secrets",
+    "zeroize",
+] }
 embedded-io-async = { workspace = true }
 heapless.workspace = true
 variegated-controller-types = { path = "../variegated-controller-types", default-features = false }

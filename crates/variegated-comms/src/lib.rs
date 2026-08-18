@@ -546,6 +546,21 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             let mut link_healthy = true;
 
             let mut buf = [0u8; 8];
+
+            // The raw bytes of the frame the accumulator is currently assembling, so a
+            // failure can show what actually arrived rather than only that something did.
+            //
+            // `CobsAccumulator` does not hand back the frame it failed on -- `DeserError`
+            // carries the *remaining* input -- so the only way to see it is to shadow it.
+            //
+            // 256 bytes rather than the accumulator's 4096: the messages worth reading are
+            // this size (a fully provisioned `SetShotUploadSettings` is 166 on the wire), and
+            // `raw_len` counts every byte regardless, so an oversized frame is reported with
+            // its true length and a truncated dump rather than a wrong one.
+            const RAW_DUMP_LEN: usize = 256;
+            let mut raw = [0u8; RAW_DUMP_LEN];
+            let mut raw_len: usize = 0;
+
             loop {
                 // The result used to be bound and dropped. `read` either fills `buf`
                 // completely or fails -- its signature is `Result<(), Error>`, not a byte
@@ -574,6 +589,22 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                 let mut window = &buf[..];
 
                 'cobs: while !window.is_empty() {
+                    // Shadow exactly what `feed` is about to take. It consumes up to and
+                    // including the next sentinel, or the whole slice if there is none, so
+                    // this stays aligned with the frame being assembled without having to
+                    // feed byte by byte -- and an unaligned shadow would report a good frame
+                    // as truncated, which is worse than no diagnostic at all.
+                    let taken = window
+                        .iter()
+                        .position(|&b| b == 0)
+                        .map_or(window.len(), |i| i + 1);
+                    for &b in &window[..taken] {
+                        if raw_len < RAW_DUMP_LEN {
+                            raw[raw_len] = b;
+                        }
+                        raw_len += 1;
+                    }
+
                     window = match cobs_buf.feed::<CommsProcessorToApplicationProcessorMessage>(&window) {
                         FeedResult::Consumed => break 'cobs,
                         // A message too large for the buffer above. Counted and
@@ -593,17 +624,35 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                         FeedResult::OverFull(new_wind) => {
                             if link_healthy {
                                 link_healthy = false;
-                                error!("Message from ESP32 overflowed the COBS accumulator");
+                                error!(
+                                    "Message from ESP32 overflowed the COBS accumulator: {} bytes, first {}: {=[u8]:02x}",
+                                    raw_len,
+                                    raw_len.min(RAW_DUMP_LEN),
+                                    &raw[..raw_len.min(RAW_DUMP_LEN)]
+                                );
                                 bus::emit_event(DebugEvent::LinkDecodeError);
                             }
+                            raw_len = 0;
                             new_wind
                         }
                         FeedResult::DeserError(new_wind) => {
                             if link_healthy {
                                 link_healthy = false;
-                                error!("Failed to deserialize message from ESP32");
+                                // The bytes, not just the fact. Which of "the frame is short",
+                                // "a byte is wrong" and "this is a different message than we
+                                // think" it is cannot be told apart from a bare failure, and
+                                // the sender already logs the length it wrote -- so the two
+                                // numbers together say immediately whether anything was lost
+                                // on the wire.
+                                error!(
+                                    "Failed to deserialize message from ESP32: {} byte frame, first {}: {=[u8]:02x}",
+                                    raw_len,
+                                    raw_len.min(RAW_DUMP_LEN),
+                                    &raw[..raw_len.min(RAW_DUMP_LEN)]
+                                );
                                 bus::emit_event(DebugEvent::LinkDecodeError);
                             }
+                            raw_len = 0;
                             new_wind
                         }
                         FeedResult::Success { data, remaining } => {
@@ -612,6 +661,8 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                             // A message that decoded is what re-arms the decode-error
                             // edge, so a link that recovers can report its next burst.
                             link_healthy = true;
+                            // This frame is done with, whatever came next starts a new one.
+                            raw_len = 0;
 
                             let message = data;
 

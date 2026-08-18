@@ -97,37 +97,27 @@ edge-http.workspace = true
 edge-ws.workspace = true
 edge-nal.workspace = true
 edge-nal-embassy = { workspace = true, features = ["tcp"] }
-# TLS for shot-log upload, with real X.509 verification.
+# MbedTLS used to be a direct dependency here, curated down to 4096/1024 record buffers. It
+# is gone: this firmware uploads over `http+noise://` now. The reasoning that led here is
+# worth keeping, because it is the measurement that decided the transport.
 #
-# # This forces MbedTLS to be built from source, and that is not a preference
+# `MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH` is not defined, so `mbedtls_ssl_setup` allocated `IN`
+# and `OUT` in full for the life of the session and never shrank them. At the `tls` bundle's
+# 16384 defaults that is 16765 + 16765 = **33530 bytes per connection** against a heap with
+# ~40 kB spare, and `mbedtls-rs` exposes no way to reach `mbedtls_ssl_conf_max_frag_len`, so
+# RFC 6066 could not rescue it. Curated to 4096/1024 the same arithmetic gives 4128 + 1056 =
+# 5184 -- which fit, but only just: the first on-device run peaked at 122,456 of 122,880.
 #
-# `mbedtls-rs-sys` ships prebuilt `.a`s for `riscv32imac-unknown-none-elf`, but they are
-# compiled with `#undef MBEDTLS_HAVE_TIME` and `#undef MBEDTLS_HAVE_TIME_DATE`. X.509
-# `notBefore`/`notAfter` checking needs both, so `hook-wall-clock` rejects the prebuilt set
-# and rebuilds. The build therefore needs cmake, ninja and a clang that can target riscv32
-# -- Apple's cannot, so `CC_riscv32imac_unknown_none_elf` must point at Homebrew's LLVM (or
-# enable `use-gcc` + `force-esp-riscv-gcc`). See `scripts/build-comms-firmware.sh`.
+# Noise needs about 600 bytes and allocates nothing after the handshake is built. Removing
+# MbedTLS also took 148 KiB out of the flash image and gave 1,424 bytes back to `.stack`
+# (measured against `main`), and removed the cmake/ninja/Homebrew-clang cross-build the
+# source build required -- `mbedtls-rs-sys`'s prebuilt `.a`s were unusable because they are
+# compiled with `#undef MBEDTLS_HAVE_TIME`, which X.509 date checking needs.
 #
-# That would be a poor trade on its own. It is not a trade, because the buffers below
-# require the same rebuild:
+# The historical note the buffer sizing rested on, kept because it is the thing to re-measure
+# if TLS ever comes back:
 #
-# # The record buffers, which are the reason any of this fits
-#
-# `MBEDTLS_SSL_VARIABLE_BUFFER_LENGTH` is not defined, so `mbedtls_ssl_setup` allocates
-# `IN` and `OUT` in full for the life of the session and never shrinks them. At the `tls`
-# bundle's 16384 defaults that is 16765 + 16765 = **33530 bytes per connection**, against a
-# heap with ~40 kB spare (see the block above `heap_allocator!` in `bin/main.rs`). It does
-# not fit, and `mbedtls-rs` exposes no way to reach `mbedtls_ssl_conf_max_frag_len`, so RFC
-# 6066 cannot rescue it either.
-#
-# Curated, at 4096/1024, the same arithmetic gives **4128 + 1056 = 5184**. Some of that
-# comes from the feature list rather than the sizes: dropping `cipher-mode-cbc` takes
-# `MBEDTLS_SSL_PADDING_ADD` 256 -> 0 and `MAC_ADD` 48 -> 16, and dropping `tls-proto-dtls`
-# takes the CID expansion to 0.
-#
-# # Why 4096 in, and the measurement behind it
-#
-# `IN` has to hold the server's entire `Certificate` handshake message in one buffer, so it
+# `IN` had to hold the server's entire `Certificate` handshake message in one buffer, so it
 # is bounded by the chain, not by a preference. This started at 8192 against a guess that a
 # three-cert RSA-2048 chain runs 4-5 kB. Measured against the real endpoint it is three
 # certs and ~2610 DER bytes, because the chain is ECDSA throughout:
@@ -142,33 +132,22 @@ edge-nal-embassy = { workspace = true, features = ["tcp"] }
 #
 # `OUT` is 1024 because the largest thing this firmware sends is a 1024-byte shot-log chunk,
 # and the request head is under 512.
-# Everything about uploading a shot that is not the chip: trust anchors, URL parsing, HTTP
-# status policy, the TLS session configuration and request framing -- all host-tested, which
-# nothing in *this* crate can be (`[lib] harness = false`). `tls` is what compiles its
-# MbedTLS-dependent half; see that crate's Cargo.toml for why it is not on by default.
-variegated-shot-upload = { path = "../../crates/variegated-shot-upload", features = ["tls", "defmt"] }
-# Named here as well so this firmware can add the chip feature. `variegated-shot-upload`
-# cannot: `esp32c6` pulls `esp-hal` and would stop that crate building for a host, which is
-# the whole point of it. Cargo unifies the two into one feature set for this build.
-mbedtls-rs = { workspace = true, features = [
-    "ssl-in-content-len-4096", "ssl-out-content-len-1024",
-    # X.509 validity dates. `hook-wall-clock` implies `hook-timer`. The clock is the
-    # SNTP-synced one from `time.rs`; before the first sync the hook returns `None`, which
-    # MbedTLS treats as both expired and not-yet-valid -- i.e. it fails closed.
-    "hook-wall-clock",
-    # Routes SHA-256/512 and modular exponentiation to the C6's accelerators. Not an
-    # optimisation: without the `exp_mod` hook, verifying an RSA-4096 root is software
-    # big-int on a 160 MHz core inside a single call with no yield point, which is an
-    # executor stall long enough to trip `watchdog.rs`.
-    "esp32c6", "embassy-time",
-    # On top of the non-negotiable floor (TLS 1.2+1.3, ECDHE-ECDSA, SHA-256, AES-GCM,
-    # HKDF, ECP/ECDH/ECDSA, PK, secp256r1, CTR-DRBG, entropy, base64, PEM, X.509 parse):
-    "alg-sha512",                # SHA-384, for AES-256-GCM-SHA384 and P-384 signatures
-    "alg-rsa", "alg-rsa-pss",    # RSA certificate chains; PSS is mandatory in TLS 1.3
-    "kex-ecdhe-rsa",             # TLS 1.2 against an RSA certificate
-    "curve-secp384r1",           # ISRG Root X2, GTS Root R4
-    "defmt",
-] }
+# Everything about uploading a shot that is not the chip: URL parsing, HTTP status policy,
+# request framing, the key encoding and the whole Noise transport -- all host-tested, which
+# nothing in *this* crate can be (`[lib] harness = false`).
+#
+# **`tls` is deliberately absent, and that is what removes MbedTLS from this binary.** The
+# crate keeps the feature, its trust anchors and their tests, and `url::Scheme` still parses
+# `https://` here -- so an `https://` endpoint on this firmware is reported as a scheme this
+# build cannot speak rather than as a bad URL. It simply is not compiled.
+#
+# The reason is memory. `docs/comms-firmware-memory-budget.md` records the TLS path peaking
+# at 122,456 of 122,880 bytes; MbedTLS wants ~6 kB for a handshake (4128 + 1056 record
+# buffers, a context, a DRBG, and the anchors parsed afresh every attempt) and Noise wants
+# about 600 with nothing allocated after the handshake is built. When MbedTLS ran out it did
+# not say so -- an allocation failure inside a signature check surfaced as
+# `BADCERT_NOT_TRUSTED`, which reads as a certificate problem and cost two flash cycles.
+variegated-shot-upload = { path = "../../crates/variegated-shot-upload", features = ["defmt"] }
 embedded-io.workspace = true
 embedded-io-async.workspace = true
 esp-alloc.workspace = true
@@ -292,29 +271,18 @@ default = [
   "esp-hal/esp32c6",
   "esp-rtos/esp32c6",
   "esp-radio/esp32c6",
-#  "insecure-tls"
 ]
 
-# **Builds a firmware that does not check the upload endpoint's certificate.**
+# `insecure-tls` used to be here, forwarding to `variegated-shot-upload`'s
+# `danger-skip-verification` so a handshake failing with `BADCERT_NOT_TRUSTED` could be told
+# apart from one failing for every other reason. It is gone with the TLS path: this firmware
+# no longer enables `variegated-shot-upload/tls`, so the feature would have forwarded to a
+# certificate check that is not compiled, and an inert debugging switch is worse than none.
 #
-#     cargo build --profile comms-release --features insecure-tls
+# The equivalent question does not arise on the Noise path. There is no chain to distrust --
+# a handshake either completes against the provisioned server key or it does not, and
+# `AttemptError::BadKeys` says which of the two keys failed to decode.
 #
-# A debugging build and never a shipping one. It exists to answer one question -- is a
-# certificate the *only* thing wrong -- when a handshake fails with `BADCERT_NOT_TRUSTED`
-# and `mbedtls-rs`'s safe API gives no way to look at the chain the server actually sent.
-#
-# It is not quiet: `upload::attempt_upload` logs a warning naming the flags verification
-# *would* have produced at every handshake, because a machine that is not checking
-# certificates should be obvious from thirty seconds of log.
-#
-# A feature rather than a runtime flag for the reason `config::TCP_COMMANDS_ENABLED` gives
-# at length: `VERIFIES_CERTIFICATES` is a `const bool`, so with the feature off the warning
-# branch is `if false` and folds away, and `AuthMode::None` is behind a `cfg` and never
-# compiled. There is nothing on the other side of it for a stray write to reach.
-#
-# One thing that looks like a counter-example and is not: `strings` finds "VERIFICATION IS
-# DISABLED" in a default build. That is defmt's interning table in `.defmt`, which sits at
-# VMA 0 and is not a loaded section -- the text costs no flash and the code that would log
-# it is gone. Check `llvm-objdump -h` before concluding otherwise.
-insecure-tls = ["variegated-shot-upload/danger-skip-verification"]
+# The crate keeps the feature, and the trust anchors and their tests with it, for a build
+# that does enable `tls`.
 

@@ -67,6 +67,19 @@ pub struct ShotUploadView {
     /// The settings UI is built around this: it never prefills the token field, and
     /// `ShotUploadTokenUpdate::Keep` exists precisely so it does not have to.
     pub token_set: bool,
+    /// The upload server's Noise **public** key, in full.
+    ///
+    /// Published rather than reduced to a bool, unlike [`Self::token_set`] and
+    /// [`Self::device_key_set`], because it is a public key: there is nothing in it to leak,
+    /// and "which server does this machine trust" is exactly what you need to read when a
+    /// handshake is being refused. Prefilled in the settings UI for the same reason.
+    pub server_key: Option<alloc::string::String>,
+    /// Whether a device key is stored -- **a bool, not the key, for the reason
+    /// [`Self::token_set`] gives at length.**
+    ///
+    /// The device key is a credential of exactly the same class as the token: anyone who
+    /// reads it can upload as this machine. It must never appear here.
+    pub device_key_set: bool,
 }
 
 impl From<&crate::shot_upload::ShotUploadConfig> for ShotUploadView {
@@ -75,6 +88,8 @@ impl From<&crate::shot_upload::ShotUploadConfig> for ShotUploadView {
             endpoint: config.endpoint.as_ref().map(|e| e.as_str().into()),
             enabled: config.enabled,
             token_set: config.token.is_some(),
+            server_key: config.server_key.as_ref().map(|k| k.as_str().into()),
+            device_key_set: config.device_key.is_some(),
         }
     }
 }

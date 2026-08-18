@@ -543,7 +543,9 @@
     "SetShotUploadConfig": {
       "endpoint": "https://plantlet.example/café/api/shots?src=réseau",
       "token": "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ",
-      "enabled": true
+      "enabled": true,
+      "server_key": "azdmpdcz4eq5w53e9rjh41b70hs2a1hmhgagr53n7m696f84tgggk",
+      "device_key": null
     }
   },
   {
@@ -552,6 +554,10 @@
       "enabled": false,
       "token": {
         "Set": "0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+      },
+      "server_key": null,
+      "device_key": {
+        "Set": "0w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3gm"
       }
     }
   }
