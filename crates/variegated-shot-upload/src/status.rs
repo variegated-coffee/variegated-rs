@@ -66,6 +66,58 @@ pub fn parse_retry_after(value: &str) -> Option<u32> {
     Some(trimmed.parse::<u32>().unwrap_or(u32::MAX))
 }
 
+/// Whether the status line was carried by something that authenticated it.
+///
+/// See [`temper`]. This exists because `http+noise://` encrypts the *body* and leaves the
+/// HTTP response line in the clear, so on that transport the status is an unauthenticated
+/// hint rather than a fact.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseTrust {
+    /// TLS. The status line is as trustworthy as the connection.
+    Authenticated,
+    /// Plain HTTP carrying a Noise body. Anyone on path can write this status line.
+    Unauthenticated,
+}
+
+/// Downgrade an outcome that arrived on a channel nobody authenticated.
+///
+/// # What this protects
+///
+/// [`UploadOutcome::Permanent`] means "give up on this shot", and under live-only scope
+/// giving up means the shot is gone. On an unauthenticated channel a single injected
+/// `HTTP/1.1 401` would trigger that, and it would be indistinguishable from a genuinely
+/// revoked key. `RateLimited` is no better: its `Retry-After` is equally forgeable, and one
+/// above [`MAX_RETRY_AFTER_SECS`] also abandons the shot.
+///
+/// So every non-success reads as transient. The cost of being wrong in that direction is
+/// bounded -- [`retry_delay`] and [`MAX_ATTEMPTS`] cap it at three attempts over 35 seconds
+/// -- while the cost of being wrong in the other direction is a lost shot.
+///
+/// # What this does not protect
+///
+/// **A forged success still loses the shot.** An injected `HTTP/1.1 201 Created` makes the
+/// uploader log "stored" and move on, and nothing a plaintext status line says can be
+/// trusted to contradict it. Closing that needs the responder to answer inside the Noise
+/// session; the shape is a `NoiseSender::open` and a single transport frame, deliberately
+/// deferred. Until then this is a known, accepted gap against an on-path attacker who is
+/// specifically targeting one machine.
+pub fn temper(outcome: UploadOutcome, trust: ResponseTrust) -> UploadOutcome {
+    match trust {
+        ResponseTrust::Authenticated => outcome,
+        ResponseTrust::Unauthenticated => match outcome {
+            // Successes pass through unchanged -- not because they are trustworthy, but
+            // because there is nothing safer to turn them into. See above.
+            UploadOutcome::Created => UploadOutcome::Created,
+            UploadOutcome::Duplicate => UploadOutcome::Duplicate,
+            // Everything else becomes the one outcome that retries and then stops.
+            UploadOutcome::Permanent
+            | UploadOutcome::ServerError
+            | UploadOutcome::RateLimited { .. } => UploadOutcome::ServerError,
+        },
+    }
+}
+
 /// Seconds to wait before attempt `attempt` (0-based), absent a `Retry-After`.
 ///
 /// Returns `None` once the attempts are spent, which is what terminates the loop -- an
@@ -142,5 +194,72 @@ mod tests {
         // The bound that makes the loop finite.
         assert_eq!(retry_delay(2), None);
         assert_eq!(retry_delay(MAX_ATTEMPTS), None);
+    }
+
+    /// Every outcome `classify_status` can produce, so the match in `temper` cannot grow a
+    /// hole when a variant is added.
+    const EVERY_OUTCOME: [UploadOutcome; 5] = [
+        UploadOutcome::Created,
+        UploadOutcome::Duplicate,
+        UploadOutcome::RateLimited { retry_after_secs: 30 },
+        UploadOutcome::ServerError,
+        UploadOutcome::Permanent,
+    ];
+
+    #[test]
+    fn an_authenticated_outcome_is_never_changed() {
+        for outcome in EVERY_OUTCOME {
+            assert_eq!(temper(outcome, ResponseTrust::Authenticated), outcome);
+        }
+    }
+
+    #[test]
+    fn an_unauthenticated_refusal_becomes_transient() {
+        // The forged-401 case. `Permanent` abandons the shot, and on this transport anyone
+        // on path can write a 401.
+        assert_eq!(
+            temper(UploadOutcome::Permanent, ResponseTrust::Unauthenticated),
+            UploadOutcome::ServerError
+        );
+    }
+
+    #[test]
+    fn an_unauthenticated_rate_limit_cannot_abandon_the_shot() {
+        // A forged `Retry-After` above MAX_RETRY_AFTER_SECS is the other way to make the
+        // uploader give up without the server saying anything.
+        assert_eq!(
+            temper(
+                UploadOutcome::RateLimited { retry_after_secs: MAX_RETRY_AFTER_SECS + 1 },
+                ResponseTrust::Unauthenticated
+            ),
+            UploadOutcome::ServerError
+        );
+    }
+
+    #[test]
+    fn no_unauthenticated_failure_is_terminal() {
+        // The property that matters, stated once over the whole space rather than per
+        // variant: nothing an attacker can write makes the uploader stop retrying early.
+        for outcome in EVERY_OUTCOME {
+            let tempered = temper(outcome, ResponseTrust::Unauthenticated);
+            assert_ne!(tempered, UploadOutcome::Permanent, "{outcome:?} stayed terminal");
+            if let UploadOutcome::RateLimited { retry_after_secs } = tempered {
+                assert!(retry_after_secs <= MAX_RETRY_AFTER_SECS, "{outcome:?} can still abandon");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unauthenticated_success_still_passes_through() {
+        // Documenting the known gap rather than pretending it is closed: a forged 201 is
+        // still believed. See `temper`'s docs.
+        assert_eq!(
+            temper(UploadOutcome::Created, ResponseTrust::Unauthenticated),
+            UploadOutcome::Created
+        );
+        assert_eq!(
+            temper(UploadOutcome::Duplicate, ResponseTrust::Unauthenticated),
+            UploadOutcome::Duplicate
+        );
     }
 }

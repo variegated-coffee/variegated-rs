@@ -35,6 +35,38 @@ use crate::channels::{
 use variegated_controller_types::ROUTINE_WRITE_CHUNK_LEN;
 use crate::ble::scanner::{ScanReport, SCAN_RESULT_CAPACITY};
 
+/// Write a whole frame to the application processor, however many goes it takes.
+///
+/// # `write_async` is not `write_all`
+///
+/// `esp_hal::uart::UartTx::write_async` returns `Result<usize, TxError>` and that `usize` is
+/// a *partial* count: it writes `min(free TX FIFO space, bytes.len())` and hands back how
+/// many it took. Every call site here used to `.expect(...)` the result, which unwraps to the
+/// count and then discards it — so **any frame larger than the free FIFO space was silently
+/// truncated**, with a successful return and a log line saying the full length had been sent.
+///
+/// The FIFO is 128 bytes on this chip. Nothing on this link had ever exceeded that, so the
+/// bug sat latent until `SetShotUploadSettings` grew a 48-byte endpoint and two 53-character
+/// Noise keys and came to 166 bytes on the wire. What arrived was the first 128 bytes,
+/// followed — with no sentinel between them, because the frame's own terminating zero was in
+/// the dropped remainder — by the next message's bytes. The application processor reported
+/// `Failed to deserialize message from ESP32` and was right to.
+///
+/// A partial write is not an error condition to report; it is the normal way this API says
+/// "the FIFO is full, call me again". So the loop is the fix, not a retry policy.
+async fn write_frame(
+    tx: &mut UartTx<'static, Async>,
+    mut bytes: &[u8],
+) -> Result<(), esp_hal::uart::TxError> {
+    while !bytes.is_empty() {
+        // `write_async` only returns after it has taken at least one byte -- it awaits
+        // `FiFoEmpty` until there is space -- so this cannot spin on `Ok(0)`.
+        let written = tx.write_async(bytes).await?;
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
 /// Start the application processor communication
 pub async fn start(
     mut rx: UartRx<'static, Async>,
@@ -466,7 +498,7 @@ pub async fn start(
         let request_config_message = CommsProcessorToApplicationProcessorMessage::RequestConfiguration;
         let serialized_message = postcard::to_allocvec_cobs(&request_config_message)
             .expect("Failed to serialize RequestConfiguration");
-        tx.write_async(&serialized_message).await
+        write_frame(&mut tx, &serialized_message).await
             .expect("Failed to write RequestConfiguration");
         log_warn!("Sent initial RequestConfiguration command on startup");
 
@@ -474,7 +506,7 @@ pub async fn start(
         let request_machine_def_message = CommsProcessorToApplicationProcessorMessage::RequestMachineDefinition;
         let serialized_message = postcard::to_allocvec_cobs(&request_machine_def_message)
             .expect("Failed to serialize RequestMachineDefinition");
-        tx.write_async(&serialized_message).await
+        write_frame(&mut tx, &serialized_message).await
             .expect("Failed to write RequestMachineDefinition");
         log_warn!("Sent initial RequestMachineDefinition command on startup");
 
@@ -482,7 +514,7 @@ pub async fn start(
         let request_routines_message = CommsProcessorToApplicationProcessorMessage::RequestRoutines;
         let serialized_message = postcard::to_allocvec_cobs(&request_routines_message)
             .expect("Failed to serialize RequestRoutines");
-        tx.write_async(&serialized_message).await
+        write_frame(&mut tx, &serialized_message).await
             .expect("Failed to write RequestRoutines");
         log_warn!("Sent initial RequestRoutines command on startup");
 
@@ -490,7 +522,7 @@ pub async fn start(
         let request_bluetooth_message = CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals;
         let serialized_message = postcard::to_allocvec_cobs(&request_bluetooth_message)
             .expect("Failed to serialize RequestBluetoothPeripherals");
-        tx.write_async(&serialized_message).await
+        write_frame(&mut tx, &serialized_message).await
             .expect("Failed to write RequestBluetoothPeripherals");
         log_warn!("Sent initial RequestBluetoothPeripherals command on startup");
 
@@ -498,7 +530,7 @@ pub async fn start(
         let request_wifi_message = CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials;
         let serialized_message = postcard::to_allocvec_cobs(&request_wifi_message)
             .expect("Failed to serialize RequestWifiCredentials");
-        tx.write_async(&serialized_message).await
+        write_frame(&mut tx, &serialized_message).await
             .expect("Failed to write RequestWifiCredentials");
         log_warn!("Sent initial RequestWifiCredentials command on startup");
 
@@ -506,7 +538,7 @@ pub async fn start(
         let request_upload_message = CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig;
         let serialized_message = postcard::to_allocvec_cobs(&request_upload_message)
             .expect("Failed to serialize RequestShotUploadConfig");
-        tx.write_async(&serialized_message).await
+        write_frame(&mut tx, &serialized_message).await
             .expect("Failed to write RequestShotUploadConfig");
         log_warn!("Sent initial RequestShotUploadConfig command on startup");
 
@@ -605,7 +637,7 @@ pub async fn start(
                     // Serialize the message to bytes
                     let serialized_message = postcard::to_allocvec_cobs(&message)
                         .expect("Failed to serialize message");
-                    tx.write_async(&serialized_message).await
+                    write_frame(&mut tx, &serialized_message).await
                         .expect("Failed to write UART");
 
                     //log_info!("Sent CommsStatus");
@@ -628,7 +660,7 @@ pub async fn start(
                     };
                     match postcard::to_allocvec_cobs(&message) {
                         Ok(serialized_message) => {
-                            if tx.write_async(&serialized_message).await.is_err() {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
                                 log_error!("Failed to write Improv report to UART");
                             }
                         }
@@ -683,7 +715,7 @@ pub async fn start(
                         .expect("Failed to serialize message");
 
                     // Send the message
-                    tx.write_async(&serialized_message).await
+                    write_frame(&mut tx, &serialized_message).await
                         .expect("Failed to write UART");
 
                     log_info!("Sent MachineCommand, length {} bytes", serialized_message.len());
@@ -704,7 +736,7 @@ pub async fn start(
                     // Serialize the message to bytes
                     let serialized_message = postcard::to_allocvec_cobs(&message)
                         .expect("Failed to serialize sensor reading");
-                    tx.write_async(&serialized_message).await
+                    write_frame(&mut tx, &serialized_message).await
                         .expect("Failed to write sensor reading");
                 }
                 // A command injected over a debug transport -- USB always, TCP only
@@ -726,7 +758,7 @@ pub async fn start(
                         // hand anyone on port 9090 a way to take the machine down.
                         match postcard::to_allocvec_cobs(&message) {
                             Ok(serialized_message) => {
-                                if tx.write_async(&serialized_message).await.is_err() {
+                                if write_frame(&mut tx, &serialized_message).await.is_err() {
                                     log_error!("Failed to write injected debug command to UART");
                                 }
                             }
@@ -760,7 +792,7 @@ pub async fn start(
                     };
                     match postcard::to_allocvec_cobs(&message) {
                         Ok(serialized_message) => {
-                            if tx.write_async(&serialized_message).await.is_err() {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
                                 log_error!("Failed to write shot log request to UART");
                             }
                         }
@@ -780,7 +812,7 @@ pub async fn start(
                     };
                     match postcard::to_allocvec_cobs(&message) {
                         Ok(serialized_message) => {
-                            if tx.write_async(&serialized_message).await.is_err() {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
                                 log_error!("Failed to write routine chunk request to UART");
                             }
                         }
@@ -823,7 +855,7 @@ pub async fn start(
 
                         match postcard::to_allocvec_cobs(&message) {
                             Ok(serialized_message) => {
-                                if tx.write_async(&serialized_message).await.is_err() {
+                                if write_frame(&mut tx, &serialized_message).await.is_err() {
                                     log_error!("Failed to write routine chunk at offset {} to UART", offset);
                                     wrote_all = false;
                                     break;
@@ -873,7 +905,7 @@ pub async fn start(
                     let message = CommsProcessorToApplicationProcessorMessage::RequestConfiguration;
                     match postcard::to_allocvec_cobs(&message) {
                         Ok(serialized_message) => {
-                            if tx.write_async(&serialized_message).await.is_err() {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
                                 log_error!("Failed to write configuration request to UART");
                             } else {
                                 log_info!("Sent RequestConfiguration on behalf of a client");
@@ -899,7 +931,7 @@ pub async fn start(
                     };
                     match postcard::to_allocvec_cobs(&message) {
                         Ok(serialized_message) => {
-                            if tx.write_async(&serialized_message).await.is_err() {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
                                 log_error!("Failed to write discovered Bluetooth peripheral");
                             }
                         }
@@ -915,7 +947,7 @@ pub async fn start(
                         if Instant::now() >= when {
                             let serialized_message = postcard::to_allocvec_cobs(&message)
                                 .expect("Failed to serialize delayed request");
-                            tx.write_async(&serialized_message).await
+                            write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write delayed request");
                             log_info!("Sent delayed request after schedule/routine update");
                         } else {
@@ -931,7 +963,7 @@ pub async fn start(
                             let request_config_message = CommsProcessorToApplicationProcessorMessage::RequestConfiguration;
                             let serialized_message = postcard::to_allocvec_cobs(&request_config_message)
                                 .expect("Failed to serialize RequestConfiguration");
-                            tx.write_async(&serialized_message).await
+                            write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write RequestConfiguration");
                             log_warn!("Sent periodic RequestConfiguration command (still waiting for response)");
                         }
@@ -941,7 +973,7 @@ pub async fn start(
                             let request_machine_def_message = CommsProcessorToApplicationProcessorMessage::RequestMachineDefinition;
                             let serialized_message = postcard::to_allocvec_cobs(&request_machine_def_message)
                                 .expect("Failed to serialize RequestMachineDefinition");
-                            tx.write_async(&serialized_message).await
+                            write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write RequestMachineDefinition");
                             log_warn!("Sent periodic RequestMachineDefinition command (still waiting for response)");
                         }
@@ -957,7 +989,7 @@ pub async fn start(
                             let request_bluetooth_message = CommsProcessorToApplicationProcessorMessage::RequestBluetoothPeripherals;
                             let serialized_message = postcard::to_allocvec_cobs(&request_bluetooth_message)
                                 .expect("Failed to serialize RequestBluetoothPeripherals");
-                            tx.write_async(&serialized_message).await
+                            write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write RequestBluetoothPeripherals");
                             log_warn!("Sent periodic RequestBluetoothPeripherals command (still waiting for response)");
                         }
@@ -972,7 +1004,7 @@ pub async fn start(
                             let request_wifi_message = CommsProcessorToApplicationProcessorMessage::RequestWifiCredentials;
                             let serialized_message = postcard::to_allocvec_cobs(&request_wifi_message)
                                 .expect("Failed to serialize RequestWifiCredentials");
-                            tx.write_async(&serialized_message).await
+                            write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write RequestWifiCredentials");
                             log_warn!("Sent periodic RequestWifiCredentials command (still waiting for response)");
                         }
@@ -987,7 +1019,7 @@ pub async fn start(
                             let request_upload_message = CommsProcessorToApplicationProcessorMessage::RequestShotUploadConfig;
                             let serialized_message = postcard::to_allocvec_cobs(&request_upload_message)
                                 .expect("Failed to serialize RequestShotUploadConfig");
-                            tx.write_async(&serialized_message).await
+                            write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write RequestShotUploadConfig");
                             log_warn!("Sent periodic RequestShotUploadConfig command (still waiting for response)");
                         }
@@ -1000,7 +1032,7 @@ pub async fn start(
                         let request_routines_message = CommsProcessorToApplicationProcessorMessage::RequestRoutines;
                         let serialized_message = postcard::to_allocvec_cobs(&request_routines_message)
                             .expect("Failed to serialize RequestRoutines");
-                        tx.write_async(&serialized_message).await
+                        write_frame(&mut tx, &serialized_message).await
                             .expect("Failed to write RequestRoutines");
                         log_info!("Sent periodic RequestRoutines command");
 

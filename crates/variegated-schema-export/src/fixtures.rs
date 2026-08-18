@@ -630,6 +630,15 @@ fn machine_commands() -> Vec<MachineCommand> {
             ),
             token: Some(heapless::String::try_from("0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ").unwrap()),
             enabled: true,
+            // One key `Some` and the other `None`, rather than both set: two adjacent
+            // `Option<String<53>>` fields are exactly where a decoder that reads the tags in
+            // the wrong order round-trips a matched pair straight past -- the same trap the
+            // endpoint/token pair above is shaped for, and it only shows up when the two
+            // differ. 53 characters is the real provisioned length, check symbol included.
+            server_key: Some(
+                heapless::String::try_from("azdmpdcz4eq5w53e9rjh41b70hs2a1hmhgagr53n7m696f84tgggk").unwrap(),
+            ),
+            device_key: None,
         }),
         // The `Set` arm, and `enabled: false` -- the two together are the combination a
         // decoder is most likely to get wrong, since a three-variant enum followed by a bool
@@ -639,6 +648,14 @@ fn machine_commands() -> Vec<MachineCommand> {
             enabled: false,
             token: ShotUploadTokenUpdate::Set(
                 heapless::String::try_from("0123456789ABCDEFGHJKMNPQRSTVWXYZ0123456789ABCDEFGHJKMNPQRSTVWXYZ").unwrap(),
+            ),
+            server_key: None,
+            // `Set` here while the token above is also `Set`: two three-variant enums in one
+            // message, so a decoder that reads one discriminant and reuses it for the other
+            // still round-trips unless their payload lengths differ -- which is why this key
+            // is 53 characters against the token's 64.
+            device_key: ShotUploadKeyUpdate::Set(
+                heapless::String::try_from("0w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3gm").unwrap(),
             ),
         }),
     ]

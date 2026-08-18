@@ -303,7 +303,15 @@ export const ShotStateSchema = enumType('ShotState', {
 export const ShotUploadConfigSchema = struct({
   endpoint: option(string()),
   token: option(string()),
-  enabled: bool()
+  enabled: bool(),
+  server_key: option(string()),
+  device_key: option(string())
+});
+
+export const ShotUploadKeyUpdateSchema = enumType('ShotUploadKeyUpdate', {
+  Keep: unitVariant('Keep'),
+  Clear: unitVariant('Clear'),
+  Set: newtypeVariant('Set', string())
 });
 
 export const ShotUploadTokenUpdateSchema = enumType('ShotUploadTokenUpdate', {
@@ -315,7 +323,9 @@ export const ShotUploadTokenUpdateSchema = enumType('ShotUploadTokenUpdate', {
 export const ShotUploadViewSchema = struct({
   endpoint: option(string()),
   enabled: bool(),
-  token_set: bool()
+  token_set: bool(),
+  server_key: option(string()),
+  device_key_set: bool()
 });
 
 export const SteamWandConfigurationSchema = struct({
@@ -585,7 +595,9 @@ export const ShotAnnotationSchema = struct({
 export const ShotUploadSettingsSchema = struct({
   endpoint: option(string()),
   enabled: bool(),
-  token: ShotUploadTokenUpdateSchema
+  token: ShotUploadTokenUpdateSchema,
+  server_key: option(string()),
+  device_key: ShotUploadKeyUpdateSchema
 });
 
 export const StateConditionSchema = enumType('StateCondition', {
@@ -1000,6 +1012,7 @@ export type ShotLogId = InferType<typeof ShotLogIdSchema>;
 export type ShotLogListEntry = InferType<typeof ShotLogListEntrySchema>;
 export type ShotState = InferType<typeof ShotStateSchema>;
 export type ShotUploadConfig = InferType<typeof ShotUploadConfigSchema>;
+export type ShotUploadKeyUpdate = InferType<typeof ShotUploadKeyUpdateSchema>;
 export type ShotUploadSettings = InferType<typeof ShotUploadSettingsSchema>;
 export type ShotUploadTokenUpdate = InferType<typeof ShotUploadTokenUpdateSchema>;
 export type ShotUploadView = InferType<typeof ShotUploadViewSchema>;

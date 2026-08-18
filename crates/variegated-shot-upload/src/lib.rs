@@ -20,6 +20,9 @@
 extern crate alloc;
 
 pub mod body;
+pub mod crockford;
+#[cfg(feature = "noise")]
+pub mod noise;
 pub mod roots;
 #[cfg(feature = "tls")]
 pub mod session;
@@ -27,7 +30,13 @@ pub mod status;
 pub mod url;
 
 pub use body::{BodyError, Chunk, ChunkSource};
+pub use crockford::{decode_key, encode_key, CrockfordError, ENCODED_LEN, KEY_LEN};
+#[cfg(feature = "noise")]
+pub use noise::{Ephemeral, Hello, Keys, NoiseError, NoiseSender, PLAINTEXT_CHUNK};
 #[cfg(feature = "tls")]
 pub use session::{client_config, connect, ConnectError};
-pub use status::{classify_status, retry_delay, UploadOutcome, MAX_ATTEMPTS, MAX_RETRY_AFTER_SECS};
-pub use url::{parse_https_url, Endpoint, UrlError};
+pub use status::{
+    classify_status, retry_delay, temper, ResponseTrust, UploadOutcome, MAX_ATTEMPTS,
+    MAX_RETRY_AFTER_SECS,
+};
+pub use url::{parse_https_url, parse_url, Endpoint, Scheme, UrlError};

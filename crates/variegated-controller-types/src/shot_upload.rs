@@ -26,6 +26,14 @@ pub const SHOT_UPLOAD_ENDPOINT_LEN: usize = 255;
 /// headroom. A longer value is a paste error rather than a token.
 pub const SHOT_UPLOAD_TOKEN_LEN: usize = 64;
 
+/// Length of a Noise key as provisioned.
+///
+/// 32 bytes as Crockford base32 is 52 characters -- 256 bits is not a multiple of five, so
+/// the last one carries a single bit -- plus a check symbol, which is what turns a mistyped
+/// key into "that is not a valid key" instead of an opaque handshake failure three retries
+/// later. See `variegated-shot-upload`'s `crockford` module, which does the decoding.
+pub const SHOT_UPLOAD_KEY_LEN: usize = 53;
+
 /// The shot-log upload destination, or as much of it as has been configured.
 ///
 /// # Why the `Option`s are per-field, and why there is no `Stored…` newtype
@@ -62,15 +70,46 @@ pub struct ShotUploadConfig {
     /// token once. That was a deliberate, accepted cost, taken because the alternative was a
     /// second settings key for one bool.
     pub enabled: bool,
+    /// The upload server's Noise static **public** key, Crockford base32.
+    ///
+    /// Only meaningful for an `http+noise://` endpoint. Public, so unlike the token it is
+    /// safe to log and safe to show in the settings UI.
+    ///
+    /// **Appended, with the same cost as `enabled` above**: every previously stored blob
+    /// fails to decode once more, and every machine loses its endpoint and token one further
+    /// time. Accepted deliberately -- the alternative was a fifth settings store, which would
+    /// mean touching `machine_stores()` and both espresso firmwares, and those two have
+    /// forked badly enough that the standing advice is not to add to them.
+    pub server_key: Option<heapless::String<SHOT_UPLOAD_KEY_LEN>>,
+    /// This machine's Noise static **secret**, Crockford base32.
+    ///
+    /// **A secret of the same class as [`Self::token`]**: see the `Debug` impl below before
+    /// logging this, and note that [`crate::configuration::ShotUploadView`] carries only
+    /// whether it is set.
+    ///
+    /// Generated in the operator's browser, not by the server, so the upload service never
+    /// holds it. That does not make it device-bound -- it still travels through a clipboard
+    /// -- but it does keep it out of the service's logs and database.
+    pub device_key: Option<heapless::String<SHOT_UPLOAD_KEY_LEN>>,
 }
 
 impl ShotUploadConfig {
-    /// Both halves present, which is the only state the uploader can act on.
+    /// Enough present for *some* transport to act on.
     ///
     /// Says nothing about [`Self::enabled`] -- "configured" and "switched on" are different
     /// questions, and the uploader asks both.
+    ///
+    /// Deliberately does not parse the endpoint to decide *which* credentials are needed:
+    /// scheme handling lives in `variegated-shot-upload`, and duplicating it here would be a
+    /// second place to keep in step. The uploader still checks the pair its scheme actually
+    /// requires and names the missing one.
     pub fn is_complete(&self) -> bool {
-        self.endpoint.is_some() && self.token.is_some()
+        self.endpoint.is_some() && (self.token.is_some() || self.has_noise_keys())
+    }
+
+    /// Both Noise keys present, which is what an `http+noise://` endpoint needs.
+    pub fn has_noise_keys(&self) -> bool {
+        self.server_key.is_some() && self.device_key.is_some()
     }
 
     /// Merge an edit from the settings UI.
@@ -81,10 +120,21 @@ impl ShotUploadConfig {
     pub fn apply(&mut self, update: ShotUploadSettings) {
         self.endpoint = update.endpoint;
         self.enabled = update.enabled;
+        // The server key is public, so the browser is sent the current one and can send it
+        // back: a plain replace is unambiguous, exactly as for the endpoint.
+        self.server_key = update.server_key;
         match update.token {
             ShotUploadTokenUpdate::Keep => {}
             ShotUploadTokenUpdate::Clear => self.token = None,
             ShotUploadTokenUpdate::Set(token) => self.token = Some(token),
+        }
+        // The device key is a secret and gets the same three-way treatment as the token, for
+        // the same reason: the browser never receives it, so a blank field cannot be read as
+        // "remove it".
+        match update.device_key {
+            ShotUploadKeyUpdate::Keep => {}
+            ShotUploadKeyUpdate::Clear => self.device_key = None,
+            ShotUploadKeyUpdate::Set(key) => self.device_key = Some(key),
         }
     }
 }
@@ -109,6 +159,50 @@ pub enum ShotUploadTokenUpdate {
     Clear,
     /// Replace it. **A secret**: see the `Debug` impl below.
     Set(heapless::String<SHOT_UPLOAD_TOKEN_LEN>),
+}
+
+/// What an edit does to the stored Noise device key.
+///
+/// The same three states as [`ShotUploadTokenUpdate`] and for the same reason -- the browser
+/// is never sent the current key, so a blank field means "untouched" rather than "remove".
+///
+/// A separate type rather than reusing that one because the two hold different lengths: a
+/// device key is [`SHOT_UPLOAD_KEY_LEN`] and a token is [`SHOT_UPLOAD_TOKEN_LEN`]. Sharing
+/// would mean a 64-capacity string carrying a 53-character value and a fallible conversion on
+/// every apply, which is a silent truncation waiting to happen.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum ShotUploadKeyUpdate {
+    /// Leave the stored key alone. The default, and what a blank field means.
+    #[default]
+    Keep,
+    /// Forget it.
+    Clear,
+    /// Replace it. **A secret**: see the `Debug` impl below.
+    Set(heapless::String<SHOT_UPLOAD_KEY_LEN>),
+}
+
+impl core::fmt::Debug for ShotUploadKeyUpdate {
+    /// Prints `Set`'s *length*, never its value -- see [`ShotUploadTokenUpdate`]'s impl.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Keep => f.write_str("Keep"),
+            Self::Clear => f.write_str("Clear"),
+            Self::Set(key) => f.debug_struct("Set").field("len", &key.len()).finish(),
+        }
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for ShotUploadKeyUpdate {
+    fn format(&self, f: defmt::Formatter) {
+        match self {
+            Self::Keep => defmt::write!(f, "Keep"),
+            Self::Clear => defmt::write!(f, "Clear"),
+            Self::Set(key) => defmt::write!(f, "Set {{ len: {} }}", key.len()),
+        }
+    }
 }
 
 impl core::fmt::Debug for ShotUploadTokenUpdate {
@@ -156,6 +250,10 @@ pub struct ShotUploadSettings {
     pub enabled: bool,
     /// Three-way; see [`ShotUploadTokenUpdate`].
     pub token: ShotUploadTokenUpdate,
+    /// Replaces the stored server key outright. Public, so a plain replace is unambiguous.
+    pub server_key: Option<heapless::String<SHOT_UPLOAD_KEY_LEN>>,
+    /// Three-way; see [`ShotUploadKeyUpdate`].
+    pub device_key: ShotUploadKeyUpdate,
 }
 
 impl core::fmt::Debug for ShotUploadConfig {
@@ -169,12 +267,17 @@ impl core::fmt::Debug for ShotUploadConfig {
     /// a public service.
     ///
     /// The endpoint is *not* elided. It is not a secret, and it is the field you actually
-    /// need to see when an upload is going to the wrong place.
+    /// need to see when an upload is going to the wrong place. Neither is the server key,
+    /// for the same reason -- it is public, and "which server does this machine trust" is
+    /// precisely the question a failing handshake raises. The **device** key is a secret and
+    /// is treated exactly like the token.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ShotUploadConfig")
             .field("endpoint", &self.endpoint.as_ref().map(|e| e.as_str()))
             .field("token_len", &self.token.as_ref().map(|t| t.len()))
             .field("enabled", &self.enabled)
+            .field("server_key", &self.server_key.as_ref().map(|k| k.as_str()))
+            .field("device_key_len", &self.device_key.as_ref().map(|k| k.len()))
             .finish()
     }
 }
@@ -185,10 +288,13 @@ impl defmt::Format for ShotUploadConfig {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(
             f,
-            "ShotUploadConfig {{ endpoint: {}, token_len: {}, enabled: {} }}",
+            "ShotUploadConfig {{ endpoint: {}, token_len: {}, enabled: {}, \
+             server_key: {}, device_key_len: {} }}",
             self.endpoint.as_ref().map(|e| e.as_str()),
             self.token.as_ref().map(|t| t.len()),
-            self.enabled
+            self.enabled,
+            self.server_key.as_ref().map(|k| k.as_str()),
+            self.device_key.as_ref().map(|k| k.len())
         )
     }
 }
@@ -201,6 +307,10 @@ pub enum ShotUploadConfigError {
     EndpointTooLong,
     /// The token exceeded [`SHOT_UPLOAD_TOKEN_LEN`].
     TokenTooLong,
+    /// The server key exceeded [`SHOT_UPLOAD_KEY_LEN`].
+    ServerKeyTooLong,
+    /// The device key exceeded [`SHOT_UPLOAD_KEY_LEN`].
+    DeviceKeyTooLong,
 }
 
 /// Build a [`ShotUploadConfig`], treating an empty field as "not configured".
@@ -234,10 +344,30 @@ pub fn shot_upload_config(
     token: &str,
     enabled: bool,
 ) -> Result<ShotUploadConfig, ShotUploadConfigError> {
+    shot_upload_config_with_keys(endpoint, token, enabled, "", "")
+}
+
+/// As [`shot_upload_config`], but also setting the `http+noise://` key pair.
+///
+/// A separate entry point rather than two more parameters on the old one, so every existing
+/// caller keeps compiling and reads the same. Both keys are refused rather than truncated for
+/// the reasons above, and with one more: a key is not merely wrong when shortened, it is not
+/// a key at all, and the resulting handshake failure names nothing.
+pub fn shot_upload_config_with_keys(
+    endpoint: &str,
+    token: &str,
+    enabled: bool,
+    server_key: &str,
+    device_key: &str,
+) -> Result<ShotUploadConfig, ShotUploadConfigError> {
     Ok(ShotUploadConfig {
         endpoint: optional_field(endpoint).map_err(|_| ShotUploadConfigError::EndpointTooLong)?,
         token: optional_field(token).map_err(|_| ShotUploadConfigError::TokenTooLong)?,
         enabled,
+        server_key: optional_field(server_key)
+            .map_err(|_| ShotUploadConfigError::ServerKeyTooLong)?,
+        device_key: optional_field(device_key)
+            .map_err(|_| ShotUploadConfigError::DeviceKeyTooLong)?,
     })
 }
 
@@ -278,11 +408,61 @@ impl<'a> Value<'a> for ShotUploadConfig {
 mod tests {
     use super::*;
 
+/// A fully-provisioned `http+noise://` settings edit survives the inter-processor wire.
+///
+/// The largest `SetShotUploadSettings` anybody sends in practice: an endpoint with a host, a
+/// port and a path, and both 53-character keys. It comes to 164 bytes as a
+/// `CommsProcessorToApplicationProcessorMessage`, against `CobsAccumulator<4096>` at both
+/// ends of that link.
+///
+/// Here because the first `http+noise://` provisioning attempt on real hardware failed with
+/// `Failed to deserialize message from ESP32` while a shorter one succeeded, which reads as
+/// a capacity problem in these types. It is not: this passes. That makes the question "does
+/// the message survive postcard" a five-second one rather than an afternoon of reading
+/// buffer sizes.
+#[test]
+fn a_fully_provisioned_settings_edit_round_trips() {
+    use crate::communication::CommsProcessorToApplicationProcessorMessage as Msg;
+    use crate::commands::MachineCommand;
+    use crate::shot_upload::*;
+
+    let settings = ShotUploadSettings {
+        endpoint: Some(
+            heapless::String::try_from("http+noise://192.168.10.85:8787/api/noise-upload").unwrap(),
+        ),
+        enabled: true,
+        token: ShotUploadTokenUpdate::Keep,
+        server_key: Some(
+            heapless::String::try_from("vtzxv1q39fddcfj2keexktfbbk4znhwndq2f9he004femzxmt0100")
+                .unwrap(),
+        ),
+        device_key: ShotUploadKeyUpdate::Set(
+            heapless::String::try_from("9961tkqed5gjx06grsfqrtf65j82192r535pa53tdzk6xa28et501")
+                .unwrap(),
+        ),
+    };
+    let msg = Msg::Command(MachineCommand::SetShotUploadSettings(settings.clone()));
+
+    let mut buf = [0u8; 4096];
+    let encoded = postcard::to_slice(&msg, &mut buf).expect("serialize");
+    // Pinned, not merely observed: the number is what a transport-side buffer has to clear,
+    // and a change to it means a wire-format change worth noticing here.
+    assert_eq!(encoded.len(), 164);
+
+    let decoded: Msg = postcard::from_bytes(encoded).expect("deserialize");
+    match decoded {
+        Msg::Command(MachineCommand::SetShotUploadSettings(got)) => assert_eq!(got, settings),
+        _ => panic!("decoded to the wrong variant"),
+    }
+}
+
     fn maximal() -> ShotUploadConfig {
         ShotUploadConfig {
             endpoint: Some(heapless::String::try_from("e".repeat(SHOT_UPLOAD_ENDPOINT_LEN).as_str()).unwrap(),),
             token: Some(heapless::String::try_from("t".repeat(SHOT_UPLOAD_TOKEN_LEN).as_str()).unwrap()),
             enabled: true,
+            server_key: Some(key(&"s".repeat(SHOT_UPLOAD_KEY_LEN))),
+            device_key: Some(key(&"d".repeat(SHOT_UPLOAD_KEY_LEN))),
         }
     }
 
@@ -294,12 +474,32 @@ mod tests {
         heapless::String::try_from(s).unwrap()
     }
 
+    fn key(s: &str) -> heapless::String<SHOT_UPLOAD_KEY_LEN> {
+        heapless::String::try_from(s).unwrap()
+    }
+
     /// A machine that has been fully configured, as the settings UI would find it.
+    ///
+    /// The token path, deliberately: most of the tests below predate the Noise transport and
+    /// assert token behaviour, so leaving the keys unset keeps them testing what they say.
     fn configured() -> ShotUploadConfig {
         ShotUploadConfig {
             endpoint: Some(endpoint("https://plantlet.example/api/shots")),
             token: Some(token("original-token")),
             enabled: true,
+            server_key: None,
+            device_key: None,
+        }
+    }
+
+    /// A machine provisioned for `http+noise://`, with no token at all.
+    fn noise_configured() -> ShotUploadConfig {
+        ShotUploadConfig {
+            endpoint: Some(endpoint("http+noise://plantlet.example/api/noise-upload")),
+            token: None,
+            enabled: true,
+            server_key: Some(key(&"s".repeat(SHOT_UPLOAD_KEY_LEN))),
+            device_key: Some(key(&"d".repeat(SHOT_UPLOAD_KEY_LEN))),
         }
     }
 
@@ -355,10 +555,11 @@ mod tests {
         // buffer, and the point of this bound is to notice if a field grows enough to
         // approach it -- not merely to confirm 328 bytes fit in 2048.
         //
-        // 1 + 2 + 255 (endpoint) + 1 + 1 + 64 (token) + 1 (enabled) + 4 (CRC) = 329.
-        let mut buffer = [0u8; 512];
+        // 1 + 2 + 255 (endpoint) + 1 + 1 + 64 (token) + 1 (enabled)
+        //   + 1 + 1 + 53 (server key) + 1 + 1 + 53 (device key) + 4 (CRC) = 439.
+        let mut buffer = [0u8; 1024];
         let len = maximal().serialize_into(&mut buffer).unwrap();
-        assert!(len <= 384, "maximal config serialized to {len} bytes");
+        assert!(len <= 512, "maximal config serialized to {len} bytes");
     }
 
     #[test]
@@ -371,6 +572,8 @@ mod tests {
             endpoint: Some(endpoint("https://plantlet.example/v2/shots")),
             enabled: true,
             token: ShotUploadTokenUpdate::Keep,
+            server_key: None,
+            device_key: ShotUploadKeyUpdate::Keep,
         });
 
         assert_eq!(config.endpoint.as_deref(), Some("https://plantlet.example/v2/shots"));
@@ -385,6 +588,8 @@ mod tests {
             endpoint: config.endpoint.clone(),
             enabled: true,
             token: ShotUploadTokenUpdate::Clear,
+            server_key: None,
+            device_key: ShotUploadKeyUpdate::Keep,
         });
 
         assert_eq!(config.token, None);
@@ -399,6 +604,8 @@ mod tests {
             endpoint: config.endpoint.clone(),
             enabled: true,
             token: ShotUploadTokenUpdate::Set(token("rotated-token")),
+            server_key: None,
+            device_key: ShotUploadKeyUpdate::Keep,
         });
 
         assert_eq!(config.token, Some(token("rotated-token")));
@@ -413,6 +620,8 @@ mod tests {
             endpoint: Some(endpoint("https://plantlet.example/api/shots")),
             enabled: true,
             token: ShotUploadTokenUpdate::Keep,
+            server_key: None,
+            device_key: ShotUploadKeyUpdate::Keep,
         });
 
         assert_eq!(config.token, None);
@@ -427,6 +636,8 @@ mod tests {
             endpoint: config.endpoint.clone(),
             enabled: false,
             token: ShotUploadTokenUpdate::Keep,
+            server_key: None,
+            device_key: ShotUploadKeyUpdate::Keep,
         });
 
         assert!(!config.enabled);
@@ -449,11 +660,16 @@ mod tests {
             endpoint: Some(endpoint("https://example.org/api/shots")),
             enabled: true,
             token: ShotUploadTokenUpdate::Set(token("sup3rs3cr3t")),
+            server_key: None,
+            device_key: ShotUploadKeyUpdate::Set(key(&"k".repeat(SHOT_UPLOAD_KEY_LEN))),
         };
         let rendered = alloc::format!("{settings:?}");
 
         assert!(!rendered.contains("sup3rs3cr3t"));
         assert!(rendered.contains("Set(len 11)"));
+        // The device key is a secret of the same class, and travels the same debug paths.
+        assert!(!rendered.contains(&"k".repeat(SHOT_UPLOAD_KEY_LEN)));
+        assert!(rendered.contains("len: 53"));
     }
 
     #[test]
@@ -495,14 +711,85 @@ mod tests {
     #[test]
     fn exactly_maximal_fields_are_accepted() {
         // The boundary the previous test sits one byte past. Off-by-one here would reject
-        // a Plantlet token, which is exactly SHOT_UPLOAD_TOKEN_LEN characters.
-        let config = shot_upload_config(
+        // a Plantlet token, which is exactly SHOT_UPLOAD_TOKEN_LEN characters -- and now
+        // also a Noise key, which is exactly SHOT_UPLOAD_KEY_LEN.
+        let config = shot_upload_config_with_keys(
             &"e".repeat(SHOT_UPLOAD_ENDPOINT_LEN),
             &"t".repeat(SHOT_UPLOAD_TOKEN_LEN),
             true,
+            &"s".repeat(SHOT_UPLOAD_KEY_LEN),
+            &"d".repeat(SHOT_UPLOAD_KEY_LEN),
         )
         .unwrap();
         assert_eq!(config, maximal());
         assert!(config.is_complete());
+    }
+
+    #[test]
+    fn a_key_one_character_too_long_is_refused() {
+        // Rejected, not truncated: a shortened key is not a slightly-wrong key, it is not a
+        // key at all, and the handshake failure it produces names nothing.
+        let long = "k".repeat(SHOT_UPLOAD_KEY_LEN + 1);
+        assert_eq!(
+            shot_upload_config_with_keys("https://e.example/x", "t", true, &long, ""),
+            Err(ShotUploadConfigError::ServerKeyTooLong)
+        );
+        assert_eq!(
+            shot_upload_config_with_keys("https://e.example/x", "t", true, "", &long),
+            Err(ShotUploadConfigError::DeviceKeyTooLong)
+        );
+    }
+
+    #[test]
+    fn a_noise_machine_is_complete_without_a_token() {
+        // The state an `http+noise://` machine is provisioned into: the device key is the
+        // credential, so requiring a token as well would make it permanently unconfigured.
+        let config = noise_configured();
+        assert!(config.token.is_none());
+        assert!(config.has_noise_keys());
+        assert!(config.is_complete());
+    }
+
+    #[test]
+    fn one_noise_key_alone_is_not_enough() {
+        let mut config = noise_configured();
+        config.device_key = None;
+        assert!(!config.has_noise_keys());
+        assert!(!config.is_complete());
+    }
+
+    #[test]
+    fn a_blank_device_key_field_keeps_the_stored_one() {
+        // The same three-way rule the token follows, for the same reason: the browser is
+        // never shown the device key, so blank means "untouched".
+        let mut config = noise_configured();
+        config.apply(ShotUploadSettings {
+            endpoint: config.endpoint.clone(),
+            enabled: true,
+            token: ShotUploadTokenUpdate::Keep,
+            server_key: config.server_key.clone(),
+            device_key: ShotUploadKeyUpdate::Keep,
+        });
+        assert_eq!(config.device_key, Some(key(&"d".repeat(SHOT_UPLOAD_KEY_LEN))));
+
+        config.apply(ShotUploadSettings {
+            endpoint: config.endpoint.clone(),
+            enabled: true,
+            token: ShotUploadTokenUpdate::Keep,
+            server_key: config.server_key.clone(),
+            device_key: ShotUploadKeyUpdate::Clear,
+        });
+        assert_eq!(config.device_key, None);
+    }
+
+    #[test]
+    fn debug_hides_the_device_key_but_shows_the_server_key() {
+        // The asymmetry is the point: one is a secret, the other is public and is exactly
+        // what you need to see when a handshake is being refused.
+        let config = noise_configured();
+        let rendered = alloc::format!("{config:?}");
+        assert!(!rendered.contains(&"d".repeat(SHOT_UPLOAD_KEY_LEN)));
+        assert!(rendered.contains("device_key_len"));
+        assert!(rendered.contains(&"s".repeat(SHOT_UPLOAD_KEY_LEN)));
     }
 }
