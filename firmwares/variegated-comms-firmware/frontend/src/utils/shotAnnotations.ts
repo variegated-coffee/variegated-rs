@@ -82,6 +82,12 @@ export function formatKey(key: ShotAnnotationKey): string {
  *
  * Returns `null` when the block is full and the key is new -- the same refusal the
  * machine makes, surfaced early so a user is told before they lose what they typed.
+ *
+ * Spreads the block rather than rebuilding it as `{ entries }`, and that is load-bearing
+ * rather than style: `entries` is no longer the only field. From format version 5 the block
+ * also carries `tasting_notes`, which this file never touches -- and rebuilding from
+ * `entries` alone would drop it on every save, erasing a note nobody asked to change. The
+ * spread also means the next field added needs no edit here.
  */
 export function upsert(
   annotations: ShotAnnotations,
@@ -92,17 +98,20 @@ export function upsert(
   if (index >= 0) {
     const entries = [...annotations.entries];
     entries[index] = { key, value };
-    return { entries };
+    return { ...annotations, entries };
   }
   if (annotations.entries.length >= MAX_SHOT_ANNOTATIONS) {
     return null;
   }
-  return { entries: [...annotations.entries, { key, value }] };
+  return { ...annotations, entries: [...annotations.entries, { key, value }] };
 }
 
 /** Drop a key, preserving the order of what is left. */
 export function remove(annotations: ShotAnnotations, key: ShotAnnotationKey): ShotAnnotations {
-  return { entries: annotations.entries.filter((entry) => !keysEqual(entry.key, key)) };
+  return {
+    ...annotations,
+    entries: annotations.entries.filter((entry) => !keysEqual(entry.key, key)),
+  };
 }
 
 /**

@@ -55,7 +55,7 @@ pub struct SensorReading<Transformed> {
 }
 pub use pump::{Pump, PumpError};
 use heapless::index_map::FnvIndexMap;
-use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS, ECType};
+use variegated_controller_types::{WeightType, PeripheralStatus, PeripheralStatusProvider, PeripheralId, PeripheralInfo, MAX_PERIPHERALS, ECType, RPMType};
 use crate::scale::ScaleConfiguration;
 
 pub mod gpio;
@@ -213,7 +213,13 @@ pub struct Group<'a, M: RawMutex, const N: usize> {
     pub output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
     pub output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
     pub output_temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
-    pub output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>
+    pub output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>,
+    /// Pump speed from a tachometer, on machines that have one.
+    ///
+    /// Group-scoped rather than machine-scoped because the pump serves the group, and
+    /// because this is the level `GroupStatus` is assembled at. A dual-group machine with
+    /// one pump per group would want it here too.
+    pub pump_rpm_sensor: Option<Receiver<'a, M, SensorReading<RPMType>, N>>
 }
 
 impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
@@ -228,7 +234,8 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         output_flow_sensor: Option<Receiver<'a, M, SensorReading<FlowRateType>, N>>,
         output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
         output_temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
-        output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>
+        output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>,
+        pump_rpm_sensor: Option<Receiver<'a, M, SensorReading<RPMType>, N>>
     ) -> Self {
         Self {
             brew_mechanism,
@@ -242,6 +249,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             output_weight_sensor,
             output_temperature_sensor,
             output_electrical_conductivity_sensor,
+            pump_rpm_sensor,
         }
     }
 
@@ -341,6 +349,14 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
 
     pub fn get_output_electrical_conductivity_reading(&mut self) -> Option<SensorReading<ECType>> {
         self.output_electrical_conductivity_sensor.as_mut().and_then(|sensor| sensor.try_get())
+    }
+
+    pub fn get_pump_rpm(&mut self) -> Option<RPMType> {
+        self.pump_rpm_sensor.as_mut().and_then(|sensor| sensor.try_get().map(|reading| reading.transformed))
+    }
+
+    pub fn get_pump_rpm_reading(&mut self) -> Option<SensorReading<RPMType>> {
+        self.pump_rpm_sensor.as_mut().and_then(|sensor| sensor.try_get())
     }
 
     pub async fn scale_tare(&mut self) -> Result<(), scale::ScaleError> {

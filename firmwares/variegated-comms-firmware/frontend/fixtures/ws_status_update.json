@@ -120,7 +120,8 @@
           "output_weight": 36.5,
           "started_at_millis": 1000000,
           "stopped_at_millis": 1027000
-        }
+        },
+        "pump_rpm": 1937.5
       },
       "1": {
         "is_brewing": true,
@@ -193,7 +194,8 @@
           "output_weight": 36.5,
           "started_at_millis": 1000000,
           "stopped_at_millis": 1027000
-        }
+        },
+        "pump_rpm": 1937.5
       }
     },
     "water_tap_statuses": {
@@ -332,7 +334,8 @@
             "Text": "VST 18g"
           }
         }
-      ]
+      ],
+      "tasting_notes": "Blackcurrant, tomato, syrupy"
     },
     "sd_card_present": true
   }

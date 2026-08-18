@@ -395,6 +395,12 @@ pub struct GroupStatus {
     pub pump_output: Output,
     pub control_state: GroupBrewControlState,
     pub previous_brew: Option<PreviousBrewInfo>,
+    /// Gear-pump speed from the tacho, on machines that have one.
+    ///
+    /// Distinct from `pump_output`, which is what the controller *asked* for. A gap
+    /// between the two is load: duty rising while this does not is a pump working against
+    /// a blockage.
+    pub pump_rpm: Option<RPMType>,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -1079,6 +1079,12 @@ static TANK_WATER_LEVEL_WATCH: StaticCell<Watch<NoopRawMutex, SensorReading<Wate
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
 static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
+// Published to by the pump tacho task and read by nobody, *deliberately* -- unlike
+// `PUMP_RPM_SIGNAL`, which was the same shape by oversight until format version 5 gave it
+// somewhere to go. Its transform is the identity, so what it carries is a raw cumulative
+// pulse count rather than a volume, and logging that under a name meaning "volume" would
+// put an uncalibrated number into a versioned format. `PumpConfiguration::tacho_pulses_per_liter`
+// is the field that would make it real; it is inert everywhere today.
 static PUMP_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 // Shared by both scale implementations -- whichever one is compiled in publishes here
 // and `Group.output_weight_sensor` reads from it, so the controller above never learns
@@ -2993,6 +2999,12 @@ async fn main_task(
         #[cfg(feature = "belka")]
         Some(output_ec_watch.receiver().unwrap()),
         #[cfg(not(feature = "belka"))]
+        None,
+        // Pump tacho. The counter above has always published into `pump_rpm_sig`; until
+        // now nothing took a receiver on it, so the measurement stopped here.
+        #[cfg(feature = "gear-pump")]
+        Some(pump_rpm_sig.receiver().unwrap()),
+        #[cfg(not(feature = "gear-pump"))]
         None,
     );
 

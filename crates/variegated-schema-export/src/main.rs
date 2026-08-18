@@ -60,7 +60,7 @@ fn main() -> ExitCode {
                 );
                 eprintln!(
                     "This file is now frozen. Add {version} to the VERSIONS table in \
-                     packages/shot-log/src/decode.ts and write its adapter."
+                     packages/shot-log/src/gates.ts and write its adapter."
                 );
                 ExitCode::SUCCESS
             }

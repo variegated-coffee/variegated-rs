@@ -171,6 +171,14 @@ pub const SHOT_ANNOTATION_TEXT_LEN: usize = 48;
 /// How many annotations one shot may carry.
 pub const MAX_SHOT_ANNOTATIONS: usize = 8;
 
+/// Longest tasting note.
+///
+/// Bounded, like every other capacity here, so that a maximal [`ShotAnnotations`] stays a
+/// number rather than a hope -- see that type's doc for what depends on it. 256 leaves
+/// 220 bytes of headroom under the 1 kB listing prefix; spending that headroom means
+/// moving four constants in three crates, so treat it as the budget it is.
+pub const SHOT_TASTING_NOTES_LEN: usize = 256;
+
 /// What an annotation is about.
 ///
 /// Everything here is **the user's**. Machine-derived facts about a shot are fields of
@@ -238,9 +246,21 @@ pub struct ShotAnnotation {
 /// Everything a user told the machine about a shot that the machine could not measure.
 ///
 /// Bounded rather than a `Vec`, because this rides in `Status` at 1 Hz and inside every
-/// stored shot: a maximal block is 545 bytes, which is the number the link MTU and the
+/// stored shot: a maximal block is 804 bytes, which is the number the link MTU and the
 /// `Status` budget are checked against. An unbounded collection would make that number
 /// unknowable.
+///
+/// That 804 is 545 of entries (8 x (18-byte key + 50-byte value) + 1) plus 259 of
+/// `tasting_notes` (option tag + 2-byte length + 256). It has to stay under the 1 kB
+/// annotation prefix a listing reads, the device's 1 kB HTTP body limit, and the listing
+/// page budget. Nothing checks any of that at runtime -- the bound is emergent from these
+/// capacities, which is exactly why they are capacities and not `String`s.
+///
+/// `tasting_notes` is a field rather than a fifth [`ShotAnnotationKey`] because one long
+/// value on a struct costs its length once, where the same value admitted to the map
+/// would have to be affordable eight times over. Widening
+/// [`SHOT_ANNOTATION_TEXT_LEN`] to fit prose instead would inflate every `Beans` and
+/// `Other` entry to pay for it.
 ///
 /// Keys are unique -- [`Self::set`] is an upsert -- so this is a small map, stored as a
 /// vector because eight entries is below the size where any other structure pays for
@@ -252,21 +272,37 @@ pub struct ShotAnnotation {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShotAnnotations {
     pub entries: heapless::Vec<ShotAnnotation, MAX_SHOT_ANNOTATIONS>,
+    /// How the shot tasted, in the user's own words.
+    ///
+    /// Prose, so it is neither a key nor a value in `entries` -- there is one per shot and
+    /// it is long. `None` and `Some("")` are not distinguished by anything downstream;
+    /// prefer clearing to storing an empty string.
+    pub tasting_notes: Option<heapless::String<SHOT_TASTING_NOTES_LEN>>,
 }
 
 impl ShotAnnotations {
     pub const fn new() -> Self {
         Self {
             entries: heapless::Vec::new(),
+            tasting_notes: None,
         }
     }
 
+    /// How many key/value entries there are.
+    ///
+    /// Deliberately not counting `tasting_notes`: every caller renders this as
+    /// "{} entries", and a note is not one.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether the user told the machine nothing at all about this shot.
+    ///
+    /// Counts `tasting_notes`, unlike [`Self::len`]. A shot annotated with only a tasting
+    /// note is annotated, and callers use this to decide whether there is anything to
+    /// show.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.tasting_notes.is_none()
     }
 
     pub fn iter(&self) -> core::slice::Iter<'_, ShotAnnotation> {
@@ -316,8 +352,14 @@ impl ShotAnnotations {
         }
     }
 
+    /// Drop everything the user recorded, tasting note included.
+    ///
+    /// The note is not optional here. This is what resets the *pending* annotations after
+    /// a shot is stored, so a note left behind would be attached to the next shot pulled
+    /// -- a wrong tasting note being worse than none.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.tasting_notes = None;
     }
 
     /// The dose in grams, if one was recorded as a number.
@@ -396,7 +438,16 @@ impl ShotLogListEntry {
             })
             .sum();
 
-        ID_LEN + SIZE_LEN + VEC_LEN + annotations
+        // `tasting_notes: Option<String<256>>` -- a one-byte tag, and when present a
+        // length prefix (two bytes at this capacity) plus the bytes themselves. Counted
+        // because this is an *upper* bound: omitting it would underestimate, and the doc
+        // above says which direction that is wrong in.
+        let notes = 1 + match &self.annotations.tasting_notes {
+            Some(notes) => 2 + notes.len(),
+            None => 0,
+        };
+
+        ID_LEN + SIZE_LEN + VEC_LEN + annotations + notes
     }
 }
 
@@ -652,7 +703,32 @@ pub enum ShotLogEvent {
 ///   is *appended*, after `final_status`, so a version 3 file read as version 4 runs out of
 ///   bytes rather than reading a sample as a timestamp; that is a cleaner failure than the
 ///   2-to-3 change, though the version check refuses it before either can happen.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 4;
+/// * `5` -- **two changes**, batched because the migration is the expensive part, not the
+///   fields: every consumer -- the frozen `schemas/vN.ts`, its adapter, the `VERSIONS`
+///   table, the fixtures -- pays once for a version rather than once for a field.
+///
+///   [`GroupSample`] gained `pump_rpm`, and [`ShotAnnotations`] gained `tasting_notes`.
+///   Both are appended, so unlike the 2-to-3 change every preceding field keeps its
+///   meaning. They differ in how loudly a mismatch fails, and the difference is worth
+///   knowing:
+///
+///   `pump_rpm` is last in `GroupSample`, but `GroupSample` is not last in the file --
+///   `water_tap_samples` follows it inside every [`ShotLogSample`]. A version 4 file read
+///   as version 5 therefore consumes the water-tap map's length byte as this field's
+///   option tag and stays desynchronised for every sample after it.
+///
+///   `tasting_notes` is last in [`ShotAnnotations`], which sits at the *front* of the file
+///   -- metadata's first field, and metadata is [`ShotLog`]'s second. A mismatch there
+///   desynchronises immediately, before a single sample is read, which is the loudest
+///   version of this failure available.
+///
+///   The version check refuses a foreign file before either can happen. `GOLDEN_V4` and
+///   `a_version_4_file_is_refused_by_its_version` are what keep that true.
+///
+///   Note the annotation change did not *require* a bump: appending to a struct only
+///   breaks a decoder that meets the new bytes, and a version 4 file simply has none. It
+///   rode along because the bump was already being paid for.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 5;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -846,6 +922,13 @@ pub struct GroupSample {
     pub shot_state: Option<ShotState>,
     pub extracted_solids: Option<ExtractedSolidsType>,
     pub output_volume: Option<OutputVolumeType>,
+    /// Gear-pump speed from the tacho, on machines that have one.
+    ///
+    /// Appended rather than filed beside `pump_output`, where it belongs topically. A
+    /// version 4 file read as version 5 then runs *out of bytes* instead of reading the
+    /// water-tap map's length as this field's option tag -- see the version 3 note on
+    /// [`SHOT_LOG_FORMAT_VERSION`] for what the other choice costs.
+    pub pump_rpm: Option<RPMType>,
 }
 
 /// Water tap sensor readings at a point in time
@@ -1074,6 +1157,41 @@ mod shot_annotation_tests {
         );
     }
 
+    /// `clear` drops the tasting note along with the entries.
+    ///
+    /// This is what resets the *pending* annotations once a shot is stored. A note that
+    /// survived would be silently attached to the next shot pulled, which is worse than
+    /// having no note at all -- the reading would look recorded rather than stale.
+    #[test]
+    fn clear_drops_the_tasting_note_too() {
+        let mut annotations = ShotAnnotations::new();
+        annotations.set(ShotAnnotationKey::Beans, text("Kenya")).unwrap();
+        annotations.tasting_notes =
+            Some(heapless::String::try_from("Blackcurrant, dense").unwrap());
+
+        annotations.clear();
+
+        assert_eq!(annotations.tasting_notes, None);
+        assert!(annotations.is_empty());
+    }
+
+    /// A shot annotated with only a tasting note is annotated.
+    ///
+    /// `is_empty` gates whether callers render the block at all, so counting only
+    /// `entries` would hide a note that is the single thing the user recorded. Note that
+    /// `len` deliberately still does not count it -- every caller of that one renders it
+    /// as "{} entries".
+    #[test]
+    fn a_notes_only_block_is_not_empty() {
+        let mut annotations = ShotAnnotations::new();
+        assert!(annotations.is_empty());
+
+        annotations.tasting_notes = Some(heapless::String::try_from("Thin, sour").unwrap());
+
+        assert!(!annotations.is_empty());
+        assert_eq!(annotations.len(), 0);
+    }
+
     #[test]
     fn remove_preserves_the_order_of_what_is_left() {
         let mut annotations = ShotAnnotations::new();
@@ -1159,6 +1277,10 @@ mod shot_log_sample_tests {
                     shot_state: Some(ShotState::PostFirstDrop),
                     extracted_solids: Some(7.75),
                     output_volume: Some(38.5),
+                    // 1937.5 is 0x44F23000 -- exact in f32, like every other value here,
+                    // and distinct from all of them. A plausible mid-shot speed for a
+                    // pump rated 300-5000 rpm.
+                    pump_rpm: Some(1937.5),
                 },
             )
             .unwrap();
@@ -1169,8 +1291,14 @@ mod shot_log_sample_tests {
             .insert(2, WaterTapSample { is_dispensing: true })
             .unwrap();
 
+        // Populated rather than empty: a `None` tasting note costs one byte and proves
+        // nothing about how the field encodes, which is the whole job of the golden array.
+        let mut annotations = ShotAnnotations::new();
+        annotations.tasting_notes =
+            Some(heapless::String::try_from("Bergamot, red apple, long cocoa finish").unwrap());
+
         let mut shot = ShotLog::new(ShotLogMetadata {
-            annotations: ShotAnnotations::new(),
+            annotations,
             shot_type: ShotType::Manual,
             group_index: 1,
             routine_metadata: None,
@@ -1234,6 +1362,14 @@ mod shot_log_sample_tests {
         assert_eq!(group.shot_state, Some(ShotState::PostFirstDrop));
         assert_eq!(group.extracted_solids, Some(7.75));
         assert_eq!(group.output_volume, Some(38.5));
+        assert_eq!(group.pump_rpm, Some(1937.5));
+
+        // The annotation block leads the file, so a note that survives says the very first
+        // thing after the version decoded at the right width.
+        assert_eq!(
+            decoded.metadata.annotations.tasting_notes.as_deref(),
+            Some("Bergamot, red apple, long cocoa finish")
+        );
 
         // Encoded after the group map, so these only survive if the group sample consumed
         // exactly its own bytes and not one field more or less.
@@ -1265,13 +1401,18 @@ mod shot_log_sample_tests {
         0x00, 0x00, 0x00,
     ];
 
-    /// The bytes version 4 produces for [`canonical_shot`], captured once when version 4
-    /// was minted.
+    /// The bytes version 4 produced for [`canonical_shot`], captured when version 4 was
+    /// minted and kept unchanged since.
     ///
     /// Not decoration: these bytes are the only thing in the tree that a round-trip test
     /// cannot replace. Encoder and decoder always agree with each other, so shape changes
     /// are invisible to every symmetric test -- but they are *not* invisible to a stored
     /// shot written by an earlier build, which is what this array stands in for.
+    ///
+    /// No longer the current encoding -- version 5 appended `pump_rpm` to [`GroupSample`]
+    /// and `tasting_notes` to [`ShotAnnotations`], and the fixture gained values for both.
+    /// Like [`GOLDEN_V3`] it is deliberately not regenerated; its remaining job is
+    /// `a_version_4_file_is_refused_by_its_version`.
     const GOLDEN_V4: &[u8] = &[
         0x04, 0x00, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01, 0x9c, 0xc7, 0x01, 0x01,
         0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x02, 0xdc, 0x0b, 0x00, 0x01,
@@ -1282,6 +1423,32 @@ mod shot_log_sample_tests {
         0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00, 0x00, 0x90, 0x3f, 0x01,
         0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40, 0x01, 0x00, 0x00, 0x1a,
         0x42, 0x01, 0x02, 0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// The bytes version 5 produces for [`canonical_shot`], captured once when version 5
+    /// was minted.
+    ///
+    /// Derived from [`GOLDEN_V4`] by applying the version 5 change rule -- version byte
+    /// `0x04` to `0x05`; `tasting_notes` as `Some` inserted directly after the annotation
+    /// vector's length; `pump_rpm` as `Some(1937.5)` inserted after `output_volume`, once
+    /// per encoded [`GroupSample`] -- and then *confirmed against the encoder* by
+    /// `the_encoding_has_not_moved_under_this_version`. Predicted then verified, rather
+    /// than pasted out of a failure diff, which is the mode that turns this array from a
+    /// check into a rubber stamp.
+    const GOLDEN_V5: &[u8] = &[
+        0x05, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
+        0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
+        0x20, 0x6c, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x6f, 0x63, 0x6f, 0x61, 0x20,
+        0x66, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01,
+        0x9c, 0xc7, 0x01, 0x01, 0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x02,
+        0xdc, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5, 0xee,
+        0x01, 0x01, 0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40, 0x01,
+        0x00, 0x00, 0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00, 0x00,
+        0x11, 0x42, 0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb, 0x42,
+        0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00,
+        0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40,
+        0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x02,
+        0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
     ];
 
     /// A version 3 file is rejected on its version, not decoded into nonsense.
@@ -1310,6 +1477,29 @@ mod shot_log_sample_tests {
         }
     }
 
+    /// A version 4 file is rejected on its version, not decoded into nonsense.
+    ///
+    /// The version 5 counterpart of the test above, and the reason [`GOLDEN_V4`] is kept
+    /// rather than replaced. The hazard is specific: `tasting_notes` was appended to
+    /// [`ShotAnnotations`], which is the *first* thing in the file after the version, so a
+    /// version 5 decoder reads the byte after the annotation vector -- `shot_type` in a
+    /// version 4 file -- as the note's option tag, and every field after it is shifted.
+    /// `pump_rpm` does the same again further in, consuming the water-tap map's length
+    /// byte. Neither is detectable from the bytes; the leading version is what catches it.
+    #[test]
+    fn a_version_4_file_is_refused_by_its_version() {
+        let (version, _rest) = postcard::take_from_bytes::<u32>(GOLDEN_V4).unwrap();
+        assert_eq!(version, 4, "GOLDEN_V4 must stay the version 4 file it was");
+        assert_ne!(
+            version, SHOT_LOG_FORMAT_VERSION,
+            "an old file must be distinguishable from a current one by its first byte"
+        );
+
+        if let Ok(decoded) = postcard::from_bytes::<ShotLog>(GOLDEN_V4) {
+            assert!(!decoded.version_supported());
+        }
+    }
+
     /// A shot stored by this version still decodes, byte for byte, to what it meant.
     ///
     /// This is the test that fires when someone adds, removes, reorders or retypes a field
@@ -1328,7 +1518,7 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V4,
+            GOLDEN_V5,
             "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
              see this test's doc comment before touching the golden array"
         );
@@ -1336,14 +1526,19 @@ mod shot_log_sample_tests {
         // Decoding the frozen bytes as well as comparing them: the assertion above proves
         // the writer has not moved, this proves the reader still understands what an
         // earlier build wrote.
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V4).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V5).unwrap();
         assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
         assert_eq!(decoded.metadata.recorded_at_unix_millis, Some(1_786_429_751_930));
+        assert_eq!(
+            decoded.metadata.annotations.tasting_notes.as_deref(),
+            Some("Bergamot, red apple, long cocoa finish")
+        );
         let group = decoded.samples[0].group_samples.get(&1).expect("group 1");
         assert_eq!(group.temperature, Some(93.5));
         assert_eq!(group.output_temperature, Some(87.25));
         assert_eq!(group.output_electrical_conductivity, Some(0.625));
         assert_eq!(group.extraction_rate, Some(1.125));
+        assert_eq!(group.pump_rpm, Some(1937.5));
     }
 }
 
@@ -1380,6 +1575,14 @@ mod shot_log_prefix_tests {
                 )
                 .unwrap();
         }
+        // The tasting note at *its* bound too. Without this the fixture is no longer
+        // maximal and the sentence above stops being true -- the block would grow by 259
+        // bytes in the field while this test kept passing on the old worst case.
+        annotations.tasting_notes = Some(
+            core::iter::repeat('x')
+                .take(SHOT_TASTING_NOTES_LEN)
+                .collect::<heapless::String<SHOT_TASTING_NOTES_LEN>>(),
+        );
 
         let mut shot = ShotLog::new(ShotLogMetadata {
             annotations: annotations.clone(),
@@ -1477,9 +1680,14 @@ mod shot_log_page_tests {
     use super::*;
 
     /// An entry with every field at its bound: eight annotations, each with a maximal
-    /// custom key and a maximal text value.
+    /// custom key and a maximal text value, plus a maximal tasting note.
     fn maximal_entry() -> ShotLogListEntry {
         let mut annotations = ShotAnnotations::new();
+        annotations.tasting_notes = Some(
+            core::iter::repeat('x')
+                .take(SHOT_TASTING_NOTES_LEN)
+                .collect::<heapless::String<SHOT_TASTING_NOTES_LEN>>(),
+        );
         for i in 0..MAX_SHOT_ANNOTATIONS {
             let mut key = heapless::String::<SHOT_ANNOTATION_KEY_LEN>::new();
             core::fmt::Write::write_fmt(&mut key, format_args!("{:016}", i)).unwrap();

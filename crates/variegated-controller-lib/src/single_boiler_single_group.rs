@@ -1091,6 +1091,10 @@ impl<
             pump_output: pump_output.clone(),
             control_state: self.ephemeral_configuration.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
+            // `None` on every machine this controller currently runs, since no
+            // single-boiler firmware passes a tacho receiver. Routed through the getter
+            // rather than hardcoded so wiring one is a firmware-only change.
+            pump_rpm: self.group.get_pump_rpm(),
         };
 
         // Calculate current timestamp if we have comms_status

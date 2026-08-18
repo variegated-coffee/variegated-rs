@@ -677,7 +677,11 @@ async fn main_task(spawner: Spawner) -> ! {
         None, // output_flow_sig has different raw type (i32) than flow_meter_sig (f32)
         Some(output_weight_sig.receiver().unwrap()),
         None, // output_temperature_sensor
-        None  // output_ec_sensor
+        None, // output_ec_sensor
+        // pump_rpm_sensor. This machine has a tacho -- `pump_rpm_sig` above, on PWM input
+        // capture -- but wiring it is untested on this hardware and deliberately out of
+        // scope here. Passing it is a one-line change when someone can verify it.
+        None
     );
 
     // Create peripheral registry and register peripherals

@@ -34,7 +34,8 @@
               "Text": "ZeroWater"
             }
           }
-        ]
+        ],
+        "tasting_notes": "Bergamot up front, red apple, long cocoa finish"
       }
     },
     {
@@ -51,7 +52,8 @@
               "Text": "Morgon / Sisters"
             }
           }
-        ]
+        ],
+        "tasting_notes": null
       }
     },
     {
@@ -61,7 +63,8 @@
       },
       "size_bytes": 1024,
       "annotations": {
-        "entries": []
+        "entries": [],
+        "tasting_notes": null
       }
     }
   ],

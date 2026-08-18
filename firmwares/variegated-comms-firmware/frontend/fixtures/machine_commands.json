@@ -505,13 +505,15 @@
               "Text": "ZeroWater"
             }
           }
-        ]
+        ],
+        "tasting_notes": "Bergamot up front, red apple, long cocoa finish"
       }
     ]
   },
   {
     "SetPendingShotAnnotations": {
-      "entries": []
+      "entries": [],
+      "tasting_notes": null
     }
   },
   {
