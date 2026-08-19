@@ -92,6 +92,33 @@ export function formatExitCondition(
       const [tapIdx, targetValue] = stateCondition.value;
       const value = formatParameterValue(targetValue);
       conditionText = `Water Tap ${tapIdx} Flow Rate < ${value} mL/s`;
+    } else if (stateCondition.type === 'GroupOutputConductivityAbove') {
+      const [groupIdx, targetValue] = stateCondition.value;
+      conditionText = `${groupName(groupIdx)} Conductivity > ${formatParameterValue(targetValue)} mS/cm`;
+    } else if (stateCondition.type === 'GroupOutputConductivityBelow') {
+      const [groupIdx, targetValue] = stateCondition.value;
+      conditionText = `${groupName(groupIdx)} Conductivity < ${formatParameterValue(targetValue)} mS/cm`;
+    } else if (stateCondition.type === 'GroupExtractionRateAbove') {
+      const [groupIdx, targetValue] = stateCondition.value;
+      conditionText = `${groupName(groupIdx)} Extraction Rate > ${formatParameterValue(targetValue)} mS·mL/cm·s`;
+    } else if (stateCondition.type === 'GroupExtractionRateBelow') {
+      const [groupIdx, targetValue] = stateCondition.value;
+      conditionText = `${groupName(groupIdx)} Extraction Rate < ${formatParameterValue(targetValue)} mS·mL/cm·s`;
+    } else if (stateCondition.type === 'ExtractedSolidsAbove') {
+      const [groupIdx, targetValue] = stateCondition.value;
+      conditionText = `${groupName(groupIdx)} Extracted Solids > ${formatParameterValue(targetValue)} mS·mL/cm`;
+    } else if (stateCondition.type === 'ExtractedSolidsBelow') {
+      const [groupIdx, targetValue] = stateCondition.value;
+      conditionText = `${groupName(groupIdx)} Extracted Solids < ${formatParameterValue(targetValue)} mS·mL/cm`;
+    } else if (stateCondition.type === 'ShotStateReached') {
+      const [groupIdx, phase] = stateCondition.value;
+      // Named per phase. "reached Saturation" is the wire spelling; "puck is saturated" is
+      // what the person who chose it was thinking.
+      const label =
+        phase.type === 'Saturation' ? 'puck is saturated'
+        : phase.type === 'PostFirstDrop' ? 'first drop'
+        : 'headspace filling';
+      conditionText = `${groupName(groupIdx)} ${label}`;
     } else {
       conditionText = 'Unknown';
     }

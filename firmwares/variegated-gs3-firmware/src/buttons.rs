@@ -48,15 +48,23 @@
 //! | Tap 2 (`+`) | Selection **down**, wrapping | **Increase** |
 //! | Tap 3 | Activate | Confirm |
 //! | Tap 4 | Pop; popping the root leaves menu mode | Cancel |
+//! | Hold 3, 1.5 s | **Run the selected routine**, skipping its parameter screen | — |
+//! | Hold 6, 3 s | `TagDoseFromScale` -- the same meaning it has outside the menu | (same) |
 //!
 //! A list is not a third direction to learn: `-` moves towards the top of it because the top
 //! is the previous item, which is the same thing `-` means to a number. Each screen's hint row
 //! names what its own buttons do, so nobody has to derive it.
 //!
-//! Buttons 5 and 6 are inert here, holds included. Entry is refused while brewing,
-//! dispensing or running a routine, but is **not** gated on machine mode -- provisioning a
-//! machine should not require heating it. The menu's content lives in [`crate::menu`]; this
-//! module owns only the input half.
+//! **The two holds are meanings the menu has, not holes in its capture.** Tapping a routine
+//! deliberately never runs it -- it always opens the parameter screen, so that what a press
+//! does is predictable before it is made. A hold is a separate, deliberate gesture, so it can
+//! carry the shortcut without weakening that rule; see [`crate::menu::activate_hold`], which
+//! also owns the two conditions under which it refuses. Button 5's hold is dropped here --
+//! re-opening an open menu is meaningless -- and every other hold and chord stays inert.
+//!
+//! Entry is refused while brewing, dispensing or running a routine, but is **not** gated on
+//! machine mode -- provisioning a machine should not require heating it. The menu's content
+//! lives in [`crate::menu`]; this module owns only the input half.
 //!
 //! # Architecture
 //!
@@ -99,12 +107,9 @@ use crate::menu::{
     MenuSender, MenuSnapshot, WifiRequest, LIST_FUNCTION_ROUTINES,
 };
 use variegated_controller_lib::routine::{Routine, RoutineRepository as RoutineRepositoryTrait};
-use variegated_controller_types::{BoilerIndex, Configuration, TemperatureType};
-use variegated_machine_menu::{routine_rows, ParameterValues, RoutineRows};
+use variegated_controller_types::Configuration;
+use variegated_machine_menu::{parameter_adjustable, routine_rows, ParameterValues, RoutineRows};
 use variegated_menu::Adjustable;
-
-/// Boiler 0. The same index `menu::confirm_editor` writes to.
-const BREW_BOILER: BoilerIndex = 0;
 
 /// Button indices for routine control (buttons 0-3)
 const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
@@ -253,15 +258,47 @@ pub struct ButtonEventHandler {
     values: ParameterValues,
     /// The value an editor frame is editing.
     editor: Option<Adjustable>,
-    /// The brew boiler's configured ceiling, from the `Configuration` channel.
+    /// What the menu reads out of `Configuration`, from that channel.
     ///
-    /// Only this one number is kept, not the `Configuration` it came from: that struct is far
-    /// too large to hold on this task for one float.
-    brew_max: Option<TemperatureType>,
+    /// A projection, not the `Configuration` it came from: that struct is far too large to
+    /// hold on this task. It was a single `Option<f32>` -- the brew boiler's ceiling -- until
+    /// the Settings menu grew rows backed by more of it.
+    menu_config: crate::menu::MenuConfig,
+    /// The Bluetooth associations, for the Bluetooth submenu's rows.
+    ///
+    /// Kept beside the projection rather than in it because it is a list of rows rather than
+    /// a scalar, and `MenuConfig` is `Copy` on purpose. At most four short entries.
+    bluetooth: Option<variegated_controller_types::bluetooth::BluetoothPeripheralList>,
+    /// When the current hold of exactly button 3 started, for run-a-routine-from-the-list.
+    ///
+    /// **Armed only while the menu is open.** Outside it button 3 taps to run function
+    /// routine 2, and a hold there has never meant anything; giving it a meaning in one mode
+    /// only is what keeps it from colliding with that.
+    button_3_hold_start: Option<Instant>,
     /// When the current hold of exactly button 5 started, for the menu long hold.
     button_5_hold_start: Option<Instant>,
     /// When the current hold of exactly button 6 started, for the dose-tag long hold.
     button_6_hold_start: Option<Instant>,
+    /// The last dose seen in `Status.pending_shot_annotations`.
+    ///
+    /// Kept so the re-seed below can be **edge-triggered**. `Status` republishes at ~10 Hz
+    /// with the same value in it, and re-seeding on presence rather than on change would
+    /// overwrite a hand-dialled parameter ten times a second.
+    ///
+    /// A projection of the annotation block rather than a copy of it, for the reason
+    /// `MenuContext` is a projection of `Status`: this task holds neither.
+    pending_dose: Option<f32>,
+    /// Which peripherals are answering, for deciding whether a routine can run.
+    ///
+    /// Kept in full, unlike `pending_dose`, because the question is per-capability and the
+    /// answer needs the whole map. It is a bounded `FnvIndexMap` of sixteen small entries,
+    /// which is the one part of `Status` cheap enough to hold here.
+    peripheral_status: variegated_controller_types::PeripheralStatus,
+    /// What this machine declares it can sense.
+    ///
+    /// `None` until the first menu fetch latches it from `MACHINE_DEFINITION_REF`, which is
+    /// behind an async mutex where `menu_data` is sync. It never changes after boot.
+    machine_definition: Option<&'static variegated_controller_types::MachineDefinition>,
 }
 
 impl ButtonEventHandler {
@@ -281,9 +318,14 @@ impl ButtonEventHandler {
             routine: None,
             values: ParameterValues::default(),
             editor: None,
-            brew_max: None,
+            menu_config: crate::menu::MenuConfig::default(),
+            bluetooth: None,
+            button_3_hold_start: None,
             button_5_hold_start: None,
             button_6_hold_start: None,
+            pending_dose: None,
+            peripheral_status: Default::default(),
+            machine_definition: None,
         }
     }
 
@@ -304,21 +346,74 @@ impl ButtonEventHandler {
         self.routines = Some(routines);
     }
 
-    /// Hand over a fetched routine, and seed its parameters from their defaults.
+    /// Hand over a fetched routine, and seed its parameters.
+    ///
+    /// From their defaults, except that a parameter linked to a numeric shot attribute takes
+    /// the pending annotation's value instead. That is what makes "capture a dose, then open
+    /// the routine" show the captured dose rather than the routine's default.
     ///
     /// `None` for a routine that has gone -- deleted over HTTP while its screen was open.
     /// The screen then has no rows at all, which is the honest rendering of it.
     pub fn provide_routine(&mut self, index: RoutineIndex, routine: Option<Routine>) {
         self.values = routine.as_ref().map(ParameterValues::from_defaults).unwrap_or_default();
+        if let Some(routine) = routine.as_ref() {
+            self.apply_pending_dose(routine);
+        }
         self.routine = Some((index, routine));
+    }
+
+    /// Write the pending dose into every parameter linked to it.
+    ///
+    /// Positional, because `ParameterValues` is: the position in `routine.parameters()`, not
+    /// `RoutineParameter::index`. Confusing the two has been a real bug here before.
+    fn apply_pending_dose(&mut self, routine: &Routine) {
+        let Some(dose) = self.pending_dose else { return };
+
+        for (position, parameter) in routine.parameters().iter().enumerate() {
+            if parameter.linked_attribute.as_ref()
+                == Some(&variegated_controller_types::ShotAnnotationKey::DoseWeight)
+            {
+                self.values.set(position, dose);
+                // The editor, if one is open on this very parameter, is reset too. Last
+                // change wins, and a capture is the later change -- leaving the editor
+                // showing the old number would mean confirming it silently undid the capture.
+                if let Some(MenuId::EditParameter { position: editing, .. }) =
+                    self.menu.top().map(|frame| frame.id)
+                {
+                    if editing as usize == position {
+                        if let Some(editor) = self.editor.as_mut() {
+                            *editor = parameter_adjustable(parameter, dose);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The menu's view of what has been fetched.
     fn menu_data(&self) -> MenuData<'_> {
+        let routine = self.routine.as_ref().and_then(|(_, r)| r.as_ref());
         MenuData {
             routines: self.routines.as_ref(),
-            routine: self.routine.as_ref().and_then(|(_, r)| r.as_ref()),
+            routine,
             values: self.values,
+            // Live, not latched with the routine: a scale can drop while the parameter
+            // screen is open, and the Run row has to grey when it does.
+            routine_runnable: routine.is_none_or(|r| {
+                crate::menu::routine_runnable(r, self.machine_definition, &self.peripheral_status)
+            }),
+            // Live for the same reason: a scale switched off while the Scale submenu is
+            // open has to grey its calibration rows.
+            scale_calibration: crate::menu::scale_calibration(
+                self.machine_definition,
+                &self.peripheral_status,
+            ),
+            scale_present: crate::menu::scale_present(
+                self.machine_definition,
+                &self.peripheral_status,
+            ),
+            bluetooth: self.bluetooth.as_ref(),
+            brew_target_unit: crate::menu::brew_target_unit(&self.menu_config),
         }
     }
 
@@ -333,12 +428,18 @@ impl ButtonEventHandler {
         self.editor = None;
     }
 
-    /// Take the brew boiler's ceiling out of a configuration.
+    /// Take what the menu needs out of a configuration.
     pub fn update_configuration(&mut self, configuration: &Configuration) {
-        self.brew_max = configuration
-            .boiler_configurations
-            .get(&BREW_BOILER)
-            .and_then(|boiler| boiler.max_temperature);
+        self.menu_config = crate::menu::MenuConfig::from_configuration(configuration);
+        self.bluetooth = Some(configuration.bluetooth_peripherals.clone());
+    }
+
+    /// The same projection, for the display tasks. See `menu::MenuConfigSnapshot`.
+    pub fn menu_config_snapshot(&self) -> crate::menu::MenuConfigSnapshot {
+        crate::menu::MenuConfigSnapshot {
+            config: self.menu_config,
+            bluetooth: self.bluetooth.clone().unwrap_or_default(),
+        }
     }
 
     /// Update status from the status receiver
@@ -363,19 +464,38 @@ impl ButtonEventHandler {
         // Update routine execution state from status
         self.routine_executing = status.routine_execution.is_some();
 
+        // A dose captured while a parameter screen is already open -- by the button-6 hold
+        // below, or from the web -- moves the linked parameter under the cursor.
+        //
+        // **Edge-triggered.** `Status` arrives at ~10 Hz carrying the same dose every time;
+        // acting on its presence rather than on its change would overwrite a hand-dialled
+        // value ten times a second and make the parameter uneditable.
+        let dose = status.pending_shot_annotations.dose_weight();
+        if dose != self.pending_dose {
+            self.pending_dose = dose;
+            if let Some(routine) = self.routine.as_ref().and_then(|(_, r)| r.clone()) {
+                self.apply_pending_dose(&routine);
+            }
+        }
+
         // Update machine mode from status
         self.machine_mode = status.mode;
 
+        // Cloned rather than projected, because a prerequisite names a capability and only
+        // the whole map can answer which peripheral has it. Read when a routine list is
+        // rebuilt, not per frame.
+        self.peripheral_status = status.peripheral_status.clone();
+
         // Read `improv` first, then let it retire an outstanding request: a change in either
         // direction is the confirmation we were waiting for.
-        let improv = MenuContext::from_status(status, false, self.brew_max).improv;
+        let improv = MenuContext::from_status(status, false, self.menu_config).improv;
         if let Some(request) = self.wifi_request {
             if !request.is_outstanding(improv, Instant::now()) {
                 self.wifi_request = None;
             }
         }
         self.menu_context =
-            MenuContext::from_status(status, self.wifi_request.is_some(), self.brew_max);
+            MenuContext::from_status(status, self.wifi_request.is_some(), self.menu_config);
 
         // The menu is a full-screen takeover, and the machine can become busy underneath it --
         // a schedule can start a routine, and so can the comms processor. The busy condition is
@@ -403,6 +523,7 @@ impl ButtonEventHandler {
     }
 
     fn clear_hold_deadlines(&mut self) {
+        self.button_3_hold_start = None;
         self.button_5_hold_start = None;
         self.button_6_hold_start = None;
     }
@@ -437,10 +558,34 @@ impl ButtonEventHandler {
     pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Vec<MachineCommand> {
         // The menu captures the six panel buttons. Routed here rather than inside `handle_press`
         // so that hold events cannot leak past it: with the menu open, a hold of button 5 must
-        // not re-open it and a hold of button 6 must not tag a dose.
+        // not re-open it.
+        //
+        // **Two holds mean something here, and both are meanings the menu has rather than
+        // holes in the capture.**
+        //
+        // Button 6 is "capture a dose", on every screen. That is exactly what a user is doing
+        // while standing at a routine's parameter screen, and requiring them to back out of
+        // the menu to do it -- then come back in, by which point the screen has re-seeded --
+        // is a worse gesture than the one that already exists.
+        //
+        // Button 3 is "run the selected routine", and only on a row that is one. It is the
+        // same button that selects, which is the point: hold what you would have pressed, and
+        // skip the parameter screen. See `menu::activate_hold` for why the shortcut is a hold
+        // rather than a second row, and for the two gates it still applies.
+        //
+        // Every *other* hold and chord stays inert here, which is what `handle_menu_press`
+        // and `check_long_hold` still enforce.
         if self.menu.is_open() {
             return match event {
                 ButtonEvent::Press(buttons) => self.handle_menu_press(buttons),
+                ButtonEvent::PressAndHoldStart(buttons) if buttons == SET_WATER_TAP => {
+                    self.button_6_hold_start = Some(now);
+                    vec![]
+                }
+                ButtonEvent::PressAndHoldStart(buttons) if buttons == SET_ROUTINE_2 => {
+                    self.button_3_hold_start = Some(now);
+                    vec![]
+                }
                 // A hold that began before the menu opened ends up here. Both deadlines have to
                 // be cleared, or a hold that straddled the transition fires out of
                 // `check_long_hold`.
@@ -544,7 +689,7 @@ impl ButtonEventHandler {
                 let Some(value) = self.editor.map(|e| e.value()) else { return vec![] };
                 // A parameter's value never leaves this task until the routine runs; only the
                 // brew setpoint produces a command, and the controller persists that itself.
-                let command = menu::confirm_editor(id, value);
+                let command = menu::confirm_editor(id, value, &self.menu_config);
                 if let MenuId::EditParameter { position, .. } = id {
                     self.values.set(position as usize, value);
                 }
@@ -613,6 +758,14 @@ impl ButtonEventHandler {
                 }
                 vec![command]
             }
+            MenuActivation::CommandAndClose(command) => {
+                // Close first, send second -- the order `RunRoutine` below uses, and for the
+                // same reason: the busy gate in `update_status` would also close the menu
+                // once the new mode showed up in a `Status`, but that is up to a status
+                // period later.
+                self.close_menu();
+                vec![command]
+            }
             MenuActivation::Enter(submenu) => {
                 if !self.menu.push(submenu) {
                     // Only reachable if `MENU_MAX_DEPTH` stops matching the deepest path.
@@ -657,6 +810,39 @@ impl ButtonEventHandler {
         }
     }
 
+    /// Run the routine the selection is sitting on, skipping its parameter screen.
+    ///
+    /// **With no parameters at all**, not with the ones a screen would have shown. The
+    /// screen is what collects them, and this gesture is the choice not to open it; sending
+    /// `None` lets the controller merge the routine's own defaults and seed any linked
+    /// parameter from the pending shot annotations. That is the same path the four hardware
+    /// buttons take, so a dose captured with button 6 beforehand still lands on the shot --
+    /// which is the case that makes running without the screen useful rather than lossy.
+    ///
+    /// `None` from `activate_hold` is impossible to distinguish from a refusal here, and
+    /// both correctly do nothing: the row is not a routine, or it is one that cannot run.
+    fn run_selected_routine(&mut self) -> Option<MachineCommand> {
+        let frame = self.menu.top()?;
+        let index = {
+            let data = self.menu_data();
+            let row = menu::row(frame.id, frame.nav.selected(), &data)?;
+            match menu::activate_hold(&row, &self.menu_context) {
+                MenuActivation::RunRoutine(index) => index,
+                _ => {
+                    defmt::info!("Menu: hold to run refused");
+                    return None;
+                }
+            }
+        };
+
+        // Close first, send second, for the reason `activate_selected`'s `RunRoutine` arm
+        // gives: this menu is a full-screen takeover sitting over a machine about to pump
+        // hot water.
+        defmt::info!("Menu: held to run a routine, closing");
+        self.close_menu();
+        Some(MachineCommand::RunRoutine(index, None))
+    }
+
     /// Handle a button press event
     fn handle_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
         // The "any button while Off turns it On" rule is gone: it made every button on the panel
@@ -694,6 +880,24 @@ impl ButtonEventHandler {
         }
     }
 
+    /// **This is the one start surface with no prerequisite check.**
+    ///
+    /// Every other one greys out a routine the machine cannot run. These four buttons send
+    /// unconditionally, and the controller's backstop refuses -- safely, but silently: no
+    /// LED, no display, nothing but a `DebugEvent::RoutineRefused` in the log. A dead button
+    /// reads as a broken machine, which is exactly what "prevent, don't refuse" exists to
+    /// avoid.
+    ///
+    /// It is not an oversight, it is a gap with a cause. This task holds no `Routine` for a
+    /// `Function` index: `LIST_FUNCTION_ROUTINES` is false, so `provide_routines` never
+    /// fetches them, and looking one up here would take the routine repository lock *in the
+    /// input path* -- which the fetch below is deliberately structured to avoid, because the
+    /// ESP transceiver holds that lock for the length of a chunked routine read and the brew
+    /// button must not queue behind one.
+    ///
+    /// Closing it properly means caching the four routines' prerequisites on this handler,
+    /// refreshed off `ROUTINES_CHANGED` at the existing lock point rather than per press.
+    /// Until then the refusal is real but invisible here.
     fn routine_command(&self, button_idx: usize) -> Vec<MachineCommand> {
         vec![if self.routine_executing {
             MachineCommand::CancelRoutine
@@ -741,10 +945,37 @@ impl ButtonEventHandler {
         const DOSE_TAG_HOLD_MS: u64 = 3000;
         const HOLD_EVENT_OFFSET_MS: u64 = SETTLING_DELAY_MS + PRESS_AND_HOLD_THRESHOLD_MS;
 
-        // With the menu open the six panel buttons belong to the menu, holds included.
+        /// How long button 3 must be held on a routine row to start it without the parameter
+        /// screen.
+        ///
+        /// The same 1.5 s as the hold that opens the menu, and deliberately so: those are the
+        /// panel's two deliberate "I mean this" gestures, and a user who has learned one
+        /// should not have to learn a second duration for the other. Long enough that it
+        /// cannot be reached by pressing select firmly -- the recognizer already stops calling
+        /// it a press at 550 ms, so the two are nowhere near each other.
+        const RUN_ROUTINE_HOLD_MS: u64 = 1500;
+
+        // With the menu open the six panel buttons belong to the menu -- holds included,
+        // except the two the menu gives its own meaning: button 6 captures a dose anywhere,
+        // and button 3 runs the selected routine. See `handle_event` for why those are
+        // meanings the menu has rather than holes in the capture. Button 5's deadline is
+        // still dropped here: re-opening an open menu is meaningless.
         if self.menu.is_open() {
-            self.clear_hold_deadlines();
-            return None;
+            self.button_5_hold_start = None;
+        } else {
+            // And the converse: button 3's meaning is the menu's alone. A hold that began
+            // inside the menu and outlived it must not fire against a closed one.
+            self.button_3_hold_start = None;
+        }
+
+        if let Some(started) = self.button_3_hold_start {
+            let held = now.saturating_duration_since(started).as_millis();
+            if held >= RUN_ROUTINE_HOLD_MS - HOLD_EVENT_OFFSET_MS {
+                // Cleared as it fires, or this re-runs on every 10 ms poll until release --
+                // which for this one would be a routine started repeatedly.
+                self.button_3_hold_start = None;
+                return self.run_selected_routine();
+            }
         }
 
         if let Some(started) = self.button_5_hold_start {
@@ -790,9 +1021,12 @@ pub async fn button_controller_task(
     routine_repository: &'static crate::RoutineRepositoryMutex,
     checkin: variegated_checkin::CheckinHandle,
     menu_sender: MenuSender,
+    menu_config_sender: crate::menu::MenuConfigSender,
 ) {
     let mut recognizer = ButtonEventRecognizer::new();
     let mut handler = ButtonEventHandler::new();
+    // The last projection sent to the displays, so an unchanged republish costs nothing.
+    let mut menu_config_published: Option<crate::menu::MenuConfigSnapshot> = None;
 
     defmt::info!("Button controller task started");
 
@@ -828,11 +1062,37 @@ pub async fn button_controller_task(
             handler.update_status(&new_status);
         }
 
-        // The brew boiler's ceiling, for the setpoint editor's upper bound. The controller
-        // republishes every ten seconds whether or not anything changed, so this arrives
-        // shortly after boot without anything here having to ask.
+        // What the Settings rows read: both boiler ceilings, the group's brew mode and its
+        // targets, and the Bluetooth associations. The controller republishes every ten
+        // seconds whether or not anything changed, so this arrives shortly after boot
+        // without anything here having to ask.
+        //
+        // Forwarded to the display tasks as well as kept, because this task is the only
+        // consumer of `Configuration` that both display tasks can reach -- one of them runs
+        // on core 1 and is spawned before the configuration channel exists. Sent on change
+        // only, so a ten-second republish of an unchanged configuration does not wake a
+        // render loop. See `menu::MenuConfigSnapshot`.
         if let Some(configuration) = configuration_receiver.try_next_message_pure() {
             handler.update_configuration(&configuration);
+            let snapshot = handler.menu_config_snapshot();
+            if Some(&snapshot) != menu_config_published.as_ref() {
+                menu_config_sender.send(snapshot.clone());
+                menu_config_published = Some(snapshot);
+            }
+        }
+
+        // The machine's own definition, latched onto the handler because `menu_data` needs it
+        // every frame and is sync. It never changes after boot, so this is exact rather than
+        // a cache, and the lock is taken once.
+        //
+        // **Outside the fetch match, not inside its `Routines` arm.** It used to sit there,
+        // where it was reached only when the routines list needed fetching -- so a user who
+        // opened Settings -> Scale without ever visiting Routines still had `None` here, and
+        // `scale_calibration` reads that as "this machine cannot calibrate" and offers no
+        // rows. The calibration rows would then appear only after an unrelated visit to the
+        // routines list.
+        if handler.menu.is_open() && handler.machine_definition.is_none() {
+            handler.machine_definition = *crate::MACHINE_DEFINITION_REF.lock().await;
         }
 
         // Fetch what the open menu needs. Answers `None` for a settled menu, so this is a
@@ -843,10 +1103,13 @@ pub async fn button_controller_task(
         // brew button must not queue behind one.
         match handler.pending_fetch() {
             Some(MenuFetch::Routines) => {
+                let definition = handler.machine_definition;
+                let peripherals = handler.peripheral_status.clone();
                 let mut repository = routine_repository.lock().await;
                 let rows = routine_rows(
                     repository.iterate_routines_with_indices().await,
                     LIST_FUNCTION_ROUTINES,
+                    |routine| crate::menu::routine_runnable(routine, definition, &peripherals),
                 );
                 handler.provide_routines(rows);
             }
@@ -915,7 +1178,8 @@ pub async fn button_controller_task(
                 }
             }
 
-            // Check for long hold conditions (button 5 opens the menu, button 6 tags the dose)
+            // Check for long hold conditions: button 5 opens the menu, button 6 tags the dose,
+            // and button 3 runs the selected routine from inside it.
             if let Some(command) = handler.check_long_hold(now) {
                 if let Err(_) = command_sender.try_send(command) {
                     defmt::warn!("Failed to send long hold command - channel full");

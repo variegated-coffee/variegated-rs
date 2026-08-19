@@ -187,7 +187,10 @@ export const ParameterUnitSchema = enumType('ParameterUnit', {
   MillilitersPerSecond: unitVariant('MillilitersPerSecond'),
   Grams: unitVariant('Grams'),
   Percent: unitVariant('Percent'),
-  Milliliters: unitVariant('Milliliters')
+  Milliliters: unitVariant('Milliliters'),
+  MillisiemensPerCentimeter: unitVariant('MillisiemensPerCentimeter'),
+  ExtractionRate: unitVariant('ExtractionRate'),
+  ExtractedSolids: unitVariant('ExtractedSolids')
 });
 
 export const ParameterValueSchema = enumType('ParameterValue', {
@@ -388,6 +391,11 @@ export const BoilerDefinitionSchema = struct({
   has_fill_mechanism: bool()
 });
 
+export const BrewControlTargetSchema = struct({
+  mode: GroupBrewControlModeSchema,
+  value: f32()
+});
+
 export const BrewStatusSchema = struct({
   brew_time: DurationSchema,
   brew_input_volume: option(f32()),
@@ -402,7 +410,9 @@ export const CommsStatusSchema = struct({
   wifi_rssi: option(i8()),
   peripheral_connection_status: map(u16(), WirelessConnectionStatusSchema),
   improv: ImprovStateSchema,
-  sntp_sync_seq: u32()
+  sntp_sync_seq: u32(),
+  wifi_ssid: string(),
+  wifi_ip: option(tuple(u8(), u8(), u8(), u8()))
 });
 
 export const DerivedParameterSchema = struct({
@@ -493,33 +503,6 @@ export const PreviousBrewInfoSchema = struct({
   stopped_at_millis: u64()
 });
 
-export const RoutineCommandSchema = enumType('RoutineCommand', {
-  StartBrewing: newtypeVariant('StartBrewing', u8()),
-  StopBrewing: newtypeVariant('StopBrewing', u8()),
-  TareGroupScale: newtypeVariant('TareGroupScale', u8()),
-  StartPumpingToWaterTap: newtypeVariant('StartPumpingToWaterTap', u8()),
-  StopPumpingToWaterTap: newtypeVariant('StopPumpingToWaterTap', u8()),
-  StartSteaming: newtypeVariant('StartSteaming', u8()),
-  StopSteaming: newtypeVariant('StopSteaming', u8()),
-  SetSteamValveOpenness: tupleVariant('SetSteamValveOpenness', u8(), ParameterValueSchema),
-  SetBoilerTemperature: tupleVariant('SetBoilerTemperature', u8(), ParameterValueSchema),
-  SetBoilerPressure: tupleVariant('SetBoilerPressure', u8(), ParameterValueSchema),
-  SetGroupFlowRate: tupleVariant('SetGroupFlowRate', u8(), ParameterValueSchema),
-  SetGroupPressure: tupleVariant('SetGroupPressure', u8(), ParameterValueSchema),
-  SetGroupOutputFlowRate: tupleVariant('SetGroupOutputFlowRate', u8(), ParameterValueSchema),
-  SetGroupFixedDutyCycle: tupleVariant('SetGroupFixedDutyCycle', u8(), ParameterValueSchema),
-  SetGroupFullOn: newtypeVariant('SetGroupFullOn', u8()),
-  SetGroupOff: newtypeVariant('SetGroupOff', u8()),
-  SetBoilerOff: newtypeVariant('SetBoilerOff', u8()),
-  SetGroupFlowRateWithTransition: tupleVariant('SetGroupFlowRateWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
-  SetGroupPressureWithTransition: tupleVariant('SetGroupPressureWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
-  SetGroupOutputFlowRateWithTransition: tupleVariant('SetGroupOutputFlowRateWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
-  SetGroupFixedDutyCycleWithTransition: tupleVariant('SetGroupFixedDutyCycleWithTransition', u8(), ParameterValueSchema, ParameterValueSchema),
-  InferGroupPressureIntegral: tupleVariant('InferGroupPressureIntegral', u8(), ParameterValueSchema),
-  InferGroupFlowRateIntegral: tupleVariant('InferGroupFlowRateIntegral', u8(), ParameterValueSchema),
-  InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), ParameterValueSchema)
-});
-
 export const RoutineExecutionStatusSchema = struct({
   routine_index: RoutineIndexSchema,
   current_step: option(u32()),
@@ -532,16 +515,12 @@ export const RoutineParameterSchema = struct({
   index: u8(),
   name: string(),
   default: f32(),
-  unit: option(ParameterUnitSchema)
+  unit: option(ParameterUnitSchema),
+  linked_attribute: option(ShotAnnotationKeySchema)
 });
 
-export const RoutineSummarySchema = struct({
-  routine_type: RoutineTypeSchema,
-  name: string(),
-  step_count: u16(),
-  parameter_count: u8(),
-  derived_parameter_count: u8(),
-  finally_count: u8()
+export const RoutinePrerequisiteSchema = struct({
+  capability: SensorCapabilitySchema
 });
 
 export const ScheduleActionSchema = enumType('ScheduleAction', {
@@ -615,7 +594,14 @@ export const StateConditionSchema = enumType('StateCondition', {
   WaterTapFlowRateBelow: tupleVariant('WaterTapFlowRateBelow', u8(), ParameterValueSchema),
   OutputWeightAbove: tupleVariant('OutputWeightAbove', u8(), ParameterValueSchema),
   OutputWeightBelow: tupleVariant('OutputWeightBelow', u8(), ParameterValueSchema),
-  InputVolumeAboveRelativeToStart: tupleVariant('InputVolumeAboveRelativeToStart', u8(), ParameterValueSchema)
+  InputVolumeAboveRelativeToStart: tupleVariant('InputVolumeAboveRelativeToStart', u8(), ParameterValueSchema),
+  GroupOutputConductivityAbove: tupleVariant('GroupOutputConductivityAbove', u8(), ParameterValueSchema),
+  GroupOutputConductivityBelow: tupleVariant('GroupOutputConductivityBelow', u8(), ParameterValueSchema),
+  GroupExtractionRateAbove: tupleVariant('GroupExtractionRateAbove', u8(), ParameterValueSchema),
+  GroupExtractionRateBelow: tupleVariant('GroupExtractionRateBelow', u8(), ParameterValueSchema),
+  ExtractedSolidsAbove: tupleVariant('ExtractedSolidsAbove', u8(), ParameterValueSchema),
+  ExtractedSolidsBelow: tupleVariant('ExtractedSolidsBelow', u8(), ParameterValueSchema),
+  ShotStateReached: tupleVariant('ShotStateReached', u8(), ShotStateSchema)
 });
 
 export const SteamWandDefinitionSchema = struct({
@@ -634,6 +620,12 @@ export const TankConfigurationSchema = struct({
 export const TankDefinitionSchema = struct({
   name: string(),
   sensors: seq(SensorCapabilitySchema)
+});
+
+export const TransitionOriginSchema = enumType('TransitionOrigin', {
+  Value: newtypeVariant('Value', ParameterValueSchema),
+  CurrentTarget: unitVariant('CurrentTarget'),
+  CurrentValue: unitVariant('CurrentValue')
 });
 
 export const WaterTapConfigurationSchema = struct({
@@ -701,6 +693,33 @@ export const PidParametersSchema = struct({
   kd: PidTermSchema
 });
 
+export const RoutineCommandSchema = enumType('RoutineCommand', {
+  StartBrewing: newtypeVariant('StartBrewing', u8()),
+  StopBrewing: newtypeVariant('StopBrewing', u8()),
+  TareGroupScale: newtypeVariant('TareGroupScale', u8()),
+  StartPumpingToWaterTap: newtypeVariant('StartPumpingToWaterTap', u8()),
+  StopPumpingToWaterTap: newtypeVariant('StopPumpingToWaterTap', u8()),
+  StartSteaming: newtypeVariant('StartSteaming', u8()),
+  StopSteaming: newtypeVariant('StopSteaming', u8()),
+  SetSteamValveOpenness: tupleVariant('SetSteamValveOpenness', u8(), ParameterValueSchema),
+  SetBoilerTemperature: tupleVariant('SetBoilerTemperature', u8(), ParameterValueSchema),
+  SetBoilerPressure: tupleVariant('SetBoilerPressure', u8(), ParameterValueSchema),
+  SetGroupFlowRate: tupleVariant('SetGroupFlowRate', u8(), ParameterValueSchema),
+  SetGroupPressure: tupleVariant('SetGroupPressure', u8(), ParameterValueSchema),
+  SetGroupOutputFlowRate: tupleVariant('SetGroupOutputFlowRate', u8(), ParameterValueSchema),
+  SetGroupFixedDutyCycle: tupleVariant('SetGroupFixedDutyCycle', u8(), ParameterValueSchema),
+  SetGroupFullOn: newtypeVariant('SetGroupFullOn', u8()),
+  SetGroupOff: newtypeVariant('SetGroupOff', u8()),
+  SetBoilerOff: newtypeVariant('SetBoilerOff', u8()),
+  SetGroupFlowRateWithTransition: tupleVariant('SetGroupFlowRateWithTransition', u8(), ParameterValueSchema, ParameterValueSchema, TransitionOriginSchema),
+  SetGroupPressureWithTransition: tupleVariant('SetGroupPressureWithTransition', u8(), ParameterValueSchema, ParameterValueSchema, TransitionOriginSchema),
+  SetGroupOutputFlowRateWithTransition: tupleVariant('SetGroupOutputFlowRateWithTransition', u8(), ParameterValueSchema, ParameterValueSchema, TransitionOriginSchema),
+  SetGroupFixedDutyCycleWithTransition: tupleVariant('SetGroupFixedDutyCycleWithTransition', u8(), ParameterValueSchema, ParameterValueSchema, TransitionOriginSchema),
+  InferGroupPressureIntegral: tupleVariant('InferGroupPressureIntegral', u8(), ParameterValueSchema),
+  InferGroupFlowRateIntegral: tupleVariant('InferGroupFlowRateIntegral', u8(), ParameterValueSchema),
+  InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), ParameterValueSchema)
+});
+
 export const RoutineExitConditionSchema = enumType('RoutineExitCondition', {
   Always: unitVariant('Always'),
   Never: unitVariant('Never'),
@@ -710,10 +729,14 @@ export const RoutineExitConditionSchema = enumType('RoutineExitCondition', {
   UserAction: newtypeVariant('UserAction', u8())
 });
 
-export const RoutineSummaryStorageSchema = struct({
-  internal: map(u32(), RoutineSummarySchema),
-  function: map(u32(), RoutineSummarySchema),
-  custom: map(u32(), RoutineSummarySchema)
+export const RoutineSummarySchema = struct({
+  routine_type: RoutineTypeSchema,
+  name: string(),
+  step_count: u16(),
+  parameter_count: u8(),
+  derived_parameter_count: u8(),
+  finally_count: u8(),
+  prerequisites: seq(RoutinePrerequisiteSchema)
 });
 
 export const ScheduleItemSchema = struct({
@@ -772,13 +795,20 @@ export const GroupStatusSchema = struct({
   pump_output: OutputSchema,
   control_state: GroupBrewControlStateSchema,
   previous_brew: option(PreviousBrewInfoSchema),
-  pump_rpm: option(f32())
+  pump_rpm: option(f32()),
+  brew_control_target: option(BrewControlTargetSchema)
 });
 
 export const RoutineExitSchema = struct({
   condition: RoutineExitConditionSchema,
   then: RoutineStepExitTypeSchema,
   description: option(string())
+});
+
+export const RoutineSummaryStorageSchema = struct({
+  internal: map(u32(), RoutineSummarySchema),
+  function: map(u32(), RoutineSummarySchema),
+  custom: map(u32(), RoutineSummarySchema)
 });
 
 export const SetPidParametersRequestSchema = struct({
@@ -839,12 +869,15 @@ export const StatusSchema = struct({
 });
 
 export const RoutineSchema = struct({
+  version: u16(),
   routine_type: RoutineTypeSchema,
   name: string(),
   parameters: seq(RoutineParameterSchema),
   derived_parameters: seq(DerivedParameterSchema),
   steps: seq(RoutineStepSchema),
-  finally: seq(RoutineCommandSchema)
+  finally: seq(RoutineCommandSchema),
+  prerequisites: seq(RoutinePrerequisiteSchema),
+  shot_annotations: seq(ShotAnnotationSchema)
 });
 
 export const MachineCommandSchema = enumType('MachineCommand', {
@@ -954,6 +987,7 @@ export type BoilerControlTargetValuesUpdate = InferType<typeof BoilerControlTarg
 export type BoilerDefinition = InferType<typeof BoilerDefinitionSchema>;
 export type BoilerStatus = InferType<typeof BoilerStatusSchema>;
 export type BoilerType = InferType<typeof BoilerTypeSchema>;
+export type BrewControlTarget = InferType<typeof BrewControlTargetSchema>;
 export type BrewStatus = InferType<typeof BrewStatusSchema>;
 export type CommsStatus = InferType<typeof CommsStatusSchema>;
 export type ControlCurve = InferType<typeof ControlCurveSchema>;
@@ -996,6 +1030,7 @@ export type RoutineExecutionStatus = InferType<typeof RoutineExecutionStatusSche
 export type RoutineExit = InferType<typeof RoutineExitSchema>;
 export type RoutineExitCondition = InferType<typeof RoutineExitConditionSchema>;
 export type RoutineParameter = InferType<typeof RoutineParameterSchema>;
+export type RoutinePrerequisite = InferType<typeof RoutinePrerequisiteSchema>;
 export type RoutineStep = InferType<typeof RoutineStepSchema>;
 export type RoutineStepExitType = InferType<typeof RoutineStepExitTypeSchema>;
 export type RoutineSummary = InferType<typeof RoutineSummarySchema>;
@@ -1025,6 +1060,7 @@ export type SteamWandStatus = InferType<typeof SteamWandStatusSchema>;
 export type TankConfiguration = InferType<typeof TankConfigurationSchema>;
 export type TankDefinition = InferType<typeof TankDefinitionSchema>;
 export type TankStatus = InferType<typeof TankStatusSchema>;
+export type TransitionOrigin = InferType<typeof TransitionOriginSchema>;
 export type WaterDispersalPumpStrategy = InferType<typeof WaterDispersalPumpStrategySchema>;
 export type WaterTapConfiguration = InferType<typeof WaterTapConfigurationSchema>;
 export type WaterTapDefinition = InferType<typeof WaterTapDefinitionSchema>;

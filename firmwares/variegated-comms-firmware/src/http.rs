@@ -664,6 +664,13 @@ impl HttpHandler {
             Ok(RoutineWriteOutcome::Failed(RoutineWriteError::Storage)) => {
                 Self::send_internal_error(conn, "The machine could not store the routine").await
             }
+            // A 400 rather than a 409 or a 426: the bytes are the problem, and the client is
+            // the one that has to change them. In practice this means a stale frontend --
+            // the schemas are generated from these types and shipped with the firmware, so a
+            // browser holding a cached bundle is the way this happens.
+            Ok(RoutineWriteOutcome::Failed(RoutineWriteError::UnsupportedVersion)) => {
+                Self::send_bad_request(conn, "Routine format version is not supported").await
+            }
             Err(_) => Self::send_unavailable(conn, "Machine did not answer in time").await,
         }
     }

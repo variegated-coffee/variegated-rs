@@ -88,15 +88,39 @@ async fn fetch_menu_data(
 ) {
     use variegated_controller_lib::routine::RoutineRepository as _;
 
+    // Latched here because this is the one place in this task that is already async; the
+    // global is behind a mutex and `menu_data` -- which needs the answer every frame -- is
+    // not. It never changes after boot, so latching it once is exact rather than a cache.
+    //
+    // **Above the early returns, not inside the fetch.** It used to sit after them, where it
+    // was reached only when a routine list or routine needed fetching -- so a user who
+    // opened Settings -> Scale without ever visiting Routines still had `None` here, and
+    // `scale_calibration` reads that as "this machine cannot calibrate" and draws no rows.
+    // The calibration rows would then appear only after an unrelated visit to the routines
+    // list, which is as confusing a bug as a panel can have.
+    // Gated on the menu being open so this does not take the mutex on every pass of a 10 ms
+    // render loop for the whole time between boot and the controller populating the global.
+    //
+    // It still re-takes it per frame while a menu is open and the global is not yet
+    // populated, where it used to be behind the `pending_fetch` return. That window is the
+    // few seconds before the controller is built, an uncontended lock, and the alternative
+    // is the bug above; but it is a real change in lock traffic and worth knowing about.
+    if state.menu.stack.is_open() && state.machine_definition.is_none() {
+        state.machine_definition = *crate::MACHINE_DEFINITION_REF.lock().await;
+    }
+
     let Some(fetch) = state.menu_pending_fetch() else { return };
     let Some(repository) = repository else { return };
 
     match fetch {
         crate::menu::MenuFetch::Routines => {
+            let definition = state.machine_definition;
+            let peripherals = state.status.peripheral_status.clone();
             let mut guard = repository.lock().await;
             state.menu_routines = Some(variegated_machine_menu::routine_rows(
                 guard.iterate_routines_with_indices().await,
                 crate::menu::LIST_FUNCTION_ROUTINES,
+                |routine| crate::menu::routine_runnable(routine, definition, &peripherals),
             ));
         }
         crate::menu::MenuFetch::Routine(index) => {
@@ -153,6 +177,7 @@ pub async fn lcd_display_task(
     routine_repository: &'static crate::RoutineRepositoryMutex,
     mut identify_receiver: IdentifyReceiver,
     mut menu_receiver: MenuReceiver,
+    mut menu_config_receiver: crate::menu::MenuConfigReceiver,
     checkin: variegated_checkin::CheckinHandle,
 ) {
     // Initialize the HD44780 LCD controller configuration
@@ -227,6 +252,13 @@ pub async fn lcd_display_task(
             }
         }
 
+        // What the Settings rows read out of `Configuration`. `try_changed` for the same
+        // reason as the menu above, and the button task only sends this when the projection
+        // actually differs -- so on a settled machine this is a `None` every iteration.
+        if let Some(config) = menu_config_receiver.try_changed() {
+            display_state.shared_state.update_menu_config(config);
+        }
+
         // Whatever the open menu needs in order to be drawn. See `fetch_menu_data`.
         fetch_menu_data(&mut display_state.shared_state, Some(routine_repository)).await;
 
@@ -299,6 +331,7 @@ pub async fn graphical_display_task(
     mut status_receiver: StatusSubscriber,
     mut identify_receiver: IdentifyReceiver,
     mut menu_receiver: MenuReceiver,
+    mut menu_config_receiver: crate::menu::MenuConfigReceiver,
     checkin: variegated_checkin::CheckinHandle,
 ) {
     use crate::display::GraphicalDisplayState;
@@ -377,6 +410,13 @@ pub async fn graphical_display_task(
             if !nav.stack.is_open() {
                 display_state.shared_state.release_menu_data();
             }
+        }
+
+        // What the Settings rows read out of `Configuration`. `try_changed` for the same
+        // reason as the menu above, and the button task only sends this when the projection
+        // actually differs -- so on a settled machine this is a `None` every iteration.
+        if let Some(config) = menu_config_receiver.try_changed() {
+            display_state.shared_state.update_menu_config(config);
         }
 
         // Query schedule store periodically (every ~1 second = 100 * 10ms)

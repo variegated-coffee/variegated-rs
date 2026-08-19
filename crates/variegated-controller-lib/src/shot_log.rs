@@ -158,6 +158,10 @@ impl ShotLogger {
                 // whether or not a brew is in flight, and a pre-infusion ramp is exactly
                 // the part worth having.
                 pump_rpm: group_status.pump_rpm,
+                // The one non-measurement in this sample -- what the pump was aimed at, as
+                // opposed to what came back. See the field's own note for why a log of only
+                // measurements hid a bug for two shots.
+                brew_control_target: group_status.brew_control_target,
             });
         }
 

@@ -83,6 +83,12 @@ fn apply_configuration(controller: &mut WifiController<'static>, credentials: &W
         return;
     }
 
+    // After the config is accepted, not before: on the error path above the station is
+    // still on whatever it was joined to, and recording the SSID we failed to apply would
+    // put a network the machine is not on onto its panel. `CommsStatus` reports this only
+    // while `WIFI_CONNECTED`, so clearing on disconnect is not this function's job.
+    crate::channels::set_wifi_ssid(credentials.ssid.as_str());
+
     // Re-apply after the station is started, because applying it before does nothing.
     //
     // esp-radio already sets this in `wifi::new` -- `set_power_saving(None)` with a

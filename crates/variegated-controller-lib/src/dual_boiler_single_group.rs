@@ -22,6 +22,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
+use variegated_controller_types::MachineDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
@@ -609,6 +610,19 @@ pub struct DualBoilerSingleGroupController<
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
+    /// What this machine declares it can sense.
+    ///
+    /// Needed here, and not only by the transceiver that ships it to clients, because a
+    /// routine's prerequisites are capabilities and this is the only place that says which
+    /// peripheral provides which. `peripheral_registry` answers *is it connected*;
+    /// this answers *what is it for*, and a prerequisite check needs both.
+    machine_definition: &'a MachineDefinition,
+    /// Since when a running routine's prerequisites have been unmet, if they are.
+    ///
+    /// `None` while everything the routine needs is present. See
+    /// [`PREREQUISITE_LOSS_GRACE`] for why a running routine is not abandoned the instant
+    /// this becomes `Some`.
+    prerequisite_lost_since: Option<Instant>,
     watchdog: Option<Watchdog>,
 
     // Heating element coordination signals
@@ -691,6 +705,7 @@ impl<
         // cannot upload anything, so the config is stored and simply never acted on.
         shot_upload_config_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, ShotUploadConfig, 2>>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
+        machine_definition: &'a MachineDefinition,
         watchdog: Option<Watchdog>,
         interlock_enabled_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, bool>,
         contention_strategy_signal: &'static embassy_sync::signal::Signal<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, variegated_controller_types::HeatingElementContentionStrategy>,
@@ -803,6 +818,8 @@ impl<
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
+            machine_definition,
+            prerequisite_lost_since: None,
             watchdog,
             interlock_enabled_signal,
             contention_strategy_signal,
@@ -1138,6 +1155,47 @@ impl<
             // genuinely need the routine.
             if let Some(status) = self.previous_status.as_ref() {
                 self.shot_logger.record_sample(status);
+            }
+
+            // A running routine whose prerequisites have gone away.
+            //
+            // Debounced rather than immediate: BLE re-association is owned by the comms
+            // processor and a link that merely blips must not cost a shot. See
+            // `PREREQUISITE_LOSS_GRACE`. Checked before the step below, so a routine that has
+            // lost what it needs does not take one more step on stale readings.
+            if self.current_routine.is_some() {
+                let peripherals = self.peripheral_registry.get_peripheral_status();
+                let missing = self
+                    .current_routine
+                    .as_ref()
+                    .and_then(|routine| {
+                        crate::routine_prerequisites::unmet_prerequisites(
+                            &routine.routine.prerequisites,
+                            self.machine_definition,
+                            &peripherals,
+                        )
+                        .next()
+                        .copied()
+                    });
+
+                match (missing, self.prerequisite_lost_since) {
+                    (None, _) => self.prerequisite_lost_since = None,
+                    (Some(_), None) => self.prerequisite_lost_since = Some(Instant::now()),
+                    (Some(missing), Some(since)) => {
+                        if since.elapsed() >= crate::routine_prerequisites::PREREQUISITE_LOSS_GRACE
+                        {
+                            log_warn!(
+                                "Abandoning routine: {:?} has been unavailable for {} ms",
+                                missing.capability,
+                                since.elapsed().as_millis()
+                            );
+                            // The cancel path, not the finished one: it runs `finally`, stops
+                            // brewing and the tap, and restores the saved configuration.
+                            self.handle_routine_exit(true).await;
+                            self.prerequisite_lost_since = None;
+                        }
+                    }
+                }
             }
 
             // Handle routine execution
@@ -1663,6 +1721,25 @@ impl<
             control_state: self.configuration.ephemeral.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
             pump_rpm: self.group.get_pump_rpm(),
+            // The **resolved** setpoint, taken from the PID rather than from
+            // `control_state.values` above. Under a curve those two disagree completely:
+            // the stored value is whatever was last written by a non-curve command -- a
+            // shot spent entirely in `PressureCurve` leaves it at whatever preinfusion set,
+            // for the whole shot -- while this is where the ramp has actually got to.
+            //
+            // Gated the same way `update_group_pump` gates its own dispatch, so a machine
+            // that is not brewing reports no target rather than a stale one.
+            brew_control_target: {
+                let mode = self.configuration.ephemeral.group_brew_control_state.mode;
+                if self.group_brewing && mode != GroupBrewControlMode::Off {
+                    Some(variegated_controller_types::BrewControlTarget {
+                        mode,
+                        value: self.pump_pid.setpoint,
+                    })
+                } else {
+                    None
+                }
+            },
         };
 
         // Calculate current timestamp if we have comms_status
@@ -1688,6 +1765,11 @@ impl<
                 // counts syncs that happened on the other processor, and extrapolating a
                 // count would be inventing one.
                 sntp_sync_seq: status.sntp_sync_seq,
+                // Both carried through unchanged, for `improv`'s reason. Neither can be
+                // advanced from this side, and the staleness that makes a latched network
+                // name misleading is already reported as `comms_status_age`.
+                wifi_ssid: status.wifi_ssid.clone(),
+                wifi_ip: status.wifi_ip,
             }),
             // Published alongside, because everything above is extrapolated: the
             // timestamp keeps advancing whether or not the comms processor is alive, so
@@ -2965,7 +3047,55 @@ impl<
         let routine = repo.get_routine(routine_index).await;
 
         if let Some(routine) = routine {
+            // The backstop, not the gate. Every surface that can start a routine greys out
+            // the ones it cannot run, so in normal use this never fires; it catches the
+            // debug channel, a scheduled run, and the race where the scale drops between a
+            // menu being drawn and the button being pressed.
+            let peripherals = self.peripheral_registry.get_peripheral_status();
+            if let Some(missing) = crate::routine_prerequisites::unmet_prerequisites(
+                &routine.prerequisites,
+                self.machine_definition,
+                &peripherals,
+            )
+            .next()
+            {
+                log_warn!(
+                    "Cannot start routine {}: needs {:?}",
+                    routine_index,
+                    missing.capability
+                );
+                variegated_log::emit_event(DebugEvent::RoutineRefused {
+                    index: routine_index.to_storage_index(),
+                    capability: missing.capability,
+                });
+                return;
+            }
+
             log_info!("Running routine");
+
+            // Shot attributes and linked parameters, in the order `routine_annotations`
+            // documents: the routine's standing attributes fill blanks only, then any linked
+            // parameter the caller did not supply is seeded from the pending annotations,
+            // then the values actually being run with are written back. All of it before the
+            // metadata below clones `pending_annotations` into the shot log.
+            crate::routine_annotations::apply_static_shot_annotations(
+                &routine,
+                &mut self.pending_annotations,
+            );
+            let runtime_params = crate::routine_annotations::seed_linked_parameters(
+                &routine,
+                runtime_params.clone(),
+                &self.pending_annotations,
+            );
+
+            // Recorded from `runtime_params`, before the context merges the routine's
+            // defaults in -- see `record_linked_parameters` for why the merged map is the
+            // wrong input.
+            crate::routine_annotations::record_linked_parameters(
+                &routine,
+                runtime_params.as_ref(),
+                &mut self.pending_annotations,
+            );
 
             // Create routine execution context
             let routine_execution_context = RoutineExecutionContext::new(
@@ -2973,7 +3103,7 @@ impl<
                 routine.clone(),
                 0u8,
                 self.configuration.clone(),
-                runtime_params.clone()
+                runtime_params
             );
 
             // Start shot logging
@@ -3013,6 +3143,9 @@ impl<
             self.shot_logger.start_shot(metadata);
             self.previous_routine_step = None;
 
+            // Cleared here rather than only where a routine ends, so a routine started while
+            // a previous one's loss timer was still armed does not inherit it.
+            self.prerequisite_lost_since = None;
             self.current_routine = Some(routine_execution_context);
             variegated_log::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
         } else {

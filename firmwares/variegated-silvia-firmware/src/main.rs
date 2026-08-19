@@ -380,6 +380,13 @@ static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static GRAVITY: StaticCell<GravityMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
+/// The machine definition, for the rotary menu.
+///
+/// `list_menu` needs it to decide whether a routine's prerequisites can be met, and it is
+/// built after that task's types are named. Read only where a routine list is fetched --
+/// alongside the repository lock already taken there -- never per frame.
+pub static MACHINE_DEFINITION_REF: Mutex<CriticalSectionRawMutex, Option<&'static MachineDefinition>> =
+    Mutex::new(None);
 static TEMP_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<TemperatureType>, 3>> = StaticCell::new();
 static PRESSURE_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<PressureType>, 3>> = StaticCell::new();
 static OUTPUT_WEIGHT_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<WeightType>, 3>> = StaticCell::new();
@@ -816,6 +823,15 @@ async fn main_task(spawner: Spawner) -> ! {
 
     info!("Machine definition created: {:?}", machine_definition);
 
+    // Promoted to `'static` so the controller can borrow it while the transceiver task takes
+    // its own copy. The controller needs it to answer a routine's prerequisites: the
+    // peripheral registry says what is *connected*, and only this says what each peripheral
+    // is *for*.
+    static MACHINE_DEFINITION: StaticCell<MachineDefinition> = StaticCell::new();
+    let machine_definition: &'static MachineDefinition =
+        MACHINE_DEFINITION.init(machine_definition);
+    *MACHINE_DEFINITION_REF.lock().await = Some(machine_definition);
+
     // Started here rather than next to `embassy_rp::init`, deliberately: everything
     // between the two -- the settings flash load, the ADC bring-up, the display reset --
     // runs before the controller's task exists to feed this, and a window that has to
@@ -842,6 +858,7 @@ async fn main_task(spawner: Spawner) -> ! {
         BoilerConfiguration::default(),   // Boiler configuration
         routine_repository_ref,
         &peripheral_registry,
+        machine_definition,
         bluetooth_store,
         Some(bluetooth_scan_channel.sender()),
         wifi_store,
@@ -960,7 +977,7 @@ async fn main_task(spawner: Spawner) -> ! {
     let debug_command_sender = debug_commands_channel.sender();
     let debug_command_receiver = debug_commands_channel.receiver();
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition, debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")).unwrap());
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition.clone(), debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")).unwrap());
 
     // Wire up the structured debug bus: USB CDC transport, periodic sampler,
     // periodic state snapshot, and injected-command handling. The channel itself is

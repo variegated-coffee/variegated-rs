@@ -899,6 +899,9 @@ fn main() -> ! {
         let menu_receiver_tft = MENU_WATCH
             .receiver()
             .expect("the menu watch is sized for both display receivers");
+        let menu_config_receiver_tft = MENU_CONFIG_WATCH
+            .receiver()
+            .expect("the menu config watch is sized for both display receivers");
 
         paint_core1_stack();
         spawn_core1(
@@ -946,6 +949,7 @@ fn main() -> ! {
                         status_channel.subscriber().expect("Failed to get TFT status subscriber"),
                         identify_receiver_tft,
                         menu_receiver_tft,
+                        menu_config_receiver_tft,
                         MONITOR.claim(CheckinId::GraphicalDisplay)
                     )));
 
@@ -1205,6 +1209,21 @@ static IDENTIFY_WATCH: Watch<SyncSendRawMutex, Instant, 2> = Watch::new();
 /// unrelated. See `menu::MenuActivation`.
 static MENU_WATCH: Watch<SyncSendRawMutex, menu::MenuSnapshot, { menu::MENU_WATCH_RECEIVERS }> =
     Watch::new();
+/// What the Settings menu reads out of `Configuration`, for the displays to draw.
+///
+/// A second watch beside `MENU_WATCH` rather than more fields on its payload: that one is
+/// `Copy` and read on a render loop, and this carries the Bluetooth associations, which are
+/// a `heapless::Vec` of names. Keeping them apart also means a configuration republished
+/// every ten seconds does not wake the displays for a menu position that has not moved.
+///
+/// Published by the button task, which is already the one `Configuration` consumer both
+/// display tasks can reach: the TFT's runs on core 1 and is spawned from `main`, before
+/// `main_task` creates the configuration channel at all.
+static MENU_CONFIG_WATCH: Watch<
+    SyncSendRawMutex,
+    menu::MenuConfigSnapshot,
+    { menu::MENU_WATCH_RECEIVERS },
+> = Watch::new();
 /// Raised by `AppDebugOp::ClearWifiCredentials`, drained by the controller.
 ///
 /// A `Signal` rather than a channel, like `SD_SELF_TEST_REQUEST` above and for the same
@@ -1310,6 +1329,15 @@ type RoutineRepositoryRef = &'static RoutineRepositoryMutex;
 // Global references to storage for cross-core access (safe via CriticalSectionRawMutex)
 static SCHEDULE_STORE_REF: Mutex<SyncSendRawMutex, Option<ScheduleStoreRef>> = Mutex::new(None);
 static ROUTINE_REPOSITORY_REF: Mutex<SyncSendRawMutex, Option<RoutineRepositoryRef>> = Mutex::new(None);
+/// The machine definition, for the menu tasks.
+///
+/// Same shape and the same reason as `ROUTINE_REPOSITORY_REF`: the button task and the
+/// display task both need it to decide whether a routine's prerequisites can be met, and
+/// both are spawned before it exists. Read only where a routine list is (re)built -- on a
+/// screen opening, alongside the repository lock that is already taken there -- never per
+/// frame.
+static MACHINE_DEFINITION_REF: Mutex<SyncSendRawMutex, Option<&'static MachineDefinition>> =
+    Mutex::new(None);
 
 /// Background task for coordinated dual heating element device
 #[embassy_executor::task]
@@ -3266,6 +3294,15 @@ async fn main_task(
 
     log_info!("Machine definition created: {:?}", machine_definition);
 
+    // Promoted to `'static` so the controller can borrow it while the transceiver task takes
+    // its own copy. The controller needs it to answer a routine's prerequisites: the
+    // peripheral registry says what is *connected*, and only this says what each peripheral
+    // is *for*.
+    static MACHINE_DEFINITION: StaticCell<MachineDefinition> = StaticCell::new();
+    let machine_definition: &'static MachineDefinition =
+        MACHINE_DEFINITION.init(machine_definition);
+    *MACHINE_DEFINITION_REF.lock().await = Some(machine_definition);
+
     // Shot log sender was passed as parameter when SD card storage is enabled
     #[cfg(feature = "sd-card-storage")]
     let shot_log_sender: Option<Sender<'static, SyncSendRawMutex, ShotLog, 2>> = Some(shot_log_sender);
@@ -3315,6 +3352,7 @@ async fn main_task(
         shot_upload_store_ref,
         Some(shot_upload_config_watch.sender()),
         peripheral_registry,
+        machine_definition,
         Some(watchdog),
         interlock_enabled_signal,
         contention_strategy_signal,
@@ -3342,12 +3380,16 @@ async fn main_task(
         let menu_receiver_lcd = MENU_WATCH
             .receiver()
             .expect("the menu watch is sized for both display receivers");
+        let menu_config_receiver_lcd = MENU_CONFIG_WATCH
+            .receiver()
+            .expect("the menu config watch is sized for both display receivers");
         spawner.spawn(unwrap!(lcd_display_task(
             lcd_device,
             display_status_receiver,
             routine_repository_ref,
             identify_receiver_lcd,
             menu_receiver_lcd,
+            menu_config_receiver_lcd,
             MONITOR.claim(CheckinId::LcdDisplay)
         )));
     }
@@ -3361,7 +3403,7 @@ async fn main_task(
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender())));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender(), MENU_CONFIG_WATCH.sender())));
 
     // Create status subscriber for LED controller and spawn the task.
     //
@@ -3397,7 +3439,7 @@ async fn main_task(
     #[cfg(not(feature = "bluetooth-group-1-scale"))]
     let scale_command_receiver = None;
 
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition, routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")))));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition.clone(), routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")))));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]

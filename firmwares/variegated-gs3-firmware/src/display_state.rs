@@ -88,6 +88,12 @@ pub struct DisplayState {
     /// wrong. Both this and the button task build it through
     /// `variegated_machine_menu::routine_rows`, so the order is the same list on both sides.
     pub menu_routines: Option<RoutineRows>,
+    /// What this machine declares it can sense, for deciding whether a routine can run.
+    ///
+    /// `None` until the first menu fetch populates it from `MACHINE_DEFINITION_REF`; that
+    /// global is behind an async mutex and `menu_data` is sync, so it is latched at the one
+    /// point that is already async. `None` reads as runnable -- see `menu::routine_runnable`.
+    pub machine_definition: Option<&'static variegated_controller_types::MachineDefinition>,
     /// The routine whose parameter screen is open, and which one it is.
     ///
     /// The parameter rows need its names and units on every frame. The Silvia re-locks the
@@ -110,6 +116,22 @@ pub struct DisplayState {
     dose_tracking_initialized: bool,
     /// When the dose popup expires, if one is up.
     dose_popup_until: Option<Instant>,
+    /// What the menu reads out of `Configuration`, and the associations it lists.
+    ///
+    /// This task subscribes to the configuration channel purely for these. Until the
+    /// Settings menu grew rows backed by `Configuration` it had no reason to -- the button
+    /// task kept the one float that was needed, and both renderers passed `None`, which is
+    /// why a config-backed row would have drawn blank here.
+    ///
+    /// `None` until the first `Configuration` arrives. The controller republishes every ten
+    /// seconds whether or not anything changed, so the gap after boot is bounded.
+    menu_config: Option<crate::menu::MenuConfig>,
+    /// The Bluetooth associations, for the Bluetooth submenu.
+    ///
+    /// Cloned out of the published `Configuration` rather than borrowed from it: this task
+    /// does not keep the `Configuration`, and the list is at most four entries of a name and
+    /// a few scalars.
+    bluetooth: Option<variegated_controller_types::bluetooth::BluetoothPeripheralList>,
 }
 
 impl DisplayState {
@@ -122,21 +144,61 @@ impl DisplayState {
             last_update: Instant::now(),
             menu: MenuSnapshot::closed(),
             menu_routines: None,
+            machine_definition: None,
             menu_routine: None,
             previous_dose_weight: None,
             dose_tracking_initialized: false,
             dose_popup_until: None,
+            menu_config: None,
+            bluetooth: None,
         }
+    }
+
+    /// Take what the menu needs from a freshly published projection.
+    pub fn update_menu_config(&mut self, snapshot: crate::menu::MenuConfigSnapshot) {
+        self.menu_config = Some(snapshot.config);
+        self.bluetooth = Some(snapshot.bluetooth);
+    }
+
+    /// The configuration projection, or its `Default` before the first one arrives.
+    ///
+    /// `Default` is deliberately the "nothing known" shape -- absent ceilings and a brew
+    /// mode of `Off` -- so the rows it feeds grey out rather than showing invented numbers.
+    pub fn menu_config(&self) -> crate::menu::MenuConfig {
+        self.menu_config.unwrap_or_default()
     }
 
     /// What the menu needs in order to have rows, as this task has it cached.
     pub fn menu_data(&self) -> crate::menu::MenuData<'_> {
+        let routine = self.menu_routine.as_ref().and_then(|(_, routine)| routine.as_ref());
         crate::menu::MenuData {
             routines: self.menu_routines.as_ref(),
-            routine: self.menu_routine.as_ref().and_then(|(_, routine)| routine.as_ref()),
+            routine,
             // The edited values come over the watch rather than from the repository: they are
             // the one part of a parameter screen that no renderer could derive.
             values: self.menu.values,
+            // Recomputed per frame from the live status rather than cached with the routine,
+            // so a scale that drops while the parameter screen is open greys the Run row.
+            // Cheap: a handful of map lookups over at most sixteen peripherals.
+            routine_runnable: routine.is_none_or(|r| {
+                crate::menu::routine_runnable(
+                    r,
+                    self.machine_definition,
+                    &self.status.peripheral_status,
+                )
+            }),
+            // Live for the same reason `routine_runnable` is: a scale can be switched off
+            // while the submenu is open, and the calibration rows have to grey when it is.
+            scale_calibration: crate::menu::scale_calibration(
+                self.machine_definition,
+                &self.status.peripheral_status,
+            ),
+            scale_present: crate::menu::scale_present(
+                self.machine_definition,
+                &self.status.peripheral_status,
+            ),
+            bluetooth: self.bluetooth.as_ref(),
+            brew_target_unit: crate::menu::brew_target_unit(&self.menu_config()),
         }
     }
 

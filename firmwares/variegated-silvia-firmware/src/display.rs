@@ -275,10 +275,10 @@ impl DisplayController {
                 BinaryColor::On
             };
 
-            let label: &str = match menu_type.item_index(row) {
-                None => "<-",
+            let (label, runnable): (&str, bool) = match menu_type.item_index(row) {
+                None => ("<-", true),
                 Some(i) => match items.get(i) {
-                    Some(item) => &item.label,
+                    Some(item) => (&item.label, item.runnable),
                     None => continue,
                 },
             };
@@ -292,6 +292,22 @@ impl DisplayController {
                     .build())
                 .draw(&mut self.display)
                 .unwrap();
+
+            // A routine the machine cannot currently run -- no scale, no conductivity probe.
+            // A marker rather than dimmed text, because this panel is one bit deep and has no
+            // dimmer to draw with; and at the right edge rather than appended to the label,
+            // because the label is a borrowed `&str` and building an owned one per row would
+            // allocate on a loop that runs every frame.
+            if !runnable {
+                Text::with_text_style("!", Point::new(118, y),
+                    self.text_style_medium_small,
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Left)
+                        .baseline(Baseline::Top)
+                        .build())
+                    .draw(&mut self.display)
+                    .unwrap();
+            }
             self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
         }
 
@@ -1182,6 +1198,10 @@ impl DisplayController {
             ParameterUnit::Grams => "g",
             ParameterUnit::Percent => "%",
             ParameterUnit::Milliliters => "ml",
+            // ASCII: this is a 128x64 OLED with a bitmap font and no middle dot.
+            ParameterUnit::MillisiemensPerCentimeter => "mS/cm",
+            ParameterUnit::ExtractionRate => "mS.ml/cm.s",
+            ParameterUnit::ExtractedSolids => "mS.ml/cm",
         };
 
         // No current value means the machine is not reporting one -- an unconnected scale,
@@ -1254,6 +1274,29 @@ impl DisplayController {
             }
             StateCondition::InputVolumeAboveRelativeToStart(_, _) => {
                 "Waiting for volume".into()
+            }
+            StateCondition::GroupOutputConductivityAbove(_, _)
+            | StateCondition::GroupOutputConductivityBelow(_, _) => {
+                "Waiting for conductivity".into()
+            }
+            StateCondition::GroupExtractionRateAbove(_, _)
+            | StateCondition::GroupExtractionRateBelow(_, _) => {
+                "Waiting for extraction".into()
+            }
+            StateCondition::ExtractedSolidsAbove(_, _)
+            | StateCondition::ExtractedSolidsBelow(_, _) => {
+                "Waiting for solids".into()
+            }
+            // Named per phase rather than "Waiting for shot state": these are the two things
+            // a user is actually waiting for, and this is a 128x64 panel where the row is
+            // the whole explanation.
+            StateCondition::ShotStateReached(_, phase) => {
+                use variegated_controller_types::ShotState;
+                match phase {
+                    ShotState::HeadspaceFill => "Waiting for fill".into(),
+                    ShotState::Saturation => "Waiting for saturation".into(),
+                    ShotState::PostFirstDrop => "Waiting for first drop".into(),
+                }
             }
         }
     }

@@ -21,23 +21,74 @@ pub enum RoutineType {
 // and the `log` half formats with `{:?}`. Every field already has it.
 #[derive(Clone, Debug)]
 pub struct Routine {
+    /// The encoding this routine was written with. See [`ROUTINE_FORMAT_VERSION`].
+    ///
+    /// **First field, deliberately.** postcard writes fields in declaration order, so this
+    /// is the first thing on the wire and in flash, and can be checked before anything after
+    /// it is trusted.
+    pub version: u16,
     pub routine_type: RoutineType,
     pub name: String,
     pub parameters: Vec<RoutineParameter>, // max 8
     pub derived_parameters: Vec<DerivedParameter>, // max 16
     pub steps: Vec<RoutineStep>,
     pub finally: Vec<RoutineCommand>,
+    /// What the machine must be able to sense for this routine to run at all.
+    ///
+    /// Empty means "runs anywhere", which is what every routine written before this field
+    /// existed meant in practice.
+    pub prerequisites: Vec<RoutinePrerequisite>, // max MAX_ROUTINE_SHOT_ANNOTATIONS-independent, see new()
+    /// Shot attributes this routine always runs with -- a fixed coffee, a fixed grind.
+    ///
+    /// Applied to the pending annotations at start, and only to keys the user has not
+    /// already set, so a value typed for this shot beats the routine's standing one. Max
+    /// [`MAX_ROUTINE_SHOT_ANNOTATIONS`].
+    pub shot_annotations: Vec<ShotAnnotation>,
 }
+
+/// The routine encoding this firmware writes and accepts.
+///
+/// Starts at 4, not 1. `Routine` had no version field before this, so the first byte of a
+/// legacy encoding is `routine_type`'s postcard discriminant -- 0..=3, for the four
+/// [`RoutineType`] variants. Any value of 4 or more is therefore unreachable by a
+/// pre-version routine, which makes `version != ROUTINE_FORMAT_VERSION` a sound rejection
+/// rather than a guess.
+///
+/// This matters because the CRC cannot catch a legacy routine: it is computed over the same
+/// bytes it always was, so it still validates. Without a version check, postcard would
+/// happily decode those bytes as a *different, structurally valid* routine -- the encoding
+/// is positional and has no field names to disagree about. The version is the only guard.
+///
+/// Bump on any change to the encoding of `Routine` or of anything reachable from it.
+///
+/// # 5 -- transitions say where they start
+///
+/// The four `*WithTransition` commands gained a [`crate::TransitionOrigin`]. They used to
+/// anchor their ramp to the quantity's *measurement*, which is right only while the pump is
+/// tracking -- and a pump pushing water through a puck mostly is not. See that type for the
+/// two shots that made the case.
+///
+/// **This bump is not free, unlike the one that took this to 4.** `ShotStateReached` rode
+/// along on an already-unreleased 4 because nothing had yet been written in that format.
+/// Routines *have* now been written at 4 and are sitting in machines' flash, so this
+/// invalidates them for real: they are refused at load rather than mis-decoded, and have to
+/// be re-created. That is the trade this constant exists to make explicit.
+pub const ROUTINE_FORMAT_VERSION: u16 = 5;
 
 #[cfg(feature = "defmt")]
 impl defmt::Format for Routine {
     fn format(&self, f: defmt::Formatter) {
-        defmt::write!(f, "Routine {{ name: {}, type: {:?}, parameters: {}, derived_parameters: {}, steps: {} }}",
+        // `version` is first here for the same reason it is first in the struct: when a
+        // routine will not load, it is the field that says why.
+        defmt::write!(f, "Routine {{ v{}, name: {}, type: {:?}, parameters: {}, derived_parameters: {}, steps: {}, prerequisites: {}, shot_annotations: {} }}",
+            self.version,
             self.name.as_str(),
             self.routine_type,
             self.parameters.len(),
             self.derived_parameters.len(),
             self.steps.len(),
+            self.prerequisites.len(),
+            self.shot_annotations.len(),
         );
     }
 }
@@ -49,13 +100,41 @@ impl Routine {
         assert!(derived_parameters.len() <= 16, "Maximum 16 derived parameters allowed");
 
         Self {
+            version: ROUTINE_FORMAT_VERSION,
             routine_type,
             name,
             parameters,
             derived_parameters,
             steps,
             finally: vec![],
+            prerequisites: vec![],
+            shot_annotations: vec![],
         }
+    }
+
+    /// Whether the routine's own invariants hold.
+    ///
+    /// Checked at the write path rather than only in [`Self::new`], because most routines --
+    /// every built-in one, and every one arriving over the wire -- are built as struct
+    /// literals and never go through the constructor. `new` asserts; this reports, because a
+    /// routine that arrives malformed from a client is a bad request, not a bug in the
+    /// firmware, and panicking on it would take the machine down.
+    pub fn validate(&self) -> Result<(), RoutineWriteError> {
+        if self.version != ROUTINE_FORMAT_VERSION {
+            return Err(RoutineWriteError::UnsupportedVersion);
+        }
+        if self.parameters.len() > 8
+            || self.derived_parameters.len() > 16
+            || self.shot_annotations.len() > MAX_ROUTINE_SHOT_ANNOTATIONS
+            // Bounded for the same reason as the rest, and it matters more than the count
+            // suggests: prerequisites are the one field copied wholesale into
+            // `RoutineSummary`, so an unbounded list rides in every summary list across the
+            // link and into every client, not just in the routine nobody has opened.
+            || self.prerequisites.len() > MAX_ROUTINE_PREREQUISITES
+        {
+            return Err(RoutineWriteError::Malformed);
+        }
+        Ok(())
     }
 
     pub fn routine_type(&self) -> RoutineType {
@@ -131,6 +210,16 @@ pub struct RoutineSummary {
     pub parameter_count: u8,
     pub derived_parameter_count: u8,
     pub finally_count: u8,
+    /// What the machine must be able to sense to run this.
+    ///
+    /// Carried in full rather than as a count, unlike every other field here, because a
+    /// count cannot answer the question a list actually asks: *can I run this right now?*
+    /// Greying out an unrunnable routine otherwise means fetching every definition to
+    /// render a list -- which is the exact cost this type exists to avoid.
+    ///
+    /// Cheap to carry and cheap to compare: `RoutinePrerequisite` is `Copy` and `Eq`, so
+    /// the comms processor's equality check on the summary list stays free.
+    pub prerequisites: Vec<RoutinePrerequisite>,
 }
 
 impl From<&Routine> for RoutineSummary {
@@ -148,6 +237,7 @@ impl From<&Routine> for RoutineSummary {
             parameter_count: routine.parameters.len().min(u8::MAX as usize) as u8,
             derived_parameter_count: routine.derived_parameters.len().min(u8::MAX as usize) as u8,
             finally_count: routine.finally.len().min(u8::MAX as usize) as u8,
+            prerequisites: routine.prerequisites.clone(),
         }
     }
 }
@@ -238,6 +328,15 @@ pub enum RoutineWriteError {
     /// The repository refused for any other reason, including a flash failure or a
     /// contended lock.
     Storage,
+    /// The encoding is not [`ROUTINE_FORMAT_VERSION`].
+    ///
+    /// In practice this is a routine stored by an older firmware. There is deliberately no
+    /// migration: the fields that would have to be invented are exactly the ones that make
+    /// a routine safe to run -- what it needs in order to work -- and a wrong guess at those
+    /// is worse than an honest refusal.
+    ///
+    /// Appended, like every other variant here.
+    UnsupportedVersion,
 }
 
 #[cfg(test)]
@@ -246,7 +345,7 @@ mod routine_summary_tests {
     use alloc::string::ToString;
 
     fn parameter(index: u8) -> RoutineParameter {
-        RoutineParameter { index, name: "p".to_string(), default: 1.0, unit: None }
+        RoutineParameter { index, name: "p".to_string(), default: 1.0, unit: None, linked_attribute: None }
     }
 
     fn derived(index: u8) -> DerivedParameter {
@@ -272,12 +371,24 @@ mod routine_summary_tests {
 
     fn routine(steps: usize) -> Routine {
         Routine {
+            version: ROUTINE_FORMAT_VERSION,
             routine_type: RoutineType::Cleaning,
             name: "Backflush".to_string(),
             parameters: (0..3).map(|i| parameter(i as u8)).collect(),
             derived_parameters: (0..2).map(|i| derived(i as u8)).collect(),
             steps: (0..steps).map(|i| step(Some(&alloc::format!("step {i}")))).collect(),
             finally: vec![RoutineCommand::StopBrewing(0)],
+            // Populated, not empty. The chunking tests below are the only coverage the
+            // reassembly path has, and a fixture whose new fields are all empty encodes them
+            // as three zero-length markers -- so it would pass identically whether or not the
+            // fields survived the round trip.
+            prerequisites: vec![RoutinePrerequisite { capability: SensorCapability::Weight }],
+            shot_annotations: vec![ShotAnnotation {
+                key: ShotAnnotationKey::Beans,
+                value: ShotAnnotationValue::Text(
+                    heapless::String::try_from("Fixture Roasters").expect("fits"),
+                ),
+            }],
         }
     }
 
@@ -368,6 +479,11 @@ mod routine_summary_tests {
         let decoded: Routine = postcard::from_bytes(&reassembled).expect("decodes");
         assert_eq!(decoded.name, original.name);
         assert_eq!(decoded.steps.len(), original.steps.len());
+        // The version is first on the wire, so a chunk boundary that ate a leading byte
+        // shows up here before anything else does.
+        assert_eq!(decoded.version, original.version);
+        assert_eq!(decoded.prerequisites, original.prerequisites);
+        assert_eq!(decoded.shot_annotations, original.shot_annotations);
         assert_eq!(
             decoded.steps.last().and_then(|s| s.description.clone()),
             original.steps.last().and_then(|s| s.description.clone()),
@@ -448,7 +564,7 @@ impl<'a> Value<'a> for Routine {
     {
         let crc = Crc::<u32>::new(&CRC_32_ISCSI);
 
-        let v = match from_bytes_crc32(buffer, crc.digest()) {
+        let v: Result<Self, SerializationError> = match from_bytes_crc32(buffer, crc.digest()) {
             Ok(value) => Ok(value),
             Err(postcard::Error::DeserializeUnexpectedEnd) => {
                 Err(SerializationError::InvalidFormat)
@@ -461,7 +577,251 @@ impl<'a> Value<'a> for Routine {
             },
         };
 
+        // The CRC does not catch a routine stored by an older firmware: it was computed over
+        // these same bytes and still validates. postcard is positional and has no field
+        // names to disagree about, so those bytes decode into a structurally valid `Routine`
+        // that is not the one that was written. This check is the only thing standing
+        // between that and a machine running it.
+        let v = v.and_then(|value: Self| {
+            if value.version == ROUTINE_FORMAT_VERSION {
+                Ok(value)
+            } else {
+                Err(SerializationError::InvalidFormat)
+            }
+        });
+
         // See the note on `ScheduleItem`: the consumed length is the whole slice.
         v.map(|value| (value, buffer.len()))
+    }
+}
+
+#[cfg(all(test, feature = "serde", feature = "sequential-storage"))]
+mod version_tests {
+    use super::*;
+    use alloc::string::ToString;
+
+    fn linked_parameter(index: u8) -> RoutineParameter {
+        RoutineParameter {
+            index,
+            name: "Dose".to_string(),
+            default: 18.0,
+            unit: Some(ParameterUnit::Grams),
+            linked_attribute: Some(ShotAnnotationKey::DoseWeight),
+        }
+    }
+
+    fn v4(name: &str) -> Routine {
+        Routine {
+            version: ROUTINE_FORMAT_VERSION,
+            routine_type: RoutineType::UserDefined,
+            name: name.to_string(),
+            parameters: vec![linked_parameter(0)],
+            derived_parameters: vec![],
+            steps: vec![RoutineStep {
+                entry_command: vec![RoutineCommand::StartBrewing(0)],
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::StateConditionMet(
+                        StateCondition::ExtractedSolidsAbove(0, ParameterValue::Static(1.5)),
+                    ),
+                    then: RoutineStepExitType::Finished,
+                    description: None,
+                }],
+                description: None,
+            }],
+            finally: vec![RoutineCommand::StopBrewing(0)],
+            prerequisites: vec![RoutinePrerequisite {
+                capability: SensorCapability::ElectricalConductivity,
+            }],
+            shot_annotations: vec![ShotAnnotation {
+                key: ShotAnnotationKey::Beans,
+                value: ShotAnnotationValue::Text(
+                    heapless::String::try_from("Drop Decaf").expect("fits"),
+                ),
+            }],
+        }
+    }
+
+    fn encode(routine: &Routine) -> ([u8; ROUTINE_MAX_ENCODED_LEN], usize) {
+        let mut buffer = [0u8; ROUTINE_MAX_ENCODED_LEN];
+        let len = routine.serialize_into(&mut buffer).expect("encodes");
+        (buffer, len)
+    }
+
+    #[test]
+    fn a_current_routine_round_trips_through_flash() {
+        let original = v4("Smart shot");
+        let (buffer, len) = encode(&original);
+
+        let (decoded, _) =
+            <Routine as Value>::deserialize_from(&buffer[..len]).expect("a v4 routine loads");
+
+        assert_eq!(decoded.version, ROUTINE_FORMAT_VERSION);
+        assert_eq!(decoded.name, "Smart shot");
+        assert_eq!(decoded.parameters[0].linked_attribute, Some(ShotAnnotationKey::DoseWeight));
+        assert_eq!(decoded.prerequisites, original.prerequisites);
+        assert_eq!(decoded.shot_annotations, original.shot_annotations);
+    }
+
+    #[test]
+    fn the_version_alone_is_what_rejects_an_old_routine() {
+        // The sharpest form of the claim. These bytes are a *structurally perfect* routine
+        // with a correctly computed CRC over exactly themselves -- the only thing wrong with
+        // them is the number in the first field. If the version check were absent, this
+        // would load and run.
+        //
+        // That is not a hypothetical: it is precisely the shape of a routine written by an
+        // older firmware, whose CRC also validates because it was computed over the bytes
+        // that were actually stored.
+        let mut stale = v4("Smart shot");
+        stale.version = ROUTINE_FORMAT_VERSION - 1;
+        let (buffer, len) = encode(&stale);
+
+        assert!(
+            <Routine as Value>::deserialize_from(&buffer[..len]).is_err(),
+            "a routine one version behind must not load"
+        );
+
+        // The control: byte-for-byte the same routine, right version, loads.
+        let (buffer, len) = encode(&v4("Smart shot"));
+        assert!(<Routine as Value>::deserialize_from(&buffer[..len]).is_ok());
+    }
+
+    #[test]
+    fn a_pre_version_encoding_does_not_decode_as_a_routine() {
+        // The real upgrade case, rather than a synthesised one: bytes in the shape `Routine`
+        // had before it carried a version. Losing these is accepted and expected -- what is
+        // not acceptable is decoding them into something that looks like a working routine.
+        #[derive(serde::Serialize)]
+        struct LegacyParameter {
+            index: u8,
+            name: alloc::string::String,
+            default: f32,
+            unit: Option<ParameterUnit>,
+        }
+
+        #[derive(serde::Serialize)]
+        struct LegacyRoutine {
+            routine_type: RoutineType,
+            name: alloc::string::String,
+            parameters: Vec<LegacyParameter>,
+            derived_parameters: Vec<DerivedParameter>,
+            steps: Vec<RoutineStep>,
+            finally: Vec<RoutineCommand>,
+        }
+
+        let legacy = LegacyRoutine {
+            routine_type: RoutineType::Cleaning,
+            name: "Backflush".to_string(),
+            parameters: vec![LegacyParameter {
+                index: 0,
+                name: "Cycles".to_string(),
+                default: 5.0,
+                unit: None,
+            }],
+            derived_parameters: vec![],
+            steps: vec![RoutineStep {
+                entry_command: vec![RoutineCommand::StartBrewing(0)],
+                exits: vec![RoutineExit {
+                    condition: RoutineExitCondition::After(ParameterValue::Static(10.0)),
+                    then: RoutineStepExitType::Finished,
+                    description: None,
+                }],
+                description: None,
+            }],
+            finally: vec![RoutineCommand::StopBrewing(0)],
+        };
+
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+        let mut buffer = [0u8; ROUTINE_MAX_ENCODED_LEN];
+        let encoded = to_slice_crc32(&legacy, &mut buffer, crc.digest()).expect("encodes");
+        let len = encoded.len();
+
+        match <Routine as Value>::deserialize_from(&buffer[..len]) {
+            Err(_) => {}
+            Ok((decoded, _)) => panic!(
+                "legacy bytes decoded into a routine: v{} {:?} {} steps",
+                decoded.version,
+                decoded.routine_type,
+                decoded.steps.len()
+            ),
+        }
+    }
+
+    #[test]
+    fn a_maximally_configured_routine_still_fits() {
+        // The new fields eat into the same 2048 bytes the steps live in, so the ceiling is
+        // worth asserting against a routine that uses all of them rather than against a
+        // typical one.
+        let mut routine = v4("Maximal");
+        routine.parameters = (0..8).map(linked_parameter).collect();
+        routine.derived_parameters = (0..16)
+            .map(|index| DerivedParameter {
+                index,
+                name: "derived".to_string(),
+                unit: Some(ParameterUnit::ExtractionRate),
+                formula: DerivedFormula::Difference { param_a: 0, param_b: 1 },
+            })
+            .collect();
+        routine.prerequisites = vec![
+            RoutinePrerequisite { capability: SensorCapability::Weight },
+            RoutinePrerequisite { capability: SensorCapability::ElectricalConductivity },
+            RoutinePrerequisite { capability: SensorCapability::OutputFlowRate },
+        ];
+        routine.shot_annotations = (0..MAX_ROUTINE_SHOT_ANNOTATIONS)
+            .map(|i| ShotAnnotation {
+                key: ShotAnnotationKey::Other(
+                    heapless::String::try_from(alloc::format!("key{i}").as_str()).expect("fits"),
+                ),
+                value: ShotAnnotationValue::Text(
+                    heapless::String::try_from("0123456789012345678901234567890123456789012345")
+                        .expect("fits"),
+                ),
+            })
+            .collect();
+
+        let encoded = postcard::to_allocvec(&routine).expect("encodes");
+        assert!(
+            encoded.len() <= ROUTINE_MAX_ENCODED_LEN,
+            "metadata alone spent {} of {} bytes, leaving too little for steps",
+            encoded.len(),
+            ROUTINE_MAX_ENCODED_LEN
+        );
+    }
+
+    #[test]
+    fn validate_refuses_what_it_cannot_store() {
+        assert_eq!(v4("ok").validate(), Ok(()));
+
+        let mut stale = v4("stale");
+        stale.version = 1;
+        assert_eq!(stale.validate(), Err(RoutineWriteError::UnsupportedVersion));
+
+        let mut greedy = v4("greedy");
+        greedy.shot_annotations = (0..MAX_ROUTINE_SHOT_ANNOTATIONS + 1)
+            .map(|_| ShotAnnotation {
+                key: ShotAnnotationKey::Beans,
+                value: ShotAnnotationValue::Number(1.0),
+            })
+            .collect();
+        assert_eq!(greedy.validate(), Err(RoutineWriteError::Malformed));
+    }
+
+    #[test]
+    fn a_summary_carries_the_prerequisites_a_list_needs_to_grey_a_row() {
+        // The whole reason these are in the summary rather than counted: a list card has to
+        // answer "can I run this right now?", and a count cannot.
+        let routine = v4("Smart shot");
+        let summary = RoutineSummary::from(&routine);
+
+        assert_eq!(
+            summary.prerequisites,
+            vec![RoutinePrerequisite { capability: SensorCapability::ElectricalConductivity }]
+        );
+
+        // And equality still discriminates on them, or the comms processor's publish-skip
+        // would hide a prerequisite edit until something else about the routine changed.
+        let mut without = routine.clone();
+        without.prerequisites = vec![];
+        assert_ne!(summary, RoutineSummary::from(&without));
     }
 }

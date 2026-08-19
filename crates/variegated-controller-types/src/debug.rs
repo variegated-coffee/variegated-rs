@@ -185,7 +185,60 @@ use crate::Status;
 ///   [`crate::shot_log::SHOT_LOG_FORMAT_VERSION`] going to 5, but the two are independent
 ///   version spaces guarding different artifacts -- the wire and the card -- and only
 ///   happen to move together here.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x94;
+/// * `0x95` -- routines v4. [`crate::Routine`] gained a leading `version` and trailing
+///   `prerequisites` and `shot_annotations`; [`crate::RoutineParameter`] a trailing
+///   `linked_attribute`; [`crate::RoutineSummary`] a trailing `prerequisites`;
+///   [`crate::StateCondition`] six extraction variants and a `ShotStateReached`,
+///   [`crate::ParameterUnit`] three units, and [`crate::RoutineWriteError`] an
+///   `UnsupportedVersion`. This event enum gained [`DebugEvent::RoutineRefused`].
+///
+///   `ShotStateReached` was appended after the other six, in the same unreleased version:
+///   `ROUTINE_FORMAT_VERSION` had already moved to 4 and this bump had already happened, so
+///   nothing had yet been written or spoken in a format the addition invalidates. Appending
+///   to an unshipped version is free; the next addition after this ships is not.
+///
+///   Mandatory in both directions. `RoutineSummary` crosses the link inside
+///   `ApplicationProcessorToCommsProcessorMessage::RoutineSummaries` and reaches a host from
+///   there; `Routine` itself crosses as *raw postcard bytes* in `RoutineChunk`, so the link
+///   does not decode it but the host at the far end does. The enum additions are the
+///   append-only case -- an older peer meets a discriminant it has no arm for -- and the
+///   struct additions are the same no-length-prefix desync as `0x90` onwards.
+///
+///   Unlike every bump before it, this one is *also* guarded at the artifact: routines in
+///   flash carry [`crate::ROUTINE_FORMAT_VERSION`], so a stored routine written by an older
+///   firmware is refused rather than silently mis-decoded. Losing those is accepted; see
+///   that constant for why no migration exists.
+/// * `0x96` -- [`crate::CommsStatus`] gained `wifi_ssid` and `wifi_ip`, both appended, so the
+///   GS3 panel's Wi-Fi Info screen has something to show.
+///
+///   **The same break as `0x8B`, on the same struct, and mandatory for the same reason.**
+///   `CommsStatus` is a field of `Status` and postcard has no length prefix to resynchronise
+///   on: an older host decoding a new `Status` reads `comms_status` without consuming these
+///   two, then reads the first of them as the start of `comms_status_age`, and every field
+///   after that is garbage -- on the tool someone is using to diagnose a machine that heats
+///   water.
+///
+///   Note the contrast with `ShotStateReached` at `0x95` below, which rode along on an
+///   already-bumped unreleased version. That was sound because a `StateCondition` variant is
+///   reachable only inside a stored [`crate::Routine`]: a decoder that does not know it can
+///   fail to read a routine, but it cannot mis-frame a live `Status`. These two fields are in
+///   the status stream itself, which is continuous, so the same "it is unreleased anyway"
+///   argument does not carry -- the failure it would allow is unbounded rather than confined
+///   to one artifact.
+/// * `0x97` -- transitions say where they start, and the group publishes its setpoint.
+///   [`crate::TransitionOrigin`] is a fourth field on each of the four `*WithTransition`
+///   routine commands, taking [`crate::ROUTINE_FORMAT_VERSION`] to 5; and
+///   [`crate::GroupStatus`] gained `brew_control_target`, appended.
+///
+///   The `GroupStatus` half is the mandatory one, for `0x8B`'s reason again: it is a struct
+///   inside `Status`, and postcard has no length prefix to resynchronise on.
+///
+///   The two travelled together deliberately. Migration surface is the cost of a format
+///   change, not the number of fields in it, and the missing setpoint is *why* the
+///   transition bug survived two shots -- with only measurements logged, what the machine
+///   had been asked for could only be reconstructed from the PID's proportional term and
+///   its acting gain.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x97;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///
@@ -585,6 +638,20 @@ pub enum DebugEvent {
     ///
     /// Appended, not inserted; see the note above.
     ShotUploadFailed { reason: Name },
+    /// A routine was not started because the machine cannot sense something it needs.
+    ///
+    /// The backstop, not the normal path: every surface that can start a routine greys out
+    /// the ones it cannot run. This fires for the debug channel, a scheduled run, and the
+    /// race where a scale drops between a menu being drawn and a button being pressed --
+    /// so seeing it at all is worth knowing about.
+    ///
+    /// `index` is `RoutineIndex::to_storage_index()`, matching [`Self::RoutineStarted`].
+    /// `capability` is the *first* unmet one, not all of them: it is a diagnostic, and a
+    /// routine that needs a scale and a probe with neither connected is one problem.
+    ///
+    /// Appended rather than filed beside `RoutineStarted` where it belongs topically, for
+    /// the reason the two events above give.
+    RoutineRefused { index: u16, capability: crate::SensorCapability },
 }
 
 impl DebugEvent {
@@ -602,7 +669,11 @@ impl DebugEvent {
             | DebugEvent::InterlockTripped { .. }
             // Warn rather than Error: a shot that failed to upload is still on the card,
             // and the browser can fetch it. Nothing has been lost yet.
-            | DebugEvent::ShotUploadFailed { .. } => Severity::Warn,
+            | DebugEvent::ShotUploadFailed { .. }
+            // Warn rather than Error: refusing is the correct outcome, and the user is
+            // told. It is worth surfacing because reaching the backstop at all means a
+            // surface let an unrunnable routine be started.
+            | DebugEvent::RoutineRefused { .. } => Severity::Warn,
             _ => Severity::Info,
         }
     }
@@ -648,6 +719,7 @@ impl DebugEvent {
             DebugEvent::SpawnFailed { .. } => "spawn_failed",
             DebugEvent::HeapReport { .. } => "heap_report",
             DebugEvent::CommandRejected { .. } => "command_rejected",
+            DebugEvent::RoutineRefused { .. } => "routine_refused",
         }
     }
 }

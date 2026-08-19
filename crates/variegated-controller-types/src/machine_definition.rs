@@ -50,7 +50,13 @@ impl Default for MachineType {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A kind of sensing a machine, group, boiler or peripheral can do.
+///
+/// `Eq` as well as `PartialEq` because [`crate::RoutinePrerequisite`] is built on this and
+/// travels inside `RoutineSummary`, whose `Eq` is load-bearing -- the comms processor skips
+/// its publish and its cache write when an arriving summary list equals the one it holds.
+/// A fieldless enum gets `Eq` for free; without it that comparison would not compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SensorCapability {
     Temperature,
     Pressure,

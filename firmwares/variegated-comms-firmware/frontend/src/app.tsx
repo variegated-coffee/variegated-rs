@@ -215,6 +215,7 @@ export function App() {
             <RoutineBuilder
               routines={routines}
               machineDefinition={machineDefinition as MachineDefinition}
+              peripheralStatus={(status as Status)?.peripheral_status ?? null}
             />
           </section>
         )}

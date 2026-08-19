@@ -728,7 +728,28 @@ pub enum ShotLogEvent {
 ///   Note the annotation change did not *require* a bump: appending to a struct only
 ///   breaks a decoder that meets the new bytes, and a version 4 file simply has none. It
 ///   rode along because the bump was already being paid for.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 5;
+/// * `6` -- [`GroupSample`] gained `brew_control_target`: the setpoint the pump was being
+///   driven to, and the quantity it was expressed in.
+///
+///   Every other field in a sample is something the machine *measured*. This is what it was
+///   *asked* for, and the file had no way to say it. That gap is not academic: a routine
+///   asking for "decline to 4 bar over 30 seconds" instead held a flat 4 bar for the whole
+///   step, and diagnosing it meant reconstructing the setpoint from each sample's
+///   proportional term divided by its acting gain -- which works only because the PID
+///   happens to log both, and only for a shot where the pump was under PID control at all.
+///
+///   Appended, so unlike the 2-to-3 change every preceding field keeps its meaning. It
+///   carries the same caveat as `pump_rpm` at version 5: `GroupSample` is not last in the
+///   file -- `water_tap_samples` follows it inside every [`ShotLogSample`] -- so a version 5
+///   file read as version 6 consumes the water-tap map's length byte as this field's option
+///   tag and stays desynchronised. `GOLDEN_V5` and
+///   `a_version_5_file_is_refused_by_its_version` are what keep the version check honest
+///   about that.
+///
+///   Unlike version 5 this carries one field rather than two: nothing else was waiting. The
+///   batching rule is that a version's migration cost is paid once whatever it contains --
+///   not that a version must be filled up before it ships.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 6;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -929,6 +950,22 @@ pub struct GroupSample {
     /// water-tap map's length as this field's option tag -- see the version 3 note on
     /// [`SHOT_LOG_FORMAT_VERSION`] for what the other choice costs.
     pub pump_rpm: Option<RPMType>,
+    /// What the pump was being driven towards, and in which quantity.
+    ///
+    /// **Every other field in this sample is a measurement; this is the intent behind
+    /// them.** Its absence is what let a transition bug survive two shots: with only
+    /// measurements recorded, the only way to recover what the machine had been *asked* for
+    /// was to divide the PID's proportional term by its acting gain and add the reading. A
+    /// setpoint diverging from its measurement is the single most useful thing this file can
+    /// show about a shot, and it was the one thing it did not.
+    ///
+    /// During a curve this is where the ramp *is*, not where it ends, so it moves sample to
+    /// sample. `None` when the group is not being commanded -- not brewing, or mode `Off`.
+    ///
+    /// Appended, like [`Self::pump_rpm`] above and with the same caveat: `GroupSample` is
+    /// not last in the file, so a version 5 file read as version 6 consumes the water-tap
+    /// map's length byte as this field's option tag. The version check refuses it first.
+    pub brew_control_target: Option<crate::BrewControlTarget>,
 }
 
 /// Water tap sensor readings at a point in time
@@ -1281,6 +1318,15 @@ mod shot_log_sample_tests {
                     // and distinct from all of them. A plausible mid-shot speed for a
                     // pump rated 300-5000 rpm.
                     pump_rpm: Some(1937.5),
+                    // 9.25 is 0x41140000, exact and distinct like the rest. `PressureCurve`
+                    // rather than the first variant, so a discriminant off by one shows up
+                    // -- and deliberately *not* equal to `pressure` above, since a setpoint
+                    // that always matched its measurement is the one case this field cannot
+                    // prove anything about.
+                    brew_control_target: Some(crate::BrewControlTarget {
+                        mode: crate::GroupBrewControlMode::PressureCurve,
+                        value: 9.25,
+                    }),
                 },
             )
             .unwrap();
@@ -1425,16 +1471,19 @@ mod shot_log_sample_tests {
         0x42, 0x01, 0x02, 0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
     ];
 
-    /// The bytes version 5 produces for [`canonical_shot`], captured once when version 5
-    /// was minted.
+    /// The bytes version 5 produced for [`canonical_shot`], captured when version 5 was
+    /// minted and kept unchanged since.
     ///
     /// Derived from [`GOLDEN_V4`] by applying the version 5 change rule -- version byte
     /// `0x04` to `0x05`; `tasting_notes` as `Some` inserted directly after the annotation
     /// vector's length; `pump_rpm` as `Some(1937.5)` inserted after `output_volume`, once
-    /// per encoded [`GroupSample`] -- and then *confirmed against the encoder* by
-    /// `the_encoding_has_not_moved_under_this_version`. Predicted then verified, rather
-    /// than pasted out of a failure diff, which is the mode that turns this array from a
-    /// check into a rubber stamp.
+    /// per encoded [`GroupSample`] -- and then *confirmed against the encoder*. Predicted
+    /// then verified, rather than pasted out of a failure diff, which is the mode that turns
+    /// this array from a check into a rubber stamp.
+    ///
+    /// No longer the current encoding -- version 6 appended `brew_control_target` to
+    /// [`GroupSample`]. Like [`GOLDEN_V3`] and [`GOLDEN_V4`] it is deliberately not
+    /// regenerated; its remaining job is `a_version_5_file_is_refused_by_its_version`.
     const GOLDEN_V5: &[u8] = &[
         0x05, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
         0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
@@ -1448,6 +1497,35 @@ mod shot_log_sample_tests {
         0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00,
         0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40,
         0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x02,
+        0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// The bytes version 6 produces for [`canonical_shot`], captured once when version 6
+    /// was minted.
+    ///
+    /// Derived from [`GOLDEN_V5`] by applying the version 6 change rule -- version byte
+    /// `0x05` to `0x06`, and `brew_control_target` as
+    /// `Some(PressureCurve, 9.25)` inserted after `pump_rpm`, once per encoded
+    /// [`GroupSample`]. That is six bytes: `0x01` for `Some`, `0x03` for the mode's
+    /// declaration-order discriminant, and `00 00 14 41` for 9.25 as a little-endian `f32`.
+    ///
+    /// Predicted from the rule and *then* confirmed against the encoder by
+    /// `the_encoding_has_not_moved_under_this_version`, for the reason [`GOLDEN_V5`] gives:
+    /// an array pasted out of a failure diff asserts only that the code does what it does.
+    const GOLDEN_V6: &[u8] = &[
+        0x06, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
+        0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
+        0x20, 0x6c, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x6f, 0x63, 0x6f, 0x61, 0x20,
+        0x66, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01,
+        0x9c, 0xc7, 0x01, 0x01, 0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x02,
+        0xdc, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5, 0xee,
+        0x01, 0x01, 0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40, 0x01,
+        0x00, 0x00, 0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00, 0x00,
+        0x11, 0x42, 0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb, 0x42,
+        0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00,
+        0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40,
+        0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x03,
+        0x00, 0x00, 0x14, 0x41, 0x01, 0x02,
         0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
     ];
 
@@ -1500,6 +1578,29 @@ mod shot_log_sample_tests {
         }
     }
 
+    /// A version 5 file is rejected on its version, not decoded into nonsense.
+    ///
+    /// The version 6 counterpart, and the reason [`GOLDEN_V5`] is kept rather than replaced.
+    /// The hazard is the one `pump_rpm` had at version 5, one field further along:
+    /// `brew_control_target` is last in [`GroupSample`], but `GroupSample` is not last in
+    /// the file -- `water_tap_samples` follows it inside every [`ShotLogSample`]. A version
+    /// 6 decoder let loose on a version 5 file reads the water-tap map's length byte as this
+    /// field's option tag and stays desynchronised for every sample after it. Nothing in the
+    /// bytes reveals that; the leading version is the only thing that can.
+    #[test]
+    fn a_version_5_file_is_refused_by_its_version() {
+        let (version, _rest) = postcard::take_from_bytes::<u32>(GOLDEN_V5).unwrap();
+        assert_eq!(version, 5, "GOLDEN_V5 must stay the version 5 file it was");
+        assert_ne!(
+            version, SHOT_LOG_FORMAT_VERSION,
+            "an old file must be distinguishable from a current one by its first byte"
+        );
+
+        if let Ok(decoded) = postcard::from_bytes::<ShotLog>(GOLDEN_V5) {
+            assert!(!decoded.version_supported());
+        }
+    }
+
     /// A shot stored by this version still decodes, byte for byte, to what it meant.
     ///
     /// This is the test that fires when someone adds, removes, reorders or retypes a field
@@ -1518,7 +1619,7 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V5,
+            GOLDEN_V6,
             "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
              see this test's doc comment before touching the golden array"
         );
@@ -1526,7 +1627,7 @@ mod shot_log_sample_tests {
         // Decoding the frozen bytes as well as comparing them: the assertion above proves
         // the writer has not moved, this proves the reader still understands what an
         // earlier build wrote.
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V5).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V6).unwrap();
         assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
         assert_eq!(decoded.metadata.recorded_at_unix_millis, Some(1_786_429_751_930));
         assert_eq!(
@@ -1539,6 +1640,11 @@ mod shot_log_sample_tests {
         assert_eq!(group.output_electrical_conductivity, Some(0.625));
         assert_eq!(group.extraction_rate, Some(1.125));
         assert_eq!(group.pump_rpm, Some(1937.5));
+        // The version 6 field, and both halves of it: a mode read one variant off would
+        // still produce a plausible number, so the number alone would not catch it.
+        let target = group.brew_control_target.expect("a version 6 sample has one");
+        assert_eq!(target.mode, crate::GroupBrewControlMode::PressureCurve);
+        assert_eq!(target.value, 9.25);
     }
 }
 

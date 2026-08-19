@@ -1,4 +1,6 @@
+use core::cell::RefCell;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::pubsub::{PubSubChannel, Publisher, Subscriber};
 use embassy_sync::signal::Signal;
 use embassy_sync::channel::{Channel, Sender, Receiver};
@@ -401,6 +403,49 @@ pub static SNTP_SYNC_SEQ: AtomicU32 = AtomicU32::new(0);
 // state is only reachable through the `WifiController`, which connection_task
 // owns. Mirror it here the same way the Belka status is mirrored.
 pub static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// The SSID the station has been configured with. See [`wifi_ssid`].
+///
+/// A **blocking** mutex, not the async one `MACHINE_DEFINITION` uses: the only writer is
+/// `wifi::apply_configuration`, which is a plain `fn` called from seven places, and an
+/// async lock cannot be taken from there. It is also the one mirror in this file that
+/// cannot be an atomic, because a 32-byte string does not fit in a word.
+static WIFI_SSID: BlockingMutex<
+    CriticalSectionRawMutex,
+    RefCell<heapless::String<{ variegated_controller_types::wifi::WIFI_SSID_LEN }>>,
+> = BlockingMutex::new(RefCell::new(heapless::String::new()));
+
+/// Record the SSID the station has just been pointed at.
+pub fn set_wifi_ssid(ssid: &str) {
+    WIFI_SSID.lock(|slot| {
+        let mut slot = slot.borrow_mut();
+        slot.clear();
+        // Truncation cannot happen: both this and `WifiCredentials::ssid` are
+        // `WIFI_SSID_LEN`, and `wifi_credentials()` already truncated on a char boundary.
+        let _ = slot.push_str(ssid);
+    });
+}
+
+/// The network to report in `CommsStatus`, empty when the link is down.
+///
+/// Gated on [`WIFI_CONNECTED`] deliberately. This is what the station was *asked* to join,
+/// not something read back from the driver, so after a disconnect the stored name is a
+/// network the machine is no longer on -- and it is displayed on a panel that has no other
+/// way to say "not this one". Empty is the honest answer there.
+///
+/// **The gate rests on there being no `.await` between the two writes.** On a credential
+/// change, `wifi::apply_configuration` stores the new SSID while `WIFI_CONNECTED` is still
+/// `true` from the old association, and the flag is only cleared afterwards. Both calls in
+/// that window are synchronous, so this task -- which runs at 1 Hz on the same cooperative
+/// executor -- cannot be scheduled inside it. Add an `.await` between them and `CommsStatus`
+/// will briefly report the new network as though the machine were already on it.
+pub fn wifi_ssid()
+-> heapless::String<{ variegated_controller_types::wifi::WIFI_SSID_LEN }> {
+    if !WIFI_CONNECTED.load(Ordering::Relaxed) {
+        return heapless::String::new();
+    }
+    WIFI_SSID.lock(|slot| slot.borrow().clone())
+}
 
 /// The Improv provisioning state, mirrored for the 1 Hz `CommsStatus`.
 ///

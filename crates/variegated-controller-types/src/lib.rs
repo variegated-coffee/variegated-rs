@@ -27,8 +27,22 @@ pub type RPMType = f32; // RPM
 pub type DutyCycleType = u8; // Percent
 pub type ValveOpenType = u8; // Percent
 pub type MixingProportionType = u8; // Percent
-pub type ECType = f32; // Electrical Conductivity
+/// Electrical conductivity of what is leaving the group, **mS/cm**.
+///
+/// Coffee conducts and water essentially does not, which is what makes this a first-drop
+/// detector as well as an extraction measure -- see `shot_state`'s `FIRST_DROP_EC`.
+pub type ECType = f32;
+/// Conductivity times output flow rate: **mS·ml/(cm·s)**.
+///
+/// Computed in the controllers, not measured. Note the fallback there: when a group reports
+/// no *output* flow it substitutes *input* flow, which is a different quantity -- so this is
+/// only as trustworthy as the group's flow sensing.
 pub type ExtractionRateType = f32;
+/// The time integral of [`ExtractionRateType`]: **mS·ml/cm**.
+///
+/// Accumulated over a brew. Beware the zero: the accumulator is initialised to `Some(0.0)`
+/// on brew start whether or not the machine has a conductivity probe, so a value that stays
+/// flat at zero means "no sensor", not "nothing extracted".
 pub type ExtractedSolidsType = f32;
 pub type OutputVolumeType = f32; // ml
 

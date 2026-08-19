@@ -1,6 +1,32 @@
-# A suggested Settings menu for the GS3 panel
+# The Settings menu for the GS3 panel
 
-**Status: a suggestion, not a spec.** Nothing here is implemented beyond `Brew temp`.
+**Status: §3's tree is built, less one row.** This document began as a suggestion rather than
+a spec, and the reasoning below is why each row is there — worth keeping, because it is also
+the argument for what was left out.
+
+The omission is **`Auto-tare`**: the one row in the tree with no `MachineCommand` at all, and
+§3.1 shows it needs a controller fix before it would mean anything, since `start_brewing`
+tares unconditionally while the GS3's stored default says it does not. A row there would be a
+physical control that does nothing, which §3.1 calls the worst outcome available on a panel.
+
+§4 and §5 are unchanged and were never menu work — they are arguments about where a setting
+should live and what the panel must not try to express.
+
+Two things about the built tree that this document did not anticipate:
+
+- **`Brew mode` and `Brew press` do not survive a reboot**, while `Brew temp` directly above
+  them does. §2 called the command for `default_group_brew_control_state` a prerequisite for
+  exactly this reason; it was descoped knowingly, and the rows say so in their doc comments.
+  Closing it is one appended `MachineCommand`, one arm and the standard inline save block.
+- **`Brew press` greys when the mode is `Off` rather than hiding.** §3 said hide. Hiding makes
+  the Settings list change length under the user, and the button task and both renderers
+  resolve a selection index against that length independently — greying is also already this
+  menu's rule for a row that cannot act.
+
+`Zero cal` and `Cal 100 g` are conditional as §3 asked, through the previously-unread
+`PeripheralDefinition.support_calibration`: **hidden** where the fitted scale cannot
+calibrate (permanent, and the GS3's default Bluetooth scale is one), **greyed** where it can
+but is not answering (transient, and the row is where "switch the scale on" gets said).
 
 The organising question is **not** "what settings does the machine have". It is:
 
@@ -82,8 +108,11 @@ which is acceptable — you chose it one press ago. A cheaper variant is a pair 
 markers showing only whether anything lies above or below, but the counter costs the same row
 and tells you the size of the list, which is what you want to know *before* deciding to scroll.
 
-(Not yet implemented — `lcd_renderer.rs` still draws the hint row. It is a change to
-`menu_rows` alone.)
+(Built, without the editor range indicator — the one element here that was purely to explain
+a clamp, and the one open question §6 raised about it. The arithmetic did not stay in
+`menu_rows`: it is in `variegated-machine-menu`'s `rows` module, because that crate can host a
+test binary and neither firmware can, and every rule above is about something *disappearing*
+without a trace, which is not a thing you can check by looking at the panel.)
 
 ### The depth budget is the real structural limit
 
@@ -155,9 +184,16 @@ silently not survive a power cycle while `Brew temp` directly above it does. Two
 rows disagreeing about permanence is worse than the missing feature, so the command for the
 default is a prerequisite, not a nice-to-have.
 
+*(Shipped anyway, knowingly — see the status note at the top and open question 7. The
+argument above still stands; it was descoped, not answered.)*
+
 ---
 
-## 3. The living settings — suggested tree
+## 3. The living settings — the tree
+
+Built as below, except `Auto-tare`. `Brew press` greys rather than hiding when the mode is
+`Off`, and the two calibration rows are hidden rather than greyed where the scale cannot
+perform them — the top of this document says why for both.
 
 ```
 Settings
@@ -165,16 +201,19 @@ Settings
 ├── Steam temp       124    edit
 ├── Brew mode        Prs    cycle   Prs / Flow / Duty / Off
 ├── Brew press       9.0    edit    label and unit follow the mode above
-├── Auto-tare         ON    toggle  † see §3.1 — the flag is ignored today
 ├── Standby                 action  the machine state the panel cannot otherwise reach
 ├── Scale              >    submenu
+|   ├── Auto-tare     ON    toggle  † see §3.1 — the flag is ignored today
 │   ├── Tare                action
-│   ├── Zero cal            action
-│   └── Cal 100 g           action
+│   ├── Zero cal            action (If supported by the scale)
+│   └── Cal 100 g           action (If supported by the scale)
 ├── Wi-Fi Setup       ON    toggle  (implemented)
+|-- Wi-Fi Info         >    info screen
+|   |-- SSID      <name>
+|   |-- RSSI:      <dBm>
+|   |-- IP:    <address>
 └── Bluetooth          >    submenu
     ├── <name>        ON    toggle  one row per association
-    └── Scan                action
 ```
 
 ### Why each one is living
@@ -183,14 +222,13 @@ Settings
 |---|---|---|---|
 | `Brew temp` | `brew_boiler…target_temperature` | exists ✅ | The single most-adjusted number on an espresso machine, and adjusted *while tasting shots*. **Implemented.** |
 | `Steam temp` | `steam_boiler…target_temperature` | exists ✅ | Changes with milk volume and technique. Free once brew temp exists — same editor, different index and ceiling. |
-| `Brew mode` | `default_group_brew_control_state.mode` | **needed** (see §2) | Pressure vs flow vs fixed duty is a recipe decision, not an install decision. |
-| `Brew press` | `…values.pressure` / `.flow_rate` / `.duty_cycle` | **needed** | **One row that renames itself** with the mode above — `Brew press` (bar), `Brew flow` (ml/s), `Brew duty` (%), hidden when mode is `Off`. Avoids three rows of which two are always irrelevant. |
+| `Brew mode` | `default_group_brew_control_state.mode` | `SetGroupBrewControlTarget` ✅, but see §2 | Pressure vs flow vs fixed duty is a recipe decision, not an install decision. *(Built against the **ephemeral** state, so it resets on reboot — the command §2 asks for is still missing.)* |
+| `Brew press` | `…values.pressure` / `.flow_rate` / `.duty_cycle` | `SetGroupBrewControlTargetValues` ✅ | **One row that renames itself** with the mode above — `Brew press` (bar), `Brew flow` (ml/s), `Brew duty` (%), and `n/a` when the mode is `Off`. Avoids three rows of which two are always irrelevant. *(Built. Greys rather than hides — see the top of this document.)* |
 | `Auto-tare` † | `group.auto_tare_enabled` | **needed**, plus §3.1 | A workflow preference that changes with the basket and the scale in use. |
 | `Standby` | `MachineMode::PowerSaveStandby` | `SetMachineMode` ✅ | The one machine state with no panel route — `{5,3}` reaches On and Off only. |
-| `Tare` / `Zero cal` / `Cal 100 g` | — | all exist ✅ | **The strongest fit in the system.** Inherently physical: you need the platform empty, or a 100 g weight in your hand. Useless remotely, and calibration drifts. |
+| `Tare` / `Zero cal` / `Cal 100 g` | — | all exist ✅ | **The strongest fit in the system.** Inherently physical: you need the platform empty, or a 100 g weight in your hand. Useless remotely, and calibration drifts. *(All three grey when no scale is answering: `Group::scale_tare` returns `Ok(())` with no controller, so an ungated row would report success and do nothing.)* |
 | `Wi-Fi Setup` | `comms_status.improv` | exists ✅ | **Implemented**, and already the right shape — the panel opens a window, the phone does the typing. |
 | Bluetooth toggle | `bluetooth_peripherals` | `SetBluetoothPeripheralEnabled` ✅ | Switching a scale off for a session without losing the pairing. |
-| `Scan` | — | `ScanForBluetoothPeripherals` ✅ | Pairing happens with the device in your hand. May be refused while busy, so the row wants the same `n/a` treatment `Run routine` has. |
 
 Three of these need a new command; only `Auto-tare` needs more than one, and §3.1 says why.
 
@@ -269,18 +307,20 @@ with structure, anything textual, and anything whose failure is silent.
    only ever be wrong.
 2. **Is `heating_element_contention_strategy` really install-once?** It has a command already,
    so it is the cheapest thing in this document to put on the panel if you disagree.
-3. **The LCD's second row becomes a context row** — title plus position on a list, the
-   quantity's name on an editor. See §1. Not yet implemented; it is a change to
-   `lcd_renderer.rs::menu_rows` alone, and worth doing before any row below is added, because
-   it changes what they can say. The open part is whether the editor's range indicator
-   (`0-105`) earns its place or reads as clutter — it is the one element there purely to
-   explain a clamp.
-4. **`Brew press` renaming itself with the mode** — elegant, or too clever for a row that
-   changes what it means? The alternative is three always-present rows, two of which are inert.
+3. ~~**The LCD's second row becomes a context row.**~~ **Built**, without the range
+   indicator — that was the open half, and it stayed out.
+4. ~~**`Brew press` renaming itself with the mode.**~~ **Built.** Still worth watching on
+   hardware: it is the one row whose meaning depends on the row above it.
 5. **The unconsumed fields in §3.1 — feature gap or dead weight?** Each is either a feature
    nobody has built yet (in which case the menu row waits for it) or a field that should be
    deleted from `Configuration`, which would be a format change. Worth deciding as a batch
    rather than one at a time, since they share a migration.
 6. **Should the unconditional tare be gated on `auto_tare_enabled` now?** It is a small fix,
    it makes the app stop lying about the machine's behaviour, and it does not depend on any
-   of the menu work.
+   of the menu work. **Still open, and now blocking a row**: `Auto-tare` is the one item in
+   §3's tree that was not built, and this is why.
+7. **New: should `Brew mode` persist?** It writes the controller's ephemeral state, so it
+   resets on every reboot while `Brew temp` two rows above it does not. §2 argued the command
+   for `default_group_brew_control_state` was a prerequisite rather than a nice-to-have for
+   exactly this reason. The rows shipped without it knowingly; whether two neighbouring rows
+   may disagree about permanence is the question to settle.

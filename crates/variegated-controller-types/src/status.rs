@@ -415,6 +415,39 @@ pub struct GroupStatus {
     /// between the two is load: duty rising while this does not is a pump working against
     /// a blockage.
     pub pump_rpm: Option<RPMType>,
+    /// What the pump is currently being driven towards, and in which quantity.
+    ///
+    /// **Every other field here is a measurement; this is the intent behind them.** Its
+    /// absence is what let a transition bug hide for two shots: with only measurements
+    /// logged, the only way to see what the machine had been *asked* for was to reconstruct
+    /// it from the PID's proportional term and its acting gain. A setpoint that disagrees
+    /// with its measurement is the single most useful thing a shot log can show, and it was
+    /// the one thing it did not.
+    ///
+    /// `None` when the group is not being commanded at all -- not brewing, or mode `Off`.
+    /// During a curve it is the curve's value *now*, not its destination, so it moves
+    /// sample to sample the way a ramp should.
+    ///
+    /// **Appended.** postcard is positional and `Status` crosses both the inter-processor
+    /// UART and the debug wire.
+    pub brew_control_target: Option<BrewControlTarget>,
+}
+
+/// What a group's pump is being driven towards. See [`GroupStatus::brew_control_target`].
+///
+/// The mode travels with the value because the number alone is ambiguous -- 2.5 is a
+/// plausible pressure, flow rate and duty cycle, and a consumer that guessed would render
+/// bar on a flow-controlled shot. It also answers the question a transition actually asks:
+/// *is this quantity the one being commanded right now?*
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrewControlTarget {
+    /// Which quantity is being controlled.
+    pub mode: crate::GroupBrewControlMode,
+    /// The setpoint the pump's PID is tracking, in that quantity's own unit.
+    pub value: f32,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

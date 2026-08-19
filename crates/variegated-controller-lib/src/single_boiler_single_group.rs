@@ -15,7 +15,7 @@ use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -285,6 +285,11 @@ pub struct SingleBoilerSingleGroupController<
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
+    /// What this machine declares it can sense -- the capability half of a prerequisite
+    /// check, which `peripheral_registry` cannot answer. See the dual-boiler twin.
+    machine_definition: &'a MachineDefinition,
+    /// Since when a running routine's prerequisites have been unmet, if they are.
+    prerequisite_lost_since: Option<Instant>,
     /// `Option` because the caller decides whether this board's WATCHDOG peripheral is
     /// available to claim, not this controller -- same shape as the dual-boiler one.
     watchdog: Option<Watchdog>,
@@ -374,6 +379,7 @@ impl<
         boiler_config: BoilerConfiguration,
         routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
+        machine_definition: &'a MachineDefinition,
         bluetooth_store: BluetoothStoreT,
         // Where an accepted `ScanForBluetoothPeripherals` goes, carrying the duration in
         // milliseconds. `None` on a machine whose comms processor is not wired for it, in
@@ -451,6 +457,8 @@ impl<
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
+            machine_definition,
+            prerequisite_lost_since: None,
             watchdog,
             bluetooth_store,
             bluetooth_associations: BluetoothAssociations::default(),
@@ -697,6 +705,39 @@ impl<
             // logged too -- see the equivalent note in `dual_boiler_single_group`.
             if let Some(status) = self.previous_status.as_ref() {
                 self.shot_logger.record_sample(status);
+            }
+
+            // A running routine whose prerequisites have gone away; debounced, and checked
+            // before the step so it does not advance on stale readings. See the equivalent
+            // block in `dual_boiler_single_group`.
+            if self.current_routine.is_some() {
+                let peripherals = self.peripheral_registry.get_peripheral_status();
+                let missing = self.current_routine.as_ref().and_then(|routine| {
+                    crate::routine_prerequisites::unmet_prerequisites(
+                        &routine.routine.prerequisites,
+                        self.machine_definition,
+                        &peripherals,
+                    )
+                    .next()
+                    .copied()
+                });
+
+                match (missing, self.prerequisite_lost_since) {
+                    (None, _) => self.prerequisite_lost_since = None,
+                    (Some(_), None) => self.prerequisite_lost_since = Some(Instant::now()),
+                    (Some(missing), Some(since)) => {
+                        if since.elapsed() >= crate::routine_prerequisites::PREREQUISITE_LOSS_GRACE
+                        {
+                            log_warn!(
+                                "Abandoning routine: {:?} has been unavailable for {} ms",
+                                missing.capability,
+                                since.elapsed().as_millis()
+                            );
+                            self.handle_routine_exit(true).await;
+                            self.prerequisite_lost_since = None;
+                        }
+                    }
+                }
             }
 
             if let Some(routine) = &mut self.current_routine {
@@ -1095,6 +1136,22 @@ impl<
             // single-boiler firmware passes a tacho receiver. Routed through the getter
             // rather than hardcoded so wiring one is a firmware-only change.
             pump_rpm: self.group.get_pump_rpm(),
+            // The resolved setpoint -- see the dual-boiler controller's copy for why this
+            // is taken from the PID rather than from `control_state.values` above.
+            brew_control_target: {
+                let mode = self.ephemeral_configuration.group_brew_control_state.mode;
+                // Same condition as `is_brewing` above -- this controller tracks brewing as a
+                // state rather than as a flag.
+                let brewing = self.state == SingleBoilerSingleGroupControllerState::Brewing;
+                if brewing && mode != GroupBrewControlMode::Off {
+                    Some(variegated_controller_types::BrewControlTarget {
+                        mode,
+                        value: self.pump_pid.setpoint,
+                    })
+                } else {
+                    None
+                }
+            },
         };
 
         // Calculate current timestamp if we have comms_status
@@ -1115,6 +1172,8 @@ impl<
                 peripheral_connection_status: FnvIndexMap::default(),
                 // Carried through unchanged -- see the note on the dual-boiler copy.
                 sntp_sync_seq: status.sntp_sync_seq,
+                wifi_ssid: status.wifi_ssid.clone(),
+                wifi_ip: status.wifi_ip,
             }),
             // Published alongside, because everything above is extrapolated: the
             // timestamp keeps advancing whether or not the comms processor is alive, so
@@ -2082,7 +2141,47 @@ impl<
         let routine = repo.get_routine(routine_index).await;
 
         if let Some(routine) = routine {
+            // The backstop; see the equivalent block in `dual_boiler_single_group`.
+            let peripherals = self.peripheral_registry.get_peripheral_status();
+            if let Some(missing) = crate::routine_prerequisites::unmet_prerequisites(
+                &routine.prerequisites,
+                self.machine_definition,
+                &peripherals,
+            )
+            .next()
+            {
+                log_warn!(
+                    "Cannot start routine {}: needs {:?}",
+                    routine_index,
+                    missing.capability
+                );
+                variegated_log::emit_event(DebugEvent::RoutineRefused {
+                    index: routine_index.to_storage_index(),
+                    capability: missing.capability,
+                });
+                return;
+            }
+
             log_info!("Running routine");
+
+            // Shot attributes and linked parameters, in the order `routine_annotations`
+            // documents, and all of it before the metadata below clones the pending block.
+            crate::routine_annotations::apply_static_shot_annotations(
+                &routine,
+                &mut self.pending_annotations,
+            );
+            let runtime_params = crate::routine_annotations::seed_linked_parameters(
+                &routine,
+                runtime_params.clone(),
+                &self.pending_annotations,
+            );
+
+            // Before the context merges defaults in; see the dual-boiler twin.
+            crate::routine_annotations::record_linked_parameters(
+                &routine,
+                runtime_params.as_ref(),
+                &mut self.pending_annotations,
+            );
 
             // Create routine execution context
             let routine_execution_context = RoutineExecutionContext::new(
@@ -2090,7 +2189,7 @@ impl<
                 routine.clone(),
                 self.state,
                 self.current_configuration(),
-                runtime_params.clone()
+                runtime_params
             );
 
             // Start shot logging
@@ -2120,6 +2219,8 @@ impl<
             self.shot_logger.start_shot(metadata);
             self.previous_routine_step = None;
 
+            // Cleared here so a new routine does not inherit the previous one's loss timer.
+            self.prerequisite_lost_since = None;
             self.current_routine = Some(routine_execution_context);
             variegated_log::emit_event(DebugEvent::RoutineStarted { index: routine_index.to_storage_index() });
         } else {

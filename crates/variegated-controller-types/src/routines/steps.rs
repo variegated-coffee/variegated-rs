@@ -52,10 +52,14 @@ pub enum RoutineCommand {
     SetBoilerOff(BoilerIndex),
 
     // Transition-enabled commands (only for groups since only they support curves)
-    SetGroupFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-    SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-    SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
-    SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue), // target, transition_time
+    //
+    // `origin` says where the ramp *starts*; it used to be implicit and wrong. See
+    // [`TransitionOrigin`] for the two shots that made the case, and note that its position
+    // is last so these read target-then-time the way they always have.
+    SetGroupFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue, TransitionOrigin), // target, transition_time, origin
+    SetGroupPressureWithTransition(GroupIndex, ParameterValue, ParameterValue, TransitionOrigin), // target, transition_time, origin
+    SetGroupOutputFlowRateWithTransition(GroupIndex, ParameterValue, ParameterValue, TransitionOrigin), // target, transition_time, origin
+    SetGroupFixedDutyCycleWithTransition(GroupIndex, ParameterValue, ParameterValue, TransitionOrigin), // target, transition_time, origin
 
     // Bumpless transfer commands - infer PID integral for smooth mode transitions
     InferGroupPressureIntegral(GroupIndex, ParameterValue),

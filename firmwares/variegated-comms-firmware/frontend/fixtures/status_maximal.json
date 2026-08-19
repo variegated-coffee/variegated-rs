@@ -120,7 +120,11 @@
         "started_at_millis": 1000000,
         "stopped_at_millis": 1027000
       },
-      "pump_rpm": 1937.5
+      "pump_rpm": 1937.5,
+      "brew_control_target": {
+        "mode": "PressureCurve",
+        "value": 7.25
+      }
     },
     "1": {
       "is_brewing": true,
@@ -194,7 +198,11 @@
         "started_at_millis": 1000000,
         "stopped_at_millis": 1027000
       },
-      "pump_rpm": 1937.5
+      "pump_rpm": 1937.5,
+      "brew_control_target": {
+        "mode": "PressureCurve",
+        "value": 7.25
+      }
     }
   },
   "water_tap_statuses": {
@@ -257,7 +265,14 @@
       }
     },
     "improv": "Provisioning",
-    "sntp_sync_seq": 7
+    "sntp_sync_seq": 7,
+    "wifi_ssid": "Cafe Wi-Fi 2.4GHz",
+    "wifi_ip": [
+      192,
+      168,
+      13,
+      37
+    ]
   },
   "comms_status_age": {
     "secs": 1,

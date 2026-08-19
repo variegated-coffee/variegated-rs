@@ -14,8 +14,22 @@ const PARAMETER_UNITS: ParameterUnit[] = [
   { type: 'Bar' },
   { type: 'MillilitersPerSecond' },
   { type: 'Grams' },
-  { type: 'Percent' }
+  { type: 'Percent' },
+  { type: 'Milliliters' },
+  { type: 'MillisiemensPerCentimeter' },
+  { type: 'ExtractionRate' },
+  { type: 'ExtractedSolids' }
 ];
+
+/// Shot attributes a parameter can mirror.
+//
+// Numeric keys only. A parameter is an f32, so only annotations holding a Number round-trip
+// through one -- `Beans` and `GrindSize` are Text on purpose, because grinders number their
+// settings incompatibly, and are deliberately absent from this list rather than offered and
+// then rejected.
+const LINKABLE_ATTRIBUTES = [
+  { value: 'DoseWeight', label: 'Dose weight (g)' }
+] as const;
 
 export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }: ParameterEditorProps) {
   const [index, setIndex] = useState<number>(
@@ -24,6 +38,9 @@ export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }
   const [name, setName] = useState(parameter?.name || '');
   const [defaultValue, setDefaultValue] = useState(parameter?.default || 0);
   const [unit, setUnit] = useState<ParameterUnit | null>(parameter?.unit || null);
+  const [linkedAttribute, setLinkedAttribute] = useState<RoutineParameter['linked_attribute']>(
+    parameter?.linked_attribute ?? null
+  );
 
   const handleSave = () => {
     if (!name.trim()) {
@@ -40,7 +57,8 @@ export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }
       index,
       name: name.trim(),
       default: defaultValue,
-      unit
+      unit,
+      linked_attribute: linkedAttribute
     });
   };
 
@@ -151,6 +169,37 @@ export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }
               <option key={u.type} value={u.type}>{u.type}</option>
             ))}
           </select>
+        </div>
+
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
+            Linked shot attribute (optional)
+          </label>
+          <select
+            value={linkedAttribute?.type ?? ''}
+            onChange={(e) => setLinkedAttribute(
+              e.currentTarget.value
+                ? { type: e.currentTarget.value } as RoutineParameter['linked_attribute']
+                : null
+            )}
+            style={{
+              width: '100%',
+              padding: '0.5rem',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              fontSize: '1rem'
+            }}
+          >
+            <option value="">None</option>
+            {LINKABLE_ATTRIBUTES.map(a => (
+              <option key={a.value} value={a.value}>{a.label}</option>
+            ))}
+          </select>
+          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
+            A linked parameter is seeded from the shot attribute before the routine runs, and
+            the value it runs with is recorded against the shot. Only numeric attributes can
+            be linked &mdash; beans and grind size are text.
+          </div>
         </div>
 
         <div style={{ display: 'flex', gap: '1rem' }}>

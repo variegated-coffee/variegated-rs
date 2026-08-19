@@ -81,6 +81,21 @@ const fn suffix(unit: Option<ParameterUnit>, style: UnitStyle) -> &'static str {
             Some(ParameterUnit::Grams) => "g",
             Some(ParameterUnit::Percent) => "%",
             Some(ParameterUnit::Milliliters) => "ml",
+            // Millisiemens, not micro. The two differ by a factor of a thousand and the
+            // firmware, the web status card and the companion app had each picked their own;
+            // this is the one that is right.
+            Some(ParameterUnit::MillisiemensPerCentimeter) => "mS/cm",
+            // Composites, spelled out. They are not named SI units and there is no shorter
+            // honest way to write them -- the "%" the web UI used was not a percentage of
+            // anything. The middle dot is the only reason these two need an ASCII form.
+            Some(ParameterUnit::ExtractionRate) => match style {
+                UnitStyle::Unicode => "mS·ml/cm·s",
+                _ => "mS.ml/cm.s",
+            },
+            Some(ParameterUnit::ExtractedSolids) => match style {
+                UnitStyle::Unicode => "mS·ml/cm",
+                _ => "mS.ml/cm",
+            },
         },
     }
 }

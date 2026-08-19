@@ -1,7 +1,13 @@
 import { useEffect, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
-import { Routine, MachineDefinition, RoutineSummary, RoutineSummaryStorage } from '../../schemas/schemas';
-import { getRoutineTypeLabel, indexFromIdentifier, RoutineIdentifier } from '../../utils/routineHelpers';
+import { Routine, MachineDefinition, PeripheralStatus, RoutineSummary, RoutineSummaryStorage } from '../../schemas/schemas';
+import {
+  capabilityLabel,
+  getRoutineTypeLabel,
+  indexFromIdentifier,
+  RoutineIdentifier,
+  unmetPrerequisites
+} from '../../utils/routineHelpers';
 import { RoutineEditor } from './RoutineEditor';
 import { getWebSocketService } from '../../services/websocket';
 import { createRoutine, deleteRoutine, saveRoutine } from '../../api/routines';
@@ -15,9 +21,18 @@ import { invalidateRoutineBody, loadRoutineBody, useRoutineBody } from '../../st
 interface RoutineBuilderProps {
   routines: RoutineSummaryStorage;
   machineDefinition: MachineDefinition | null;
+  /**
+   * Which peripherals are answering, for deciding whether a routine can run.
+   *
+   * Together with `machineDefinition` this is what greys a card. `null` means "cannot tell"
+   * and everything reads as runnable -- the machine's own backstop still refuses anything
+   * that really cannot run, and greying the whole list because a status has not arrived yet
+   * would be the worse lie.
+   */
+  peripheralStatus: PeripheralStatus | null;
 }
 
-const RoutineBuilderComponent = ({ routines, machineDefinition }: RoutineBuilderProps) => {
+const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus }: RoutineBuilderProps) => {
   const [editingRoutine, setEditingRoutine] = useState<RoutineIdentifier | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [addingType, setAddingType] = useState<'custom' | 'function'>('custom');
@@ -133,6 +148,13 @@ const RoutineBuilderComponent = ({ routines, machineDefinition }: RoutineBuilder
   // them rather than deriving them: a card that showed "8 steps" by consulting the
   // definition would have to fetch every routine on the machine just to draw a list.
   const renderRoutineCard = (routine: RoutineSummary, identifier: RoutineIdentifier, allowEdit: boolean, allowDelete: boolean) => {
+    // What this machine cannot currently sense. Answered from the summary rather than the
+    // definition, which is why prerequisites are carried there: a list that had to fetch
+    // every routine to know which ones it could run is exactly what the summary exists to
+    // avoid.
+    const missing = unmetPrerequisites(routine.prerequisites, machineDefinition, peripheralStatus);
+    const runnable = missing.length === 0;
+
     // For function routines, use the function name from machine definition
     const getRoutineLabel = () => {
       if (identifier.type === 'function' && machineDefinition?.function_routines) {
@@ -169,18 +191,27 @@ const RoutineBuilderComponent = ({ routines, machineDefinition }: RoutineBuilder
             {routine.step_count} step{routine.step_count !== 1 ? 's' : ''}
             {routine.finally_count > 0 && ` • ${routine.finally_count} finally command${routine.finally_count !== 1 ? 's' : ''}`}
           </div>
+          {!runnable && (
+            // Named, not just disabled. "Needs a scale" tells someone what to go and do;
+            // a greyed button with no reason reads as a broken page.
+            <div style={{ fontSize: '0.85rem', color: '#a15c00', marginTop: '0.35rem' }}>
+              Needs {missing.map(p => capabilityLabel(p.capability)).join(' and ')}
+            </div>
+          )}
         </div>
 
         <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
           <button
             onClick={() => void handleRun(identifier)}
+            disabled={!runnable}
+            title={runnable ? undefined : `Needs ${missing.map(p => capabilityLabel(p.capability)).join(' and ')}`}
             style={{
               padding: '0.5rem 1rem',
-              backgroundColor: '#28a745',
+              backgroundColor: runnable ? '#28a745' : '#c8c8c8',
               color: 'white',
               border: 'none',
               borderRadius: '4px',
-              cursor: 'pointer',
+              cursor: runnable ? 'pointer' : 'not-allowed',
               fontSize: '0.9rem',
               fontWeight: '500'
             }}

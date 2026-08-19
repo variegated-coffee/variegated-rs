@@ -1,5 +1,15 @@
-import { RoutineCommand, ParameterValue, ParameterUnit } from '../../schemas/schemas';
+import { RoutineCommand, ParameterValue, ParameterUnit, TransitionOrigin } from '../../schemas/schemas';
 import { useMachine } from '../../contexts/MachineContext';
+
+/// Where a transition starts, as a clause to append to its summary.
+///
+/// `CurrentTarget` renders as nothing: it is the default and the one that needs no
+/// explanation, and repeating it on every transition would bury the two that do.
+function originClause(origin: TransitionOrigin, unit?: ParameterUnit | null): string {
+  if (origin.type === 'CurrentTarget') return '';
+  if (origin.type === 'CurrentValue') return ', starting from the measured value';
+  return `, starting from ${getParameterValueDisplay(origin.value, unit)}`;
+}
 
 export function getParameterValueDisplay(value: ParameterValue, unit?: ParameterUnit | null): string {
   if (value.type === 'Static') {
@@ -117,23 +127,27 @@ export function getRoutineCommandSummary(
   }
 
   if (command.type === 'SetGroupFlowRateWithTransition') {
-    const [index, target, time] = command.value;
-    return `Set ${groupName(index)} flow rate to ${getParameterValueDisplay(target, { type: 'MillilitersPerSecond' })} over ${getParameterValueDisplay(time, { type: 'Seconds' })}`;
+    const [index, target, time, origin] = command.value;
+    const unit: ParameterUnit = { type: 'MillilitersPerSecond' };
+    return `Set ${groupName(index)} flow rate to ${getParameterValueDisplay(target, unit)} over ${getParameterValueDisplay(time, { type: 'Seconds' })}${originClause(origin, unit)}`;
   }
 
   if (command.type === 'SetGroupPressureWithTransition') {
-    const [index, target, time] = command.value;
-    return `Set ${groupName(index)} pressure to ${getParameterValueDisplay(target, { type: 'Bar' })} over ${getParameterValueDisplay(time, { type: 'Seconds' })}`;
+    const [index, target, time, origin] = command.value;
+    const unit: ParameterUnit = { type: 'Bar' };
+    return `Set ${groupName(index)} pressure to ${getParameterValueDisplay(target, unit)} over ${getParameterValueDisplay(time, { type: 'Seconds' })}${originClause(origin, unit)}`;
   }
 
   if (command.type === 'SetGroupOutputFlowRateWithTransition') {
-    const [index, target, time] = command.value;
-    return `Set ${groupName(index)} output flow rate to ${getParameterValueDisplay(target, { type: 'MillilitersPerSecond' })} over ${getParameterValueDisplay(time, { type: 'Seconds' })}`;
+    const [index, target, time, origin] = command.value;
+    const unit: ParameterUnit = { type: 'MillilitersPerSecond' };
+    return `Set ${groupName(index)} output flow rate to ${getParameterValueDisplay(target, unit)} over ${getParameterValueDisplay(time, { type: 'Seconds' })}${originClause(origin, unit)}`;
   }
 
   if (command.type === 'SetGroupFixedDutyCycleWithTransition') {
-    const [index, target, time] = command.value;
-    return `Set ${groupName(index)} duty cycle to ${getParameterValueDisplay(target, { type: 'Percent' })} over ${getParameterValueDisplay(time, { type: 'Seconds' })}`;
+    const [index, target, time, origin] = command.value;
+    const unit: ParameterUnit = { type: 'Percent' };
+    return `Set ${groupName(index)} duty cycle to ${getParameterValueDisplay(target, unit)} over ${getParameterValueDisplay(time, { type: 'Seconds' })}${originClause(origin, unit)}`;
   }
 
   if (command.type === 'InferGroupPressureIntegral') {

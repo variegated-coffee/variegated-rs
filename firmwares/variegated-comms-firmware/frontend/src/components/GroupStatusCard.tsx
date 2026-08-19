@@ -183,17 +183,23 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
           </div>
         )}
 
+        {/* mS/cm, not µS/cm, and two decimals rather than none: espresso runs around
+            1-3 mS/cm at the spout, so the old µS label was out by a factor of a thousand and
+            `toFixed(0)` then rounded the whole useful range to "1", "2" or "3". The unit is
+            pinned in `ECType`. */}
         {hasGroupSensor(index, { type: 'ElectricalConductivity' }) && status.output_electrical_conductivity !== null && status.output_electrical_conductivity !== undefined && (
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
             <span style={{ color: '#666' }}>EC:</span>
-            <span style={{ fontWeight: '500' }}>{status.output_electrical_conductivity.toFixed(0)} µS/cm</span>
+            <span style={{ fontWeight: '500' }}>{status.output_electrical_conductivity.toFixed(2)} mS/cm</span>
           </div>
         )}
 
+        {/* Not a percentage of anything. Extraction rate is conductivity times output flow;
+            see `ExtractionRateType`. */}
         {status.extraction_rate !== null && status.extraction_rate !== undefined && (
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
             <span style={{ color: '#666' }}>Extraction:</span>
-            <span style={{ fontWeight: '500' }}>{status.extraction_rate.toFixed(1)}%</span>
+            <span style={{ fontWeight: '500' }}>{status.extraction_rate.toFixed(2)} mS·mL/cm·s</span>
           </div>
         )}
       </div>

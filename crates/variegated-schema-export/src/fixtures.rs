@@ -179,6 +179,13 @@ fn status_maximal() -> Status {
                         stopped_at_millis: 1_027_000,
                     }),
                     pump_rpm: Some(1937.5),
+                    // A curve mode rather than the first variant, per this file's rule
+                    // about enum-typed fields: a discriminant of zero is what a decoder
+                    // that did not know the field existed would produce by accident.
+                    brew_control_target: Some(variegated_controller_types::BrewControlTarget {
+                        mode: variegated_controller_types::GroupBrewControlMode::PressureCurve,
+                        value: 7.25,
+                    }),
                 },
             )
             .expect("fits");
@@ -249,6 +256,14 @@ fn status_maximal() -> Status {
             // Non-zero for the same reason `improv` is not `Stopped`: zero is what a
             // decoder that does not know this field exists would produce by accident.
             sntp_sync_seq: 7,
+            // Non-empty and non-ASCII-trivial: a length-prefixed string is exactly the
+            // shape a decoder with the wrong field count would mis-frame, and an empty one
+            // encodes as a single zero byte that such a decoder produces by accident.
+            wifi_ssid: heapless::String::try_from("Cafe Wi-Fi 2.4GHz").unwrap(),
+            // `Some`, not `None`: `None` is one zero byte, which is what a decoder that
+            // does not know this field exists would produce. Octets are all distinct so a
+            // byte-order error cannot pass.
+            wifi_ip: Some([192, 168, 13, 37]),
         }),
         // Subsecond, so the `nanos` half of `Duration` is exercised rather than left at
         // zero -- postcard encodes the two varints separately.
@@ -359,6 +374,7 @@ fn status_minimal() -> Status {
 
 fn routine() -> Routine {
     Routine {
+        version: variegated_controller_types::ROUTINE_FORMAT_VERSION,
         routine_type: RoutineType::Cleaning,
         name: "Fixture".into(),
         parameters: vec![RoutineParameter {
@@ -366,6 +382,9 @@ fn routine() -> Routine {
             name: "Dose".into(),
             default: 18.0,
             unit: Some(ParameterUnit::Grams),
+            // Linked, so the fixture exercises the field rather than leaving every
+            // consumer's rendering of it untested against real data.
+            linked_attribute: Some(variegated_controller_types::ShotAnnotationKey::DoseWeight),
         }],
         derived_parameters: vec![DerivedParameter {
             index: 1,
@@ -385,6 +404,15 @@ fn routine() -> Routine {
             description: Some("Brew".into()),
         }],
         finally: vec![RoutineCommand::StopBrewing(0)],
+        prerequisites: vec![variegated_controller_types::RoutinePrerequisite {
+            capability: variegated_controller_types::SensorCapability::Weight,
+        }],
+        shot_annotations: vec![variegated_controller_types::ShotAnnotation {
+            key: variegated_controller_types::ShotAnnotationKey::Beans,
+            value: variegated_controller_types::ShotAnnotationValue::Text(
+                heapless::String::try_from("Fixture Roasters").expect("fits"),
+            ),
+        }],
     }
 }
 
@@ -556,6 +584,11 @@ fn machine_commands() -> Vec<MachineCommand> {
             // Different again from `status_maximal`'s, so neither fixture can pass on a
             // decoder that hardcodes the other's value.
             sntp_sync_seq: 12,
+            // Both different from `status_maximal`'s, for that same reason. A different
+            // *length* of SSID in particular, since the length prefix is the part a
+            // mis-framed decoder gets wrong.
+            wifi_ssid: heapless::String::try_from("roastery-back").unwrap(),
+            wifi_ip: Some([10, 0, 42, 8]),
         }),
         AddScheduleItem(schedule_item()),
         RemoveScheduleItem(3),
@@ -767,6 +800,14 @@ pub fn canonical_shot() -> ShotLog {
         // so unlike the version 3 three above, everything before it keeps its meaning in
         // an older file.
         pump_rpm: Some(1937.5),
+        // The field version 6 added, appended for that same reason. The one non-measurement
+        // in this sample: what the pump was aimed at rather than what came back, which is
+        // why it is deliberately *not* equal to `pressure` above -- a fixture where the two
+        // agreed could not tell a decoder reading the wrong one from a correct one.
+        brew_control_target: Some(variegated_controller_types::BrewControlTarget {
+            mode: variegated_controller_types::GroupBrewControlMode::PressureCurve,
+            value: 9.25,
+        }),
     };
 
     let sample_at = |t: u64, brewing: bool, pressure: f32, flow_out: f32| {
@@ -930,6 +971,8 @@ fn routine_summaries() -> RoutineSummaryStorage {
             parameter_count: 1,
             derived_parameter_count: 0,
             finally_count: 0,
+            // Heat-up touches no peripheral, so it runs on any machine.
+            prerequisites: vec![],
         },
     );
     storage.function.insert(
@@ -941,6 +984,16 @@ fn routine_summaries() -> RoutineSummaryStorage {
             parameter_count: 4,
             derived_parameter_count: 2,
             finally_count: 1,
+            // Two, so a fixture exists for the "needs more than one thing" rendering.
+            prerequisites: vec![
+                variegated_controller_types::RoutinePrerequisite {
+                    capability: variegated_controller_types::SensorCapability::Weight,
+                },
+                variegated_controller_types::RoutinePrerequisite {
+                    capability:
+                        variegated_controller_types::SensorCapability::ElectricalConductivity,
+                },
+            ],
         },
     );
 

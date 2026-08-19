@@ -124,6 +124,13 @@ pub struct ListMenuItem {
     /// be recovered from a row number, so it returns `None` unconditionally. The id is captured
     /// here when the items are fetched, while the index is still in hand.
     pub id: MenuItemId,
+    /// Whether activating this row will do anything.
+    ///
+    /// Only routines can be un-runnable -- everything else in these menus is a setting -- so
+    /// every other row builds this as `true`. Captured at fetch time alongside the id, and
+    /// for the same reason: the row is what activation and drawing both see, and they must
+    /// agree.
+    pub runnable: bool,
 }
 
 /// Rows on screen at once on the 128x64 panel.
@@ -203,20 +210,38 @@ impl ListMenuType {
         }
     }
     
-    pub async fn get_items(&self, routine_repository: Option<&RoutineRepository>, _status: Option<&Status>) -> Vec<ListMenuItem> {
+    /// `status` is what decides whether each routine can currently run. It has always been
+    /// in this signature and always been ignored; it is now used. `None` means "cannot tell",
+    /// which reads as runnable -- the controller's own backstop still refuses anything that
+    /// really cannot run, and greying every routine because a caller passed `None` would be
+    /// the worse lie.
+    pub async fn get_items(&self, routine_repository: Option<&RoutineRepository>, status: Option<&Status>) -> Vec<ListMenuItem> {
         match self {
             ListMenuType::Routines => {
                 if let Some(rr) = routine_repository {
+                    let definition = *crate::MACHINE_DEFINITION_REF.lock().await;
                     let mut repo = rr.lock().await;
                     // Ordering, filtering and name truncation all live in
                     // `variegated-machine-menu`, shared with the GS3 and host-tested there.
                     // `include_function: true` keeps this board's behaviour: it has no
                     // hardware routine buttons, so it shows everything it has.
-                    routine_rows(repo.iterate_routines_with_indices().await, true)
+                    routine_rows(repo.iterate_routines_with_indices().await, true, |routine| {
+                        match (definition, status) {
+                            (Some(definition), Some(status)) => {
+                                variegated_controller_lib::routine_prerequisites::prerequisites_satisfied(
+                                    &routine.prerequisites,
+                                    definition,
+                                    &status.peripheral_status,
+                                )
+                            }
+                            _ => true,
+                        }
+                    })
                         .into_iter()
                         .map(|row| ListMenuItem {
                             label: row.name.as_str().to_string(),
                             id: MenuItemId::Routine(row.index),
+                            runnable: row.runnable,
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -228,24 +253,26 @@ impl ListMenuType {
                     .map(|item| ListMenuItem {
                         label: item.label.to_string(),
                         id: item.id,
+                        // Settings are always actionable; only routines can be gated.
+                        runnable: true,
                     })
                     .collect()
             }
             ListMenuType::PidConfig(_pid_type) => {
                 vec![
-                    ListMenuItem { label: "kP".to_string(), id: MenuItemId::PidTerm(PidTermType::Kp) },
-                    ListMenuItem { label: "kI".to_string(), id: MenuItemId::PidTerm(PidTermType::Ki) },
-                    ListMenuItem { label: "kD".to_string(), id: MenuItemId::PidTerm(PidTermType::Kd) },
-                    ListMenuItem { label: "Reset parameters".to_string(), id: MenuItemId::PidResetParameters },
+                    ListMenuItem { label: "kP".to_string(), id: MenuItemId::PidTerm(PidTermType::Kp), runnable: true },
+                    ListMenuItem { label: "kI".to_string(), id: MenuItemId::PidTerm(PidTermType::Ki), runnable: true },
+                    ListMenuItem { label: "kD".to_string(), id: MenuItemId::PidTerm(PidTermType::Kd), runnable: true },
+                    ListMenuItem { label: "Reset parameters".to_string(), id: MenuItemId::PidResetParameters, runnable: true },
                 ]
             }
             ListMenuType::PidTermConfig(_pid_type, _term) => {
                 // TODO: Get current values from status and display them
                 vec![
-                    ListMenuItem { label: "Positive Scale".to_string(), id: MenuItemId::PidComponent(PidComponentType::PositiveScale) },
-                    ListMenuItem { label: "Negative Scale".to_string(), id: MenuItemId::PidComponent(PidComponentType::NegativeScale) },
-                    ListMenuItem { label: "Upper Limit".to_string(), id: MenuItemId::PidComponent(PidComponentType::UpperLimit) },
-                    ListMenuItem { label: "Lower Limit".to_string(), id: MenuItemId::PidComponent(PidComponentType::LowerLimit) },
+                    ListMenuItem { label: "Positive Scale".to_string(), id: MenuItemId::PidComponent(PidComponentType::PositiveScale), runnable: true },
+                    ListMenuItem { label: "Negative Scale".to_string(), id: MenuItemId::PidComponent(PidComponentType::NegativeScale), runnable: true },
+                    ListMenuItem { label: "Upper Limit".to_string(), id: MenuItemId::PidComponent(PidComponentType::UpperLimit), runnable: true },
+                    ListMenuItem { label: "Lower Limit".to_string(), id: MenuItemId::PidComponent(PidComponentType::LowerLimit), runnable: true },
                 ]
             }
         }
@@ -260,7 +287,9 @@ impl ListMenuType {
                     // `get_routine_count`. The two disagree once anything is filtered or
                     // capped -- and a count that exceeds the rows drawn is exactly the
                     // over-scroll this file's `geometry` comment is about.
-                    routine_rows(repo.iterate_routines_with_indices().await, true).len()
+                    // `|_| true`: this counts rows, and an unrunnable routine still has one.
+                    // Greying is what marks it, not omission -- see `RoutineRow::runnable`.
+                    routine_rows(repo.iterate_routines_with_indices().await, true, |_| true).len()
                 } else {
                     0
                 }

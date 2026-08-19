@@ -177,6 +177,17 @@ pub const fn parameter_bounds(unit: Option<ParameterUnit>) -> (f32, f32, f32) {
         Some(ParameterUnit::Grams) => (0.0, 500.0, 0.5),
         Some(ParameterUnit::Percent) => (0.0, 100.0, 1.0),
         Some(ParameterUnit::Milliliters) => (0.0, 2000.0, 5.0),
+        // Espresso runs roughly 1-3 mS/cm at the spout; brewed coffee is lower. 10 is well
+        // clear of anything real without being a number a mis-set parameter can hide in.
+        Some(ParameterUnit::MillisiemensPerCentimeter) => (0.0, 10.0, 0.1),
+        // Conductivity times output flow, so of the order of a few mS·ml/cm·s at a typical
+        // 1-2 ml/s. The ceilings here are generous rather than measured: unlike seconds or
+        // bar, nobody has yet dialled these in on a real machine, and a ceiling that is too
+        // low silently clamps a parameter where one that is too high merely allows a value
+        // the routine will never reach.
+        Some(ParameterUnit::ExtractionRate) => (0.0, 50.0, 0.1),
+        // The integral of the above over a shot, so larger again.
+        Some(ParameterUnit::ExtractedSolids) => (0.0, 500.0, 0.5),
         None => (0.0, f32::INFINITY, 0.5),
     }
 }
@@ -196,7 +207,7 @@ mod tests {
     use variegated_controller_types::routines::core::RoutineType;
 
     fn param(index: u8, default: f32, unit: Option<ParameterUnit>) -> RoutineParameter {
-        RoutineParameter { index, name: "p".to_string(), default, unit }
+        RoutineParameter { index, name: "p".to_string(), default, unit, linked_attribute: None }
     }
 
     fn routine_with(parameters: Vec<RoutineParameter>) -> Routine {
@@ -207,6 +218,16 @@ mod tests {
         ParameterListChrome { back_row: false, visible_rows: 4, wrap: true };
     const SILVIA: ParameterListChrome =
         ParameterListChrome { back_row: true, visible_rows: 5, wrap: false };
+
+    /// `ParameterValues` must stay `Copy`.
+    ///
+    /// Not a style preference: it is the payload of the GS3's `MenuSnapshot` `Watch`, and
+    /// losing `Copy` breaks that at a call site in another crate with an error that names
+    /// neither this type nor the reason. Asserted at compile time so the failure lands here.
+    const _: () = {
+        const fn assert_copy<T: Copy>() {}
+        assert_copy::<ParameterValues>();
+    };
 
     #[test]
     fn values_are_seeded_from_the_defaults() {
@@ -255,12 +276,15 @@ mod tests {
         // `Routine::new` asserts eight, but a routine deserialized from flash or off the
         // wire never went through it.
         let routine = Routine {
+            version: variegated_controller_types::ROUTINE_FORMAT_VERSION,
             routine_type: RoutineType::UserDefined,
             name: "r".to_string(),
             parameters: (0..12).map(|i| param(i, i as f32, None)).collect(),
             derived_parameters: vec![],
             steps: vec![],
             finally: vec![],
+            prerequisites: vec![],
+            shot_annotations: vec![],
         };
         let values = ParameterValues::from_defaults(&routine);
         assert_eq!(values.len(), MAX_ROUTINE_PARAMETERS);

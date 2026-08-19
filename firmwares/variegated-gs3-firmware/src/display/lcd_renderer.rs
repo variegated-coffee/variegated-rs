@@ -106,20 +106,28 @@ impl LcdDisplayState {
             }
         }
 
+        // A dose the user just captured, for five seconds. Ahead of the provisioning rows
+        // because it is direct feedback for an action taken a second ago -- and **ahead of the
+        // menu** for the same reason. Capturing a dose is reachable from inside the menu:
+        // button 6's hold means the same thing there as outside it, and the web can send one
+        // at any time. Leaving the menu drawn would make the gesture silent on exactly the
+        // screen a user is most likely to be standing at.
+        //
+        // On the TFT this is an overlay drawn on top of the menu; here it is a takeover,
+        // because 2x16 has no room to be both. Five seconds, then the menu is back where it
+        // was -- the stack is untouched by this.
+        if self.shared_state.dose_popup_active() {
+            if let Some(grams) = self.shared_state.dose_popup_weight() {
+                return ("  Dose captured ".to_string(), format!("     {:.1} g", grams));
+            }
+        }
+
         // After the identify flash and ahead of the provisioning rows and the mode match, for the
         // reasons in `graphical_renderer::render`. Ahead of the provisioning rows specifically
         // because the menu's own value column says whether the window is open, and replacing a menu
         // the user is navigating with "Ready to pair" strands them.
         if self.shared_state.menu.stack.is_open() {
             return self.menu_rows();
-        }
-
-        // A dose the user just captured, for five seconds. Ahead of the provisioning rows because it
-        // is direct feedback for an action taken a second ago.
-        if self.shared_state.dose_popup_active() {
-            if let Some(grams) = self.shared_state.dose_popup_weight() {
-                return ("  Dose captured ".to_string(), format!("     {:.1} g", grams));
-            }
         }
 
         // What the machine is doing, for as long as it is doing it. Behind the dose popup,
@@ -302,18 +310,39 @@ impl LcdDisplayState {
 
     /// The button menu's two rows.
     ///
-    /// Only one item row fits, so the selected item is the only one drawn and no `>` marker is
-    /// needed. `"Wi-Fi Setup"` is 11 characters and `"OFF"` is 3, so the `{:<12}{:>4}` split fits
-    /// exactly -- which is why `menu.rs` labels it `"Wi-Fi Setup"` rather than
-    /// `"Wi-Fi Provisioning"`. Both rows must stay <= 16: `pad_or_truncate_to_16` truncates
-    /// silently, mid-word.
+    /// **Row 1 is context, row 2 is the item.** The second row used to carry a static button
+    /// hint (`1^ 2v 3sel 4bck`), which is the same four buttons on every screen, never
+    /// changes, and is learned in one use -- a poor trade for half of a two-row display. It
+    /// could not answer the two questions a user of a sixteen-column menu actually has:
     ///
-    /// The `.12` and `.4` precisions are what hold that split now that labels are data-driven.
-    /// A routine name is up to `ROUTINE_NAME_LEN` characters and a parameter name is unbounded,
-    /// and a bare `{:<12}` pads to *at least* twelve without ever cutting -- so a long name
-    /// would push the row past sixteen and `pad_or_truncate_to_16` would take the truncation
-    /// out of the value column, which on a parameter screen is the half that matters. A
-    /// precision on a `str` counts characters rather than bytes, so it cannot split one.
+    /// - **Where am I?** This panel drew no title at all, so pressing into Settings changed
+    ///   only which item was showing. With submenus and a routine list that is the
+    ///   significant gap.
+    /// - **How much more is there?** Only one item row fits, so a four-item menu and a
+    ///   twenty-four-item routine list looked identical from any single row of either.
+    ///
+    /// | screen | row 1 | row 2 |
+    /// |---|---|---|
+    /// | list | title + position, `{:<10.10}{:>6}` | the item, `{:<12.12}{:>4.4}` -- unchanged |
+    /// | editor | the quantity's name, all 16 | its value, right-aligned |
+    /// | info | the field's name, all 16 | its value, all 16 |
+    ///
+    /// Two things fall out of this, both wanted. **Labels stay at twelve characters**, since
+    /// only one item is ever drawn and no selection marker is needed. And **an editor's value
+    /// is no longer capped at four**, so it takes `UnitStyle::Ascii` and the unit comes back:
+    /// `94.0C`, not `94`. `Compact` survives only on the list row, whose value column really
+    /// is four wide.
+    ///
+    /// Both rows must stay <= 16: `pad_or_truncate_to_16` truncates silently, mid-word, and
+    /// from the *right* -- so on the list row an over-long label eats the value rather than
+    /// itself. The `.12` and `.4` precisions are what hold that split now that labels are
+    /// data-driven: a routine name is up to `ROUTINE_NAME_LEN` characters and a parameter
+    /// name is unbounded, and a bare `{:<12}` pads to *at least* twelve without ever cutting.
+    /// A precision on a `str` counts characters rather than bytes, so it cannot split one.
+    ///
+    /// Everything here is ASCII, for the same reason as the TFT: the HD44780's A00 ROM has no
+    /// `°` and no up/down triangles, and `pad_or_truncate_to_16` would push a multi-byte char
+    /// through `write_char` unmodified.
     fn menu_rows(&self) -> (String, String) {
         const BLANK: &str = "                ";
 
@@ -321,10 +350,14 @@ impl LcdDisplayState {
             return (BLANK.to_string(), BLANK.to_string());
         };
         let data = self.shared_state.menu_data();
+        let ctx = MenuContext::from_status(
+            &self.shared_state.status,
+            self.shared_state.menu.wifi_pending,
+            self.shared_state.menu_config(),
+        );
 
-        // An editor frame has no rows: its title names the quantity and the value is the whole
-        // of the screen. `Compact` because a value has four columns here and a unit would not
-        // fit beside it -- and the title has already said which unit it is.
+        // An editor frame has no rows: its title names the quantity and the value is the
+        // whole of the screen.
         if frame.id.is_editor() {
             let value = self
                 .shared_state
@@ -335,34 +368,49 @@ impl LcdDisplayState {
                         value: editor.value(),
                         unit: menu::editor_unit(frame.id, &data),
                     }
-                    .text(UnitStyle::Compact)
+                    .text(UnitStyle::Ascii)
                 })
                 .unwrap_or_default();
-            return (
-                format!("{:<12.12}{:>4.4}", menu::title(frame.id, &data), value),
-                "1- 2+ 3ok 4cncl".to_string(),
-            );
+            return variegated_machine_menu::editor_rows(menu::title(frame.id, &data), &value);
         }
 
         let Some(row) = menu::row(frame.id, frame.nav.selected(), &data) else {
-            return (BLANK.to_string(), BLANK.to_string());
+            // A menu with no rows at all -- a machine with nothing paired opening Bluetooth,
+            // which is the *default* state of every machine. Two blank rows here read as a
+            // crashed display: no title, no hint, and only button 4 out of it.
+            //
+            // The title plus `menu::empty_label` says which screen this is and why it is
+            // empty. `list_rows` already handles a total of zero by drawing no position, and
+            // is tested for it -- that branch was unreachable while this returned early.
+            return variegated_machine_menu::list_rows(
+                menu::title(frame.id, &data),
+                0,
+                0,
+                menu::empty_label(frame.id),
+                "",
+            );
         };
 
-        let ctx = MenuContext::from_status(
-            &self.shared_state.status,
-            self.shared_state.menu.wifi_pending,
-            None,
-        );
+        // An info row's value is a network name or an address -- fifteen characters or more,
+        // against a four-column value field. It gets both rows: the field name where the
+        // title would be, the value across the whole of the second. Nothing is lost, because
+        // the parent menu's own row already said which screen this is.
+        let ssid = MenuContext::wifi_ssid(&self.shared_state.status);
+        if let Some(value) = menu::info_value(&row, &ctx, ssid) {
+            return variegated_machine_menu::info_rows(menu::label(&row, &ctx), &value);
+        }
+
         let value = menu::value(&row, &ctx)
             .map(|value| value.text(UnitStyle::Compact))
             .unwrap_or_default();
 
-        // ASCII for the same reason as the TFT: the HD44780 A00 ROM has no up/down triangle
-        // glyphs (U+25B2/U+25BC), and `pad_or_truncate_to_16` would push a multi-byte char
-        // through `write_char` unmodified.
-        (
-            format!("{:<12.12}{:>4.4}", menu::label(&row), value),
-            "1^ 2v 3sel 4bck".to_string(),
+        let geo = menu::geometry(frame.id, &data);
+        variegated_machine_menu::list_rows(
+            menu::title(frame.id, &data),
+            frame.nav.selected(),
+            geo.total_rows,
+            menu::label(&row, &ctx),
+            &value,
         )
     }
 
@@ -595,6 +643,13 @@ impl LcdDisplayState {
             ParameterUnit::Grams => ("g", 1),
             ParameterUnit::Percent => ("%", 0),
             ParameterUnit::Milliliters => ("ml", 1),
+            // Sixteen columns is not enough for "mS.ml/cm.s", and "3.2>4.0" with no unit at
+            // all is worse than an abbreviation -- the row already names the step. So the
+            // two composites are abbreviated to what distinguishes them from each other,
+            // and only conductivity keeps a unit a reader would recognise.
+            ParameterUnit::MillisiemensPerCentimeter => ("mS", 1),
+            ParameterUnit::ExtractionRate => ("ex", 1),
+            ParameterUnit::ExtractedSolids => ("sol", 1),
         };
 
         match (progress.current, decimals) {

@@ -353,10 +353,31 @@ pub(crate) struct RoutineParameterEditState {
 }
 
 impl RoutineParameterEditState {
-    pub fn new(routine: &Routine) -> Self {
+    /// Seed the screen: defaults, except that a parameter linked to the dose takes whatever
+    /// dose has been captured for the next shot.
+    ///
+    /// `pending_dose` is `Status.pending_shot_annotations.dose_weight()`. This board has no
+    /// way to *capture* a dose of its own -- nothing here emits `TagDoseFromScale`, and the
+    /// encoder has a single falling edge and no hold gesture to hang one on -- so in practice
+    /// the value arrives from the web. Seeding from it anyway is what makes that capture
+    /// reach the routine.
+    pub fn new(routine: &Routine, pending_dose: Option<f32>) -> Self {
+        let mut values = ParameterValues::from_defaults(routine);
+
+        if let Some(dose) = pending_dose {
+            for (position, parameter) in routine.parameters().iter().enumerate() {
+                // Positional, because `ParameterValues` is -- not `RoutineParameter::index`.
+                if parameter.linked_attribute.as_ref()
+                    == Some(&variegated_controller_types::ShotAnnotationKey::DoseWeight)
+                {
+                    values.set(position, dose);
+                }
+            }
+        }
+
         Self {
             nav: ListNav::new(), // Starts on the back row
-            values: ParameterValues::from_defaults(routine),
+            values,
             routine_name: routine.name().to_string(),
         }
     }
@@ -392,18 +413,27 @@ pub(crate) struct UIStatus {
 ///
 /// It also spares the renderer a `get_items` call per frame -- it runs on a 1 us delay and was
 /// taking the routine repository mutex and re-allocating a `Vec<String>` every time round.
+/// `status` is what decides which routines are runnable. It has been in `get_items`'s
+/// signature all along and was ignored, which is why an unrunnable routine has always looked
+/// exactly like a runnable one here.
+///
+/// `None` where the menu being entered contains no routines -- the PID screens -- rather
+/// than manufacturing a `Status` to satisfy the type. Nothing in those menus can be gated.
 async fn enter_list_menu(
     menu_type: ListMenuType,
     routine_repository: &RoutineRepository,
     parent: Option<Box<(ListMenuType, ListNav)>>,
+    status: Option<&Status>,
 ) -> UIState {
-    let items = menu_type.get_items(Some(routine_repository), None).await;
+    let items = menu_type.get_items(Some(routine_repository), status).await;
     UIState::ListMenu(menu_type, ListNav::new(), parent, Some(items))
 }
 
+/// `pending_dose` seeds a dose-linked parameter; see [`RoutineParameterEditState::new`].
 pub async fn handle_menu_item_activation(
     item_id: MenuItemId,
     routine_repository: &RoutineRepository,
+    pending_dose: Option<f32>,
 ) -> Option<UIState> {
     info!("Menu item activated: {:?}", item_id);
     let new_state = match item_id {
@@ -411,7 +441,7 @@ pub async fn handle_menu_item_activation(
             // Load routine definition and transition to parameter view
             let mut repo = routine_repository.lock().await;
             if let Some(routine) = repo.get_routine(index).await {
-                let edit_state = RoutineParameterEditState::new(routine);
+                let edit_state = RoutineParameterEditState::new(routine, pending_dose);
                 Some(UIState::RoutineParameters(index as RoutineIndex, edit_state))
             } else {
                 // Handle missing routine gracefully
@@ -433,16 +463,16 @@ pub async fn handle_menu_item_activation(
             None
         },
         MenuItemId::SettingsBoilerTemperaturePID => {
-            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), routine_repository, None).await)
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::BoilerTemperature), routine_repository, None, None).await)
         },
         MenuItemId::SettingsPumpFlowRatePID => {
-            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), routine_repository, None).await)
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpFlowRate), routine_repository, None, None).await)
         },
         MenuItemId::SettingsPumpOutputFlowRatePID => {
-            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), routine_repository, None).await)
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpOutputFlowRate), routine_repository, None, None).await)
         },
         MenuItemId::SettingsPumpPressurePID => {
-            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpPressure), routine_repository, None).await)
+            Some(enter_list_menu(ListMenuType::PidConfig(PidConfigType::PumpPressure), routine_repository, None, None).await)
         },
         MenuItemId::PidTerm(_term) => {
             // This will be called from PID config menu, need to get the PID type from context
@@ -636,10 +666,10 @@ where
                     UIState::Idle(substate) => {
                         match substate {
                             IdleSubState::RoutineMenuSelected => {
-                                self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None).await;
+                                self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None, Some(&self.current_status)).await;
                             }
                             IdleSubState::SettingsMenuSelected => {
-                                self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
+                                self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None, Some(&self.current_status)).await;
                             }
                             // Nothing selected, and the machine is not on: the press turns
                             // it on.
@@ -688,6 +718,21 @@ where
                                 .or_else(|| menu_type.get_menu_item_id(item_index))
                         });
 
+                        // Whether the selected row can be acted on at all. Only routines can
+                        // answer `false` -- see `ListMenuItem::runnable`. Read from the same
+                        // cached item the renderer drew the "!" from, so what a press does and
+                        // what the screen said agree by construction rather than by both
+                        // recomputing it.
+                        let selected_runnable = menu_type
+                            .item_index(selected_row)
+                            .and_then(|item_index| {
+                                cached_items
+                                    .as_ref()
+                                    .and_then(|items| items.get(item_index))
+                                    .map(|item| item.runnable)
+                            })
+                            .unwrap_or(true);
+
                         // Row space throughout: `item_index` returns `None` for the back row and
                         // `Some(i)` for an item, which is the same mapping the renderer uses.
                         if menu_type.item_index(selected_row).is_none() {
@@ -698,6 +743,12 @@ where
                             } else {
                                 self.status.state = menu_type.get_back_state();
                             }
+                        } else if !selected_runnable {
+                            // The machine cannot sense something this routine needs. Refused
+                            // at the list rather than at the Execute row inside the parameter
+                            // screen, so a user is not walked into a screen they cannot leave
+                            // by running anything.
+                            warn!("Routine refused: its prerequisites are not met");
                         } else if let Some(menu_item_id) = resolved {
 
                             // Handle menu item activation
@@ -760,6 +811,7 @@ where
                                             ListMenuType::PidTermConfig(pid_type, term),
                                             self.routine_repository,
                                             parent_state,
+                                            Some(&self.current_status),
                                         ).await;
                                     }
                                 },
@@ -851,7 +903,8 @@ where
                                 _ => {
                                     if let Some(new_state) = handle_menu_item_activation(
                                         menu_item_id,
-                                        self.routine_repository
+                                        self.routine_repository,
+                                        self.current_status.pending_shot_annotations.dose_weight(),
                                     ).await {
                                         self.status.state = new_state;
                                     }
@@ -881,7 +934,7 @@ where
                             }
                             ScaleSettingsSubState::BackSelected | ScaleSettingsSubState::NoneSelected => {
                                 // Go back to Settings menu
-                                self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
+                                self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None, Some(&self.current_status)).await;
                             }
                         }
                     }
@@ -903,7 +956,7 @@ where
                     }
                     UIState::SettingsInformation | UIState::SettingsDebugInfo => {
                         // Go back to settings menu
-                        self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
+                        self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None, Some(&self.current_status)).await;
                     }
                     UIState::WifiProvisioning => {
                         // Closed explicitly rather than left to expire. Leaving the screen is
@@ -911,7 +964,7 @@ where
                         // more minutes of connectable advertising shares one antenna with
                         // Wi-Fi and with the live link to the scale.
                         self.command_sender.send(MachineCommand::CloseWifiProvisioningWindow).await;
-                        self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None).await;
+                        self.status.state = enter_list_menu(ListMenuType::Settings, self.routine_repository, None, Some(&self.current_status)).await;
                     }
                     UIState::RoutineExecution => {
                         // Cancel the currently running routine
@@ -926,7 +979,7 @@ where
                             match edit_state.row_kind(edit_state.nav.selected(), params.len()) {
                                 ParameterRow::Back => {
                                     // Back button selected - return to routine menu
-                                    self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None).await;
+                                    self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None, Some(&self.current_status)).await;
                                 }
                                 ParameterRow::Execute => {
                                     // Execute button selected - run routine with current parameters.

@@ -409,6 +409,12 @@ export function StepEditor({ step, onSave, onCancel, parameters, derivedParamete
 
       {editingCommandIndex !== null && (
         <RoutineCommandBuilder
+          // Keyed so switching straight from one command's editor to another's remounts it.
+          // The builder seeds its fields from this prop in `useState` initialisers, which
+          // React runs once per mount -- without the key, editing command 0 and then command
+          // 1 without closing in between would show command 0's values and save them over
+          // command 1's.
+          key={editingCommandIndex}
           command={entryCommands[editingCommandIndex]}
           onSave={handleSaveCommand}
           onCancel={() => setEditingCommandIndex(null)}

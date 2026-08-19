@@ -265,6 +265,16 @@ async fn store_routine<M: embassy_sync::blocking_mutex::raw::RawMutex, R: Routin
         }
     };
 
+    // Refused here rather than at the flash, so a client gets a reason instead of a silent
+    // failure to reload. This catches an old client as well as an old routine: the encoding
+    // is positional, so a client built against an earlier `Routine` produces bytes that
+    // decode into *something* -- and the version is the only field that says they should
+    // not have.
+    if let Err(e) = routine.validate() {
+        error!("A routine write was refused: {}", e);
+        return RoutineWriteOutcome::Failed(e);
+    }
+
     // Bounded, like every other repository access on this task. This runs on the UART
     // reader, which also carries status and configuration; waiting indefinitely on a
     // contended repository would stall the whole link behind one save.

@@ -194,7 +194,15 @@ impl GraphicalDisplayState {
         // also means `render_provisioning_banner` does not draw over the hint row, which is right --
         // the menu's own value column already says whether the window is open.
         if self.shared_state.menu.stack.is_open() {
-            return self.render_menu(display);
+            self.render_menu(display)?;
+            // The one overlay that survives the takeover. Capturing a dose is reachable from
+            // inside the menu -- button 6's hold means the same thing there as outside it, and
+            // the web can send one at any time -- so suppressing this would make the gesture
+            // silent on exactly the screen a user is most likely to be standing at. The other
+            // two overlays stay suppressed: the menu's own value column already says whether
+            // the provisioning window is open, and the activity overlay duplicates a mode
+            // renderer this path does not run.
+            return self.render_dose_popup(display);
         }
 
         // === Effective area ===
@@ -281,13 +289,33 @@ impl GraphicalDisplayState {
         let geo = menu::geometry(frame.id, &data);
         // The renderer resolves the value column itself, per frame, from live `Status`. That
         // is what lets Wi-Fi Setup read OFF -> ON about a second after activation with no
-        // button pressed in between. `brew_max` is the button task's, and only bounds the
-        // editor, so `None` here costs nothing the value column shows.
+        // button pressed in between.
+        //
+        // The configuration projection used to be `None` here, on the grounds that it only
+        // bounded an editor the button task owns. That stopped being true once Settings grew
+        // rows whose *value* comes from `Configuration` -- brew mode, its target, both
+        // ceilings -- which is why this task now subscribes to that channel too.
         let ctx = MenuContext::from_status(
             &self.shared_state.status,
             self.shared_state.menu.wifi_pending,
-            None,
+            self.shared_state.menu_config(),
         );
+        let ssid = MenuContext::wifi_ssid(&self.shared_state.status);
+
+        // A list with no rows -- a machine with nothing paired opening Bluetooth, which is
+        // the default state of every machine. Less stark here than on the character LCD,
+        // since the title and separator are already drawn, but an empty box under a heading
+        // still does not say whether the list is empty or still loading.
+        if geo.total_rows == 0 {
+            font.render_aligned(
+                format_args!("{}", menu::empty_label(frame.id)),
+                Point::new(EFFECTIVE_X + 6, MENU_FIRST_ROW_Y + 2),
+                VerticalPosition::Top,
+                HorizontalAlignment::Left,
+                FontColor::Transparent(Rgb565::WHITE),
+                display,
+            ).ok();
+        }
 
         for (screen_row, index) in frame.nav.visible_range(geo).enumerate() {
             let Some(row) = menu::row(frame.id, index, &data) else { continue };
@@ -310,7 +338,7 @@ impl GraphicalDisplayState {
             };
 
             font.render_aligned(
-                format_args!("{}", menu::label(&row)),
+                format_args!("{}", menu::label(&row, &ctx)),
                 Point::new(EFFECTIVE_X + 6, row_y + 2),
                 VerticalPosition::Top,
                 HorizontalAlignment::Left,
@@ -318,11 +346,21 @@ impl GraphicalDisplayState {
                 display
             ).ok();
 
+            // An info row's value is a network name or an address, which does not fit the
+            // character LCD's four-column field -- that panel gives these rows both of its
+            // rows instead. Here there is room to draw it like any other value.
+            //
+            // `render_aligned` right-aligns without clipping, so a 32-character SSID will
+            // overrun into the label rather than truncating. The label is at most four
+            // characters wide on this screen, which leaves room for one at this font size.
+            let info = menu::info_value(&row, &ctx, ssid);
             // `Ascii`: this panel has room for a unit but not for a degree sign. See the note
             // on the hint row below -- a glyph outside 32..127 loses the whole string.
-            if let Some(value) = menu::value(&row, &ctx) {
+            let value = menu::value(&row, &ctx);
+            let rendered = value.as_ref().map(|value| value.text(UnitStyle::Ascii));
+            if let Some(text) = info.as_deref().or(rendered.as_deref()) {
                 font.render_aligned(
-                    format_args!("{}", value.text(UnitStyle::Ascii)),
+                    format_args!("{}", text),
                     Point::new(EFFECTIVE_X + EFFECTIVE_WIDTH - 6, row_y + 2),
                     VerticalPosition::Top,
                     HorizontalAlignment::Right,
@@ -355,8 +393,21 @@ impl GraphicalDisplayState {
         // result, so it fails as a silently blank row. Naming the button is also the information a
         // user actually needs: these buttons are numbered and unlabelled, and an arrow says which
         // way the selection moves but not which finger moves it.
+        // The routines list is the one screen where holding select means something, so it is
+        // the one screen that says so. A gesture with no visual affordance is otherwise only
+        // discoverable by being told about it -- and the character LCD, which spends both of
+        // its rows on context now, has nowhere to say it at all.
+        // Seven characters wider than the default hint, with the inter-item spacing tightened
+        // to pay for most of it. `render_aligned` clips at the panel edge rather than dropping
+        // the string -- that only happens on a missing glyph, and this is all ASCII -- so the
+        // failure mode if it ever does overrun is visible rather than a blank row.
+        let hint = if matches!(frame.id, MenuId::Routines) {
+            "1 Up  2 Down  3 Select, hold Run  4 Back"
+        } else {
+            "1 Up   2 Down   3 Select   4 Back"
+        };
         font.render_aligned(
-            format_args!("1 Up   2 Down   3 Select   4 Back"),
+            format_args!("{}", hint),
             Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
             VerticalPosition::Top,
             HorizontalAlignment::Center,
@@ -1318,6 +1369,11 @@ impl GraphicalDisplayState {
             ParameterUnit::Grams => ("Weight", "g"),
             ParameterUnit::Percent => ("Level", "%"),
             ParameterUnit::Milliliters => ("Volume", "ml"),
+            // The unit strings stay ASCII here: this pane is drawn with an embedded-graphics
+            // bitmap font, and the label column is what carries the meaning anyway.
+            ParameterUnit::MillisiemensPerCentimeter => ("Conduct", "mS/cm"),
+            ParameterUnit::ExtractionRate => ("Ext rate", "mS.ml/cm.s"),
+            ParameterUnit::ExtractedSolids => ("Solids", "mS.ml/cm"),
         };
 
         Some((label.into(), unit.into(), progress.target))

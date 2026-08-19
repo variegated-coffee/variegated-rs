@@ -31,6 +31,18 @@ pub struct RoutineRow {
     pub index: RoutineIndex,
     /// What to draw, truncated to [`ROUTINE_NAME_LEN`] on a character boundary.
     pub name: String<ROUTINE_NAME_LEN>,
+    /// Whether the machine can currently satisfy this routine's prerequisites.
+    ///
+    /// Carried on the row rather than recomputed at draw time because a renderer has no
+    /// `Routine` -- that is the point of a row -- and because the answer must be the same
+    /// one the *activation* path uses. A row drawn as runnable and then refused, or greyed
+    /// and then run, is worse than either outcome consistently.
+    ///
+    /// Computed by the predicate passed to [`routine_rows`], which is how this crate stays
+    /// free of the prerequisite rules themselves: they live in
+    /// `variegated-controller-lib::routine_prerequisites`, and this crate cannot depend on
+    /// that one.
+    pub runnable: bool,
 }
 
 /// A routine list, in display order.
@@ -53,9 +65,15 @@ pub type RoutineRows = Vec<RoutineRow, MAX_MENU_ROUTINES>;
 /// Rows past [`MAX_MENU_ROUTINES`] are dropped. That is a truncation rather than a panic
 /// because a menu is not worth taking the machine down for, and callers that care can compare
 /// the length against the repository's count.
+///
+/// `is_runnable` decides [`RoutineRow::runnable`]. A closure rather than a rule this crate
+/// knows, because deciding it needs a `MachineDefinition` and a live `PeripheralStatus` and
+/// the logic lives in `variegated-controller-lib`, which this crate is deliberately below.
+/// Callers with nothing to check against pass `|_| true`.
 pub fn routine_rows<'a>(
     routines: impl Iterator<Item = (RoutineIndex, &'a Routine)>,
     include_function: bool,
+    is_runnable: impl Fn(&Routine) -> bool,
 ) -> RoutineRows {
     // Three passes rather than a sort, because there is no allocator here and `heapless::Vec`
     // has no stable sort. The groups are small and the iterator is over an in-RAM cache.
@@ -70,7 +88,11 @@ pub fn routine_rows<'a>(
             RoutineIndex::Function(_) => continue,
             RoutineIndex::Internal(_) => &mut internal,
         };
-        let _ = bucket.push(RoutineRow { index, name: truncate_name(routine.name()) });
+        let _ = bucket.push(RoutineRow {
+            index,
+            name: truncate_name(routine.name()),
+            runnable: is_runnable(routine),
+        });
     }
 
     // A repository iterating a `BTreeMap` already yields each group ascending, but this
@@ -134,7 +156,7 @@ mod tests {
     #[test]
     fn custom_comes_first_and_internal_last() {
         let repo = repository_order();
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true);
         assert_eq!(names(&rows), ["Morning", "Evening", "Button two", "Backflush", "Descale"]);
     }
 
@@ -142,7 +164,7 @@ mod tests {
     fn function_routines_can_be_left_out() {
         // The GS3 binds Function(0..3) to panel buttons 1-4 and does not list them.
         let repo = repository_order();
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), false);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), false, |_| true);
         assert_eq!(names(&rows), ["Morning", "Evening", "Backflush", "Descale"]);
         assert!(rows.iter().all(|r| !matches!(r.index, RoutineIndex::Function(_))));
     }
@@ -155,7 +177,7 @@ mod tests {
             (RoutineIndex::Custom(1), routine("one")),
             (RoutineIndex::Internal(2), routine("two")),
         ];
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true);
         assert_eq!(names(&rows), ["one", "five", "two", "nine"]);
     }
 
@@ -163,16 +185,33 @@ mod tests {
     fn the_index_survives_the_row() {
         // The whole reason a row carries one: it cannot be recovered from the row number.
         let repo = repository_order();
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), false);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), false, |_| true);
         assert_eq!(rows[0].index, RoutineIndex::Custom(0));
         assert_eq!(rows[1].index, RoutineIndex::Custom(2), "row 1 is not Custom(1)");
         assert_eq!(rows[2].index, RoutineIndex::Internal(0));
     }
 
     #[test]
+    fn runnability_is_decided_per_row_by_the_caller() {
+        // The rows an unrunnable routine produces are still *there* -- greyed, not hidden.
+        // Hiding it would leave a user hunting for a routine they can see in the browser,
+        // with nothing on the machine to say why it is missing.
+        let repo = repository_order();
+        let rows = routine_rows(
+            repo.iter().map(|(i, r)| (*i, r)),
+            true,
+            |routine| routine.name() != "Morning",
+        );
+
+        assert_eq!(names(&rows), ["Morning", "Evening", "Button two", "Backflush", "Descale"]);
+        assert!(!rows[0].runnable, "Morning is greyed");
+        assert!(rows[1..].iter().all(|r| r.runnable));
+    }
+
+    #[test]
     fn an_empty_repository_is_an_empty_list() {
         let repo: AllocVec<(RoutineIndex, Routine)> = vec![];
-        assert!(routine_rows(repo.iter().map(|(i, r)| (*i, r)), true).is_empty());
+        assert!(routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true).is_empty());
     }
 
     #[test]
@@ -180,7 +219,7 @@ mod tests {
         // `heapless::String::push_str` rejects the *whole* write when it does not fit, so
         // the naive version of this leaves a blank row instead of a shortened one.
         let repo = vec![(RoutineIndex::Custom(0), routine("A routine with a really very long name"))];
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true);
         assert_eq!(rows[0].name.len(), ROUTINE_NAME_LEN);
         assert!("A routine with a really very long name".starts_with(rows[0].name.as_str()));
     }
@@ -190,7 +229,7 @@ mod tests {
         // Slicing a `&str` at an arbitrary byte index panics, and a routine name is
         // user-supplied text arriving over HTTP.
         let repo = vec![(RoutineIndex::Custom(0), routine("ààààààààààààààààààààààààà"))];
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true);
         assert!(rows[0].name.len() <= ROUTINE_NAME_LEN);
         assert!(rows[0].name.chars().all(|c| c == 'à'));
     }
@@ -200,7 +239,7 @@ mod tests {
         let repo: AllocVec<(RoutineIndex, Routine)> = (0..MAX_MENU_ROUTINES as u32 + 8)
             .map(|n| (RoutineIndex::Custom(n), routine("r")))
             .collect();
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true);
         assert_eq!(rows.len(), MAX_MENU_ROUTINES);
     }
 
@@ -211,7 +250,7 @@ mod tests {
             .map(|n| (RoutineIndex::Custom(n), routine("c")))
             .collect();
         repo.push((RoutineIndex::Internal(0), routine("i")));
-        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true);
+        let rows = routine_rows(repo.iter().map(|(i, r)| (*i, r)), true, |_| true);
         assert_eq!(rows.len(), MAX_MENU_ROUTINES);
         assert!(rows.iter().all(|r| matches!(r.index, RoutineIndex::Custom(_))));
     }

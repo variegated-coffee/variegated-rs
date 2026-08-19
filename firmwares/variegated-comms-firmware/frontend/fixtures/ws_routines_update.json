@@ -7,7 +7,8 @@
         "step_count": 2,
         "parameter_count": 1,
         "derived_parameter_count": 0,
-        "finally_count": 0
+        "finally_count": 0,
+        "prerequisites": []
       }
     },
     "function": {
@@ -17,7 +18,15 @@
         "step_count": 11,
         "parameter_count": 4,
         "derived_parameter_count": 2,
-        "finally_count": 1
+        "finally_count": 1,
+        "prerequisites": [
+          {
+            "capability": "Weight"
+          },
+          {
+            "capability": "ElectricalConductivity"
+          }
+        ]
       }
     },
     "custom": {
@@ -27,7 +36,12 @@
         "step_count": 1,
         "parameter_count": 1,
         "derived_parameter_count": 1,
-        "finally_count": 1
+        "finally_count": 1,
+        "prerequisites": [
+          {
+            "capability": "Weight"
+          }
+        ]
       }
     }
   }

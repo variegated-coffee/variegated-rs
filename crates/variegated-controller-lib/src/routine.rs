@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::format;
 use core::ops::{DerefMut, Range};
-use variegated_log::log_info;
+use variegated_log::{log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
@@ -17,33 +17,37 @@ use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::Cache;
 use sequential_storage::map::{MapConfig, MapStorage};
 use crate::flash::BorrowedFlash;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, ControlCurve, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, MachineCommand, RoutineIndex, Status, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, BrewControlTarget, ControlCurve, ECType, ExtractedSolidsType, ExtractionRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, MachineCommand, RoutineIndex, Status, TransitionOrigin, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
 
 // Re-export types that are commonly used by consumers of this module
 pub use variegated_controller_types::{
     Routine, RoutineParameter, ParameterUnit, RoutineType, RoutineStep,
     RoutineCommand, RoutineExit, RoutineExitCondition, StateCondition,
     ParameterValue, RoutineStepExitType, RoutineParameters, DerivedFormula,
-    DerivedParameter,
+    DerivedParameter, RoutinePrerequisite, SensorCapability, ROUTINE_FORMAT_VERSION,
 };
 
 pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
     let parameters = vec![
-        RoutineParameter { 
-            index: 0, 
+        RoutineParameter {
+            index: 0,
             name: "Tgt Flow Rate".try_into().unwrap(),
-            default: 2.0, 
-            unit: Some(ParameterUnit::MillilitersPerSecond)
+            default: 2.0,
+            unit: Some(ParameterUnit::MillilitersPerSecond),
+            linked_attribute: None,
         },
-        RoutineParameter { 
-            index: 1, 
+        RoutineParameter {
+            index: 1,
             name: "Water amt".try_into().unwrap(),
-            default: 30.0, 
-            unit: Some(ParameterUnit::Grams)
+            default: 30.0,
+            // Grams of water, not of coffee -- deliberately not linked to `DoseWeight`.
+            unit: Some(ParameterUnit::Grams),
+            linked_attribute: None,
         },
     ];
-    
+
     Routine {
+        version: ROUTINE_FORMAT_VERSION,
         routine_type: RoutineType::UserDefined,
         name: "Water dispersal".try_into().unwrap(),
         parameters,
@@ -60,7 +64,11 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
             },
             // Step 1: Set target to flow rate
             RoutineStep {
-                entry_command: vec![RoutineCommand::SetGroupFixedDutyCycleWithTransition(group, ParameterValue::Static(50.0), ParameterValue::Static(5.0))],
+                // A soft start: nothing is commanding the pump this early, so the origin
+                // falls through to the measured duty cycle, which is zero. Getting that
+                // fallback wrong turned this into an instant step to 50% -- see
+                // `resolve_transition_origin`.
+                entry_command: vec![RoutineCommand::SetGroupFixedDutyCycleWithTransition(group, ParameterValue::Static(50.0), ParameterValue::Static(5.0), TransitionOrigin::CurrentTarget)],
 //                entry_command: vec![RoutineCommand::SetGroupOutputFlowRateWithTransition(group, ParameterValue::Parameter(0), ParameterValue::Static(8.0))],
                 exits: vec![RoutineExit::new(
                     RoutineExitCondition::Always,
@@ -88,6 +96,11 @@ pub fn create_water_dispersal_routine(group: GroupIndex) -> Routine {
             },
         ],
         finally: vec![],
+        // Every step here is gated on the group's output weight, so without a scale this
+        // routine cannot advance past taring -- `OutputWeightBelow` on an absent sensor is
+        // never met. Declaring the need is what turns that hang into a refusal.
+        prerequisites: vec![RoutinePrerequisite { capability: SensorCapability::Weight }],
+        shot_annotations: vec![],
     }
 }
 
@@ -196,6 +209,54 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         resolve_parameter_value(pv, &self.parameters, &self.routine.derived_parameters)
     }
 
+    /// Where a transition's ramp starts, or `None` when that cannot be answered.
+    ///
+    /// `measured` is the quantity's current reading and `modes` are the control modes under
+    /// which [`TransitionOrigin::CurrentTarget`] refers to *this* quantity -- a pressure
+    /// transition may only read the published target while the group is actually being
+    /// commanded in pressure, since the number carries whatever unit the active mode uses.
+    ///
+    /// **`None` rather than `0.0`.** Every one of these used to end in `.unwrap_or(0.0)`, so
+    /// a sensor reading `None` produced a ramp starting from zero bar -- a command the
+    /// routine never asked for and the widest possible excursion from wherever the machine
+    /// actually was. The caller starts at the destination instead, which is what the
+    /// `transition_time <= 0.0` branch already does.
+    fn resolve_transition_origin(
+        &self,
+        origin: &TransitionOrigin,
+        measured: Option<f32>,
+        target: Option<&BrewControlTarget>,
+        modes: &[GroupBrewControlMode],
+    ) -> Option<f32> {
+        match origin {
+            TransitionOrigin::Value(pv) => Some(self.resolve_value(pv)),
+            TransitionOrigin::CurrentValue => measured,
+            // **Falls through to the measurement when this quantity has no target.**
+            //
+            // A target in another quantity is not this quantity's target: 50 means duty
+            // cycle, not 50 bar. But "no pressure setpoint" does not mean "nowhere" -- the
+            // group is at *some* pressure, and that measurement is the only honest answer to
+            // "where am I, in pressure". Ramping from it is what a transition out of duty
+            // control into pressure control obviously means.
+            //
+            // This does not reopen the bug the type exists to close. That one is a
+            // measurement lagging a setpoint *in the same quantity*, and there this still
+            // prefers the setpoint. The fallback fires only where no such setpoint exists,
+            // and there is nothing for the measurement to lag behind.
+            //
+            // It is also what makes the first transition of a routine a ramp rather than a
+            // step: nothing is commanded before `StartBrewing`, so without this a soft start
+            // would resolve to its own destination and jump straight there.
+            //
+            // The routine editor warns when a routine can reach this, since a step whose
+            // behaviour depends on the mode it was entered in is worth seeing before it runs.
+            TransitionOrigin::CurrentTarget => target
+                .filter(|t| modes.contains(&t.mode))
+                .map(|t| t.value)
+                .or(measured),
+        }
+    }
+
     fn create_linear_transition_curve(
         &self, 
         current_value: f32, 
@@ -230,7 +291,9 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
         Duration::from_millis((seconds * 1000.0) as u64)
     }
     
-    fn resolve_command(&self, cmd: &RoutineCommand, status: &Status) -> MachineCommand {
+    /// `pub(crate)` only so the tests at the foot of this file can drive it. Nothing outside
+    /// this module calls it; the controllers go through `step`.
+    pub(crate) fn resolve_command(&self, cmd: &RoutineCommand, status: &Status) -> MachineCommand {
         match cmd {
             RoutineCommand::StartBrewing(idx) => MachineCommand::StartBrewing(*idx),
             RoutineCommand::StopBrewing(idx) => MachineCommand::StopBrewing(*idx),
@@ -326,7 +389,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
             }
             
             // Transition-enabled commands
-            RoutineCommand::SetGroupFlowRateWithTransition(idx, target_pv, transition_pv) => {
+            RoutineCommand::SetGroupFlowRateWithTransition(idx, target_pv, transition_pv, origin) => {
                 let target_value = self.resolve_value(target_pv);
                 let transition_time = self.resolve_value(transition_pv);
                 
@@ -345,12 +408,20 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                             duty_cycle_curve: None
                         }))
                 } else {
-                    // Create linear transition curve from current value
-                    let current_value = status.get_group_status(*idx)
-                        .and_then(|gs| gs.input_flow_rate)
-                        .unwrap_or(0.0);
+                    let group = status.get_group_status(*idx);
+                    let origin = self.resolve_transition_origin(
+                        origin,
+                        group.and_then(|gs| gs.input_flow_rate),
+                        group.and_then(|gs| gs.brew_control_target.as_ref()),
+                        &[
+                            GroupBrewControlMode::GroupFlowRate,
+                            GroupBrewControlMode::GroupFlowRateCurve,
+                        ],
+                    );
+                    // Unknowable origin: go straight there rather than ramping from a made-up
+                    // number. See `resolve_transition_origin`.
                     let curve = self.create_linear_transition_curve(
-                        current_value, target_value, transition_time
+                        origin.unwrap_or(target_value), target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::GroupFlowRateCurve,
@@ -367,7 +438,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 }
             }
             
-            RoutineCommand::SetGroupPressureWithTransition(idx, target_pv, transition_pv) => {
+            RoutineCommand::SetGroupPressureWithTransition(idx, target_pv, transition_pv, origin) => {
                 let target_value = self.resolve_value(target_pv);
                 let transition_time = self.resolve_value(transition_pv);
                 
@@ -385,11 +456,18 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                             duty_cycle_curve: None
                         }))
                 } else {
-                    let current_value = status.get_group_status(*idx)
-                        .and_then(|gs| gs.pressure)
-                        .unwrap_or(0.0);
+                    let group = status.get_group_status(*idx);
+                    let origin = self.resolve_transition_origin(
+                        origin,
+                        group.and_then(|gs| gs.pressure),
+                        group.and_then(|gs| gs.brew_control_target.as_ref()),
+                        &[
+                            GroupBrewControlMode::Pressure,
+                            GroupBrewControlMode::PressureCurve,
+                        ],
+                    );
                     let curve = self.create_linear_transition_curve(
-                        current_value, target_value, transition_time
+                        origin.unwrap_or(target_value), target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::PressureCurve,
@@ -406,7 +484,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 }
             }
             
-            RoutineCommand::SetGroupOutputFlowRateWithTransition(idx, target_pv, transition_pv) => {
+            RoutineCommand::SetGroupOutputFlowRateWithTransition(idx, target_pv, transition_pv, origin) => {
                 let target_value = self.resolve_value(target_pv);
                 let transition_time = self.resolve_value(transition_pv);
                 
@@ -424,11 +502,18 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                             duty_cycle_curve: None
                         }))
                 } else {
-                    let current_value = status.get_group_status(*idx)
-                        .and_then(|gs| gs.output_flow_rate)
-                        .unwrap_or(0.0);
+                    let group = status.get_group_status(*idx);
+                    let origin = self.resolve_transition_origin(
+                        origin,
+                        group.and_then(|gs| gs.output_flow_rate),
+                        group.and_then(|gs| gs.brew_control_target.as_ref()),
+                        &[
+                            GroupBrewControlMode::OutputFlowRate,
+                            GroupBrewControlMode::OutputFlowRateCurve,
+                        ],
+                    );
                     let curve = self.create_linear_transition_curve(
-                        current_value, target_value, transition_time
+                        origin.unwrap_or(target_value), target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::OutputFlowRateCurve,
@@ -445,7 +530,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                 }
             }
             
-            RoutineCommand::SetGroupFixedDutyCycleWithTransition(idx, target_pv, transition_pv) => {
+            RoutineCommand::SetGroupFixedDutyCycleWithTransition(idx, target_pv, transition_pv, origin) => {
                 let target_value = self.resolve_value(target_pv);
                 let transition_time = self.resolve_value(transition_pv);
                 
@@ -464,12 +549,24 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                             duty_cycle_curve: None
                         }))
                 } else {
-                    // Create linear transition curve from current duty cycle
-                    let current_value = status.get_group_status(*idx)
-                        .map(|gs| gs.pump_output.duty_cycle() as f32)
-                        .unwrap_or(0.0);
+                    let group = status.get_group_status(*idx);
+                    // Duty cycle is the one quantity whose "current value" is already a
+                    // command rather than a measurement -- it is what the pump was last told,
+                    // so `CurrentValue` here was never the bug the other three had. It stays
+                    // distinct from `CurrentTarget` all the same: under a duty *curve* the
+                    // target is where the ramp is now, while the reading has been through
+                    // `apply_pump_configuration_limits` and may be clamped away from it.
+                    let origin = self.resolve_transition_origin(
+                        origin,
+                        group.map(|gs| gs.pump_output.duty_cycle() as f32),
+                        group.and_then(|gs| gs.brew_control_target.as_ref()),
+                        &[
+                            GroupBrewControlMode::FixedDutyCycle,
+                            GroupBrewControlMode::FixedDutyCycleCurve,
+                        ],
+                    );
                     let curve = self.create_linear_transition_curve(
-                        current_value, target_value, transition_time
+                        origin.unwrap_or(target_value), target_value, transition_time
                     );
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::FixedDutyCycleCurve,
@@ -650,6 +747,71 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         .map_or(false, |volume| volume > threshold as OutputVolumeType)
                 })
             }
+
+            // The extraction conditions.
+            //
+            // Note what these deliberately do *not* do: `unwrap_or(0.0)`, which the boiler,
+            // pressure and weight arms above all use. An absent sensor is not a reading of
+            // zero, and treating it as one makes every `...Below` condition on a machine
+            // without the sensor fire instantly. `map_or(false, ...)` all the way down means
+            // a missing measurement leaves the condition unmet in either direction, which is
+            // the same thing a prerequisite would have refused the routine for.
+            StateCondition::GroupOutputConductivityAbove(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.output_electrical_conductivity.map_or(false, |ec| ec > threshold as ECType)
+                })
+            }
+            StateCondition::GroupOutputConductivityBelow(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.output_electrical_conductivity.map_or(false, |ec| ec < threshold as ECType)
+                })
+            }
+            StateCondition::GroupExtractionRateAbove(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.extraction_rate.map_or(false, |rate| rate > threshold as ExtractionRateType)
+                })
+            }
+            StateCondition::GroupExtractionRateBelow(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.extraction_rate.map_or(false, |rate| rate < threshold as ExtractionRateType)
+                })
+            }
+            // `extracted_solids` lives on `BrewStatus`, so outside a brew there is nothing to
+            // compare and the condition is unmet -- which is what stops a solids-terminated
+            // step from ending the instant it is entered, before brewing has started.
+            StateCondition::ExtractedSolidsAbove(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.current_brew.as_ref()
+                        .and_then(|b| b.extracted_solids)
+                        .map_or(false, |solids| solids > threshold as ExtractedSolidsType)
+                })
+            }
+            StateCondition::ExtractedSolidsBelow(idx, pv) => {
+                let threshold = self.resolve_value(&pv);
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.current_brew.as_ref()
+                        .and_then(|b| b.extracted_solids)
+                        .map_or(false, |solids| solids < threshold as ExtractedSolidsType)
+                })
+            }
+            // `reached`, not `==`: the phases are transient and a step comparing for equality
+            // would wait forever for one the machine passed through between evaluations.
+            //
+            // No shot, no phase. `shot_state` lives on `current_brew` and is `None` before
+            // the tracker has classified anything, both of which correctly leave this unmet
+            // rather than guessing at `HeadspaceFill`.
+            StateCondition::ShotStateReached(idx, phase) => {
+                status.get_group_status(idx).map_or(false, |s| {
+                    s.current_brew.as_ref()
+                        .and_then(|b| b.shot_state)
+                        .map_or(false, |state| state.reached(phase))
+                })
+            }
         }
     }
 }
@@ -774,11 +936,37 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
             .await
             .unwrap();
 
-        while let Some((key, value)) = iterator
-            .next::<Option<Routine>>(&mut self.deserialization_buffer)
-            .await
-            .unwrap_or(None)
-        {
+        // An item that will not deserialize is **skipped, not fatal**, and this is the whole
+        // difference between losing the routines written by an older firmware and losing the
+        // store.
+        //
+        // This used to read `.unwrap_or(None)`, which ends the loop on `Err`. Nothing could
+        // fail there before routines carried a version -- every stored item decoded. Now a
+        // routine from an older firmware returns `SerializationError`, and terminating on it
+        // is far worse than it first looks: `fetch_all_items` yields *superseded* items too
+        // ("for the same key there might be multiple items returned, the last one is the
+        // current active one"), and the log is in write order. So the stale item comes first,
+        // the load stops there, and every routine after it is invisible -- including ones
+        // written *after* the upgrade, which would then work for one session and disappear on
+        // the next boot. Silently, and on every boot thereafter.
+        //
+        // Continuing is safe: `MapItemIter::next` advances past the item before it tries to
+        // deserialize the value, so the error is reported from a position already moved on.
+        let mut skipped = 0usize;
+        loop {
+            let item = match iterator
+                .next::<Option<Routine>>(&mut self.deserialization_buffer)
+                .await
+            {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let (key, value) = item;
+
             // Skip Internal routines - they are never persisted to flash
             if let Some(idx) = RoutineIndex::from_storage_index(key) {
                 if matches!(idx, RoutineIndex::Internal(_)) {
@@ -793,6 +981,22 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
             } else {
                 self.cache.remove(&key);
             }
+        }
+
+        if skipped > 0 {
+            // Expected exactly once, on the first boot after a routine format change. Said
+            // out loud because the routines are genuinely gone and the user should hear it
+            // from the machine rather than discover it in a menu -- and because a count that
+            // keeps growing across boots would mean something other than an upgrade.
+            //
+            // Not compacted automatically: `optimize_storage` erases and rewrites the whole
+            // range, and doing that unprompted during boot is a worse risk than leaving dead
+            // bytes that are now correctly stepped over.
+            log_warn!(
+                "Skipped {} unreadable routine(s) while loading -- most likely written by an \
+                 older firmware. Run routine storage optimization to reclaim the space.",
+                skipped
+            );
         }
 
         self.cache_initialized = true;
@@ -834,6 +1038,13 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
     }
 
     async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
+        // Validated here rather than only at the chunked write path, because that is not the
+        // only way in: `MachineCommand::AddRoutine` carries a whole `Routine` and reaches
+        // this function directly from the debug channel, never passing through
+        // `Value::deserialize_from`. A routine stored that way would sit in the cache and be
+        // *runnable* at a version the machine has just declared it cannot read.
+        routine.validate().map_err(|_| "Routine failed validation")?;
+
         self.load_from_flash().await?;
 
         // Find first available Custom index
@@ -902,6 +1113,9 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         if matches!(index, RoutineIndex::Internal(_)) {
             return Err("Cannot update internal routine - they are read-only");
         }
+
+        // See `add_routine`: `MachineCommand::UpdateRoutine` reaches here directly.
+        routine.validate().map_err(|_| "Routine failed validation")?;
 
         self.load_from_flash().await?;
 
@@ -1013,6 +1227,9 @@ impl RoutineRepository for InMemoryRoutineRepository {
     }
 
     async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
+        // See `update_routine` below, and the flash-backed repository's `add_routine`.
+        routine.validate().map_err(|_| "Routine failed validation")?;
+
         // Find first available Custom index
         let mut inner_index = 0u32;
         loop {
@@ -1066,6 +1283,11 @@ impl RoutineRepository for InMemoryRoutineRepository {
             return Err("Cannot update internal routine - they are read-only");
         }
 
+        // Validated even here, where nothing is persisted: the point is that a stored routine
+        // is runnable, and this repository's routines are just as runnable as the flash-backed
+        // one's. See the note in `SequentialStorageRoutineRepository::add_routine`.
+        routine.validate().map_err(|_| "Routine failed validation")?;
+
         let storage_index = index.to_storage_index();
         // For update, we allow creating new routines (not just updating existing ones)
         self.routines.insert(storage_index, routine);
@@ -1096,6 +1318,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
 
 pub fn create_shot_routine(group: GroupIndex) -> Routine {
     Routine {
+        version: ROUTINE_FORMAT_VERSION,
         routine_type: RoutineType::UserDefined,
         name: "Smart shot".try_into().unwrap(),
         parameters: vec![
@@ -1103,31 +1326,39 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
                 index: 0,
                 name: "Preinf. Time".try_into().unwrap(),
                 default: 5.0,
-                unit: Some(ParameterUnit::Seconds)
+                unit: Some(ParameterUnit::Seconds),
+                linked_attribute: None,
             },
             RoutineParameter {
                 index: 1,
+                // The *yield*, not the dose -- this is what comes out. `DoseWeight` is the
+                // dry coffee going in, so these are not the same number and this is not
+                // linked to it.
                 name: "Brew Weight".try_into().unwrap(),
                 default: 50.0,
-                unit: Some(ParameterUnit::Grams)
+                unit: Some(ParameterUnit::Grams),
+                linked_attribute: None,
             },
             RoutineParameter {
                 index: 2,
                 name: "Tgt Press".try_into().unwrap(),
                 default: 8.0,
-                unit: Some(ParameterUnit::Bar)
+                unit: Some(ParameterUnit::Bar),
+                linked_attribute: None,
             },
             RoutineParameter {
                 index: 3,
                 name: "Resc Trigger".try_into().unwrap(),
                 default: 2.5,
-                unit: Some(ParameterUnit::MillilitersPerSecond)
+                unit: Some(ParameterUnit::MillilitersPerSecond),
+                linked_attribute: None,
             },
             RoutineParameter {
                 index: 4,
                 name: "Rescue Flow".try_into().unwrap(),
                 default: 1.5,
-                unit: Some(ParameterUnit::MillilitersPerSecond)
+                unit: Some(ParameterUnit::MillilitersPerSecond),
+                linked_attribute: None,
             },
         ],
         derived_parameters: vec![], // No derived parameters for this routine
@@ -1220,6 +1451,10 @@ pub fn create_shot_routine(group: GroupIndex) -> Routine {
             },
         ],
         finally: vec![],
+        // Brew-by-weight: the shot ends on `OutputWeightAbove`, and the rescue branch reads
+        // the group's flow. Without a scale the shot has no end condition that can fire.
+        prerequisites: vec![RoutinePrerequisite { capability: SensorCapability::Weight }],
+        shot_annotations: vec![],
     }
 }
 
@@ -1228,6 +1463,7 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
     ];
 
     Routine {
+        version: ROUTINE_FORMAT_VERSION,
         routine_type: RoutineType::HeatUp,
         name: "Heat-up".try_into().unwrap(),
         parameters,
@@ -1261,6 +1497,9 @@ pub fn create_heatup_routine(boiler_index: BoilerIndex) -> Routine {
             },
         ],
         finally: vec![],
+        // Boiler temperature only -- an on-board sensor, not a peripheral. Runs anywhere.
+        prerequisites: vec![],
+        shot_annotations: vec![],
     }
 }
 
@@ -1339,12 +1578,18 @@ pub fn create_volumetric_shot_routine(group: GroupIndex, milliliters: f32, bloom
     let routine_name = name.unwrap_or_else(|| "Volumetric shot".into());
 
     Routine {
+        version: ROUTINE_FORMAT_VERSION,
         routine_type: RoutineType::UserDefined,
         name: routine_name,
         parameters: vec![],
         derived_parameters: vec![], // No derived parameters for this routine
         steps,
         finally: vec![],
+        // Volumetric, not gravimetric: it ends on `InputVolumeAboveRelativeToStart`, which
+        // the group's own flow meter reports. No peripheral involved -- which is the point
+        // of this routine existing alongside the weight-based one.
+        prerequisites: vec![],
+        shot_annotations: vec![],
     }
 }
 
@@ -1397,11 +1642,244 @@ pub fn create_backflush_routine(group: GroupIndex, pump_duty_cycle: DutyCycleTyp
     }
 
     Routine {
+        version: ROUTINE_FORMAT_VERSION,
         routine_type: RoutineType::Cleaning,
         name: "Backflush".try_into().unwrap(),
         parameters: vec![],
         derived_parameters: vec![],
         steps,
         finally: vec![RoutineCommand::StopBrewing(group)],
+        // Timers only. A backflush must run on a machine stripped down for cleaning, which
+        // is exactly when the scale is off the drip tray.
+        prerequisites: vec![],
+        shot_annotations: vec![],
+    }
+}
+#[cfg(test)]
+mod transition_origin_tests {
+    //! Where a transition's ramp starts.
+    //!
+    //! These are regression tests for a bug that survived two shots on a real machine. The
+    //! routine asked for 9 bar over one second and then a decline to 4 bar over thirty; what
+    //! it got was a flat line at 4 bar, because the ramp was anchored to the *measurement*,
+    //! real pressure had only reached 3.995 bar in that first second, and a ramp from 3.995
+    //! to 4.0 does nothing. Rewritten as a 9-8-7-6-5-4 staircase, every "decline" instead
+    //! ramped *upward* for the same reason.
+    //!
+    //! The curve is asserted directly rather than through a simulated shot: `c` is where the
+    //! ramp begins and `b` is its slope, so those two numbers are the entire behaviour.
+
+    use super::*;
+    use variegated_controller_types::{BrewControlTarget, GroupStatus};
+
+    const GROUP: GroupIndex = 0;
+
+    fn context() -> RoutineExecutionContext<(), ()> {
+        let routine = Routine::new(
+            RoutineType::UserDefined,
+            "Test".try_into().unwrap(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        RoutineExecutionContext::new(RoutineIndex::Custom(0), routine, (), (), None)
+    }
+
+    /// A status whose group reports `pressure` as its measurement and, optionally, a
+    /// resolved control target.
+    fn status(pressure: Option<f32>, target: Option<BrewControlTarget>) -> Status {
+        let mut status = Status::new();
+        let mut group = GroupStatus::default();
+        group.pressure = pressure;
+        group.brew_control_target = target;
+        let _ = status.group_statuses.insert(GROUP, group);
+        status
+    }
+
+    fn pressure_target(mode: GroupBrewControlMode, value: f32) -> Option<BrewControlTarget> {
+        Some(BrewControlTarget { mode, value })
+    }
+
+    /// The curve a pressure transition produces, or `None` if it emitted something else.
+    fn curve_of(command: MachineCommand) -> ControlCurve {
+        match command {
+            MachineCommand::SetGroupBrewControlTarget(_, _, Some(update)) => update
+                .pressure_curve
+                .expect("a pressure transition sets a pressure curve"),
+            // `label()` rather than `{:?}`: `MachineCommand` has no `Debug`.
+            other => panic!("expected a brew control target, got {}", other.label()),
+        }
+    }
+
+    fn transition(
+        origin: TransitionOrigin,
+        target: f32,
+        seconds: f32,
+        status: &Status,
+    ) -> ControlCurve {
+        let command = RoutineCommand::SetGroupPressureWithTransition(
+            GROUP,
+            ParameterValue::Static(target),
+            ParameterValue::Static(seconds),
+            origin,
+        );
+        curve_of(context().resolve_command(&command, status))
+    }
+
+    #[test]
+    fn current_target_starts_the_ramp_at_the_setpoint_not_the_measurement() {
+        // The bug, in one assertion. The machine was commanded to 9 bar and had physically
+        // reached 3.995; a decline to 4 bar must start from 9, not from 3.995.
+        let status = status(
+            Some(3.995),
+            pressure_target(GroupBrewControlMode::PressureCurve, 9.0),
+        );
+
+        let curve = transition(TransitionOrigin::CurrentTarget, 4.0, 30.0, &status);
+
+        assert_eq!(curve.c, 9.0, "ramp must begin at the setpoint");
+        // Declining, and at the rate the routine asked for: (4 - 9) / 30.
+        assert!((curve.b - (-5.0 / 30.0)).abs() < 1e-6, "slope was {}", curve.b);
+    }
+
+    #[test]
+    fn the_shot_that_produced_a_flat_line_now_declines() {
+        // The exact numbers from 20260819-12493815.BIN. Under the old behaviour this built
+        // a ramp from 3.995 to 4.0 -- thirty seconds of nothing.
+        let measured = 3.9950066;
+        let old = ControlCurve {
+            a: 0.0,
+            b: (4.0 - measured) / 30.0,
+            c: measured,
+            min: measured.min(4.0),
+            max: measured.max(4.0),
+        };
+        assert!(
+            (old.max - old.min) < 0.01,
+            "precondition: the old curve really was flat, spanning {}",
+            old.max - old.min,
+        );
+
+        let status = status(
+            Some(measured),
+            pressure_target(GroupBrewControlMode::PressureCurve, 9.0),
+        );
+        let curve = transition(TransitionOrigin::CurrentTarget, 4.0, 30.0, &status);
+
+        assert_eq!(curve.c, 9.0);
+        assert_eq!((curve.min, curve.max), (4.0, 9.0), "spans the whole decline");
+    }
+
+    #[test]
+    fn every_step_of_the_staircase_declines() {
+        // The rewrite that also failed: 9-8-7-6-5-4, each over five seconds, while the
+        // measurement lagged far below. Each step's ramp used to *climb* toward its target
+        // from wherever pressure had sagged.
+        for (from, to) in [(9.0, 8.0), (8.0, 7.0), (7.0, 6.0), (6.0, 5.0), (5.0, 4.0)] {
+            let status = status(
+                Some(4.2), // measurement stuck low, as it was for the whole shot
+                pressure_target(GroupBrewControlMode::PressureCurve, from),
+            );
+            let curve = transition(TransitionOrigin::CurrentTarget, to, 5.0, &status);
+
+            assert_eq!(curve.c, from, "{from} -> {to} must start at {from}");
+            assert!(curve.b < 0.0, "{from} -> {to} must decline, sloped {}", curve.b);
+        }
+    }
+
+    #[test]
+    fn current_value_still_starts_at_the_measurement() {
+        // The old behaviour, kept and now chosen deliberately rather than by default.
+        let status = status(
+            Some(3.995),
+            pressure_target(GroupBrewControlMode::PressureCurve, 9.0),
+        );
+
+        let curve = transition(TransitionOrigin::CurrentValue, 4.0, 30.0, &status);
+
+        assert_eq!(curve.c, 3.995);
+    }
+
+    #[test]
+    fn a_named_value_overrides_both() {
+        let status = status(
+            Some(3.995),
+            pressure_target(GroupBrewControlMode::PressureCurve, 9.0),
+        );
+
+        let curve = transition(
+            TransitionOrigin::Value(ParameterValue::Static(6.0)),
+            4.0,
+            30.0,
+            &status,
+        );
+
+        assert_eq!(curve.c, 6.0);
+    }
+
+    #[test]
+    fn a_target_in_another_quantity_falls_through_to_the_measurement() {
+        // The group is being commanded in *flow*, so "2.5" is millilitres per second, and
+        // reading it as a pressure would start the ramp at 2.5 bar -- a number nobody chose.
+        // There is no pressure setpoint at all here, so the measurement is the only honest
+        // answer to "where am I, in pressure", and the ramp is preserved.
+        let status = status(
+            Some(6.0),
+            pressure_target(GroupBrewControlMode::GroupFlowRate, 2.5),
+        );
+
+        let curve = transition(TransitionOrigin::CurrentTarget, 4.0, 30.0, &status);
+
+        assert_eq!(curve.c, 6.0, "starts at the measured pressure, not the flow target");
+        assert!(curve.b < 0.0, "and still declines toward 4 bar");
+    }
+
+    #[test]
+    fn the_first_transition_of_a_routine_is_a_ramp_and_not_a_step() {
+        // Nothing commands the pump before `StartBrewing`, so `brew_control_target` is
+        // `None`. Falling back to the *destination* here -- which an earlier draft of this
+        // did -- silently turns every soft start into an instant jump to full output.
+        let status = status(Some(0.0), None);
+
+        let curve = transition(TransitionOrigin::CurrentTarget, 9.0, 5.0, &status);
+
+        assert_eq!(curve.c, 0.0, "a soft start begins where the machine actually is");
+        assert!((curve.b - 9.0 / 5.0).abs() < 1e-6, "slope was {}", curve.b);
+    }
+
+    #[test]
+    fn an_unknown_origin_goes_to_the_target_rather_than_ramping_from_zero() {
+        // Every one of these used to end in `.unwrap_or(0.0)`. On a machine with no pressure
+        // sensor reading that meant a ramp starting at zero bar -- the widest possible
+        // excursion from wherever the machine actually was, from a routine that asked for
+        // neither end of it.
+        for origin in [TransitionOrigin::CurrentTarget, TransitionOrigin::CurrentValue] {
+            let curve = transition(origin, 6.0, 5.0, &status(None, None));
+
+            assert_eq!(curve.c, 6.0, "{origin:?} must not invent a starting value");
+            assert_eq!(curve.b, 0.0);
+            assert_eq!((curve.min, curve.max), (6.0, 6.0));
+        }
+    }
+
+    #[test]
+    fn a_zero_length_transition_is_still_a_plain_set() {
+        // Unchanged, and worth pinning: the origin is irrelevant when there is no ramp.
+        let command = RoutineCommand::SetGroupPressureWithTransition(
+            GROUP,
+            ParameterValue::Static(7.0),
+            ParameterValue::Static(0.0),
+            TransitionOrigin::CurrentTarget,
+        );
+        let status = status(Some(3.0), pressure_target(GroupBrewControlMode::Pressure, 9.0));
+
+        match context().resolve_command(&command, &status) {
+            MachineCommand::SetGroupBrewControlTarget(_, mode, Some(update)) => {
+                assert_eq!(mode, GroupBrewControlMode::Pressure);
+                assert_eq!(update.pressure, Some(7.0));
+                assert!(update.pressure_curve.is_none());
+            }
+            other => panic!("expected a plain pressure set, got {}", other.label()),
+        }
     }
 }

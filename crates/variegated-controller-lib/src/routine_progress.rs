@@ -101,6 +101,12 @@ fn state_progress(
         // Boolean, not a threshold.
         StateCondition::Brewing(_) | StateCondition::NotBrewing(_) => None,
 
+        // A phase, not a measurement. There is no target to count towards -- saturation is a
+        // crossover between two signals, not a level either of them crosses -- so a renderer
+        // gets `None` and shows the step's description instead. Returning a fabricated
+        // "1 of 2" would put a progress bar on something that does not progress.
+        StateCondition::ShotStateReached(_, _) => None,
+
         StateCondition::BoilerTemperatureAbove(boiler, target)
         | StateCondition::BoilerTemperatureBelow(boiler, target) => Some(ExitProgress {
             current: boiler_status(status, *boiler).and_then(|b| b.temperature),
@@ -158,6 +164,36 @@ fn state_progress(
             target: resolve(target, status, routine),
             unit: ParameterUnit::Milliliters,
         }),
+
+        StateCondition::GroupOutputConductivityAbove(group, target)
+        | StateCondition::GroupOutputConductivityBelow(group, target) => Some(ExitProgress {
+            current: status
+                .get_group_status(*group)
+                .and_then(|g| g.output_electrical_conductivity),
+            target: resolve(target, status, routine),
+            unit: ParameterUnit::MillisiemensPerCentimeter,
+        }),
+
+        StateCondition::GroupExtractionRateAbove(group, target)
+        | StateCondition::GroupExtractionRateBelow(group, target) => Some(ExitProgress {
+            current: status.get_group_status(*group).and_then(|g| g.extraction_rate),
+            target: resolve(target, status, routine),
+            unit: ParameterUnit::ExtractionRate,
+        }),
+
+        // The only one of the three that lives on `BrewStatus` rather than `GroupStatus`,
+        // because it only exists during a brew: it is an accumulator, and there is nothing
+        // to accumulate over when the group is idle. Outside a brew `current` is `None`,
+        // which is the honest answer -- not zero, which would read as "nothing extracted".
+        StateCondition::ExtractedSolidsAbove(group, target)
+        | StateCondition::ExtractedSolidsBelow(group, target) => Some(ExitProgress {
+            current: status
+                .get_group_status(*group)
+                .and_then(|g| g.current_brew.as_ref())
+                .and_then(|b| b.extracted_solids),
+            target: resolve(target, status, routine),
+            unit: ParameterUnit::ExtractedSolids,
+        }),
     }
 }
 
@@ -210,6 +246,7 @@ mod tests {
     /// real routine would express against it.
     fn routine_with_derived() -> Routine {
         Routine {
+            version: variegated_controller_types::ROUTINE_FORMAT_VERSION,
             routine_type: RoutineType::UserDefined,
             name: "Ratio".to_string(),
             parameters: vec![],
@@ -235,6 +272,8 @@ mod tests {
             ],
             steps: vec![],
             finally: vec![],
+            prerequisites: vec![],
+            shot_annotations: vec![],
         }
     }
 
@@ -400,9 +439,10 @@ mod tests {
 
     #[test]
     fn conditions_with_nothing_to_measure_report_nothing() {
-        // `Always`/`Never` fire without a threshold, `UserAction` waits for a person, and
-        // `Brewing` is a boolean. Returning `Some` with a fabricated target would put a
-        // meaningless progress bar on three screens.
+        // `Always`/`Never` fire without a threshold, `UserAction` waits for a person,
+        // `Brewing` is a boolean, and a shot phase is a phase rather than a level. Returning
+        // `Some` with a fabricated target would put a meaningless progress bar on three
+        // screens.
         let status = status_running();
 
         for condition in [
@@ -411,9 +451,87 @@ mod tests {
             RoutineExitCondition::UserAction(0),
             RoutineExitCondition::StateConditionMet(StateCondition::Brewing(0)),
             RoutineExitCondition::StateConditionMet(StateCondition::NotBrewing(0)),
+            RoutineExitCondition::StateConditionMet(StateCondition::ShotStateReached(
+                0,
+                variegated_controller_types::ShotState::Saturation,
+            )),
         ] {
             assert_eq!(exit_condition_progress(&condition, &status, None), None);
         }
+    }
+
+    #[test]
+    fn an_absent_extraction_sensor_is_absent_rather_than_zero() {
+        // The same rule as the scale, applied to the three extraction quantities. It matters
+        // more here than elsewhere: a machine with no conductivity probe reports nothing for
+        // all three, and rendering that as 0.0 would put a plausible-looking number on three
+        // displays for a sensor that does not exist.
+        let status = status_running();
+
+        for (condition, unit) in [
+            (StateCondition::GroupOutputConductivityAbove(0, ParameterValue::Static(1.2)),
+             ParameterUnit::MillisiemensPerCentimeter),
+            (StateCondition::GroupExtractionRateAbove(0, ParameterValue::Static(0.8)),
+             ParameterUnit::ExtractionRate),
+            (StateCondition::ExtractedSolidsAbove(0, ParameterValue::Static(2.0)),
+             ParameterUnit::ExtractedSolids),
+        ] {
+            let progress = exit_condition_progress(
+                &RoutineExitCondition::StateConditionMet(condition),
+                &status,
+                None,
+            )
+            .expect("extraction conditions report progress");
+
+            assert_eq!(progress.current, None, "{:?}", condition);
+            assert_eq!(progress.unit, unit);
+        }
+    }
+
+    #[test]
+    fn extracted_solids_is_only_measurable_during_a_brew() {
+        // It lives on `BrewStatus`, not `GroupStatus`, because it is an accumulator over a
+        // brew. A group that is not brewing has no value -- not a stale one, and not zero.
+        let mut status = status_running();
+        let mut group = GroupStatus::default();
+        group.output_electrical_conductivity = Some(1.4);
+        group.extraction_rate = Some(0.7);
+        group.current_brew = None;
+        let _ = status.group_statuses.insert(0, group);
+
+        let solids = exit_condition_progress(
+            &RoutineExitCondition::StateConditionMet(StateCondition::ExtractedSolidsAbove(
+                0,
+                ParameterValue::Static(2.0),
+            )),
+            &status,
+            None,
+        )
+        .expect("the target is still reportable");
+        assert_eq!(solids.current, None, "no brew, no accumulator");
+
+        // The two that live on the group itself are readable whether or not a brew is
+        // running, which is what makes them usable as a *start* condition.
+        let ec = exit_condition_progress(
+            &RoutineExitCondition::StateConditionMet(
+                StateCondition::GroupOutputConductivityAbove(0, ParameterValue::Static(1.2)),
+            ),
+            &status,
+            None,
+        )
+        .expect("conductivity reports progress");
+        assert_eq!(ec.current, Some(1.4));
+
+        let rate = exit_condition_progress(
+            &RoutineExitCondition::StateConditionMet(StateCondition::GroupExtractionRateBelow(
+                0,
+                ParameterValue::Static(0.2),
+            )),
+            &status,
+            None,
+        )
+        .expect("extraction rate reports progress");
+        assert_eq!(rate.current, Some(0.7));
     }
 
     #[test]

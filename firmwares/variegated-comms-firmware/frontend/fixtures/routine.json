@@ -1,4 +1,5 @@
 {
+  "version": 5,
   "routine_type": "Cleaning",
   "name": "Fixture",
   "parameters": [
@@ -6,7 +7,8 @@
       "index": 0,
       "name": "Dose",
       "default": 18.0,
-      "unit": "Grams"
+      "unit": "Grams",
+      "linked_attribute": "DoseWeight"
     }
   ],
   "derived_parameters": [
@@ -54,6 +56,19 @@
   "finally": [
     {
       "StopBrewing": 0
+    }
+  ],
+  "prerequisites": [
+    {
+      "capability": "Weight"
+    }
+  ],
+  "shot_annotations": [
+    {
+      "key": "Beans",
+      "value": {
+        "Text": "Fixture Roasters"
+      }
     }
   ]
 }

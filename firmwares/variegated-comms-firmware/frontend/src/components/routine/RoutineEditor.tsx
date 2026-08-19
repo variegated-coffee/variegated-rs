@@ -1,8 +1,10 @@
 import { useState } from 'preact/hooks';
-import { Routine, RoutineParameter, DerivedParameter, RoutineStep, RoutineCommand } from '../../schemas/schemas';
+import { Routine, RoutineParameter, DerivedParameter, RoutineStep, RoutineCommand, RoutinePrerequisite, ShotAnnotation } from '../../schemas/schemas';
 import { ParametersTab } from './ParametersTab';
 import { StepsTab } from './StepsTab';
 import { FinallyTab } from './FinallyTab';
+import { ContextTab } from './ContextTab';
+import { ROUTINE_FORMAT_VERSION } from '../../utils/routineHelpers';
 
 interface RoutineEditorProps {
   routine: Routine | null;
@@ -15,7 +17,7 @@ interface RoutineEditorProps {
   };
 }
 
-type TabType = 'parameters' | 'steps' | 'finally';
+type TabType = 'parameters' | 'steps' | 'finally' | 'context';
 
 export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }: RoutineEditorProps) {
   const [activeTab, setActiveTab] = useState<TabType>('parameters');
@@ -24,6 +26,8 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
   const [derivedParameters, setDerivedParameters] = useState<DerivedParameter[]>(routine?.derived_parameters || []);
   const [steps, setSteps] = useState<RoutineStep[]>(routine?.steps || []);
   const [finallyCommands, setFinallyCommands] = useState<RoutineCommand[]>(routine?.finally || []);
+  const [prerequisites, setPrerequisites] = useState<RoutinePrerequisite[]>(routine?.prerequisites || []);
+  const [shotAnnotations, setShotAnnotations] = useState<ShotAnnotation[]>(routine?.shot_annotations || []);
 
   const handleSave = () => {
     if (!name.trim()) {
@@ -37,12 +41,18 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
     }
 
     void onSave({
+      // Always the version this bundle was built against, never the one the routine was
+      // loaded with. Saving is a write in the current format; carrying an older number
+      // forward would be claiming the machine can read something it has just refused.
+      version: ROUTINE_FORMAT_VERSION,
       routine_type: routine?.routine_type || { type: 'UserDefined' },
       name: name.trim(),
       parameters,
       derived_parameters: derivedParameters,
       steps,
-      finally: finallyCommands
+      finally: finallyCommands,
+      prerequisites,
+      shot_annotations: shotAnnotations
     });
   };
 
@@ -157,6 +167,9 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
           <button onClick={() => setActiveTab('finally')} style={getTabStyle('finally')}>
             Finally ({finallyCommands.length})
           </button>
+          <button onClick={() => setActiveTab('context')} style={getTabStyle('context')}>
+            Context ({prerequisites.length + shotAnnotations.length})
+          </button>
         </div>
 
         {/* Tab Content */}
@@ -183,6 +196,15 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
               onFinallyCommandsChange={setFinallyCommands}
               parameters={parameters}
               derivedParameters={derivedParameters}
+            />
+          )}
+          {activeTab === 'context' && (
+            <ContextTab
+              prerequisites={prerequisites}
+              shotAnnotations={shotAnnotations}
+              parameters={parameters}
+              onPrerequisitesChange={setPrerequisites}
+              onShotAnnotationsChange={setShotAnnotations}
             />
           )}
         </div>

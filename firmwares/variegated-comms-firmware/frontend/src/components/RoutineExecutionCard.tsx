@@ -228,6 +228,58 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
           currentVal = (groupStatus?.output_weight ?? 0).toFixed(1);
           targetVal = value.toFixed(1);
           unit = 'g';
+        } else if (stateCondition.type === 'GroupOutputConductivityAbove' || stateCondition.type === 'GroupOutputConductivityBelow') {
+          const [groupIdx, targetValue] = stateCondition.value;
+          const value = targetValue.type === 'Static' ? targetValue.value : 0;
+          const groupKey = Array.from(status.group_statuses.keys())[groupIdx];
+          const groupStatus = status.group_statuses.get(groupKey);
+          label = exit.description || 'Conductivity';
+          currentVal = (groupStatus?.output_electrical_conductivity ?? 0).toFixed(2);
+          targetVal = value.toFixed(2);
+          unit = 'mS/cm';
+        } else if (stateCondition.type === 'GroupExtractionRateAbove' || stateCondition.type === 'GroupExtractionRateBelow') {
+          const [groupIdx, targetValue] = stateCondition.value;
+          const value = targetValue.type === 'Static' ? targetValue.value : 0;
+          const groupKey = Array.from(status.group_statuses.keys())[groupIdx];
+          const groupStatus = status.group_statuses.get(groupKey);
+          label = exit.description || 'Extraction Rate';
+          currentVal = (groupStatus?.extraction_rate ?? 0).toFixed(2);
+          targetVal = value.toFixed(2);
+          unit = 'mS·mL/cm·s';
+        } else if (stateCondition.type === 'ExtractedSolidsAbove' || stateCondition.type === 'ExtractedSolidsBelow') {
+          const [groupIdx, targetValue] = stateCondition.value;
+          const value = targetValue.type === 'Static' ? targetValue.value : 0;
+          const groupKey = Array.from(status.group_statuses.keys())[groupIdx];
+          const groupStatus = status.group_statuses.get(groupKey);
+          label = exit.description || 'Extracted Solids';
+          // From `current_brew`, matching what the controller evaluates: extracted solids is
+          // an accumulator over a brew and does not exist outside one.
+          currentVal = (groupStatus?.current_brew?.extracted_solids ?? 0).toFixed(2);
+          targetVal = value.toFixed(2);
+          unit = 'mS·mL/cm';
+        } else if (stateCondition.type === 'ShotStateReached') {
+          const [groupIdx, phase] = stateCondition.value;
+          const groupKey = Array.from(status.group_statuses.keys())[groupIdx];
+          const groupStatus = status.group_statuses.get(groupKey);
+          const current = groupStatus?.current_brew?.shot_state;
+          const wanted =
+            phase.type === 'Saturation' ? 'Puck saturated'
+            : phase.type === 'PostFirstDrop' ? 'First drop'
+            : 'Headspace fill';
+          // A phase, so there is no bar to fill. Shows what it is waiting for and where the
+          // shot actually is -- "not brewing" when there is no shot, which is the honest
+          // rendering of a condition that cannot be met outside one.
+          const reached =
+            current == null ? 'not brewing'
+            : current.type === 'HeadspaceFill' ? 'filling headspace'
+            : current.type === 'Saturation' ? 'saturating'
+            : 'extracting';
+          return (
+            <div key={idx} style={{ fontSize: '0.9rem', color: '#155724' }}>
+              {exit.description || wanted}:{' '}
+              <span style={{ fontWeight: '600' }}>{reached}</span>
+            </div>
+          );
         } else if (stateCondition.type === 'Brewing' || stateCondition.type === 'NotBrewing') {
           const groupIdx = stateCondition.value;
           const groupKey = Array.from(status.group_statuses.keys())[groupIdx];

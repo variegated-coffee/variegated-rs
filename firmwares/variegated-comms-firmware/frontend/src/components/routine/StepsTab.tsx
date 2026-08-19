@@ -4,6 +4,7 @@ import { StepEditor } from './StepEditor';
 import { getRoutineCommandSummary } from './RoutineCommandSummary';
 import { useMachine } from '../../contexts/MachineContext';
 import { formatExitConditionsSummary } from '../../utils/exitConditionFormatter';
+import { transitionWarnings } from '../../utils/transitionWarnings';
 
 interface StepsTabProps {
   steps: RoutineStep[];
@@ -16,6 +17,15 @@ export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }
   const machine = useMachine();
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [isAdding, setIsAdding] = useState(false);
+
+  // Recomputed on every render rather than memoised: routines are a handful of steps, and a
+  // stale warning about a step the user just edited is worse than the work saved.
+  const warningsByStep = new Map<number, string[]>();
+  for (const warning of transitionWarnings(steps)) {
+    const existing = warningsByStep.get(warning.step) ?? [];
+    existing.push(warning.message);
+    warningsByStep.set(warning.step, existing);
+  }
 
   const handleSaveStep = (step: RoutineStep) => {
     if (editingIndex !== null) {
@@ -97,6 +107,27 @@ export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }
                     Step {index}
                     {step.description && <span style={{ color: '#666', fontWeight: 'normal' }}>: {step.description}</span>}
                   </div>
+
+                  {/* A transition whose starting point depends on how the step was entered.
+                      Advisory rather than blocking: the firmware has defined behaviour for
+                      it, and it is occasionally exactly what was meant. See
+                      `utils/transitionWarnings`. */}
+                  {(warningsByStep.get(index) ?? []).map((message, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        fontSize: '0.85rem',
+                        color: '#8a6d00',
+                        backgroundColor: '#fff8e1',
+                        border: '1px solid #ffe082',
+                        borderRadius: '3px',
+                        padding: '0.4rem 0.6rem',
+                        marginBottom: '0.5rem',
+                      }}
+                    >
+                      ⚠ {message}
+                    </div>
+                  ))}
 
                   {step.entry_command.length > 0 && (
                     <div style={{ fontSize: '0.85rem', color: '#444', marginBottom: '0.25rem' }}>

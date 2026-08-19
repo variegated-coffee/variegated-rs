@@ -411,12 +411,15 @@ mod tests {
         // named in the codec's own docs as the variant with no finite bound.
         let command = |name_len: usize| {
             DebugCommand::Machine(MachineCommand::AddRoutine(Routine {
+                version: variegated_controller_types::ROUTINE_FORMAT_VERSION,
                 routine_type: RoutineType::UserDefined,
                 name: std::iter::repeat('A').take(name_len).collect(),
                 parameters: std::vec::Vec::new(),
                 derived_parameters: std::vec::Vec::new(),
                 steps: std::vec::Vec::new(),
                 finally: std::vec::Vec::new(),
+                prerequisites: std::vec::Vec::new(),
+                shot_annotations: std::vec::Vec::new(),
             }))
         };
 

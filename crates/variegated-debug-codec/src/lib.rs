@@ -1948,6 +1948,15 @@ mod tests {
                             stopped_at_millis: u64::MAX,
                         }),
                         pump_rpm: Some(f32::MAX),
+                        // Maximal like everything else here: `Some` is the wider encoding,
+                        // and a non-first mode discriminant so a decoder that ignored the
+                        // field could not pass by accident.
+                        brew_control_target: Some(
+                            variegated_controller_types::BrewControlTarget {
+                                mode: variegated_controller_types::GroupBrewControlMode::PressureCurve,
+                                value: f32::MAX,
+                            },
+                        ),
                     },
                 )
                 .unwrap();
@@ -1998,6 +2007,13 @@ mod tests {
             // Maximal, like everything else in this fixture: this is the widest varint a
             // `u32` can encode, so the frame it produces is the largest one possible.
             sntp_sync_seq: u32::MAX,
+            // Maximal too: a full-length SSID is the largest this field can encode, and
+            // it is the one that decides whether the widest possible frame still fits.
+            wifi_ssid: heapless::String::try_from(
+                "s".repeat(variegated_controller_types::wifi::WIFI_SSID_LEN).as_str(),
+            )
+            .unwrap(),
+            wifi_ip: Some([255, 255, 255, 255]),
         });
 
         for i in 0..MAX_PERIPHERALS as u16 {

@@ -29,15 +29,22 @@
 
 extern crate alloc;
 
+mod brew;
 mod format;
 mod listing;
 mod parameters;
+mod rows;
 mod temperature;
 
+pub use brew::{
+    brew_mode_label, brew_target, duty_cycle_from_editor, next_brew_mode, OFFERED_BREW_MODES,
+};
 pub use format::{format_value, UnitStyle, VALUE_TEXT_LEN};
 pub use listing::{RoutineRow, RoutineRows, MAX_MENU_ROUTINES, ROUTINE_NAME_LEN, routine_rows};
 pub use parameters::{
     parameter_adjustable, parameter_bounds, parameter_geometry, parameter_row,
     ParameterListChrome, ParameterRow, ParameterValues, MAX_ROUTINE_PARAMETERS,
 };
+pub use rows::{drawable, editor_rows, info_rows, list_rows, push_drawable, COLUMNS};
 pub use temperature::{boiler_temperature_adjustable, BOILER_TEMPERATURE_STEP};
+

@@ -51,6 +51,26 @@ pub struct CommsStatus {
     /// **Appended, not inserted.** postcard is positional and this type crosses the UART
     /// between two separately-flashed binaries.
     pub sntp_sync_seq: u32,
+    /// The network the station is associated with, or empty when it is not.
+    ///
+    /// This is the SSID the station was *configured* with, mirrored from
+    /// `wifi::apply_configuration`, not one read back from the driver -- so it is only
+    /// meaningful while [`Self::wifi_connected`]. The comms processor clears it rather than
+    /// letting it stand, because a name left behind after a disconnect claims a connection
+    /// that does not exist, and this is displayed on a panel with no other way to say
+    /// "not this one".
+    ///
+    /// **Appended, not inserted**, for the reason [`Self::sntp_sync_seq`] gives.
+    pub wifi_ssid: heapless::String<{ crate::wifi::WIFI_SSID_LEN }>,
+    /// The DHCP address, or `None` before the lease is granted and again once it is lost.
+    ///
+    /// `[u8; 4]` rather than an address type because nothing in this crate has one, and
+    /// [`crate::debug::CommsState::wifi_ip`] already made exactly this choice for exactly
+    /// this value. `None` rather than `0.0.0.0`: that address means "this host on this
+    /// network" and would render as a plausible-looking lie.
+    ///
+    /// **Appended, not inserted.**
+    pub wifi_ip: Option<[u8; 4]>,
 }
 
 #[cfg(feature = "defmt")]
@@ -58,11 +78,13 @@ impl defmt::Format for CommsStatus {
     fn format(&self, f: defmt::Formatter) {
         defmt::write!(
             f,
-            "CommsStatus {{ timestamp: {:?}, sntp_sync_seq: {}, wifi_connected: {}, wifi_rssi: {:?}, improv: {:?}, peripherals: {} }}",
+            "CommsStatus {{ timestamp: {:?}, sntp_sync_seq: {}, wifi_connected: {}, wifi_rssi: {:?}, wifi_ssid: {}, wifi_ip: {:?}, improv: {:?}, peripherals: {} }}",
             self.timestamp,
             self.sntp_sync_seq,
             self.wifi_connected,
             self.wifi_rssi,
+            self.wifi_ssid.as_str(),
+            self.wifi_ip,
             self.improv,
             Debug2Format(&self.peripheral_connection_status),
         )

@@ -331,6 +331,16 @@ async fn comms_status_signaller_task(
             // It anchors its clock when this changes and ignores the timestamp the rest of
             // the time, so the RTC's own drift between syncs stays on this processor.
             sntp_sync_seq: SNTP_SYNC_SEQ.load(Ordering::Relaxed),
+            // Mirrored from `wifi::apply_configuration`, and empty whenever the link is
+            // down -- see `channels::wifi_ssid`.
+            wifi_ssid: variegated_comms_firmware::channels::wifi_ssid(),
+            // The same lease the `WIFI_IPV4` store above just refreshed, so the two cannot
+            // disagree within a cycle. `None` rather than `0.0.0.0`, which is what
+            // `NO_IPV4` means and never a real interface address.
+            wifi_ip: match WIFI_IPV4.load(Ordering::Relaxed) {
+                NO_IPV4 => None,
+                bits => Some(bits.to_be_bytes()),
+            },
         };
         COMMS_STATUS_SIGNAL.signal(comms_status);
         Timer::after(Duration::from_secs(1)).await;

@@ -1,5 +1,5 @@
 import { useState } from 'preact/hooks';
-import { RoutineCommand, ParameterValue, RoutineParameter, DerivedParameter, ParameterUnit } from '../../schemas/schemas';
+import { RoutineCommand, ParameterValue, RoutineParameter, DerivedParameter, ParameterUnit, TransitionOrigin } from '../../schemas/schemas';
 import { ParameterValueEditor } from './ParameterValueEditor';
 import { EntitySelector, EntityType } from '../EntitySelector';
 
@@ -41,13 +41,94 @@ function getCommandType(command: RoutineCommand): CommandType {
   return command.type as CommandType;
 }
 
+/** Whether `v` is a tagged variant with one of the given tags. */
+function hasTag<T extends string>(v: unknown, tags: readonly T[]): v is { type: T } {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    tags.includes((v as { type?: unknown }).type as T)
+  );
+}
+
+// Enumerated rather than "anything with a `type`", because the hazard being guarded against
+// is reading one of these *as the other* if a payload's positions ever shift. A tag outside
+// the set falls back to the default, which is the safe direction -- but it does mean a new
+// variant must be added here or it will not load back into the editor.
+const PARAMETER_VALUE_TAGS = ['Static', 'Parameter', 'DerivedParameter'] as const;
+const TRANSITION_ORIGIN_TAGS = ['Value', 'CurrentTarget', 'CurrentValue'] as const;
+
+/**
+ * What an existing command was carrying, for the editor to open on.
+ *
+ * **This is the whole of the bug it was written for.** The `command` prop was read for
+ * exactly two things -- which type to select, and whether the dialog says "Edit" or "Add" --
+ * so every field reverted to its default the moment a saved command was reopened. A
+ * transition saved at 9 bar over 5 seconds came back as 0 bar over 1 second, and pressing
+ * save wrote those numbers back over the real ones. Every value-carrying command was
+ * affected; a transition is simply where it is most visible, having three fields to lose.
+ *
+ * Read positionally rather than by a per-variant switch, mirroring `handleSave` in reverse.
+ * Every command this builder offers is either a bare index or `[index, value, time?,
+ * origin?]`, so one path serves all of them -- and a switch would be twenty branches that
+ * have to stay in step with the twenty that write them.
+ */
+export function fieldsOf(command: RoutineCommand | null): {
+  index: number;
+  value: ParameterValue;
+  transitionTime: ParameterValue;
+  origin: TransitionOrigin;
+} {
+  const defaults = {
+    index: 0,
+    value: { type: 'Static', value: 0 } as ParameterValue,
+    transitionTime: { type: 'Static', value: 1 } as ParameterValue,
+    // See the note on the state below for why the default is the target.
+    origin: { type: 'CurrentTarget' } as TransitionOrigin,
+  };
+
+  if (!command || !('value' in command)) return defaults;
+
+  const payload = (command as { value: unknown }).value;
+  // A command that carries nothing but which boiler or group it acts on.
+  if (typeof payload === 'number') return { ...defaults, index: payload };
+  if (!Array.isArray(payload)) return defaults;
+
+  const [index, value, time, origin] = payload as unknown[];
+  return {
+    index: typeof index === 'number' ? index : defaults.index,
+    value: hasTag(value, PARAMETER_VALUE_TAGS) ? (value as ParameterValue) : defaults.value,
+    transitionTime: hasTag(time, PARAMETER_VALUE_TAGS)
+      ? (time as ParameterValue)
+      : defaults.transitionTime,
+    origin: hasTag(origin, TRANSITION_ORIGIN_TAGS)
+      ? (origin as TransitionOrigin)
+      : defaults.origin,
+  };
+}
+
 export function RoutineCommandBuilder({ command, onSave, onCancel, parameters, derivedParameters }: RoutineCommandBuilderProps) {
   const [commandType, setCommandType] = useState<CommandType>(
     command ? getCommandType(command) : 'StartBrewing'
   );
-  const [index, setIndex] = useState<number>(0);
-  const [value, setValue] = useState<ParameterValue>({ type: 'Static', value: 0 });
-  const [transitionTime, setTransitionTime] = useState<ParameterValue>({ type: 'Static', value: 1 });
+  // Seeded from the command being edited rather than from fixed defaults -- see `fieldsOf`.
+  const initial = fieldsOf(command);
+  const [index, setIndex] = useState<number>(initial.index);
+  const [value, setValue] = useState<ParameterValue>(initial.value);
+  const [transitionTime, setTransitionTime] = useState<ParameterValue>(initial.transitionTime);
+  // Where the ramp starts. `CurrentTarget` for a new command, deliberately: it means
+  // "continue from wherever the last ramp left the setpoint", which is what a transition
+  // almost always means. The old implicit behaviour was `CurrentValue` -- anchoring to the
+  // *measurement* -- which turned a "decline to 4 bar over 30 s" into a flat line on a real
+  // machine, because pressure had only reached 3.995 bar by the time the command ran.
+  const [transitionOrigin, setTransitionOrigin] = useState<TransitionOrigin>(initial.origin);
+  // Only `Value` carries a payload; the other two are unit variants. Seeded from the origin
+  // when it is one, so reopening a transition that started from an explicit 6 bar shows 6
+  // rather than the placeholder.
+  const [originValue, setOriginValue] = useState<ParameterValue>(
+    initial.origin.type === 'Value' ? initial.origin.value : { type: 'Static', value: 0 }
+  );
+  const origin: TransitionOrigin =
+    transitionOrigin.type === 'Value' ? { type: 'Value', value: originValue } : transitionOrigin;
 
   const handleSave = () => {
     let cmd: RoutineCommand;
@@ -105,16 +186,16 @@ export function RoutineCommandBuilder({ command, onSave, onCancel, parameters, d
         cmd = { type: 'SetBoilerOff', value: index };
         break;
       case 'SetGroupFlowRateWithTransition':
-        cmd = { type: 'SetGroupFlowRateWithTransition', value: [index, value, transitionTime] };
+        cmd = { type: 'SetGroupFlowRateWithTransition', value: [index, value, transitionTime, origin] };
         break;
       case 'SetGroupPressureWithTransition':
-        cmd = { type: 'SetGroupPressureWithTransition', value: [index, value, transitionTime] };
+        cmd = { type: 'SetGroupPressureWithTransition', value: [index, value, transitionTime, origin] };
         break;
       case 'SetGroupOutputFlowRateWithTransition':
-        cmd = { type: 'SetGroupOutputFlowRateWithTransition', value: [index, value, transitionTime] };
+        cmd = { type: 'SetGroupOutputFlowRateWithTransition', value: [index, value, transitionTime, origin] };
         break;
       case 'SetGroupFixedDutyCycleWithTransition':
-        cmd = { type: 'SetGroupFixedDutyCycleWithTransition', value: [index, value, transitionTime] };
+        cmd = { type: 'SetGroupFixedDutyCycleWithTransition', value: [index, value, transitionTime, origin] };
         break;
       case 'InferGroupPressureIntegral':
         cmd = { type: 'InferGroupPressureIntegral', value: [index, value] };
@@ -283,6 +364,50 @@ export function RoutineCommandBuilder({ command, onSave, onCancel, parameters, d
             parameters={parameters}
             derivedParameters={derivedParameters}
           />
+        )}
+
+        {/* Where the ramp starts. See the note on `transitionOrigin` above for why this is
+            a choice rather than an assumption, and why the default is the target. */}
+        {needsTransition && (
+          <div style={{ marginBottom: '1rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.25rem' }}>Transition From</label>
+            <select
+              value={transitionOrigin.type}
+              onChange={(e) => {
+                const type = (e.target as HTMLSelectElement).value as TransitionOrigin['type'];
+                setTransitionOrigin(
+                  type === 'Value' ? { type: 'Value', value: originValue } : { type },
+                );
+              }}
+              style={{ width: '100%', padding: '0.5rem' }}
+            >
+              <option value="CurrentTarget">Current target &mdash; continue from the last ramp</option>
+              <option value="CurrentValue">Current value &mdash; resync to what the machine measures</option>
+              <option value="Value">A specific value</option>
+            </select>
+            <div style={{ fontSize: '0.85em', opacity: 0.75, marginTop: '0.25rem' }}>
+              {transitionOrigin.type === 'CurrentTarget'
+                ? 'Starts where the previous step left the setpoint. Usually what you want.'
+                : transitionOrigin.type === 'CurrentValue'
+                ? 'Starts at the measured reading. If the machine is lagging behind its setpoint, a declining transition can end up ramping upward.'
+                : 'Starts at a value you name, whatever the machine is doing.'}
+            </div>
+            {transitionOrigin.type === 'Value' && (
+              <div style={{ marginTop: '0.5rem' }}>
+                <ParameterValueEditor
+                  value={originValue}
+                  onChange={(v) => {
+                    setOriginValue(v);
+                    setTransitionOrigin({ type: 'Value', value: v });
+                  }}
+                  label="Start From"
+                  unit={getValueUnit()}
+                  parameters={parameters}
+                  derivedParameters={derivedParameters}
+                />
+              </div>
+            )}
+          </div>
         )}
 
         {/* Action Buttons */}

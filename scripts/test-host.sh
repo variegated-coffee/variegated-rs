@@ -57,10 +57,14 @@ run "variegated-debug-codec" -p variegated-debug-codec "$@"
 # The menu navigation model, shared by both firmwares. No `--no-default-features` needed:
 # this crate's `defmt` is opt-in precisely so that a plain `cargo test` links.
 run "variegated-menu" -p variegated-menu "$@"
-# The layer above it: routine listing and ordering, parameter edit state, per-unit ranges
-# and value formatting. Same opt-in `defmt`, and it depends on
-# `variegated-controller-types` with `default-features = false` for that reason -- that
-# crate's default set turns defmt on unconditionally.
+# The layer above it: routine listing and ordering, parameter edit state, per-unit ranges,
+# value formatting, brew-mode/target selection and the 2x16 row layout. Same opt-in `defmt`,
+# and it depends on `variegated-controller-types` with `default-features = false` for that
+# reason -- that crate's default set turns defmt on unconditionally.
+#
+# The row-layout and brew-target suites are here rather than beside the renderer that uses
+# them because neither firmware crate can host a test binary: both set `test = false` and
+# depend on `embassy-rp`. Moving that arithmetic into this crate is what made it checkable.
 run "variegated-machine-menu" -p variegated-machine-menu "$@"
 # Press/chord/hold recognition from raw button samples. Same opt-in `defmt` as
 # `variegated-menu`, and host-testable for the same reason: it takes milliseconds as a

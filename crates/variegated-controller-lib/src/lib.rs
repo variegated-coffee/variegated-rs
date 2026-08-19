@@ -25,6 +25,9 @@
 
 pub mod flash;
 pub mod routine;
+pub mod routine_annotations;
+pub mod routine_prerequisites;
+pub mod scale_calibration;
 pub mod routine_progress;
 pub mod settings;
 // Ungated, unlike the controller below: the mode table is pure and its interesting property

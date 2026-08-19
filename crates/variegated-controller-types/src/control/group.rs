@@ -139,3 +139,67 @@ pub enum ShotState {
     /// Final phase: first drops detected on scale, extraction underway
     PostFirstDrop,
 }
+
+impl ShotState {
+    /// How far through a shot this phase is.
+    ///
+    /// Declaration order is the physical order, and nothing skips backwards within a shot.
+    pub fn rank(self) -> u8 {
+        match self {
+            ShotState::HeadspaceFill => 0,
+            ShotState::Saturation => 1,
+            ShotState::PostFirstDrop => 2,
+        }
+    }
+
+    /// Whether the shot has got at least as far as `phase`.
+    ///
+    /// **At least as far, not equal to**, and that is the whole reason this exists rather
+    /// than callers writing `==`. A routine step waiting for saturation is asking "has the
+    /// puck wetted through", not "is the machine in that exact phase this instant" -- and
+    /// the phases are transient. `PostFirstDrop` can arrive in the same 400 ms evaluation
+    /// window that `Saturation` did on a fast, coarse shot, and a step comparing for
+    /// equality would then wait forever for a phase the machine has already left.
+    pub fn reached(self, phase: ShotState) -> bool {
+        self.rank() >= phase.rank()
+    }
+}
+
+#[cfg(test)]
+mod shot_state_tests {
+    use super::*;
+
+    #[test]
+    fn a_later_phase_has_reached_an_earlier_one() {
+        // The property a routine step depends on. Once the first drop has landed the puck is
+        // certainly saturated, so a step waiting on saturation must fire even though the
+        // machine has already moved past it -- both phases can be crossed inside one 400 ms
+        // evaluation window on a fast shot, and `==` would hang there forever.
+        assert!(ShotState::PostFirstDrop.reached(ShotState::Saturation));
+        assert!(ShotState::PostFirstDrop.reached(ShotState::HeadspaceFill));
+        assert!(ShotState::Saturation.reached(ShotState::HeadspaceFill));
+    }
+
+    #[test]
+    fn an_earlier_phase_has_not_reached_a_later_one() {
+        assert!(!ShotState::HeadspaceFill.reached(ShotState::Saturation));
+        assert!(!ShotState::Saturation.reached(ShotState::PostFirstDrop));
+    }
+
+    #[test]
+    fn a_phase_has_reached_itself() {
+        for phase in [ShotState::HeadspaceFill, ShotState::Saturation, ShotState::PostFirstDrop] {
+            assert!(phase.reached(phase));
+        }
+    }
+
+    #[test]
+    fn rank_follows_declaration_order() {
+        // The ranks are what `reached` compares, and declaration order is the physical order
+        // of a shot. A variant inserted rather than appended would renumber the postcard
+        // discriminants *and* silently reorder these, so this pins both at once.
+        assert_eq!(ShotState::HeadspaceFill.rank(), 0);
+        assert_eq!(ShotState::Saturation.rank(), 1);
+        assert_eq!(ShotState::PostFirstDrop.rank(), 2);
+    }
+}
