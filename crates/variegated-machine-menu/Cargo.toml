@@ -1,0 +1,24 @@
+[package]
+name = "variegated-machine-menu"
+version = "0.1.0"
+edition = "2024"
+description = "The routine-listing, parameter-editing and value-formatting model both espresso firmwares' menus are built on"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Opt-in, not default, for the reason `variegated-menu` gives: a `Format` impl
+# monomorphized on a host has no `_defmt_acquire` to link against, and the failure reads
+# "Too many sections!". A crate whose whole point is that it can be host-tested must not
+# turn defmt on by itself.
+defmt = { workspace = true, optional = true }
+heapless.workspace = true
+
+# `default-features = false` is not optional. This crate's default set pulls defmt in
+# unconditionally, which would defeat the opt-in above. `double_boiler`/`single_group` are
+# pure marker features that gate nothing in that crate, so dropping them costs nothing.
+variegated-controller-types = { version = "0.1.0", path = "../variegated-controller-types", default-features = false }
+variegated-menu = { version = "0.1.0", path = "../variegated-menu" }
+
+[features]
+default = []
+defmt = ["dep:defmt", "variegated-controller-types/defmt", "variegated-menu/defmt", "heapless/defmt"]

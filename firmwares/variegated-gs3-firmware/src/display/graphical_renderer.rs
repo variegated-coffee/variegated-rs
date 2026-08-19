@@ -28,7 +28,8 @@ use variegated_controller_types::{BoilerControlMode, DualBoilerSingleGroupContro
 use variegated_controller_types::wifi::ImprovState;
 use variegated_instrumentation::instrumented_section;
 use crate::display_state::{DisplayState, DisplayMode};
-use crate::menu::{self, MenuContext};
+use crate::menu::{self, MenuContext, MenuId, MenuValue, MENU_VISIBLE_ROWS};
+use variegated_machine_menu::UnitStyle;
 #[cfg(any(feature = "gravity", feature = "bluetooth-group-1-scale"))]
 use crate::GROUP_SCALE_PERIPHERAL_ID;
 #[cfg(feature = "belka")]
@@ -240,19 +241,32 @@ impl GraphicalDisplayState {
         const MENU_FIRST_ROW_Y: i32 = EFFECTIVE_Y + 21;
         const MENU_SEPARATOR_Y: i32 = EFFECTIVE_Y + 17;
         const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 16;
+        /// The scrollbar's column, reserved down the right-hand edge.
+        ///
+        /// The selected-row highlight stops short of it. Both are white, and the thumb is
+        /// drawn after the rows, so a full-width highlight would paint the thumb out on
+        /// exactly the row the user is looking at.
+        const MENU_TRACK_WIDTH: i32 = 3;
+        const MENU_TRACK_HEIGHT: u32 = (MENU_ROW_HEIGHT * MENU_VISIBLE_ROWS as i32) as u32;
 
         let Some(frame) = self.shared_state.menu.stack.top() else { return Ok(()) };
+        let data = self.shared_state.menu_data();
 
         let font = FontRenderer::new::<u8g2_font_helvB12_tr>();
 
         font.render_aligned(
-            format_args!("Menu"),
+            format_args!("{}", menu::title(frame.id, &data)),
             Point::new(EFFECTIVE_X + 4, EFFECTIVE_Y + 1),
             VerticalPosition::Top,
             HorizontalAlignment::Left,
             FontColor::Transparent(Rgb565::WHITE),
             display
         ).ok();
+
+        // An editor frame has no rows: one big value, and buttons that move it.
+        if frame.id.is_editor() {
+            return self.render_menu_editor(display, frame.id, &data, &font);
+        }
 
         Line::new(
             Point::new(EFFECTIVE_X, MENU_SEPARATOR_Y),
@@ -264,21 +278,28 @@ impl GraphicalDisplayState {
             .build())
         .draw(display).ok();
 
-        let geo = menu::geometry(frame.id);
-        let all = menu::items(frame.id);
+        let geo = menu::geometry(frame.id, &data);
+        // The renderer resolves the value column itself, per frame, from live `Status`. That
+        // is what lets Wi-Fi Setup read OFF -> ON about a second after activation with no
+        // button pressed in between. `brew_max` is the button task's, and only bounds the
+        // editor, so `None` here costs nothing the value column shows.
         let ctx = MenuContext::from_status(
             &self.shared_state.status,
             self.shared_state.menu.wifi_pending,
+            None,
         );
 
-        for (screen_row, row) in frame.nav.visible_range(geo).enumerate() {
-            let Some(item) = all.get(row) else { continue };
+        for (screen_row, index) in frame.nav.visible_range(geo).enumerate() {
+            let Some(row) = menu::row(frame.id, index, &data) else { continue };
             let row_y = MENU_FIRST_ROW_Y + screen_row as i32 * MENU_ROW_HEIGHT;
 
-            let text_color = if row == frame.nav.selected() {
+            let text_color = if index == frame.nav.selected() {
                 Rectangle::new(
                     Point::new(EFFECTIVE_X, row_y),
-                    Size::new(EFFECTIVE_WIDTH as u32, MENU_ROW_HEIGHT as u32),
+                    Size::new(
+                        (EFFECTIVE_WIDTH - MENU_TRACK_WIDTH) as u32,
+                        MENU_ROW_HEIGHT as u32,
+                    ),
                 )
                 .into_styled(PrimitiveStyleBuilder::new().fill_color(Rgb565::WHITE).build())
                 .draw(display).ok();
@@ -289,7 +310,7 @@ impl GraphicalDisplayState {
             };
 
             font.render_aligned(
-                format_args!("{}", item.label),
+                format_args!("{}", menu::label(&row)),
                 Point::new(EFFECTIVE_X + 6, row_y + 2),
                 VerticalPosition::Top,
                 HorizontalAlignment::Left,
@@ -297,9 +318,11 @@ impl GraphicalDisplayState {
                 display
             ).ok();
 
-            if let Some(value) = menu::value_text(item, &ctx) {
+            // `Ascii`: this panel has room for a unit but not for a degree sign. See the note
+            // on the hint row below -- a glyph outside 32..127 loses the whole string.
+            if let Some(value) = menu::value(&row, &ctx) {
                 font.render_aligned(
-                    format_args!("{}", value),
+                    format_args!("{}", value.text(UnitStyle::Ascii)),
                     Point::new(EFFECTIVE_X + EFFECTIVE_WIDTH - 6, row_y + 2),
                     VerticalPosition::Top,
                     HorizontalAlignment::Right,
@@ -307,6 +330,22 @@ impl GraphicalDisplayState {
                     display
                 ).ok();
             }
+        }
+
+        // A scrollbar, in the reserved column, only when the list does not fit: `ListNav::thumb`
+        // answers `None` in that case, so the two static menus never draw one and the routines
+        // list -- the first menu here that can exceed four rows -- does. Without it nothing on
+        // screen says a fifth routine exists.
+        if let Some((thumb_y, thumb_height)) = frame.nav.thumb(geo, MENU_TRACK_HEIGHT) {
+            Rectangle::new(
+                Point::new(
+                    EFFECTIVE_X + EFFECTIVE_WIDTH - MENU_TRACK_WIDTH,
+                    MENU_FIRST_ROW_Y + thumb_y as i32,
+                ),
+                Size::new(MENU_TRACK_WIDTH as u32, thumb_height),
+            )
+            .into_styled(PrimitiveStyleBuilder::new().fill_color(Rgb565::WHITE).build())
+            .draw(display).ok();
         }
 
         // ASCII, not arrows, and this is a correctness matter rather than a style one. Every font
@@ -317,7 +356,58 @@ impl GraphicalDisplayState {
         // user actually needs: these buttons are numbered and unlabelled, and an arrow says which
         // way the selection moves but not which finger moves it.
         font.render_aligned(
-            format_args!("1 Down   2 Up   3 Select   4 Back"),
+            format_args!("1 Up   2 Down   3 Select   4 Back"),
+            Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
+
+        Ok(())
+    }
+
+    /// An editor frame: the value being dialled, and what the buttons do to it.
+    ///
+    /// The title is already drawn by the caller and names the quantity, so this draws only the
+    /// number. Buttons 1 and 2 keep meaning "previous / next value" -- the same thing they
+    /// mean in a list -- and 3 and 4 change from Select/Back to Confirm/Cancel, because on
+    /// this screen leaving without confirming is a real choice rather than the only one.
+    fn render_menu_editor<D>(
+        &self,
+        display: &mut D,
+        menu: MenuId,
+        data: &menu::MenuData<'_>,
+        font: &FontRenderer,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 16;
+
+        // Nothing to edit means the frame was pushed without a value, which the button task
+        // does not do. Draw the hints anyway rather than an empty screen.
+        if let Some(editor) = self.shared_state.menu.editor {
+            let value = MenuValue::Number {
+                value: editor.value(),
+                unit: menu::editor_unit(menu, data),
+            };
+            let large = FontRenderer::new::<u8g2_font_logisoso32_tr>();
+            large.render_aligned(
+                format_args!("{}", value.text(UnitStyle::Ascii)),
+                Point::new(EFFECTIVE_CENTER_X, EFFECTIVE_CENTER_Y - 16),
+                VerticalPosition::Top,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(Rgb565::WHITE),
+                display
+            ).ok();
+        }
+
+        font.render_aligned(
+            // "Less"/"More" rather than the list's "Up"/"Down": buttons 1 and 2 are the panel's
+            // `-` and `+` on both screens, and reusing a vertical word for a number would
+            // suggest the mapping had changed when it has not.
+            format_args!("1 Less   2 More   3 Confirm   4 Cancel"),
             Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
             VerticalPosition::Top,
             HorizontalAlignment::Center,

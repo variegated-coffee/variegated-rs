@@ -10,12 +10,16 @@ use embedded_hal_async::digital::Wait;
 use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
+use variegated_machine_menu::{
+    boiler_temperature_adjustable, parameter_bounds, parameter_geometry, parameter_row,
+    ParameterListChrome, ParameterRow, ParameterValues,
+};
 use variegated_menu::{Adjustable, ListGeometry, ListNav};
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use alloc::boxed::Box;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
-use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameters, RoutineRepository as RoutineRepositoryTrait};
+use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::single_boiler_state::{
     DEFAULT_STEAM_TARGET_TEMPERATURE, MAX_BREW_TEMPERATURE, MAX_STEAM_TEMPERATURE,
 };
@@ -161,7 +165,12 @@ pub(crate) enum UIState {
     ParameterManipulation {
         edit_state: RoutineParameterEditState,
         routine_index: RoutineIndex,
-        param_index: u8,
+        /// Position in `routine.parameters()`, **not** `RoutineParameter::index`.
+        ///
+        /// The same thing [`variegated_machine_menu::ParameterValues`] is indexed by. The two
+        /// are not interchangeable: a routine's parameter indices are not required to be
+        /// contiguous or to start at zero.
+        position: usize,
         current_value: f32,
         param_name: String,
         param_unit: Option<ParameterUnit>,
@@ -321,56 +330,49 @@ impl ManualBrewParameters {
     }
 }
 
-/// What a row of the routine parameter editor is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RowKind {
-    Back,
-    Parameter(usize),
-    Execute,
-}
+/// This panel's parameter-screen chrome: a `<-` row, five rows visible, no wrapping.
+///
+/// A rotary encoder has no dedicated back control, so the row has to exist here; the GS3 has
+/// button 4 and a permanent hint row, and spends its four rows on routines instead.
+pub(crate) const PARAMETER_CHROME: ParameterListChrome = ParameterListChrome {
+    back_row: true,
+    visible_rows: crate::list_menu::VISIBLE_ROWS,
+    wrap: false,
+};
 
+/// Where a routine's parameter screen is, and what has been dialled into it.
+///
+/// The row layout and the value store are both [`variegated_machine_menu`]'s, shared with the
+/// GS3 and host-tested there. What stays here is what is this panel's: the chrome above, and
+/// the routine name, which is cached so the renderer does not re-lock the repository for it.
 #[derive(Debug, Clone)]
 pub(crate) struct RoutineParameterEditState {
     pub nav: ListNav,
-    pub parameter_values: RoutineParameters,
+    pub values: ParameterValues,
     pub routine_name: String,
 }
 
 impl RoutineParameterEditState {
     pub fn new(routine: &Routine) -> Self {
-        // Initialize with default values from routine parameters
-        let mut parameter_values = RoutineParameters::new();
-        for param in routine.parameters() {
-            let _ = parameter_values.insert(param.index, param.default);
-        }
-
         Self {
             nav: ListNav::new(), // Starts on the back row
-            parameter_values,
+            values: ParameterValues::from_defaults(routine),
             routine_name: routine.name().to_string(),
         }
     }
 
     /// Back, then one row per parameter, then Execute. One index space, same as the list menu.
     ///
-    /// `param_count` is passed in rather than read off `parameter_values`, because the renderer
-    /// draws `routine.parameters()` and a row count taken from anywhere else is a second source
-    /// of truth for the same number -- which is the class of bug this whole change removes.
+    /// `param_count` is passed in rather than read off `values`, because the renderer draws
+    /// `routine.parameters()` and a row count taken from anywhere else is a second source of
+    /// truth for the same number -- which is the class of bug this whole change removes.
     pub fn geometry(&self, param_count: usize) -> ListGeometry {
-        ListGeometry {
-            total_rows: 1 + param_count + 1,
-            visible_rows: crate::list_menu::VISIBLE_ROWS,
-            wrap: false,
-        }
+        parameter_geometry(param_count, PARAMETER_CHROME)
     }
 
     /// What a row is.
-    pub fn row_kind(&self, row: usize, param_count: usize) -> RowKind {
-        match row {
-            0 => RowKind::Back,
-            r if r <= param_count => RowKind::Parameter(r - 1),
-            _ => RowKind::Execute,
-        }
+    pub fn row_kind(&self, row: usize, param_count: usize) -> ParameterRow {
+        parameter_row(row, param_count, PARAMETER_CHROME)
     }
 }
 
@@ -570,14 +572,16 @@ where
                             }
                         }
                     }
-                    UIState::ParameterManipulation { current_value, .. } => {
-                        // Today's behaviour exactly: floor at 0, no ceiling, 0.5 steps.
+                    UIState::ParameterManipulation { current_value, param_unit, .. } => {
+                        // The range now comes from the parameter's unit rather than being
+                        // `(0.0, f32::INFINITY, 0.5)` for everything. `RoutineParameter` still
+                        // carries no min, max or step -- and must not gain any, its postcard
+                        // encoding being positional and unversioned -- so the table lives in
+                        // `variegated-machine-menu` and is keyed on the unit.
                         //
-                        // A data-driven range is not available. `RoutineParameter`
-                        // (`routines/parameters.rs`) carries `index`, `name`, `default` and
-                        // `unit` and no min, max or step, so giving this real bounds means
-                        // extending a shared domain type -- a separate change.
-                        let mut a = Adjustable::new(*current_value, 0.0, f32::INFINITY, 0.5);
+                        // A parameter with no declared unit keeps exactly the old behaviour.
+                        let (min, max, step) = parameter_bounds(*param_unit);
+                        let mut a = Adjustable::new(*current_value, min, max, step);
                         match direction {
                             Direction::CounterClockwise => a.increase(),
                             Direction::Clockwise => a.decrease(),
@@ -585,15 +589,7 @@ where
                         *current_value = a.value();
                     }
                     UIState::ConfigValueEdit { config_type, current_value, .. } => {
-                        // Adjust configuration value with appropriate increment
-                        let increment_size = match config_type {
-                            ConfigEditType::BoilerTemperature | ConfigEditType::SteamTemperature => 0.5,
-                            ConfigEditType::PidParameter(_, _, component) => match component {
-                                PidComponentType::PositiveScale | PidComponentType::NegativeScale => 0.1,
-                                PidComponentType::UpperLimit | PidComponentType::LowerLimit => 1.0,
-                            }
-                        };
-                        
+
                         // The temperatures stop where the controller's interlock would cut
                         // heating anyway; a target above it can only produce an element that
                         // runs to the limit and shuts off. PID terms keep the old open-ended
@@ -604,13 +600,25 @@ where
                         // a brew setpoint to -100 degrees C. It now applies only to the PID
                         // components, which can legitimately be negative; picking real PID limits
                         // is a domain question and a separate conversation.
-                        let (min, max) = match config_type {
-                            ConfigEditType::BoilerTemperature => (0.0, MAX_BREW_TEMPERATURE),
-                            ConfigEditType::SteamTemperature => (0.0, MAX_STEAM_TEMPERATURE),
-                            ConfigEditType::PidParameter(..) => (-100.0, f32::INFINITY),
+                        // The half-degree step and the zero floor are shared with the GS3's
+                        // brew-temperature editor; only the ceiling is this machine's.
+                        let mut a = match config_type {
+                            ConfigEditType::BoilerTemperature => {
+                                boiler_temperature_adjustable(*current_value, MAX_BREW_TEMPERATURE)
+                            }
+                            ConfigEditType::SteamTemperature => {
+                                boiler_temperature_adjustable(*current_value, MAX_STEAM_TEMPERATURE)
+                            }
+                            ConfigEditType::PidParameter(_, _, component) => {
+                                let step = match component {
+                                    PidComponentType::PositiveScale
+                                    | PidComponentType::NegativeScale => 0.1,
+                                    PidComponentType::UpperLimit
+                                    | PidComponentType::LowerLimit => 1.0,
+                                };
+                                Adjustable::new(*current_value, -100.0, f32::INFINITY, step)
+                            }
                         };
-
-                        let mut a = Adjustable::new(*current_value, min, max, increment_size);
                         match direction {
                             Direction::CounterClockwise => a.increase(),
                             Direction::Clockwise => a.decrease(),
@@ -916,29 +924,30 @@ where
                         if let Some(routine) = repo.get_routine(routine_index).await {
                             let params = routine.parameters();
                             match edit_state.row_kind(edit_state.nav.selected(), params.len()) {
-                                RowKind::Back => {
+                                ParameterRow::Back => {
                                     // Back button selected - return to routine menu
                                     self.status.state = enter_list_menu(ListMenuType::Routines, self.routine_repository, None).await;
                                 }
-                                RowKind::Execute => {
-                                    // Execute button selected - run routine with current parameters
-                                    let runtime_params = if edit_state.parameter_values.is_empty() {
-                                        None
-                                    } else {
-                                        Some(edit_state.parameter_values.clone())
-                                    };
+                                ParameterRow::Execute => {
+                                    // Execute button selected - run routine with current parameters.
+                                    // `to_runtime` re-keys the positional values by
+                                    // `RoutineParameter::index` and returns `None` for a routine
+                                    // with no parameters, which is what this sent before.
+                                    let runtime_params = edit_state.values.to_runtime(routine);
                                     self.command_sender.send(MachineCommand::RunRoutine(routine_index, runtime_params)).await;
                                     self.status.state = UIState::RoutineExecution;
                                 }
-                                RowKind::Parameter(i) => {
+                                ParameterRow::Parameter(position) => {
                                     // Parameter selected - enter manipulation mode
-                                    if let Some(param) = params.get(i) {
-                                        let param_index = param.index;
-                                        let current_value = edit_state.parameter_values.get(&param_index).copied().unwrap_or(param.default);
+                                    if let Some(param) = params.get(position) {
+                                        let current_value = edit_state
+                                            .values
+                                            .get(position)
+                                            .unwrap_or(param.default);
                                         self.status.state = UIState::ParameterManipulation {
                                             edit_state: edit_state.clone(),
                                             routine_index,
-                                            param_index,
+                                            position,
                                             current_value,
                                             param_name: param.name.clone(),
                                             param_unit: param.unit,
@@ -948,33 +957,19 @@ where
                             }
                         }
                     }
-                    UIState::ParameterManipulation { edit_state, routine_index, param_index, current_value, .. } => {
-                        // Return to parameter list with updated value
+                    UIState::ParameterManipulation { edit_state, routine_index, position, current_value, .. } => {
+                        // Return to parameter list with updated value.
+                        //
+                        // The write cannot fail and cannot be dropped. `ParameterValues` is a
+                        // fixed positional array, and `position` came from the row layout over
+                        // the same routine, so it is in range by construction. The map-keyed
+                        // version this replaced could refuse the write on a routine with more
+                        // than eight parameters, and its only recourse was to log and discard
+                        // an edit the operator had just made.
                         let routine_index = *routine_index;
-                        let param_index = *param_index;
-                        let current_value = *current_value;
-                        
-                        // Use the preserved edit state and update only the current parameter
                         let mut preserved_edit_state = edit_state.clone();
-                        // `parameter_values` is a `FnvIndexMap<_, _, 8>`, and this key was
-                        // seeded with the routine's default by `RoutineParameterEditState::new`,
-                        // so this replaces rather than grows and cannot fail -- unless the
-                        // routine carries more than the eight parameters `RoutineDefinition`
-                        // documents as its maximum, in which case `new` already dropped this
-                        // one and the edit has nowhere to land. Say so rather than discarding
-                        // it silently: the symptom is otherwise just a value the operator
-                        // edited quietly reverting on the way back to the list.
-                        if preserved_edit_state
-                            .parameter_values
-                            .insert(param_index, current_value)
-                            .is_err()
-                        {
-                            warn!(
-                                "Parameter {} does not fit the 8-entry edit map; edit discarded",
-                                param_index
-                            );
-                        }
-                        
+                        preserved_edit_state.values.set(*position, *current_value);
+
                         self.status.state = UIState::RoutineParameters(routine_index, preserved_edit_state);
                     }
                     UIState::ConfigValueEdit { config_type, current_value, previous_menu_type, previous_menu_state, .. } => {

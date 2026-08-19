@@ -8,7 +8,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use core::time::Duration;
 use embassy_time::Instant;
-use variegated_controller_types::{MachineMode, Status, SingleGroupControllerGroups};
+use variegated_controller_lib::routine::Routine;
+use variegated_controller_types::{MachineMode, RoutineIndex, Status, SingleGroupControllerGroups};
+use variegated_machine_menu::RoutineRows;
 use crate::menu::MenuSnapshot;
 
 /// Duration to display post-brew summary after brewing completes (milliseconds)
@@ -78,6 +80,26 @@ pub struct DisplayState {
     last_update: Instant,
     /// Where the menu is, cached from `MENU_WATCH` by whichever display task owns this.
     pub menu: MenuSnapshot,
+    /// The routines the menu is listing, cached from the repository by the display task.
+    ///
+    /// Fetched here rather than published in `MenuSnapshot` because that payload is `Copy`
+    /// and this is not, and because a routine's name -- unlike its value column -- does not
+    /// change under a stationary selection, so there is nothing for a stale copy to get
+    /// wrong. Both this and the button task build it through
+    /// `variegated_machine_menu::routine_rows`, so the order is the same list on both sides.
+    pub menu_routines: Option<RoutineRows>,
+    /// The routine whose parameter screen is open, and which one it is.
+    ///
+    /// The parameter rows need its names and units on every frame. The Silvia re-locks the
+    /// repository for these per frame; this caches, the way `current_routine` already does
+    /// for the routine-execution screen.
+    ///
+    /// Doubly optional, and the distinction matters. The outer says whether the fetch has
+    /// happened; the inner is its result, `None` for a routine that has been deleted over
+    /// HTTP while its screen was open. Collapsing them would make "not found" indistinguishable
+    /// from "not fetched", and `menu_pending_fetch` would then ask again on every frame --
+    /// re-taking the repository lock in a render loop, forever.
+    pub menu_routine: Option<(RoutineIndex, Option<Routine>)>,
     /// The dose on the pending annotations as of the previous status.
     previous_dose_weight: Option<f32>,
     /// Whether any status has been seen yet.
@@ -99,10 +121,38 @@ impl DisplayState {
             was_brewing: false,
             last_update: Instant::now(),
             menu: MenuSnapshot::closed(),
+            menu_routines: None,
+            menu_routine: None,
             previous_dose_weight: None,
             dose_tracking_initialized: false,
             dose_popup_until: None,
         }
+    }
+
+    /// What the menu needs in order to have rows, as this task has it cached.
+    pub fn menu_data(&self) -> crate::menu::MenuData<'_> {
+        crate::menu::MenuData {
+            routines: self.menu_routines.as_ref(),
+            routine: self.menu_routine.as_ref().and_then(|(_, routine)| routine.as_ref()),
+            // The edited values come over the watch rather than from the repository: they are
+            // the one part of a parameter screen that no renderer could derive.
+            values: self.menu.values,
+        }
+    }
+
+    /// What this task still has to fetch for the open menu. See `menu::pending_fetch`.
+    pub fn menu_pending_fetch(&self) -> Option<crate::menu::MenuFetch> {
+        crate::menu::pending_fetch(
+            self.menu.stack.top().map(|frame| frame.id),
+            self.menu_routines.is_some(),
+            self.menu_routine.as_ref().map(|(index, _)| *index),
+        )
+    }
+
+    /// Drop what was fetched for a menu that is no longer open.
+    pub fn release_menu_data(&mut self) {
+        self.menu_routines = None;
+        self.menu_routine = None;
     }
 
     /// Whether the dose popup is on screen right now.

@@ -69,6 +69,45 @@ pub type IdentifyReceiver = embassy_sync::watch::Receiver<
     2,
 >;
 
+/// Fetch whatever the open menu needs to be drawn, if anything.
+///
+/// Both display tasks call this, and the decision of *what* to fetch comes from
+/// `menu::pending_fetch` -- the same call the button task makes. A renderer that decided on
+/// different terms would list routines in a different order from the one being navigated, and
+/// the user would activate a row other than the one they read.
+///
+/// It answers immediately for a settled menu: `pending_fetch` returns `None` once the fetch
+/// has landed, so this is a comparison and no lock on all but the first frame of a screen.
+///
+/// `repository` is an `Option` because the TFT task reaches it through
+/// `ROUTINE_REPOSITORY_REF`, which is not populated until the controller is built.
+#[cfg(any(feature = "character-display", feature = "tft-display"))]
+async fn fetch_menu_data(
+    state: &mut crate::display_state::DisplayState,
+    repository: Option<&crate::RoutineRepositoryMutex>,
+) {
+    use variegated_controller_lib::routine::RoutineRepository as _;
+
+    let Some(fetch) = state.menu_pending_fetch() else { return };
+    let Some(repository) = repository else { return };
+
+    match fetch {
+        crate::menu::MenuFetch::Routines => {
+            let mut guard = repository.lock().await;
+            state.menu_routines = Some(variegated_machine_menu::routine_rows(
+                guard.iterate_routines_with_indices().await,
+                crate::menu::LIST_FUNCTION_ROUTINES,
+            ));
+        }
+        crate::menu::MenuFetch::Routine(index) => {
+            let mut guard = repository.lock().await;
+            // `Some((index, None))`, not `None`, when the routine is gone: this records that
+            // the fetch happened. See the field's own note.
+            state.menu_routine = Some((index, guard.get_routine(index).await.cloned()));
+        }
+    }
+}
+
 /// The receiver each display task takes for the button menu's position.
 ///
 /// Sized and named like [`IdentifyReceiver`] above, and for the same reasons.
@@ -182,7 +221,14 @@ pub async fn lcd_display_task(
         // loop has to keep rendering whether or not the menu moved.
         if let Some(nav) = menu_receiver.try_changed() {
             display_state.shared_state.menu = nav;
+            // A `Routine` clone is not small, and a closed menu will not draw it again.
+            if !nav.stack.is_open() {
+                display_state.shared_state.release_menu_data();
+            }
         }
+
+        // Whatever the open menu needs in order to be drawn. See `fetch_menu_data`.
+        fetch_menu_data(&mut display_state.shared_state, Some(routine_repository)).await;
 
         // Update cached routine when routine execution changes
         if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {
@@ -327,6 +373,10 @@ pub async fn graphical_display_task(
         // loop has to keep rendering whether or not the menu moved.
         if let Some(nav) = menu_receiver.try_changed() {
             display_state.shared_state.menu = nav;
+            // A `Routine` clone is not small, and a closed menu will not draw it again.
+            if !nav.stack.is_open() {
+                display_state.shared_state.release_menu_data();
+            }
         }
 
         // Query schedule store periodically (every ~1 second = 100 * 10ms)
@@ -343,6 +393,12 @@ pub async fn graphical_display_task(
                 display_state.next_schedule = None;
             }
         }
+
+        // Whatever the open menu needs in order to be drawn. This task reaches the repository
+        // through `ROUTINE_REPOSITORY_REF` rather than an argument: it is spawned on core 1
+        // before the controller that builds the repository exists.
+        let menu_repository = crate::ROUTINE_REPOSITORY_REF.lock().await.clone();
+        fetch_menu_data(&mut display_state.shared_state, menu_repository).await;
 
         // Update cached routine when routine execution changes (fetch once per execution, not every iteration)
         if let Some(routine_execution) = &display_state.shared_state.status.routine_execution {

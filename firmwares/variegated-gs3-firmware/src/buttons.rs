@@ -38,12 +38,20 @@
 //! steam-valve button is not one of them and keeps working, because the menu can be opened
 //! mid-steam and losing valve control behind a menu is not acceptable.
 //!
-//! | Input | Action |
-//! |---|---|
-//! | Tap 1 | Selection **down**, wrapping |
-//! | Tap 2 | Selection **up**, wrapping |
-//! | Tap 3 | Activate |
-//! | Tap 4 | Pop; popping the root leaves menu mode |
+//! **Buttons 1 and 2 are marked `-` and `+` on the panel**, and that is the whole rule for
+//! what they do here: 1 is *less* or *previous*, 2 is *more* or *next*. Every menu screen is
+//! that one rule read against whatever it is showing.
+//!
+//! | Input | In a list | In a value editor |
+//! |---|---|---|
+//! | Tap 1 (`-`) | Selection **up**, wrapping | **Decrease** |
+//! | Tap 2 (`+`) | Selection **down**, wrapping | **Increase** |
+//! | Tap 3 | Activate | Confirm |
+//! | Tap 4 | Pop; popping the root leaves menu mode | Cancel |
+//!
+//! A list is not a third direction to learn: `-` moves towards the top of it because the top
+//! is the previous item, which is the same thing `-` means to a number. Each screen's hint row
+//! names what its own buttons do, so nobody has to derive it.
 //!
 //! Buttons 5 and 6 are inert here, holds included. Entry is refused while brewing,
 //! dispensing or running a routine, but is **not** gated on machine mode -- provisioning a
@@ -87,9 +95,16 @@ use variegated_buttons::{
 };
 use crate::StatusSubscriber;
 use crate::menu::{
-    self, GsMenu, MenuActivation, MenuContext, MenuId, MenuItemKind, MenuSender, MenuSnapshot,
-    WifiRequest,
+    self, GsMenu, MenuActivation, MenuContext, MenuData, MenuFetch, MenuId, MenuItemKind, MenuRow,
+    MenuSender, MenuSnapshot, WifiRequest, LIST_FUNCTION_ROUTINES,
 };
+use variegated_controller_lib::routine::{Routine, RoutineRepository as RoutineRepositoryTrait};
+use variegated_controller_types::{BoilerIndex, Configuration, TemperatureType};
+use variegated_machine_menu::{routine_rows, ParameterValues, RoutineRows};
+use variegated_menu::Adjustable;
+
+/// Boiler 0. The same index `menu::confirm_editor` writes to.
+const BREW_BOILER: BoilerIndex = 0;
 
 /// Button indices for routine control (buttons 0-3)
 const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
@@ -214,6 +229,35 @@ pub struct ButtonEventHandler {
     ///
     /// Owned here for the same reason the menu is: this task is the one that sent it.
     wifi_request: Option<WifiRequest>,
+    /// The routine list backing `MenuId::Routines`, once fetched.
+    ///
+    /// Fetched by the task loop when that menu opens and dropped when it closes, rather than
+    /// rebuilt per iteration: the repository is RAM-cached after its first load, but the ESP
+    /// transceiver holds its lock for the length of a chunked routine read, and stalling the
+    /// input loop behind that would make the brew button unresponsive.
+    ///
+    /// `Option`, not an empty `Vec` standing in for "not yet": a machine with no custom
+    /// routines has an empty list and it is a correct answer.
+    routines: Option<RoutineRows>,
+    /// The routine a parameter screen is open on, and which one it is.
+    ///
+    /// Cloned out of the repository, because the screen needs its parameter names and units
+    /// on every frame and re-locking for them is what the Silvia does and should not.
+    ///
+    /// Doubly optional: the outer says whether the fetch has happened, the inner is its
+    /// result. A routine deleted over HTTP while its screen was open must still count as
+    /// fetched, or `pending_fetch` asks for it again on every iteration and takes the
+    /// repository lock in the input loop, forever.
+    routine: Option<(RoutineIndex, Option<Routine>)>,
+    /// What has been dialled into that routine's parameters.
+    values: ParameterValues,
+    /// The value an editor frame is editing.
+    editor: Option<Adjustable>,
+    /// The brew boiler's configured ceiling, from the `Configuration` channel.
+    ///
+    /// Only this one number is kept, not the `Configuration` it came from: that struct is far
+    /// too large to hold on this task for one float.
+    brew_max: Option<TemperatureType>,
     /// When the current hold of exactly button 5 started, for the menu long hold.
     button_5_hold_start: Option<Instant>,
     /// When the current hold of exactly button 6 started, for the dose-tag long hold.
@@ -233,9 +277,68 @@ impl ButtonEventHandler {
             menu_context: MenuContext::default(),
             menu: GsMenu::closed(),
             wifi_request: None,
+            routines: None,
+            routine: None,
+            values: ParameterValues::default(),
+            editor: None,
+            brew_max: None,
             button_5_hold_start: None,
             button_6_hold_start: None,
         }
+    }
+
+    /// What the open menu is missing, or `None` if it has everything it needs.
+    ///
+    /// Called every loop iteration; it answers `None` once the fetch has landed, so a settled
+    /// menu costs one comparison and no lock.
+    pub fn pending_fetch(&self) -> Option<MenuFetch> {
+        menu::pending_fetch(
+            self.menu.top().map(|frame| frame.id),
+            self.routines.is_some(),
+            self.routine.as_ref().map(|(index, _)| *index),
+        )
+    }
+
+    /// Hand over a fetched routine list.
+    pub fn provide_routines(&mut self, routines: RoutineRows) {
+        self.routines = Some(routines);
+    }
+
+    /// Hand over a fetched routine, and seed its parameters from their defaults.
+    ///
+    /// `None` for a routine that has gone -- deleted over HTTP while its screen was open.
+    /// The screen then has no rows at all, which is the honest rendering of it.
+    pub fn provide_routine(&mut self, index: RoutineIndex, routine: Option<Routine>) {
+        self.values = routine.as_ref().map(ParameterValues::from_defaults).unwrap_or_default();
+        self.routine = Some((index, routine));
+    }
+
+    /// The menu's view of what has been fetched.
+    fn menu_data(&self) -> MenuData<'_> {
+        MenuData {
+            routines: self.routines.as_ref(),
+            routine: self.routine.as_ref().and_then(|(_, r)| r.as_ref()),
+            values: self.values,
+        }
+    }
+
+    /// Drop everything fetched for a menu that is no longer open.
+    ///
+    /// A `Routine` clone is not small, and holding one after the menu closed would keep it
+    /// for as long as the machine stays up.
+    fn release_menu_data(&mut self) {
+        self.routines = None;
+        self.routine = None;
+        self.values = ParameterValues::default();
+        self.editor = None;
+    }
+
+    /// Take the brew boiler's ceiling out of a configuration.
+    pub fn update_configuration(&mut self, configuration: &Configuration) {
+        self.brew_max = configuration
+            .boiler_configurations
+            .get(&BREW_BOILER)
+            .and_then(|boiler| boiler.max_temperature);
     }
 
     /// Update status from the status receiver
@@ -265,21 +368,32 @@ impl ButtonEventHandler {
 
         // Read `improv` first, then let it retire an outstanding request: a change in either
         // direction is the confirmation we were waiting for.
-        let improv = MenuContext::from_status(status, false).improv;
+        let improv = MenuContext::from_status(status, false, self.brew_max).improv;
         if let Some(request) = self.wifi_request {
             if !request.is_outstanding(improv, Instant::now()) {
                 self.wifi_request = None;
             }
         }
-        self.menu_context = MenuContext::from_status(status, self.wifi_request.is_some());
+        self.menu_context =
+            MenuContext::from_status(status, self.wifi_request.is_some(), self.brew_max);
 
         // The menu is a full-screen takeover, and the machine can become busy underneath it --
         // a schedule can start a routine, and so can the comms processor. The busy condition is
         // not only an entry gate.
+        //
+        // This also covers a routine started *from* the menu, but it is not what closes it:
+        // `activate_selected` closes first and sends second, so the menu is gone before the
+        // command leaves rather than up to a status period later.
         if self.menu.is_open() && self.machine_is_busy() {
             defmt::info!("Menu: closing, the machine became busy");
-            self.menu.close();
+            self.close_menu();
         }
+    }
+
+    /// Close the menu and drop everything that was fetched for it.
+    fn close_menu(&mut self) {
+        self.menu.close();
+        self.release_menu_data();
     }
 
     /// Brewing, dispensing or running a routine. Not a mode check: the menu is reachable while
@@ -311,7 +425,12 @@ impl ButtonEventHandler {
 
     /// Where the menu is and what it is waiting for, for publication.
     pub fn menu_snapshot(&self) -> MenuSnapshot {
-        MenuSnapshot { stack: self.menu, wifi_pending: self.wifi_request.is_some() }
+        MenuSnapshot {
+            stack: self.menu,
+            wifi_pending: self.wifi_request.is_some(),
+            editor: self.editor,
+            values: self.values,
+        }
     }
 
     /// Handle a button event and return the appropriate machine command
@@ -358,24 +477,33 @@ impl ButtonEventHandler {
 
     fn handle_menu_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
         let Some(frame) = self.menu.top() else { return vec![] };
-        let geo = menu::geometry(frame.id);
+
+        // An editor frame has no rows, and buttons 1 and 2 move the value instead of the
+        // selection. 1 and 2 still mean "previous / next", whether what they step through is a
+        // list or a number.
+        if frame.id.is_editor() {
+            return self.handle_editor_press(buttons);
+        }
+
+        // `geometry` borrows the fetched data; take the value out before touching `self` again.
+        let geo = menu::geometry(frame.id, &self.menu_data());
 
         match buttons {
             SET_ROUTINE_0 => {
-                if let Some(frame) = self.menu.top_mut() {
-                    frame.nav.down(geo);
-                }
-                vec![]
-            }
-            SET_ROUTINE_1 => {
                 if let Some(frame) = self.menu.top_mut() {
                     frame.nav.up(geo);
                 }
                 vec![]
             }
+            SET_ROUTINE_1 => {
+                if let Some(frame) = self.menu.top_mut() {
+                    frame.nav.down(geo);
+                }
+                vec![]
+            }
             SET_ROUTINE_2 => self.activate_selected(),
             SET_ROUTINE_3 => {
-                self.menu.pop();
+                self.pop_menu();
                 vec![]
             }
             // The on-board button is not one of the six panel buttons. The menu can be opened
@@ -387,17 +515,96 @@ impl ButtonEventHandler {
         }
     }
 
+    /// Buttons on an editor frame: 1 decreases, 2 increases, 3 confirms, 4 cancels.
+    ///
+    /// 1 and 2 are doing exactly what they do in a list -- the panel marks them `-` and `+`,
+    /// and *less* applied to a number is a smaller number the same way *previous* applied to a
+    /// list is the row above. Nothing is inverted between the two screens; see the module docs.
+    ///
+    /// 3 and 4 do change, from Select/Back to Confirm/Cancel, because leaving an editor
+    /// without committing is a real choice here rather than the only one.
+    fn handle_editor_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
+        let Some(frame) = self.menu.top() else { return vec![] };
+        let id = frame.id;
+
+        match buttons {
+            SET_ROUTINE_0 => {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.decrease();
+                }
+                vec![]
+            }
+            SET_ROUTINE_1 => {
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.increase();
+                }
+                vec![]
+            }
+            SET_ROUTINE_2 => {
+                let Some(value) = self.editor.map(|e| e.value()) else { return vec![] };
+                // A parameter's value never leaves this task until the routine runs; only the
+                // brew setpoint produces a command, and the controller persists that itself.
+                let command = menu::confirm_editor(id, value);
+                if let MenuId::EditParameter { position, .. } = id {
+                    self.values.set(position as usize, value);
+                }
+                defmt::info!("Menu: confirmed editor at {}", value);
+                self.pop_menu();
+                command.into_iter().collect()
+            }
+            SET_ROUTINE_3 => {
+                self.pop_menu();
+                vec![]
+            }
+            #[cfg(feature = "pwm-steam-valve")]
+            SET_STEAM_VALVE => self.cycle_steam_valve(),
+            _ => vec![],
+        }
+    }
+
+    /// Leave the current menu, clearing anything that belonged only to it.
+    ///
+    /// Leaving a routine's parameter screen drops the routine *and the values dialled into
+    /// it*, so re-entering it starts from the routine's own defaults again. Keeping them
+    /// would mean a screen that looks identical on two visits but runs different numbers, and
+    /// nothing on it says which visit you are on. It also matches what selecting a routine
+    /// does on the Silvia, where the edit state is built fresh every time.
+    fn pop_menu(&mut self) {
+        self.menu.pop();
+        self.editor = None;
+
+        if !self.menu.is_open() {
+            self.release_menu_data();
+        } else if !matches!(
+            self.menu.top().map(|frame| frame.id),
+            Some(MenuId::RoutineParameters(_)) | Some(MenuId::EditParameter { .. })
+        ) {
+            self.routine = None;
+            self.values = ParameterValues::default();
+        }
+    }
+
     fn activate_selected(&mut self) -> Vec<MachineCommand> {
         let Some(frame) = self.menu.top() else { return vec![] };
-        // `.get`, not `[..]`: the selection cannot be out of range here, but a renderer and a
-        // handler reading the same table at different moments is exactly where that stops being
-        // true.
-        let Some(item) = menu::items(frame.id).get(frame.nav.selected()) else { return vec![] };
+        let (id, selected) = (frame.id, frame.nav.selected());
 
-        match menu::activate(item, &self.menu_context) {
+        // Resolve the row and decide what to do with it in one borrow, so that nothing below
+        // can act on a row the data no longer has. `menu::row` returns `None` rather than
+        // indexing: the selection cannot be out of range here, but a renderer and a handler
+        // reading the same list at different moments is exactly where that stops being true.
+        let (activation, is_wifi) = {
+            let data = self.menu_data();
+            let Some(row) = menu::row(id, selected, &data) else { return vec![] };
+            let is_wifi = matches!(
+                &row,
+                MenuRow::Item(item) if item.kind == MenuItemKind::WifiProvisioning
+            );
+            (menu::activate(&row, &self.menu_context), is_wifi)
+        };
+
+        match activation {
             MenuActivation::Command(command) => {
-                defmt::info!("Menu: activated {}", item.label);
-                if item.kind == MenuItemKind::WifiProvisioning {
+                if is_wifi {
                     // The window takes about a second to open or close. Until it does, the
                     // value column reads "..." rather than the state we just asked to leave.
                     self.wifi_request =
@@ -406,8 +613,45 @@ impl ButtonEventHandler {
                 }
                 vec![command]
             }
+            MenuActivation::Enter(submenu) => {
+                if !self.menu.push(submenu) {
+                    // Only reachable if `MENU_MAX_DEPTH` stops matching the deepest path.
+                    defmt::warn!("Menu: stack full, cannot enter {}", submenu);
+                }
+                vec![]
+            }
+            MenuActivation::Edit { menu: editor_menu, value } => {
+                if self.menu.push(editor_menu) {
+                    self.editor = Some(value);
+                } else {
+                    defmt::warn!("Menu: stack full, cannot edit");
+                }
+                vec![]
+            }
+            MenuActivation::RunRoutine(index) => {
+                // Build the parameters *before* closing, because closing drops the routine the
+                // positions are resolved against.
+                let parameters = self
+                    .routine
+                    .as_ref()
+                    .filter(|(cached, _)| *cached == index)
+                    .and_then(|(_, routine)| routine.as_ref())
+                    .and_then(|routine| self.values.to_runtime(routine));
+
+                // Close first, send second. The busy gate in `update_status` would also close
+                // it once the routine showed up in a `Status`, but that is up to a status
+                // period after the user asked for the menu to go, and this menu is a
+                // full-screen takeover sitting over a machine about to pump hot water.
+                defmt::info!("Menu: running routine, closing");
+                self.close_menu();
+                vec![MachineCommand::RunRoutine(index, parameters)]
+            }
             MenuActivation::Pop => {
-                self.menu.pop();
+                self.pop_menu();
+                vec![]
+            }
+            MenuActivation::Refuse => {
+                defmt::info!("Menu: row refused");
                 vec![]
             }
         }
@@ -542,6 +786,8 @@ pub async fn button_controller_task(
     mut button_interrupt: embassy_rp::gpio::Input<'static>,
     command_sender: Sender<'static, AtomicRawMutex, MachineCommand, 10>,
     mut status_receiver: StatusSubscriber,
+    mut configuration_receiver: crate::ConfigurationSubscriber,
+    routine_repository: &'static crate::RoutineRepositoryMutex,
     checkin: variegated_checkin::CheckinHandle,
     menu_sender: MenuSender,
 ) {
@@ -580,6 +826,36 @@ pub async fn button_controller_task(
         if let Some(new_status) = status_receiver.try_next_message_pure() {
             // Can close the menu, if the machine became busy underneath it.
             handler.update_status(&new_status);
+        }
+
+        // The brew boiler's ceiling, for the setpoint editor's upper bound. The controller
+        // republishes every ten seconds whether or not anything changed, so this arrives
+        // shortly after boot without anything here having to ask.
+        if let Some(configuration) = configuration_receiver.try_next_message_pure() {
+            handler.update_configuration(&configuration);
+        }
+
+        // Fetch what the open menu needs. Answers `None` for a settled menu, so this is a
+        // comparison and no lock on all but the first iteration after a screen opens.
+        //
+        // Awaiting the repository here rather than inside the event path is deliberate: the
+        // ESP transceiver holds this lock for the length of a chunked routine read, and the
+        // brew button must not queue behind one.
+        match handler.pending_fetch() {
+            Some(MenuFetch::Routines) => {
+                let mut repository = routine_repository.lock().await;
+                let rows = routine_rows(
+                    repository.iterate_routines_with_indices().await,
+                    LIST_FUNCTION_ROUTINES,
+                );
+                handler.provide_routines(rows);
+            }
+            Some(MenuFetch::Routine(index)) => {
+                let mut repository = routine_repository.lock().await;
+                let routine = repository.get_routine(index).await.cloned();
+                handler.provide_routine(index, routine);
+            }
+            None => {}
         }
 
         // Every iteration, not only the ones with a button sample: a provisioning command

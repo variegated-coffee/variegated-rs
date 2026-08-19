@@ -3354,10 +3354,14 @@ async fn main_task(
 
     // Create status subscriber for button controller and spawn the task
     let button_status_receiver = status_channel.subscriber().expect("Failed to get button status subscriber");
+    // The menu's brew-setpoint editor needs the boiler's configured ceiling, which is the one
+    // thing `Status` does not carry. `CONFIGURATION_RECEIVERS` has room; this is the third of
+    // four. The task keeps the ceiling and discards the rest rather than holding a copy.
+    let button_configuration_receiver = configuration_channel.subscriber().expect("Failed to get button configuration subscriber");
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender())));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender())));
 
     // Create status subscriber for LED controller and spawn the task.
     //

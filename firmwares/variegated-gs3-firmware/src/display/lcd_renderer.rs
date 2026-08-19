@@ -13,7 +13,8 @@ use variegated_timekeeping::TimeKeeper;
 use variegated_controller_lib::routine::RoutineRepository;
 
 use crate::display_state::{DisplayState, DisplayMode};
-use crate::menu::{self, MenuContext};
+use crate::menu::{self, MenuContext, MenuValue};
+use variegated_machine_menu::UnitStyle;
 use crate::RoutineRepositoryMutex;
 
 /// LCD-specific display state with buffer tracking
@@ -306,27 +307,62 @@ impl LcdDisplayState {
     /// exactly -- which is why `menu.rs` labels it `"Wi-Fi Setup"` rather than
     /// `"Wi-Fi Provisioning"`. Both rows must stay <= 16: `pad_or_truncate_to_16` truncates
     /// silently, mid-word.
+    ///
+    /// The `.12` and `.4` precisions are what hold that split now that labels are data-driven.
+    /// A routine name is up to `ROUTINE_NAME_LEN` characters and a parameter name is unbounded,
+    /// and a bare `{:<12}` pads to *at least* twelve without ever cutting -- so a long name
+    /// would push the row past sixteen and `pad_or_truncate_to_16` would take the truncation
+    /// out of the value column, which on a parameter screen is the half that matters. A
+    /// precision on a `str` counts characters rather than bytes, so it cannot split one.
     fn menu_rows(&self) -> (String, String) {
+        const BLANK: &str = "                ";
+
         let Some(frame) = self.shared_state.menu.stack.top() else {
-            return ("                ".to_string(), "                ".to_string());
+            return (BLANK.to_string(), BLANK.to_string());
         };
-        let items = menu::items(frame.id);
-        let Some(item) = items.get(frame.nav.selected()) else {
-            return ("                ".to_string(), "                ".to_string());
+        let data = self.shared_state.menu_data();
+
+        // An editor frame has no rows: its title names the quantity and the value is the whole
+        // of the screen. `Compact` because a value has four columns here and a unit would not
+        // fit beside it -- and the title has already said which unit it is.
+        if frame.id.is_editor() {
+            let value = self
+                .shared_state
+                .menu
+                .editor
+                .map(|editor| {
+                    MenuValue::Number {
+                        value: editor.value(),
+                        unit: menu::editor_unit(frame.id, &data),
+                    }
+                    .text(UnitStyle::Compact)
+                })
+                .unwrap_or_default();
+            return (
+                format!("{:<12.12}{:>4.4}", menu::title(frame.id, &data), value),
+                "1- 2+ 3ok 4cncl".to_string(),
+            );
+        }
+
+        let Some(row) = menu::row(frame.id, frame.nav.selected(), &data) else {
+            return (BLANK.to_string(), BLANK.to_string());
         };
 
         let ctx = MenuContext::from_status(
             &self.shared_state.status,
             self.shared_state.menu.wifi_pending,
+            None,
         );
-        let value = menu::value_text(item, &ctx).unwrap_or("");
+        let value = menu::value(&row, &ctx)
+            .map(|value| value.text(UnitStyle::Compact))
+            .unwrap_or_default();
 
         // ASCII for the same reason as the TFT: the HD44780 A00 ROM has no up/down triangle
         // glyphs (U+25B2/U+25BC), and `pad_or_truncate_to_16` would push a multi-byte char
         // through `write_char` unmodified.
         (
-            format!("{:<12}{:>4}", item.label, value),
-            "1v 2^ 3sel 4bck".to_string(),
+            format!("{:<12.12}{:>4.4}", menu::label(&row), value),
+            "1^ 2v 3sel 4bck".to_string(),
         )
     }
 

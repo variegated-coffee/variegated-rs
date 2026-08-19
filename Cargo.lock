@@ -5337,6 +5337,7 @@ dependencies = [
  "variegated-hal",
  "variegated-instrumentation",
  "variegated-log",
+ "variegated-machine-menu",
  "variegated-mcp23017",
  "variegated-menu",
  "variegated-nv3007",
@@ -5415,6 +5416,16 @@ dependencies = [
  "portable-atomic",
  "variegated-controller-types",
  "variegated-debug",
+]
+
+[[package]]
+name = "variegated-machine-menu"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+ "heapless 0.9.3",
+ "variegated-controller-types",
+ "variegated-menu",
 ]
 
 [[package]]
@@ -5608,6 +5619,7 @@ dependencies = [
  "variegated-hal",
  "variegated-instrumentation",
  "variegated-log",
+ "variegated-machine-menu",
  "variegated-mcp9600",
  "variegated-menu",
  "variegated-timekeeping",

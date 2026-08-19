@@ -193,20 +193,33 @@ problem nobody has: the menu has two items and one of them is "Exit menu".
 
 ### 3.6 Navigation directions
 
-Button 1 moves the selection **down**, button 2 **up**. The selection wraps at both ends.
+Button 1 moves the selection **up**, button 2 **down**. The selection wraps at both ends.
+
+**Buttons 1 and 2 are marked `-` and `+` on the panel**, and that marking is the rule the whole
+menu follows: 1 means *less* or *previous*, 2 means *more* or *next*. Moving up a list is moving
+to the previous row, so `-` goes up.
+
+This is the reverse of what shipped first, which had 1 down and 2 up — a mapping that read the
+buttons as a numbered row instead of as a signed pair, and so pointed `-` at "next". Changed at
+Magnus's call once there were menus long enough to scroll, which is when it started to matter.
 
 Wrapping rather than clamping because there is one physical button per direction: clamped,
-button 2 does nothing on the first row, and a button that does nothing reads as a broken
+button 1 does nothing on the first row, and a button that does nothing reads as a broken
 machine. (The Silvia clamps, and should — a rotary encoder has no such problem, and wrapping a
 long settings list on a knob is disorienting. This is why wrapping is a per-caller choice in the
 shared crate rather than a property of the navigation type.)
 
-### 3.7 Adjustable settings — specified now, implemented later
+### 3.7 Adjustable settings
 
-There are no adjustable settings in the GS3 menu today. When there are, the shape is:
-activating an adjustable item pushes an editor frame, where **button 1 decreases, button 2
-increases, button 3 confirms and button 4 pops**. That keeps 1 and 2 meaning "previous / next
-value" whether the thing being moved through is a list or a number.
+Activating an adjustable item pushes an editor frame, where **button 1 decreases, button 2
+increases, button 3 confirms and button 4 pops**.
+
+This is §3.6's rule unchanged, not a second one: the panel marks 1 `-` and 2 `+`, and *less*
+applied to a number is a smaller number exactly as *previous* applied to a list is the row
+above. Nothing inverts between the two screens.
+
+The hint row says `1 Less   2 More` rather than repeating `1 Up   2 Down`, because reusing a
+vertical word for a quantity would imply the mapping had changed when it has not.
 
 The mechanism for it ships now — `Adjustable` and `MenuStack::push` are both in the crate — but
 **no dead code goes into the firmware**. This repository requires zero warnings in every
@@ -214,6 +227,9 @@ configuration that is built, and an unused enum variant or an uncalled method in
 crate is a warning. In a *library* crate a `pub` item is part of the API and is not dead code,
 which is why the crate can carry the mechanism and the firmware cannot. `MenuActivation` gains
 an `Enter(MenuId)` variant in the same commit as the first submenu, not before.
+
+That commit is the Settings/Routines menus: `Enter`, `Edit` and the first two editor frames
+(the brew setpoint, and a routine parameter) landed together with the submenus that use them.
 
 ---
 
@@ -329,7 +345,7 @@ The character LCD orders its overlays the same way, for the same reasons.
 
 ### 5.4 The button hints are ASCII, and that is a correctness constraint
 
-The hint row reads `1 Down   2 Up   3 Select   4 Back`. Not `1 ▼  2 ▲`.
+The hint row reads `1 Up   2 Down   3 Select   4 Back`. Not `1 ▲  2 ▼`.
 
 Every font in use on the TFT is a u8g2 `_tr` font — glyphs 32..127. `▲` and `▼` (U+25B2/U+25BC)
 return `LookupError::GlyphNotFound`, and because `render_aligned` resolves the bounding box

@@ -4,6 +4,7 @@ use alloc::{string::{String, ToString}};
 use defmt::Format;
 use variegated_controller_types::{Status, RoutineIndex};
 use variegated_controller_lib::routine::RoutineRepository as RoutineRepositoryTrait;
+use variegated_machine_menu::routine_rows;
 use variegated_menu::{ListGeometry, ListNav};
 use crate::RoutineRepository;
 
@@ -207,10 +208,15 @@ impl ListMenuType {
             ListMenuType::Routines => {
                 if let Some(rr) = routine_repository {
                     let mut repo = rr.lock().await;
-                    repo.iterate_routines_with_indices().await
-                        .map(|(routine_index, routine)| ListMenuItem {
-                            label: routine.name().to_string(),
-                            id: MenuItemId::Routine(routine_index),
+                    // Ordering, filtering and name truncation all live in
+                    // `variegated-machine-menu`, shared with the GS3 and host-tested there.
+                    // `include_function: true` keeps this board's behaviour: it has no
+                    // hardware routine buttons, so it shows everything it has.
+                    routine_rows(repo.iterate_routines_with_indices().await, true)
+                        .into_iter()
+                        .map(|row| ListMenuItem {
+                            label: row.name.as_str().to_string(),
+                            id: MenuItemId::Routine(row.index),
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -250,7 +256,11 @@ impl ListMenuType {
             ListMenuType::Routines => {
                 if let Some(rr) = routine_repository {
                     let mut repo = rr.lock().await;
-                    repo.get_routine_count().await
+                    // Counted the same way `get_items` builds the list, not with
+                    // `get_routine_count`. The two disagree once anything is filtered or
+                    // capped -- and a count that exceeds the rows drawn is exactly the
+                    // over-scroll this file's `geometry` comment is about.
+                    routine_rows(repo.iterate_routines_with_indices().await, true).len()
                 } else {
                     0
                 }

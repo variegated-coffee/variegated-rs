@@ -1,5 +1,5 @@
 use alloc::{format, vec::Vec};
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use core::cmp::PartialEq;
 use display_interface_spi::SPIInterface;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
@@ -27,7 +27,8 @@ use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::single_boiler_state;
 use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit, RoutineRepository as RoutineRepositoryTrait};
-use crate::rotary::{RoutineParameterEditState, RowKind};
+use crate::rotary::RoutineParameterEditState;
+use variegated_machine_menu::{format_value, ParameterRow, UnitStyle};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
@@ -1383,20 +1384,6 @@ impl DisplayController {
         }
     }
     
-    /// Format parameter value with appropriate unit
-    fn format_parameter_value(&self, value: f32, unit: Option<ParameterUnit>) -> String {
-        match unit {
-            Some(ParameterUnit::Seconds) => format!("{:.1}s", value),
-            Some(ParameterUnit::Celsius) => format!("{:.1}°C", value),
-            Some(ParameterUnit::Bar) => format!("{:.1}bar", value),
-            Some(ParameterUnit::MillilitersPerSecond) => format!("{:.1}ml/s", value),
-            Some(ParameterUnit::Grams) => format!("{:.1}g", value),
-            Some(ParameterUnit::Percent) => format!("{:.1}%", value),
-            Some(ParameterUnit::Milliliters) => format!("{:.1}ml", value),
-            None => format!("{:.1}", value),
-        }
-    }
-    
     /// Render routine parameters view (follows ListMenu pattern exactly)
     async fn render_routine_parameters(&mut self, routine_index: RoutineIndex, edit_state: &RoutineParameterEditState) {
         // Title (same as list menu)
@@ -1432,15 +1419,18 @@ impl DisplayController {
                 let y = 12 + screen_row as i32 * 10;
 
                 let label = match edit_state.row_kind(row, params.len()) {
-                    RowKind::Back => "<-".to_string(),
-                    RowKind::Execute => "Execute Routine".to_string(),
-                    RowKind::Parameter(i) => match params.get(i) {
+                    ParameterRow::Back => "<-".to_string(),
+                    ParameterRow::Execute => "Execute Routine".to_string(),
+                    ParameterRow::Parameter(position) => match params.get(position) {
                         Some(param) => {
-                            let current_value = edit_state.parameter_values
-                                .get(&param.index)
-                                .copied()
+                            let current_value = edit_state
+                                .values
+                                .get(position)
                                 .unwrap_or(param.default);
-                            let value_str = self.format_parameter_value(current_value, param.unit);
+                            // `Unicode`: this panel's font has the degree sign. The GS3's
+                            // does not, and drops the whole row rather than the glyph.
+                            let value_str =
+                                format_value(current_value, param.unit, UnitStyle::Unicode);
                             format!("{} ({})", param.name, value_str)
                         }
                         None => continue,
@@ -1496,7 +1486,7 @@ impl DisplayController {
             .unwrap();
 
         // Current value prominently displayed with unit
-        let value_text = self.format_parameter_value(current_value, param_unit);
+        let value_text = format_value(current_value, param_unit, UnitStyle::Unicode);
         Text::with_text_style(&value_text, Point::new(64, 20), self.text_style_large,
             TextStyleBuilder::new()
                 .alignment(Alignment::Center)
