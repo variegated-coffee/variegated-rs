@@ -177,7 +177,7 @@ pub fn steam_boiler_state_or_default(stored: BoilerControlState) -> BoilerContro
 mod tests {
     use super::*;
     use variegated_control_algorithm::pid::PidOut;
-    use variegated_controller_types::BoilerStatus;
+    use variegated_controller_types::{BoilerStatus, DutyCycleType};
 
     const ALL_STATES: [State; 5] = [
         State::BrewModeIdle,
@@ -416,7 +416,7 @@ mod tests {
     /// halves of the convention cannot drift apart without this failing.
     #[test]
     fn the_active_slot_is_the_one_the_element_is_under() {
-        let element = Output::FixedDutyCycle(47);
+        let element = Output::FixedDutyCycle(DutyCycleType::new(47));
 
         for state in ALL_STATES {
             let (brew, steam) = element_outputs_for(state, element);

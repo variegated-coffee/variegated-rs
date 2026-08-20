@@ -28,6 +28,7 @@ import {
   f32,
   i8,
   map,
+  newtypeStruct,
   newtypeVariant,
   option,
   seq,
@@ -120,6 +121,8 @@ export const DurationSchema = struct({
   nanos: u32()
 });
 
+export const DutyCycleSchema = newtypeStruct('DutyCycle', u8());
+
 export const EnvironmentalSensorTypeSchema = enumType('EnvironmentalSensorType', {
   AmbientTemperature: unitVariant('AmbientTemperature'),
   CaseTemperature: unitVariant('CaseTemperature'),
@@ -145,6 +148,8 @@ export const HeatingElementContentionStrategySchema = enumType('HeatingElementCo
   SteamPriority: unitVariant('SteamPriority'),
   Proportional: unitVariant('Proportional')
 });
+
+export const HexadecimalDutyCycleSchema = newtypeStruct('HexadecimalDutyCycle', u8());
 
 export const ImprovStateSchema = enumType('ImprovState', {
   Stopped: unitVariant('Stopped'),
@@ -223,14 +228,6 @@ export const PidParameterTargetSchema = enumType('PidParameterTarget', {
   GroupFlowRate: newtypeVariant('GroupFlowRate', u8()),
   GroupOutputFlowRate: newtypeVariant('GroupOutputFlowRate', u8()),
   GroupPressure: newtypeVariant('GroupPressure', u8())
-});
-
-export const PumpConfigurationSchema = struct({
-  tacho_pulses_per_liter: option(f32()),
-  max_duty_cycle: option(u8()),
-  min_duty_cycle: option(u8()),
-  ramp_up_time_ms: option(u32()),
-  ramp_down_time_ms: option(u32())
 });
 
 export const RoutineIndexSchema = enumType('RoutineIndex', {
@@ -372,11 +369,6 @@ export const TankStatusSchema = struct({
   water_level: option(u8())
 });
 
-export const WaterDispersalPumpStrategySchema = enumType('WaterDispersalPumpStrategy', {
-  AlwaysPump: newtypeVariant('AlwaysPump', u8()),
-  NoPump: unitVariant('NoPump')
-});
-
 export const WaterTapStatusSchema = struct({
   is_dispensing: bool()
 });
@@ -459,11 +451,6 @@ export const EnvironmentalSensorDefinitionSchema = struct({
   measurement_range: option(tuple(f32(), f32()))
 });
 
-export const FillConfigurationSchema = struct({
-  fill_threshold: option(u8()),
-  pump_configuration: option(PumpConfigurationSchema)
-});
-
 export const GroupBrewControlTargetValuesSchema = struct({
   flow_rate: f32(),
   flow_rate_curve: ControlCurveSchema,
@@ -471,7 +458,7 @@ export const GroupBrewControlTargetValuesSchema = struct({
   pressure_curve: ControlCurveSchema,
   output_flow_rate: f32(),
   output_flow_rate_curve: ControlCurveSchema,
-  duty_cycle: u8(),
+  duty_cycle: DutyCycleSchema,
   duty_cycle_curve: ControlCurveSchema
 });
 
@@ -482,7 +469,7 @@ export const GroupBrewControlTargetValuesUpdateSchema = struct({
   pressure_curve: option(ControlCurveSchema),
   output_flow_rate: option(f32()),
   output_flow_rate_curve: option(ControlCurveSchema),
-  duty_cycle: option(u8()),
+  duty_cycle: option(DutyCycleSchema),
   duty_cycle_curve: option(ControlCurveSchema)
 });
 
@@ -495,7 +482,7 @@ export const GroupDefinitionSchema = struct({
 
 export const OutputSchema = enumType('Output', {
   Off: unitVariant('Off'),
-  FixedDutyCycle: newtypeVariant('FixedDutyCycle', u8()),
+  FixedDutyCycle: newtypeVariant('FixedDutyCycle', DutyCycleSchema),
   PidOutput: newtypeVariant('PidOutput', PidOutSchema)
 });
 
@@ -524,6 +511,20 @@ export const PreviousBrewInfoSchema = struct({
   output_weight: option(f32()),
   started_at_millis: u64(),
   stopped_at_millis: u64()
+});
+
+export const PumpConfigurationSchema = struct({
+  tacho_pulses_per_liter: option(f32()),
+  max_duty_cycle: option(DutyCycleSchema),
+  min_duty_cycle: option(DutyCycleSchema),
+  ramp_up_time_ms: option(u32()),
+  ramp_down_time_ms: option(u32())
+});
+
+export const PumpOutputSchema = enumType('PumpOutput', {
+  Off: unitVariant('Off'),
+  FixedDutyCycle: newtypeVariant('FixedDutyCycle', HexadecimalDutyCycleSchema),
+  PidOutput: newtypeVariant('PidOutput', PidOutSchema)
 });
 
 export const QueryErrorSchema = enumType('QueryError', {
@@ -629,13 +630,9 @@ export const TransitionOriginSchema = enumType('TransitionOrigin', {
   CurrentValue: unitVariant('CurrentValue')
 });
 
-export const WaterTapConfigurationSchema = struct({
-  pump_strategy: WaterDispersalPumpStrategySchema,
-  temperature_target: option(f32()),
-  max_dispense_time_seconds: option(u32()),
-  flow_rate_limit: option(f32()),
-  pump_configuration: option(PumpConfigurationSchema),
-  supply_tank_index: option(u8())
+export const WaterDispersalPumpStrategySchema = enumType('WaterDispersalPumpStrategy', {
+  AlwaysPump: newtypeVariant('AlwaysPump', DutyCycleSchema),
+  NoPump: unitVariant('NoPump')
 });
 
 export const WaterTapDefinitionSchema = struct({
@@ -674,6 +671,11 @@ export const ClientQuerySchema = enumType('ClientQuery', {
     routine: seq(u8())
   }),
   ShotLogPage: newtypeVariant('ShotLogPage', ShotLogListRequestSchema)
+});
+
+export const FillConfigurationSchema = struct({
+  fill_threshold: option(u8()),
+  pump_configuration: option(PumpConfigurationSchema)
 });
 
 export const GroupBrewControlStateSchema = struct({
@@ -759,6 +761,15 @@ export const ShotAnnotationsSchema = struct({
   tasting_notes: option(string())
 });
 
+export const WaterTapConfigurationSchema = struct({
+  pump_strategy: WaterDispersalPumpStrategySchema,
+  temperature_target: option(f32()),
+  max_dispense_time_seconds: option(u32()),
+  flow_rate_limit: option(f32()),
+  pump_configuration: option(PumpConfigurationSchema),
+  supply_tank_index: option(u8())
+});
+
 export const BoilerConfigurationSchema = struct({
   temperature_pid_parameters: PidParametersSchema,
   pressure_pid_parameters: PidParametersSchema,
@@ -798,7 +809,7 @@ export const GroupStatusSchema = struct({
   output_temperature: option(f32()),
   output_electrical_conductivity: option(f32()),
   extraction_rate: option(f32()),
-  pump_output: OutputSchema,
+  pump_output: PumpOutputSchema,
   control_state: GroupBrewControlStateSchema,
   previous_brew: option(PreviousBrewInfoSchema),
   pump_rpm: option(f32()),
@@ -1012,6 +1023,7 @@ export type DerivedFormula = InferType<typeof DerivedFormulaSchema>;
 export type DerivedParameter = InferType<typeof DerivedParameterSchema>;
 export type DiscoveredBluetoothPeripheral = InferType<typeof DiscoveredBluetoothPeripheralSchema>;
 export type Duration = InferType<typeof DurationSchema>;
+export type DutyCycle = InferType<typeof DutyCycleSchema>;
 export type EnvironmentalSensorDefinition = InferType<typeof EnvironmentalSensorDefinitionSchema>;
 export type EnvironmentalSensorType = InferType<typeof EnvironmentalSensorTypeSchema>;
 export type FillConfiguration = InferType<typeof FillConfigurationSchema>;
@@ -1023,6 +1035,7 @@ export type GroupConfiguration = InferType<typeof GroupConfigurationSchema>;
 export type GroupDefinition = InferType<typeof GroupDefinitionSchema>;
 export type GroupStatus = InferType<typeof GroupStatusSchema>;
 export type HeatingElementContentionStrategy = InferType<typeof HeatingElementContentionStrategySchema>;
+export type HexadecimalDutyCycle = InferType<typeof HexadecimalDutyCycleSchema>;
 export type ImprovState = InferType<typeof ImprovStateSchema>;
 export type KalmanParameters = InferType<typeof KalmanParametersSchema>;
 export type Limits = InferType<typeof LimitsSchema>;
@@ -1041,6 +1054,7 @@ export type PidParameters = InferType<typeof PidParametersSchema>;
 export type PidTerm = InferType<typeof PidTermSchema>;
 export type PreviousBrewInfo = InferType<typeof PreviousBrewInfoSchema>;
 export type PumpConfiguration = InferType<typeof PumpConfigurationSchema>;
+export type PumpOutput = InferType<typeof PumpOutputSchema>;
 export type QueryError = InferType<typeof QueryErrorSchema>;
 export type QueryOk = InferType<typeof QueryOkSchema>;
 export type QueryOutcome = InferType<typeof QueryOutcomeSchema>;

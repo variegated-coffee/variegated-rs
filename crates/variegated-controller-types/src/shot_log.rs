@@ -752,7 +752,25 @@ pub enum ShotLogEvent {
 ///   Unlike version 5 this carries one field rather than two: nothing else was waiting. The
 ///   batching rule is that a version's migration cost is paid once whatever it contains --
 ///   not that a version must be filled up before it ships.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 6;
+/// * `7` -- [`GroupSample::pump_output`] became a [`crate::PumpOutput`], carrying the pump's
+///   duty cycle on a 0-255 scale instead of as a 0-100 percentage.
+///
+///   **This is the dangerous kind, and it is dangerous in a way none of the others were.**
+///   Every previous bump moved bytes: a field was added, removed or retyped to a different
+///   width, and a decoder built against the wrong revision desynchronised loudly. This one
+///   moves nothing. `DutyCycle` and `HexadecimalDutyCycle` are newtypes over `u8` and
+///   postcard encodes a newtype struct as its inner value, so a version 6 file and a version
+///   7 file with the same pump duty are *byte-identical*. What changed is what the byte
+///   means: 72 was 72% and is now 72/255, which is 28%.
+///
+///   Nothing automated catches that. `the_encoding_has_not_moved_under_this_version` passed
+///   unchanged across this edit, because the encoding genuinely had not moved. The version
+///   is the only thing standing between a v6 shot and a viewer that would render its pump
+///   trace at 2.55x the truth -- plausible the whole way, with no gap or garbage to notice.
+///   `GOLDEN_V6` and `a_version_6_file_is_refused_by_its_version` are what keep the check
+///   honest; note that `GOLDEN_V7` differs from `GOLDEN_V6` only in the leading version
+///   varint, and that is correct rather than a mistake.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 7;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -942,7 +960,9 @@ pub struct GroupSample {
     pub output_temperature: Option<TemperatureType>,
     pub output_electrical_conductivity: Option<ECType>,
     pub extraction_rate: Option<ExtractionRateType>,
-    pub pump_output: Output,
+    /// On the pump's own 0-255 scale, with the percentage derivable from it. See
+    /// [`PumpOutput`].
+    pub pump_output: PumpOutput,
     pub shot_state: Option<ShotState>,
     pub extracted_solids: Option<ExtractedSolidsType>,
     pub output_volume: Option<OutputVolumeType>,
@@ -1313,7 +1333,7 @@ mod shot_log_sample_tests {
                     output_temperature: Some(87.25),
                     output_electrical_conductivity: Some(0.625),
                     extraction_rate: Some(1.125),
-                    pump_output: Output::FixedDutyCycle(72),
+                    pump_output: PumpOutput::FixedDutyCycle(HexadecimalDutyCycle::new(72)),
                     shot_state: Some(ShotState::PostFirstDrop),
                     extracted_solids: Some(7.75),
                     output_volume: Some(38.5),
@@ -1407,7 +1427,7 @@ mod shot_log_sample_tests {
         assert_eq!(group.output_temperature, Some(87.25));
         assert_eq!(group.output_electrical_conductivity, Some(0.625));
         assert_eq!(group.extraction_rate, Some(1.125));
-        assert_eq!(group.pump_output, Output::FixedDutyCycle(72));
+        assert_eq!(group.pump_output, PumpOutput::FixedDutyCycle(HexadecimalDutyCycle::new(72)));
         assert_eq!(group.shot_state, Some(ShotState::PostFirstDrop));
         assert_eq!(group.extracted_solids, Some(7.75));
         assert_eq!(group.output_volume, Some(38.5));
@@ -1532,6 +1552,34 @@ mod shot_log_sample_tests {
         0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
     ];
 
+    /// The bytes version 7 produces for [`canonical_shot`], captured once when version 7
+    /// was minted.
+    ///
+    /// **Identical to [`GOLDEN_V6`] except the leading version byte, and that is the point.**
+    /// Version 7 retyped `GroupSample::pump_output` from a percentage to the pump's 0-255
+    /// scale. Both are newtypes over `u8`, postcard encodes a newtype struct as its inner
+    /// value, and `canonical_shot` drives the pump at the raw number 72 either way -- so the
+    /// encoding is unchanged and only its meaning moved. A reader comparing these two arrays
+    /// and concluding the bump was unnecessary has it exactly backwards: a change that leaves
+    /// the bytes alone is the one the golden test cannot catch, which is why the version
+    /// check is carrying all of the weight here.
+    const GOLDEN_V7: &[u8] = &[
+        0x07, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
+        0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
+        0x20, 0x6c, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x6f, 0x63, 0x6f, 0x61, 0x20,
+        0x66, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01,
+        0x9c, 0xc7, 0x01, 0x01, 0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x02,
+        0xdc, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5, 0xee,
+        0x01, 0x01, 0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40, 0x01,
+        0x00, 0x00, 0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00, 0x00,
+        0x11, 0x42, 0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb, 0x42,
+        0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00,
+        0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40,
+        0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x03,
+        0x00, 0x00, 0x14, 0x41, 0x01, 0x02,
+        0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    ];
+
     /// A version 3 file is rejected on its version, not decoded into nonsense.
     ///
     /// The whole point of a leading version. `recorded_at_unix_millis` was *appended* to
@@ -1604,6 +1652,29 @@ mod shot_log_sample_tests {
         }
     }
 
+    /// A version 6 file is rejected on its version, not decoded into nonsense.
+    ///
+    /// **The version check is doing more work here than in any of the cases above.** For
+    /// versions 3, 4 and 5 the bytes themselves moved, so a mismatched decoder desynchronised
+    /// and had at least a chance of producing something obviously wrong. Version 7 retyped
+    /// `pump_output` without changing a single byte -- see [`GOLDEN_V7`] -- so a version 6
+    /// file decodes *perfectly* under version 7's schema and hands back a pump duty of 72
+    /// that means 28% where the file meant 72%. There is no desynchronisation, no garbage,
+    /// and nothing downstream that could notice. This assertion is the entire defence.
+    #[test]
+    fn a_version_6_file_is_refused_by_its_version() {
+        let (version, _rest) = postcard::take_from_bytes::<u32>(GOLDEN_V6).unwrap();
+        assert_eq!(version, 6, "GOLDEN_V6 must stay the version 6 file it was");
+        assert_ne!(
+            version, SHOT_LOG_FORMAT_VERSION,
+            "an old file must be distinguishable from a current one by its first byte"
+        );
+
+        if let Ok(decoded) = postcard::from_bytes::<ShotLog>(GOLDEN_V6) {
+            assert!(!decoded.version_supported());
+        }
+    }
+
     /// A shot stored by this version still decodes, byte for byte, to what it meant.
     ///
     /// This is the test that fires when someone adds, removes, reorders or retypes a field
@@ -1622,7 +1693,7 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V6,
+            GOLDEN_V7,
             "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
              see this test's doc comment before touching the golden array"
         );
@@ -1630,7 +1701,7 @@ mod shot_log_sample_tests {
         // Decoding the frozen bytes as well as comparing them: the assertion above proves
         // the writer has not moved, this proves the reader still understands what an
         // earlier build wrote.
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V6).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V7).unwrap();
         assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
         assert_eq!(decoded.metadata.recorded_at_unix_millis, Some(1_786_429_751_930));
         assert_eq!(

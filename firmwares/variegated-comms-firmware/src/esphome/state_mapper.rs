@@ -134,7 +134,7 @@ pub async fn status_task(
                 ));
                 send_if_valid!(duty_cycle_key, StateChange::SensorStateChange(SensorState::new(
                     duty_cycle_key,
-                    Some(boiler_status.output.duty_cycle() as f32)
+                    Some(boiler_status.output.duty_cycle().value() as f32)
                 )));
 
                 // Extract and publish PID terms (only for PID output)
@@ -223,13 +223,17 @@ pub async fn status_task(
                     brew_time_key,
                     group_status.current_brew.as_ref().map(|ref s| s.brew_time.as_secs_f32())
                 )));
+                // Home Assistant keeps seeing a percentage. The pump is driven on a 0-255
+                // scale internally, but this entity is a display surface rather than a
+                // tuning one, and its key is a stable identifier in HA -- so the percentage
+                // is derived here rather than a second entity being added beside it.
                 send_if_valid!(pump_duty_key, StateChange::SensorStateChange(SensorState::new(
                     pump_duty_key,
-                    Some(group_status.pump_output.duty_cycle() as f32)
+                    Some(group_status.pump_output.duty_cycle().value() as f32)
                 )));
 
                 // Extract and publish group PID terms (only for PID output)
-                if let variegated_controller_types::Output::PidOutput(pid_out) = &group_status.pump_output {
+                if let variegated_controller_types::PumpOutput::PidOutput(pid_out) = &group_status.pump_output {
                     let pid_p_key = (ENTITY_TYPE_GROUP_CONST as u32) << 24 |
                                    ((group_index as u32) << 16) |
                                    (GROUP_PID_P_TERM_CONST as u32);

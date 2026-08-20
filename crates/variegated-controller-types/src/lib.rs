@@ -24,7 +24,11 @@ pub type WeightType = f32; // g
 pub type WeightChangeType  = f32; // g/s
 pub type FrequencyType = f32; // Hz
 pub type RPMType = f32; // RPM
-pub type DutyCycleType = u8; // Percent
+/// Percent, 0-100. See [`duty_cycle`] for why this is a newtype and
+/// [`HexadecimalDutyCycleType`] for the scale the pump is actually driven with.
+pub type DutyCycleType = DutyCycle;
+/// 0-255, the pump's scale. See [`duty_cycle`].
+pub type HexadecimalDutyCycleType = HexadecimalDutyCycle;
 pub type ValveOpenType = u8; // Percent
 pub type MixingProportionType = u8; // Percent
 /// Electrical conductivity of what is leaving the group, **mS/cm**.
@@ -84,6 +88,7 @@ pub mod control;
 pub mod controller_variants;
 pub mod debug;
 pub mod debug_command;
+pub mod duty_cycle;
 pub mod machine_definition;
 pub mod machine_mode;
 pub mod peripherals;
@@ -107,6 +112,7 @@ pub use control::boiler::*;
 pub use control::group::*;
 pub use control::steam_wand::*;
 pub use controller_variants::*;
+pub use duty_cycle::*;
 pub use machine_definition::*;
 pub use machine_mode::*;
 pub use peripherals::*;

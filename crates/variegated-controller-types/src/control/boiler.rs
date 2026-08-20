@@ -85,7 +85,7 @@ pub enum WaterDispersalPumpStrategy {
 
 impl Default for WaterDispersalPumpStrategy {
     fn default() -> Self {
-        WaterDispersalPumpStrategy::AlwaysPump(100)
+        WaterDispersalPumpStrategy::AlwaysPump(DutyCycle::FULL)
     }
 }
 

@@ -374,7 +374,10 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         pressure_curve: None,
                         output_flow_rate: None,
                         output_flow_rate_curve: None,
-                        duty_cycle: Some(self.resolve_value(pv) as u8),
+                        // Routines are authored in percent, so this stays a `DutyCycle`.
+                        // `from_f32` clamps where the bare `as u8` it replaced did not: a
+                        // routine parameter resolving above 100 used to arrive as-is.
+                        duty_cycle: Some(DutyCycleType::from_f32(self.resolve_value(pv))),
                         duty_cycle_curve: None
                     }))
             }
@@ -542,7 +545,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                             flow_rate: None,
                             output_flow_rate: None,
                             pressure: None,
-                            duty_cycle: Some(target_value as u8),
+                            duty_cycle: Some(DutyCycleType::from_f32(target_value)),
                             flow_rate_curve: None,
                             pressure_curve: None,
                             output_flow_rate_curve: None,
@@ -558,7 +561,9 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     // `apply_pump_configuration_limits` and may be clamped away from it.
                     let origin = self.resolve_transition_origin(
                         origin,
-                        group.map(|gs| gs.pump_output.duty_cycle() as f32),
+                        // As a percentage, because the curve this feeds is authored in
+                        // percent -- `pump_output` itself is on the pump's 0-255 scale.
+                        group.map(|gs| gs.pump_output.duty_cycle().value() as f32),
                         group.and_then(|gs| gs.brew_control_target.as_ref()),
                         &[
                             GroupBrewControlMode::FixedDutyCycle,
@@ -1601,7 +1606,7 @@ pub fn create_backflush_routine(group: GroupIndex, pump_duty_cycle: DutyCycleTyp
     let mut steps = vec![
         // Step 0: Initialize - set group to full power
         RoutineStep {
-            entry_command: vec![RoutineCommand::SetGroupFixedDutyCycle(group, ParameterValue::Static(pump_duty_cycle.into()))],
+            entry_command: vec![RoutineCommand::SetGroupFixedDutyCycle(group, ParameterValue::Static(pump_duty_cycle.value() as f32))],
             exits: vec![RoutineExit::new(
                 RoutineExitCondition::Always,
                 RoutineStepExitType::NextStep

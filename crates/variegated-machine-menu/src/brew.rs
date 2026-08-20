@@ -85,7 +85,7 @@ pub fn brew_target(
         GroupBrewControlMode::FixedDutyCycle => Some((
             "Brew duty",
             ParameterUnit::Percent,
-            values.duty_cycle as f32,
+            values.duty_cycle.value() as f32,
         )),
         _ => None,
     }
@@ -93,26 +93,15 @@ pub fn brew_target(
 
 /// A duty cycle as a percentage, rounded and clamped into a [`DutyCycleType`].
 ///
-/// **Rounded, not truncated.** The editor's step for `Percent` is 1.0 from a whole number,
-/// so the arithmetic should land exactly -- but `f32` addition repeated a hundred times need
-/// not, and truncating a 99.999999 to 99 would make the row appear to stick one short of
-/// full on the way up.
+/// The rounding rule this used to spell out now lives on the type itself, in
+/// [`DutyCycleType::from_f32`], because it is the same rule everywhere a duty cycle is
+/// narrowed from a float -- an editor, an evaluated curve, a PID output -- and having one
+/// copy per call site is how two of them ended up disagreeing.
 ///
-/// Clamped as well: [`variegated_menu::Adjustable`] already bounds this to 0..=100 through
-/// [`crate::parameter_bounds`], and this holds if that bound ever moves. A float-to-int `as`
-/// cast saturates rather than wrapping, so the clamp is about staying inside *this*
-/// quantity's range, not about avoiding undefined behaviour.
-///
-/// `+ 0.5` rather than `libm::roundf`: this crate does not link libm, and the two agree for
-/// the non-negative values an editor bounded at zero can produce.
+/// Kept as a named function rather than inlined at the call sites because the editors read
+/// better for it, and because it is the documented entry point the GS3's menu uses.
 pub fn duty_cycle_from_editor(value: f32) -> DutyCycleType {
-    if value <= 0.0 {
-        0
-    } else if value >= 100.0 {
-        100
-    } else {
-        (value + 0.5) as DutyCycleType
-    }
+    DutyCycleType::from_f32(value)
 }
 
 #[cfg(test)]
@@ -123,7 +112,7 @@ mod tests {
         GroupBrewControlTargetValues {
             pressure: 9.0,
             flow_rate: 2.5,
-            duty_cycle: 80,
+            duty_cycle: DutyCycleType::new(80),
             ..Default::default()
         }
     }
@@ -237,31 +226,35 @@ mod tests {
         }
     }
 
+    // The rounding and saturation rules themselves are tested on the type, in
+    // `variegated_controller_types::duty_cycle`. These cover the editor's own contract:
+    // the values an `Adjustable` bounded at 0..=100 can actually hand over.
+
     #[test]
     fn a_duty_cycle_one_float_step_short_of_full_still_rounds_to_full() {
         // The failure this function exists for: truncation would make the row stick at 99.
-        assert_eq!(duty_cycle_from_editor(99.999_99), 100);
-        assert_eq!(duty_cycle_from_editor(79.999_99), 80);
-        assert_eq!(duty_cycle_from_editor(0.000_01), 0);
+        assert_eq!(duty_cycle_from_editor(99.999_99).value(), 100);
+        assert_eq!(duty_cycle_from_editor(79.999_99).value(), 80);
+        assert_eq!(duty_cycle_from_editor(0.000_01).value(), 0);
     }
 
     #[test]
     fn duty_cycles_round_to_nearest_rather_than_down() {
-        assert_eq!(duty_cycle_from_editor(50.0), 50);
-        assert_eq!(duty_cycle_from_editor(50.4), 50);
-        assert_eq!(duty_cycle_from_editor(50.5), 51);
-        assert_eq!(duty_cycle_from_editor(50.6), 51);
+        assert_eq!(duty_cycle_from_editor(50.0).value(), 50);
+        assert_eq!(duty_cycle_from_editor(50.4).value(), 50);
+        assert_eq!(duty_cycle_from_editor(50.5).value(), 51);
+        assert_eq!(duty_cycle_from_editor(50.6).value(), 51);
     }
 
     #[test]
     fn duty_cycles_outside_the_range_saturate() {
-        assert_eq!(duty_cycle_from_editor(-5.0), 0);
-        assert_eq!(duty_cycle_from_editor(0.0), 0);
-        assert_eq!(duty_cycle_from_editor(100.0), 100);
-        assert_eq!(duty_cycle_from_editor(1000.0), 100);
+        assert_eq!(duty_cycle_from_editor(-5.0).value(), 0);
+        assert_eq!(duty_cycle_from_editor(0.0).value(), 0);
+        assert_eq!(duty_cycle_from_editor(100.0).value(), 100);
+        assert_eq!(duty_cycle_from_editor(1000.0).value(), 100);
         // `Adjustable` maps NaN to its minimum, so this should not arrive -- but a
         // saturating cast on NaN is 0, and 0% is the safe way to be wrong about a pump.
-        assert_eq!(duty_cycle_from_editor(f32::NAN), 0);
+        assert_eq!(duty_cycle_from_editor(f32::NAN).value(), 0);
     }
 
     #[test]

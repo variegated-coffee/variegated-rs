@@ -2738,7 +2738,7 @@ async fn main_task(
     // Add internal routines (never persisted to flash)
     routine_repository.add_internal_routine(
         RoutineIndex::Internal(0),
-        create_backflush_routine(SingleGroup.as_index(), 50)
+        create_backflush_routine(SingleGroup.as_index(), DutyCycleType::new(50))
     ).await.unwrap();
 
     let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));

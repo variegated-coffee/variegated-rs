@@ -12,8 +12,8 @@ use crate::{DutyCycleType, HeatingElement, WithTask};
 struct CoordinatedState {
     interlock_enabled: bool,
     contention_strategy: HeatingElementContentionStrategy,
-    brew_duty_cycle: u8,
-    steam_duty_cycle: u8,
+    brew_duty_cycle: DutyCycleType,
+    steam_duty_cycle: DutyCycleType,
 }
 
 impl Default for CoordinatedState {
@@ -21,8 +21,8 @@ impl Default for CoordinatedState {
         Self {
             interlock_enabled: false,
             contention_strategy: HeatingElementContentionStrategy::default(),
-            brew_duty_cycle: 0,
-            steam_duty_cycle: 0,
+            brew_duty_cycle: DutyCycleType::OFF,
+            steam_duty_cycle: DutyCycleType::OFF,
         }
     }
 }
@@ -48,7 +48,7 @@ pub struct CoordinatedDualHeatingElementControl<M: RawMutex + 'static> {
 impl<M: RawMutex + 'static> CoordinatedDualHeatingElementControl<M> {
     pub fn new(duty_signal: &'static Signal<M, DutyCycleType>) -> Self {
         CoordinatedDualHeatingElementControl {
-            last_value: 0,
+            last_value: DutyCycleType::OFF,
             duty_signal,
         }
     }
@@ -141,8 +141,8 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeating
 
     /// Calculate the heating schedule for coordinated (interlock enabled) operation
     fn calculate_coordinated_schedule(&self, state: &CoordinatedState) -> HeatingSchedule {
-        let brew_duty = state.brew_duty_cycle as f32 / 100.0;
-        let steam_duty = state.steam_duty_cycle as f32 / 100.0;
+        let brew_duty = state.brew_duty_cycle.value() as f32 / 100.0;
+        let steam_duty = state.steam_duty_cycle.value() as f32 / 100.0;
 
         let total_micros = self.cycle_duration.as_micros() as f32;
         let brew_requested = Duration::from_micros((total_micros * brew_duty) as u64);
@@ -199,8 +199,8 @@ impl<O1: OutputPin, O2: OutputPin, M: RawMutex + 'static> CoordinatedDualHeating
     fn calculate_independent_schedule(&self, state: &CoordinatedState) -> HeatingSchedule {
         // In independent mode, we run both simultaneously with their requested duty cycles
         // This means they may overlap, which is the whole point of disabling the interlock
-        let brew_duty = state.brew_duty_cycle as f32 / 100.0;
-        let steam_duty = state.steam_duty_cycle as f32 / 100.0;
+        let brew_duty = state.brew_duty_cycle.value() as f32 / 100.0;
+        let steam_duty = state.steam_duty_cycle.value() as f32 / 100.0;
 
         let total_micros = self.cycle_duration.as_micros() as f32;
         let brew_duration = Duration::from_micros((total_micros * brew_duty) as u64);

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::Instant;
-use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, DutyCycleType, WaterLevelType, Pump, ValveMechanism};
+use crate::{BrewMechanism, BrewMechanismError, WaterTapMechanism, WaterTapMechanismError, HexadecimalDutyCycleType, WaterLevelType, Pump, ValveMechanism};
 use alloc::boxed::Box;
 use defmt::Format;
 use variegated_log::log_info;
@@ -63,9 +63,9 @@ pub struct DualBoilerMechanism<'a> {
     state: DualBoilerMechanismState,
     config: DualBoilerConfig,
     // Unified resource requests
-    brew_request: Option<DutyCycleType>,
-    water_dispersal_request: Option<DutyCycleType>,
-    fill_request: Option<DutyCycleType>,
+    brew_request: Option<HexadecimalDutyCycleType>,
+    water_dispersal_request: Option<HexadecimalDutyCycleType>,
+    fill_request: Option<HexadecimalDutyCycleType>,
     steam_dispersal_request: bool,
 }
 
@@ -175,7 +175,7 @@ impl<'a> DualBoilerMechanism<'a> {
         )
     }
 
-    pub fn get_pump_duty_cycle(&self) -> Option<DutyCycleType> {
+    pub fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType> {
         self.pump.as_ref().map(|pump| pump.get_duty_cycle())
     }
 
@@ -219,10 +219,10 @@ impl<'a> DualBoilerMechanism<'a> {
                 (fill_duty, false, false, true, false)
             } else if self.steam_dispersal_request {
                 // Steam only (no pump needed)
-                (0, false, false, false, true)
+                (HexadecimalDutyCycleType::OFF, false, false, false, true)
             } else {
                 // All off
-                (0, false, false, false, false)
+                (HexadecimalDutyCycleType::OFF, false, false, false, false)
             };
 
         // Apply arbitrated states to hardware
@@ -244,7 +244,7 @@ impl<'a> DualBoilerMechanism<'a> {
     }
 
     // Unified resource request methods
-    pub fn request_brew_state(&mut self, brewing: bool, duty_cycle: DutyCycleType) {
+    pub fn request_brew_state(&mut self, brewing: bool, duty_cycle: HexadecimalDutyCycleType) {
         self.brew_request = if brewing {
             Some(duty_cycle)
         } else {
@@ -253,7 +253,7 @@ impl<'a> DualBoilerMechanism<'a> {
         self.arbitrate_all_resources();
     }
 
-    pub fn request_water_dispersal_state(&mut self, dispensing: bool, duty_cycle: DutyCycleType) {
+    pub fn request_water_dispersal_state(&mut self, dispensing: bool, duty_cycle: HexadecimalDutyCycleType) {
         self.water_dispersal_request = if dispensing {
             Some(duty_cycle)
         } else {
@@ -262,7 +262,7 @@ impl<'a> DualBoilerMechanism<'a> {
         self.arbitrate_all_resources();
     }
 
-    pub fn request_fill_state(&mut self, filling: bool, duty_cycle: DutyCycleType) {
+    pub fn request_fill_state(&mut self, filling: bool, duty_cycle: HexadecimalDutyCycleType) {
         self.fill_request = if filling {
             Some(duty_cycle)
         } else {
@@ -292,7 +292,7 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
         }
     }
 
-    pub async fn set_fill_state(&mut self, filling: bool, duty_cycle: DutyCycleType) {
+    pub async fn set_fill_state(&mut self, filling: bool, duty_cycle: HexadecimalDutyCycleType) {
         let mut mechanism = self.mechanism.lock().await;
         mechanism.request_fill_state(filling, duty_cycle);
     }
@@ -331,7 +331,7 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
                     // Start/continue filling cycle (tank has water or feature disabled)
                     self.is_filling_cycle = true;
                     self.threshold_exceeded_time = None;
-                    self.set_fill_state(true, 100).await;
+                    self.set_fill_state(true, HexadecimalDutyCycleType::FULL).await;
                 } else {
                     // Can't fill (not idle OR tank empty). Not logged: this runs
                     // from the same 10 Hz loop, and an empty tank is a normal
@@ -343,7 +343,7 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
                     // no "which one tripped" ambiguity for text to resolve.
                     self.is_filling_cycle = false;
                     self.threshold_exceeded_time = None;
-                    self.set_fill_state(false, 0).await;
+                    self.set_fill_state(false, HexadecimalDutyCycleType::OFF).await;
                 }
             } else {
                 // At or above threshold
@@ -353,7 +353,7 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
                         None => {
                             // Just reached threshold during fill - start timing
                             self.threshold_exceeded_time = Some(Instant::now());
-                            self.set_fill_state(true, 100).await;
+                            self.set_fill_state(true, HexadecimalDutyCycleType::FULL).await;
                         }
                         Some(exceeded_time) => {
                             // Already above threshold - check if stable for 2 seconds
@@ -362,23 +362,23 @@ impl<'a, M: RawMutex> DualBoilerFillMechanism<'a, M> {
                                 // Level has been stable above threshold for 2 seconds - stop filling
                                 self.is_filling_cycle = false;
                                 self.threshold_exceeded_time = None;
-                                self.set_fill_state(false, 0).await;
+                                self.set_fill_state(false, HexadecimalDutyCycleType::OFF).await;
                             } else {
                                 // Not yet stable for 2 seconds - keep filling
-                                self.set_fill_state(true, 100).await;
+                                self.set_fill_state(true, HexadecimalDutyCycleType::FULL).await;
                             }
                         }
                     }
                 } else {
                     // Not in a fill cycle and level is above threshold - do nothing (stay off)
-                    self.set_fill_state(false, 0).await;
+                    self.set_fill_state(false, HexadecimalDutyCycleType::OFF).await;
                 }
             }
         } else {
             // No threshold set - turn off fill and end any fill cycle
             self.is_filling_cycle = false;
             self.threshold_exceeded_time = None;
-            self.set_fill_state(false, 0).await;
+            self.set_fill_state(false, HexadecimalDutyCycleType::OFF).await;
         }
     }
 }
@@ -395,13 +395,13 @@ impl<'a, M: RawMutex> DualBoilerBrewMechanism<'a, M> {
 
 #[async_trait]
 impl<'a, M: RawMutex + Sync> BrewMechanism for DualBoilerBrewMechanism<'a, M> {
-    async fn set_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError> {
+    async fn set_state(&mut self, brewing: bool, duty_cycle: HexadecimalDutyCycleType) -> Result<(), BrewMechanismError> {
         let mut mechanism = self.mechanism.lock().await;
-        mechanism.request_brew_state(brewing, duty_cycle_percent);
+        mechanism.request_brew_state(brewing, duty_cycle);
         Ok(())
     }
 
-    fn get_pump_duty_cycle(&self) -> Option<DutyCycleType> {
+    fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType> {
         let mechanism = self.mechanism.try_lock();
         mechanism.ok().and_then(|m| m.get_pump_duty_cycle())
     }
@@ -429,13 +429,13 @@ impl<'a, M: RawMutex> DualBoilerWaterTapMechanism<'a, M> {
 
 #[async_trait]
 impl<'a, M: RawMutex + Sync> WaterTapMechanism for DualBoilerWaterTapMechanism<'a, M> {
-    async fn set_state(&mut self, dispensing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), WaterTapMechanismError> {
+    async fn set_state(&mut self, dispensing: bool, duty_cycle: HexadecimalDutyCycleType) -> Result<(), WaterTapMechanismError> {
         let mut mechanism = self.mechanism.lock().await;
-        mechanism.request_water_dispersal_state(dispensing, duty_cycle_percent);
+        mechanism.request_water_dispersal_state(dispensing, duty_cycle);
         Ok(())
     }
 
-    fn get_pump_duty_cycle(&self) -> Option<DutyCycleType> {
+    fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType> {
         let mechanism = self.mechanism.try_lock();
         mechanism.ok().and_then(|m| m.get_pump_duty_cycle())
     }

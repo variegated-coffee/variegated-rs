@@ -4,8 +4,16 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Timer};
 use embedded_hal::digital::OutputPin;
 use variegated_instrumentation::async_task_loop;
-use variegated_soft_pwm::SoftPwm;
+use variegated_soft_pwm::{Percent, SoftPwm};
 use crate::{DutyCycleType, HeatingElement, WithTask};
+
+/// The seam between this tree's percentage type and the soft-PWM crate's own.
+///
+/// Both are percentages, so this is a rename rather than a rescale -- but the two crates
+/// keep separate types on purpose, and one function is where that costs anything.
+fn to_soft_pwm(duty_cycle: DutyCycleType) -> Percent {
+    Percent::new(duty_cycle.value())
+}
 
 pub struct GpioBinaryHeatingElementControl<M: RawMutex + 'static> {
     last_value: DutyCycleType,
@@ -15,7 +23,7 @@ pub struct GpioBinaryHeatingElementControl<M: RawMutex + 'static> {
 impl<M: RawMutex + 'static> GpioBinaryHeatingElementControl<M> {
     pub fn new(signal: &'static Signal<M, DutyCycleType>) -> Self {
         GpioBinaryHeatingElementControl {
-            last_value: 0,
+            last_value: DutyCycleType::OFF,
             signal
         }
     }
@@ -39,7 +47,7 @@ impl<O: OutputPin, M: RawMutex + 'static> GpioBinaryHeatingElement<O, M> {
     pub fn new(output: O, signal: &'static Signal<M, DutyCycleType>) -> Self {
         GpioBinaryHeatingElement {
             output,
-            soft_pwm: SoftPwm::new(Duration::from_secs(3), 0),
+            soft_pwm: SoftPwm::new(Duration::from_secs(3), Percent::OFF),
             signal: &signal,
             checkin: variegated_checkin::CheckinHandle::none(),
         }
@@ -88,6 +96,7 @@ impl<O: OutputPin, M: RawMutex + 'static> WithTask for GpioBinaryHeatingElement<
         async_task_loop!("GpioBinaryHeatingElement", None, {
             let new_duty_cycle = self.signal.try_take();
             if let Some(duty_cycle) = new_duty_cycle {
+                let duty_cycle = to_soft_pwm(duty_cycle);
                 if duty_cycle != self.soft_pwm.get_duty_cycle() {
                     // Not logged: the duty cycle reaches the host as
                     // `BoilerStatus::output`, and logging it here put a line on the

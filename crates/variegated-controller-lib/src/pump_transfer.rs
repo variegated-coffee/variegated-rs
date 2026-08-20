@@ -42,7 +42,7 @@
 //! [`FixedDutyCycle`]: GroupBrewControlMode::FixedDutyCycle
 //! [`FixedDutyCycleCurve`]: GroupBrewControlMode::FixedDutyCycleCurve
 
-use variegated_controller_types::{DutyCycleType, GroupBrewControlMode};
+use variegated_controller_types::{GroupBrewControlMode, HexadecimalDutyCycleType};
 
 /// Whether `mode` puts the pump PID in control of the duty cycle.
 ///
@@ -69,8 +69,9 @@ pub enum PumpPidTransfer {
     /// The PID is taking over from open-loop control. Seed its integral so its first output
     /// matches the duty cycle already being commanded, then step it.
     Engage {
-        /// The duty cycle the pump is running at right now, to be inherited.
-        seed_from_duty: DutyCycleType,
+        /// The duty cycle the pump is running at right now, to be inherited. On the pump's
+        /// 0-255 scale, which is also the scale the PID's output and integral are in.
+        seed_from_duty: HexadecimalDutyCycleType,
     },
     /// The PID already had the output and keeps it. Step it.
     ///
@@ -95,7 +96,7 @@ pub enum PumpPidTransfer {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PumpPidEngagement {
     engaged: bool,
-    last_commanded_duty: DutyCycleType,
+    last_commanded_duty: HexadecimalDutyCycleType,
 }
 
 impl PumpPidEngagement {
@@ -121,7 +122,7 @@ impl PumpPidEngagement {
     }
 
     /// Record the duty cycle actually sent to the pump this iteration.
-    pub fn record_commanded_duty(&mut self, duty: DutyCycleType) {
+    pub fn record_commanded_duty(&mut self, duty: HexadecimalDutyCycleType) {
         self.last_commanded_duty = duty;
     }
 
@@ -134,7 +135,7 @@ impl PumpPidEngagement {
     /// last dialled into the duty-cycle screen.
     ///
     /// [`FixedDutyCycle`]: GroupBrewControlMode::FixedDutyCycle
-    pub fn last_commanded_duty(&self) -> DutyCycleType {
+    pub fn last_commanded_duty(&self) -> HexadecimalDutyCycleType {
         self.last_commanded_duty
     }
 }
@@ -142,6 +143,12 @@ impl PumpPidEngagement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A raw duty cycle. These are 0-255 values, not percentages -- 60 here is ~24% of full
+    /// pump output, not 60% of it.
+    const fn duty(raw: u8) -> HexadecimalDutyCycleType {
+        HexadecimalDutyCycleType::new(raw)
+    }
 
     const ALL_MODES: [GroupBrewControlMode; 10] = [
         GroupBrewControlMode::Off,
@@ -177,11 +184,11 @@ mod tests {
             engagement.transfer_for(GroupBrewControlMode::FixedDutyCycle),
             PumpPidTransfer::Hold
         );
-        engagement.record_commanded_duty(60);
+        engagement.record_commanded_duty(duty(60));
 
         assert_eq!(
             engagement.transfer_for(GroupBrewControlMode::Pressure),
-            PumpPidTransfer::Engage { seed_from_duty: 60 }
+            PumpPidTransfer::Engage { seed_from_duty: duty(60) }
         );
     }
 
@@ -190,13 +197,13 @@ mod tests {
     #[test]
     fn staying_in_a_closed_loop_mode_engages_only_once() {
         let mut engagement = PumpPidEngagement::new();
-        engagement.record_commanded_duty(60);
+        engagement.record_commanded_duty(duty(60));
 
         assert_eq!(
             engagement.transfer_for(GroupBrewControlMode::Pressure),
-            PumpPidTransfer::Engage { seed_from_duty: 60 }
+            PumpPidTransfer::Engage { seed_from_duty: duty(60) }
         );
-        engagement.record_commanded_duty(58);
+        engagement.record_commanded_duty(duty(58));
 
         for _ in 0..10 {
             assert_eq!(
@@ -211,7 +218,7 @@ mod tests {
     #[test]
     fn closed_loop_to_closed_loop_continues() {
         let mut engagement = PumpPidEngagement::new();
-        engagement.record_commanded_duty(60);
+        engagement.record_commanded_duty(duty(60));
 
         assert!(matches!(
             engagement.transfer_for(GroupBrewControlMode::Pressure),
@@ -245,25 +252,25 @@ mod tests {
     #[test]
     fn leaving_and_returning_re_engages() {
         let mut engagement = PumpPidEngagement::new();
-        engagement.record_commanded_duty(45);
+        engagement.record_commanded_duty(duty(45));
 
         assert!(matches!(
             engagement.transfer_for(GroupBrewControlMode::Pressure),
             PumpPidTransfer::Engage { .. }
         ));
-        engagement.record_commanded_duty(45);
+        engagement.record_commanded_duty(duty(45));
 
         assert_eq!(
             engagement.transfer_for(GroupBrewControlMode::Off),
             PumpPidTransfer::Hold
         );
-        engagement.record_commanded_duty(0);
+        engagement.record_commanded_duty(duty(0));
 
         // Off commanded 0, so there is nothing to inherit -- which is right. Coming out of
         // Off is a start, not a transfer.
         assert_eq!(
             engagement.transfer_for(GroupBrewControlMode::Pressure),
-            PumpPidTransfer::Engage { seed_from_duty: 0 }
+            PumpPidTransfer::Engage { seed_from_duty: duty(0) }
         );
     }
 
@@ -275,7 +282,7 @@ mod tests {
         let mut engagement = PumpPidEngagement::new();
         assert_eq!(
             engagement.transfer_for(GroupBrewControlMode::GroupFlowRate),
-            PumpPidTransfer::Engage { seed_from_duty: 0 }
+            PumpPidTransfer::Engage { seed_from_duty: duty(0) }
         );
     }
 }

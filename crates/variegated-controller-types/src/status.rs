@@ -211,7 +211,7 @@ impl defmt::Format for Status {
             }
             match boiler_status.output {
                 Output::Off => defmt::write!(f, " OUT:Off"),
-                Output::FixedDutyCycle(dc) => defmt::write!(f, " OUT:{}%", dc),
+                Output::FixedDutyCycle(dc) => defmt::write!(f, " OUT:{}%", dc.value()),
                 Output::PidOutput(pid_out) => defmt::write!(f, " OUT:PID{}%", pid_out.out),
             }
             defmt::write!(f, " MODE:{:?}", boiler_status.control_state.mode);
@@ -261,10 +261,22 @@ impl defmt::Format for Status {
             if let Some(ec) = group_status.output_electrical_conductivity {
                 defmt::write!(f, " EC:{}", ec);
             }
+            // Both scales, because this line is read while tuning: the raw value is what
+            // the pump was actually given, and the percentage is what the operator set.
             match group_status.pump_output {
-                Output::Off => defmt::write!(f, " PUMP:Off"),
-                Output::FixedDutyCycle(dc) => defmt::write!(f, " PUMP:{}%", dc),
-                Output::PidOutput(pid_out) => defmt::write!(f, " PUMP:PID{}%", pid_out.out),
+                PumpOutput::Off => defmt::write!(f, " PUMP:Off"),
+                PumpOutput::FixedDutyCycle(_) => defmt::write!(
+                    f,
+                    " PUMP:{}/255 ({}%)",
+                    group_status.pump_output.hexadecimal_duty_cycle().value(),
+                    group_status.pump_output.duty_cycle().value()
+                ),
+                PumpOutput::PidOutput(pid_out) => defmt::write!(
+                    f,
+                    " PUMP:PID{}/255 ({}%)",
+                    pid_out.out,
+                    group_status.pump_output.duty_cycle().value()
+                ),
             }
             defmt::write!(f, ")");
         }
@@ -406,7 +418,9 @@ pub struct GroupStatus {
     pub output_temperature: Option<TemperatureType>,
     pub output_electrical_conductivity: Option<ECType>,
     pub extraction_rate: Option<ExtractionRateType>,
-    pub pump_output: Output,
+    /// On the pump's own 0-255 scale, with the percentage derivable from it. See
+    /// [`PumpOutput`].
+    pub pump_output: PumpOutput,
     pub control_state: GroupBrewControlState,
     pub previous_brew: Option<PreviousBrewInfo>,
     /// Gear-pump speed from the tacho, on machines that have one.

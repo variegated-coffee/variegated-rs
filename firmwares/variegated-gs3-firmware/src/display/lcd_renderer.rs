@@ -7,7 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::format;
 use embassy_time::Instant;
 use hd44780_controller::controller::{Controller, state::Init};
-use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, COMMS_STATUS_STALE_AFTER};
+use variegated_controller_types::{DualBoilerSingleGroupControllerBoilers, DutyCycleType, Routine, RoutineExitCondition, SingleGroupControllerGroups, StateCondition, COMMS_STATUS_STALE_AFTER};
 use variegated_controller_types::wifi::ImprovState;
 use variegated_timekeeping::TimeKeeper;
 use variegated_controller_lib::routine::RoutineRepository;
@@ -285,7 +285,7 @@ impl LcdDisplayState {
     fn get_heating_indicator(&self, boiler_index: u8) -> char {
         self.shared_state.status.get_boiler_status(boiler_index)
             .map(|status| {
-                if status.output.duty_cycle() > 0 {
+                if status.output.duty_cycle() > DutyCycleType::OFF {
                     'X'
                 } else {
                     'O'

@@ -7,7 +7,7 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use variegated_machine_menu::{
@@ -191,7 +191,9 @@ impl Default for UIState {
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ManualBrewParameters {
-    pub duty_cycle: u8,    // 0-100%
+    /// A percentage. This screen is an operator control, so it stays on the operator's
+    /// scale; the conversion to the pump's 0-255 scale happens in the controller.
+    pub duty_cycle: DutyCycleType,
     pub flow_rate: f32,    // ml/s
     pub pressure: f32,     // bar
 }
@@ -199,7 +201,7 @@ pub(crate) struct ManualBrewParameters {
 impl ManualBrewParameters {
     pub fn new() -> Self {
         Self {
-            duty_cycle: 0,
+            duty_cycle: DutyCycleType::OFF,
             flow_rate: 5.0,
             pressure: 9.0,
         }
@@ -207,7 +209,7 @@ impl ManualBrewParameters {
 
     pub fn get_value(&self, mode: ControlMode) -> f32 {
         match mode {
-            ControlMode::PumpDutyCycle => self.duty_cycle as f32,
+            ControlMode::PumpDutyCycle => self.duty_cycle.value() as f32,
             ControlMode::PumpFlowRate => self.flow_rate,
             ControlMode::PumpPressure => self.pressure,
         }
@@ -236,9 +238,9 @@ impl ManualBrewParameters {
         if increment { a.increase() } else { a.decrease() }
 
         match mode {
-            // Back through `u8`. The value is clamped to 0..=100 by `Adjustable`, so this cast
-            // cannot saturate.
-            ControlMode::PumpDutyCycle => self.duty_cycle = a.value() as u8,
+            // `Adjustable` already clamps to 0..=100; `from_f32` clamps again and rounds
+            // rather than truncating, which is the rule every duty cycle narrows by.
+            ControlMode::PumpDutyCycle => self.duty_cycle = DutyCycleType::from_f32(a.value()),
             ControlMode::PumpFlowRate => self.flow_rate = a.value(),
             ControlMode::PumpPressure => self.pressure = a.value(),
         }
@@ -247,7 +249,7 @@ impl ManualBrewParameters {
     pub fn to_group_brew_control_command(&self, mode: ControlMode) -> (GroupBrewControlMode, Option<GroupBrewControlTargetValuesUpdate>) {
         match mode {
             ControlMode::PumpDutyCycle => {
-                if self.duty_cycle == 0 {
+                if self.duty_cycle == DutyCycleType::OFF {
                     (GroupBrewControlMode::Off, None)
                 } else {
                     (GroupBrewControlMode::FixedDutyCycle, Some(GroupBrewControlTargetValuesUpdate {
@@ -298,13 +300,18 @@ impl ManualBrewParameters {
     }
 
     pub fn sync_from_process_values(&mut self, group_status: &variegated_controller_types::GroupStatus) {
-        // Update duty cycle from current pump output (clamp to 0-100%)
-        let current_duty = group_status.pump_output.duty_cycle();
-        // Round to nearest 5% increment, in `u16`. `current_duty` is a `DutyCycleType = u8`
-        // produced by a saturating `as u8` cast, so a duty of 254 or 255 overflowed the `+ 2` --
-        // a debug panic, and a wrap to 0 in release.
+        // Update duty cycle from current pump output, as a percentage -- `pump_output` is on
+        // the pump's 0-255 scale and this screen is not.
+        //
+        // The arithmetic is in `u16` because it used to have to be: `current_duty` came from
+        // an unclamped `as u8` cast, so a duty of 254 or 255 overflowed the `+ 2` -- a debug
+        // panic, and a wrap to 0 in release. `DutyCycle::value()` is bounded at 100 now, so
+        // that cannot recur; the wider type is kept because `+ 2` on a `u8` at exactly 100 is
+        // still closer to the edge than this needs to be.
+        let current_duty = group_status.pump_output.duty_cycle().value();
         let (_, duty_max, _) = Self::limits(ControlMode::PumpDutyCycle);
-        self.duty_cycle = (((current_duty as u16 + 2) / 5) * 5).min(duty_max as u16) as u8;
+        let snapped = (((current_duty as u16 + 2) / 5) * 5).min(duty_max as u16);
+        self.duty_cycle = DutyCycleType::new(snapped as u8);
 
         // Update flow rate from the current process value. It must be the *input* flow rate:
         // `ControlMode::PumpFlowRate` maps to `GroupBrewControlMode::GroupFlowRate`, whose PID

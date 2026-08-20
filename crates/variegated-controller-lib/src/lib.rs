@@ -130,10 +130,26 @@ impl From<PreviousBrewInfo> for variegated_controller_types::PreviousBrewInfo {
     }
 }
 
+/// A PID whose output is a **percentage** -- the boilers' scale.
 pub fn limited_pid() -> PidCtrl<f32> {
     let mut pid = PidCtrl::default();
     pid.limits.try_set_lower(0.0).unwrap();
     pid.limits.try_set_upper(100.0).unwrap();
+    pid
+}
+
+/// A PID whose output is a **raw 0-255 duty cycle** -- the pump's scale.
+///
+/// The clamp is the whole difference, but it is not cosmetic: the limit is what the
+/// integrator winds up against, so this is the line that decides the numeric domain the
+/// pump PID computes in. Gains are denominated in output-per-error and therefore live on
+/// this scale too -- a gain set tuned against the 0-100 clamp drives the pump at ~1/2.55 of
+/// its intent here, which is why the compiled defaults were rescaled when this was
+/// introduced and why stored gains need retuning.
+pub fn hexadecimal_limited_pid() -> PidCtrl<f32> {
+    let mut pid = PidCtrl::default();
+    pid.limits.try_set_lower(0.0).unwrap();
+    pid.limits.try_set_upper(255.0).unwrap();
     pid
 }
 

@@ -90,14 +90,24 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
     return `${(totalMs / 1000).toFixed(1)}s`;
   };
 
-  // Format output display
+  // Format output display.
+  //
+  // `pump_output` is on the pump's own 0-255 scale, not a percentage -- the schema decodes
+  // `HexadecimalDutyCycle` transparently to a `number`, so nothing here would have caught
+  // the old `%` suffix having become wrong by a factor of 2.55. Both are shown: the raw
+  // value is what the pump was given, and the percentage is what an operator set.
+  const PUMP_FULL_SCALE = 255;
+  const asPercent = (raw: number) => (raw * 100) / PUMP_FULL_SCALE;
+
   const getOutputDisplay = () => {
     if (status.pump_output.type === 'Off') {
       return 'Off';
     } else if (status.pump_output.type === 'FixedDutyCycle') {
-      return `${status.pump_output.value.toFixed(1)}%`;
+      const raw = status.pump_output.value;
+      return `${raw}/255 (${asPercent(raw).toFixed(0)}%)`;
     } else if (status.pump_output.type === 'PidOutput') {
-      return `${status.pump_output.value.out.toFixed(1)}%`;
+      const raw = status.pump_output.value.out;
+      return `${raw.toFixed(1)}/255 (${asPercent(raw).toFixed(0)}%)`;
     }
     return 'Unknown';
   };

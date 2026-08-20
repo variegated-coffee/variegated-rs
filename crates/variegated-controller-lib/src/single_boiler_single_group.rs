@@ -15,7 +15,7 @@ use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -141,7 +141,7 @@ impl Default for SingleBoilerSingleGroupEphemeralConfiguration {
             group_brew_control_state: GroupBrewControlState {
                 mode: GroupBrewControlMode::FixedDutyCycle,
                 values: GroupBrewControlTargetValues {
-                    duty_cycle: 100,
+                    duty_cycle: DutyCycleType::FULL,
                     ..GroupBrewControlTargetValues::default()
                 },
             },
@@ -158,20 +158,32 @@ impl Default for SingleBoilerSingleGroupPersistentConfiguration {
             ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
             kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
         };
+        // The pump gains below are the old 0-100 tuning multiplied by 2.55, because the pump
+        // PID's output moved from a percentage to the pump's 0-255 scale and a gain is
+        // denominated in output-per-error. The per-term clamps are scaled with them: a clamp
+        // is a quantity of output, so leaving one behind would silently tighten it by the
+        // same factor.
+        //
+        // **These are defaults, not a migration.** Gains already stored on a machine are
+        // left exactly as they were, so a machine taking this update runs its pump at about
+        // 1/2.55 of its previous authority until it is retuned. That is deliberate --
+        // rescaling someone's tuning arithmetically assumes their tuning was linear in the
+        // clamp, which is the thing least likely to be true of a hand-tuned loop.
+        const PUMP_SCALE: f32 = 2.55;
         pid_parameters.pump_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default() ),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+            kp: PidTerm::new(10.0 * PUMP_SCALE, PidLimits::default() ),
+            ki: PidTerm::new(0.01 * PUMP_SCALE, PidLimits::new_with_limits(-50.0 * PUMP_SCALE, 80.0 * PUMP_SCALE).unwrap() ),
+            kd: PidTerm::new(30.0 * PUMP_SCALE, PidLimits::new_with_limits(-10.0 * PUMP_SCALE, 10.0 * PUMP_SCALE).unwrap() )
         };
         pid_parameters.pump_output_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default() ),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+            kp: PidTerm::new(10.0 * PUMP_SCALE, PidLimits::default() ),
+            ki: PidTerm::new(0.01 * PUMP_SCALE, PidLimits::new_with_limits(-50.0 * PUMP_SCALE, 80.0 * PUMP_SCALE).unwrap() ),
+            kd: PidTerm::new(30.0 * PUMP_SCALE, PidLimits::new_with_limits(-10.0 * PUMP_SCALE, 10.0 * PUMP_SCALE).unwrap() )
         };
         pid_parameters.pump_pressure_params = PidParameters {
-            kp: PidTerm::new( 10.0, PidLimits::default() ),
-            ki: PidTerm::new( 0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap() ),
-            kd: PidTerm::new( 30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap() )
+            kp: PidTerm::new( 10.0 * PUMP_SCALE, PidLimits::default() ),
+            ki: PidTerm::new( 0.01 * PUMP_SCALE, PidLimits::new_with_limits(-50.0 * PUMP_SCALE, 80.0 * PUMP_SCALE).unwrap() ),
+            kd: PidTerm::new( 30.0 * PUMP_SCALE, PidLimits::new_with_limits(-10.0 * PUMP_SCALE, 10.0 * PUMP_SCALE).unwrap() )
         };
 
         SingleBoilerSingleGroupPersistentConfiguration {
@@ -429,7 +441,8 @@ impl<
             tank,
             state: SingleBoilerSingleGroupControllerState::default(),
             boiler_pid: super::limited_pid(),
-            pump_pid: super::limited_pid(),
+            // 0-255, not 0-100: the pump PID computes on the pump's own scale.
+            pump_pid: super::hexadecimal_limited_pid(),
             pump_pid_engagement: PumpPidEngagement::new(),
             configuration_store: settings_store,
             persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration::default(),
@@ -831,7 +844,7 @@ impl<
         }
     }
 
-    async fn update_pump(&mut self, actual_pump_control_state: GroupBrewControlState, delta_t: f32) -> Output {
+    async fn update_pump(&mut self, actual_pump_control_state: GroupBrewControlState, delta_t: f32) -> PumpOutput {
         // Calculate elapsed time for curve evaluation if needed
         let elapsed_seconds = self.curve_start_time
             .map(|start| {
@@ -893,7 +906,7 @@ impl<
             PumpPidTransfer::Engage { seed_from_duty } => {
                 // Setpoint and gains are already set for this mode by the match above, and
                 // both matter: the seed is `target_output - kp * error`.
-                self.pump_pid.infer_and_set_integral(seed_from_duty as f32, pump_pv);
+                self.pump_pid.infer_and_set_integral(seed_from_duty.value() as f32, pump_pv);
                 Some(self.pump_pid.step(PidIn::new(pump_pv, delta_t)))
             }
             PumpPidTransfer::Continue => Some(self.pump_pid.step(PidIn::new(pump_pv, delta_t))),
@@ -902,35 +915,48 @@ impl<
         // `pump_pid_out` is `Some` exactly when the mode is closed-loop, so it -- rather
         // than a second list of modes that could drift from `is_closed_loop` -- picks the
         // branch.
+        // Everything below the controller is on the pump's 0-255 scale; the operator's
+        // percentages are converted here, once, on the way in.
         let output = if let Some(pump_pid_out) = pump_pid_out {
-            self.group.set_brewing_state(true, pump_pid_out.out as u8).await;
-            Output::PidOutput(pump_pid_out)
+            // The PID computes natively in 0-255, so its output needs narrowing but not
+            // rescaling. `from_f32` saturates, where the bare `as u8` this replaced did not.
+            self.group
+                .set_brewing_state(true, HexadecimalDutyCycleType::from_f32(pump_pid_out.out))
+                .await;
+            PumpOutput::PidOutput(pump_pid_out)
         } else {
             match actual_pump_control_state.mode {
                 GroupBrewControlMode::FullOn => {
-                    self.group.set_brewing_state(true, 100).await;
-                    Output::FixedDutyCycle(100)
+                    self.group.set_brewing_state(true, HexadecimalDutyCycleType::FULL).await;
+                    PumpOutput::FixedDutyCycle(HexadecimalDutyCycleType::FULL)
                 },
                 GroupBrewControlMode::FixedDutyCycle => {
-                    let duty_cycle = actual_pump_control_state.values.duty_cycle;
+                    let duty_cycle: HexadecimalDutyCycleType =
+                        actual_pump_control_state.values.duty_cycle.into();
                     self.group.set_brewing_state(true, duty_cycle).await;
-                    Output::FixedDutyCycle(duty_cycle)
+                    PumpOutput::FixedDutyCycle(duty_cycle)
                 }
                 GroupBrewControlMode::FixedDutyCycleCurve => {
-                    let target_duty_cycle = actual_pump_control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
+                    // The curve is authored in percent and evaluates to an `f32`, so going
+                    // through `DutyCycle` costs no resolution -- the narrowing to a byte
+                    // happens once, on the far side of the conversion.
+                    let target_percent = DutyCycleType::from_f32(
+                        actual_pump_control_state.values.duty_cycle_curve.evaluate(elapsed_seconds),
+                    );
+                    let target_duty_cycle: HexadecimalDutyCycleType = target_percent.into();
                     self.group.set_brewing_state(true, target_duty_cycle).await;
-                    Output::FixedDutyCycle(target_duty_cycle)
+                    PumpOutput::FixedDutyCycle(target_duty_cycle)
                 }
                 // `Off`, and anything else `is_closed_loop` declines.
                 _ => {
-                    self.group.set_brewing_state(false, 0).await;
-                    Output::Off
+                    self.group.set_brewing_state(false, HexadecimalDutyCycleType::OFF).await;
+                    PumpOutput::Off
                 },
             }
         };
 
         // What the next `Engage` inherits, which is why it is recorded in every mode.
-        self.pump_pid_engagement.record_commanded_duty(output.duty_cycle());
+        self.pump_pid_engagement.record_commanded_duty(output.hexadecimal_duty_cycle());
         output
     }
 
@@ -959,7 +985,7 @@ impl<
 
         match actual_boiler_control_state.mode {
             BoilerControlMode::Off => {
-                self.boiler.set_heating_element_duty_cycle(0).await;
+                self.boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
                 Output::Off
             },
             _ => {
@@ -982,17 +1008,19 @@ impl<
                     // temperature and the maximum both reach the host in `Status` and
                     // `Configuration` already.
                     log_warn!("Boiler heating disabled: temperature at or above configured maximum");
-                    0
+                    DutyCycleType::OFF
                 } else if !Self::is_boiler_level_safe(boiler_level, &self.boiler_config) {
                     log_warn!("Boiler heating disabled: water level below minimum safe level");
-                    0
+                    DutyCycleType::OFF
                 } else {
-                    boiler_pid_out.out as u8
+                    // The boiler PID is clamped to 0-100 by `limited_pid`, so this stays a
+                    // percentage -- unlike the pump's, which moved to 0-255.
+                    DutyCycleType::from_f32(boiler_pid_out.out)
                 };
 
                 self.boiler.set_heating_element_duty_cycle(duty_cycle).await;
 
-                if duty_cycle == 0 && boiler_pid_out.out > 0.0 {
+                if duty_cycle == DutyCycleType::OFF && boiler_pid_out.out > 0.0 {
                     // Level check blocked heating
                     Output::PidOutput(PidOut { out: 0.0, ..boiler_pid_out })
                 } else {
@@ -1054,7 +1082,7 @@ impl<
         (actual_boiler_control_state, actual_pump_control_state)
     }
 
-    async fn send_status(&mut self, boiler_output: Output, pump_output: Output) {
+    async fn send_status(&mut self, boiler_output: Output, pump_output: PumpOutput) {
         // One element, two published slots: the inactive one reports `Off` so that an
         // interface can tell which of them the element is actually under. The split lives in
         // `single_boiler_state` beside its inverse, `active_boiler_index`, because the two
@@ -1649,9 +1677,9 @@ impl<
                     self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_pressure_params);
 
                     // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_pressure as f32);
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_pressure as f32);
 
-                    log_info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
+                    log_info!("Set pressure integral based on duty cycle {}/255 and pressure {}", current_duty_cycle.value(), current_pressure);
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
@@ -1671,9 +1699,9 @@ impl<
                     self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_flow_rate_params);
 
                     // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_flow_rate as f32);
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_flow_rate as f32);
 
-                    log_info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
+                    log_info!("Set flow rate integral based on duty cycle {}/255 and flow rate {}", current_duty_cycle.value(), current_flow_rate);
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
@@ -1693,9 +1721,9 @@ impl<
                     self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_output_flow_rate_params);
 
                     // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_output_flow_rate as f32);
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_output_flow_rate as f32);
 
-                    log_info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
+                    log_info!("Set output flow rate integral based on duty cycle {}/255 and output flow rate {}", current_duty_cycle.value(), current_output_flow_rate);
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
@@ -2012,12 +2040,12 @@ impl<
             match (old_state, new_state) {
                 (SingleBoilerSingleGroupControllerState::BrewModeIdle, SingleBoilerSingleGroupControllerState::Brewing) => {
                     variegated_log::emit_event(DebugEvent::BrewStarted { group: SingleGroup.as_index() });
-                    self.group.set_brewing_state(true, 0).await;
+                    self.group.set_brewing_state(true, HexadecimalDutyCycleType::OFF).await;
                     self.started_brewing().await;
                 }
                 (SingleBoilerSingleGroupControllerState::Brewing, SingleBoilerSingleGroupControllerState::BrewModeIdle) => {
                     variegated_log::emit_event(DebugEvent::BrewStopped { group: SingleGroup.as_index() });
-                    self.group.set_brewing_state(false, 0).await;
+                    self.group.set_brewing_state(false, HexadecimalDutyCycleType::OFF).await;
                     self.stopped_brewing().await;
                 }
                 _ => {}

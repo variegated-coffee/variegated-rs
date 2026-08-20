@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use defmt::Format;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::watch::Receiver;
-pub use variegated_controller_types::{DutyCycleType, FlowRateType, InputVolumeType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
+pub use variegated_controller_types::{DutyCycleType, FlowRateType, HexadecimalDutyCycleType, InputVolumeType, MixingProportionType, PressureType, TemperatureType, ValveOpenType, WaterLevelType};
 
 /// Mutex type for cross-core and cross-executor synchronization
 ///
@@ -253,9 +253,9 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         }
     }
 
-    pub async fn set_brewing_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) {
+    pub async fn set_brewing_state(&mut self, brewing: bool, duty_cycle: HexadecimalDutyCycleType) {
         if let Some(brew_mechanism) = &mut self.brew_mechanism {
-            brew_mechanism.set_state(brewing, duty_cycle_percent).await.expect("Failed to set brewing state");
+            brew_mechanism.set_state(brewing, duty_cycle).await.expect("Failed to set brewing state");
         }
     }
 
@@ -267,7 +267,7 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         }
     }
     
-    pub fn get_pump_duty_cycle(&self) -> Option<DutyCycleType> {
+    pub fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType> {
         if let Some(brew_mechanism) = &self.brew_mechanism {
             brew_mechanism.get_pump_duty_cycle()
         } else {
@@ -465,9 +465,9 @@ impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
         }
     }
 
-    pub async fn set_water_dispensing_state(&mut self, dispensing: bool, duty_cycle_percent: DutyCycleType) {
+    pub async fn set_water_dispensing_state(&mut self, dispensing: bool, duty_cycle: HexadecimalDutyCycleType) {
         if let Some(water_tap_mechanism) = &mut self.water_tap_mechanism {
-            water_tap_mechanism.set_state(dispensing, duty_cycle_percent).await.expect("Failed to set water dispensing state");
+            water_tap_mechanism.set_state(dispensing, duty_cycle).await.expect("Failed to set water dispensing state");
         }
     }
 
@@ -479,7 +479,7 @@ impl<'a, M: RawMutex, const N: usize> WaterTap<'a, M, N> {
         }
     }
 
-    pub fn get_pump_duty_cycle(&self) -> Option<DutyCycleType> {
+    pub fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType> {
         if let Some(water_tap_mechanism) = &self.water_tap_mechanism {
             water_tap_mechanism.get_pump_duty_cycle()
         } else {
@@ -531,10 +531,16 @@ pub trait WithTask {
     async fn task(&mut self);
 }
 
+/// A heating element, driven as a percentage.
+///
+/// Percent, unlike the pump -- see [`Pump`](crate::pump::Pump). The actuation here is a
+/// 3-second soft-PWM cycle, where one percent is 30 ms, so there is no finer resolution to
+/// be had and nothing to gain from the pump's scale. Typing it as a [`DutyCycleType`]
+/// rather than a bare `u8` is what stops a pump value reaching a heating element.
 #[async_trait]
 pub trait HeatingElement {
-    async fn set_duty_cycle(&mut self, duty_cycle_percent: u8);
-    async fn get_duty_cycle(&self) -> u8;
+    async fn set_duty_cycle(&mut self, duty_cycle_percent: DutyCycleType);
+    async fn get_duty_cycle(&self) -> DutyCycleType;
 }
 
 pub trait BoilerFillMechanism {
@@ -542,12 +548,17 @@ pub trait BoilerFillMechanism {
     fn get_filling_state(&self) -> Result<bool, BoilerFillMechanismError>;
 }
 
+/// Everything from here down to the pump is on the pump's 0-255 scale.
+///
+/// The conversion from the operator's percentage happens once, in the controller, on the
+/// way in. Converting here instead would round-trip through 100 steps and throw away the
+/// resolution the scale exists to provide.
 #[async_trait]
 pub trait BrewMechanism {
     // Controls brewing state and pump duty cycle in a single operation
-    async fn set_state(&mut self, brewing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), BrewMechanismError>;
+    async fn set_state(&mut self, brewing: bool, duty_cycle: HexadecimalDutyCycleType) -> Result<(), BrewMechanismError>;
 
-    fn get_pump_duty_cycle(&self) -> Option<DutyCycleType>;
+    fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType>;
     fn get_brew_state(&self) -> bool;
     fn get_three_way_valve_open(&self) -> Option<bool>;
 }
@@ -555,9 +566,9 @@ pub trait BrewMechanism {
 #[async_trait]
 pub trait WaterTapMechanism {
     // Controls water dispensing state and pump duty cycle in a single operation
-    async fn set_state(&mut self, dispensing: bool, duty_cycle_percent: DutyCycleType) -> Result<(), WaterTapMechanismError>;
+    async fn set_state(&mut self, dispensing: bool, duty_cycle: HexadecimalDutyCycleType) -> Result<(), WaterTapMechanismError>;
 
-    fn get_pump_duty_cycle(&self) -> Option<DutyCycleType>;
+    fn get_pump_duty_cycle(&self) -> Option<HexadecimalDutyCycleType>;
     fn get_dispensing_state(&self) -> bool;
 }
 

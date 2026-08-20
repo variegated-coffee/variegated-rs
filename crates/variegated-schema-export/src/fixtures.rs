@@ -107,7 +107,7 @@ fn group_control_state() -> GroupBrewControlState {
             pressure_curve: control_curve(),
             output_flow_rate: 1.5,
             output_flow_rate_curve: control_curve(),
-            duty_cycle: 75,
+            duty_cycle: DutyCycle::new(75),
             duty_cycle_curve: control_curve(),
         },
     }
@@ -116,8 +116,8 @@ fn group_control_state() -> GroupBrewControlState {
 fn pump_configuration() -> PumpConfiguration {
     PumpConfiguration {
         tacho_pulses_per_liter: Some(1000.0),
-        max_duty_cycle: Some(100),
-        min_duty_cycle: Some(10),
+        max_duty_cycle: Some(DutyCycle::new(100)),
+        min_duty_cycle: Some(DutyCycle::new(10)),
         ramp_up_time_ms: Some(500),
         ramp_down_time_ms: Some(250),
     }
@@ -171,7 +171,7 @@ fn status_maximal() -> Status {
                     output_temperature: Some(88.0),
                     output_electrical_conductivity: Some(0.5),
                     extraction_rate: Some(1.25),
-                    pump_output: Output::FixedDutyCycle(80),
+                    pump_output: PumpOutput::FixedDutyCycle(HexadecimalDutyCycle::new(80)),
                     control_state: group_control_state(),
                     previous_brew: Some(PreviousBrewInfo {
                         brew_time: core::time::Duration::new(27, 0),
@@ -550,7 +550,7 @@ fn machine_commands() -> Vec<MachineCommand> {
                 pressure_curve: Some(control_curve()),
                 output_flow_rate: Some(1.5),
                 output_flow_rate_curve: Some(control_curve()),
-                duty_cycle: Some(60),
+                duty_cycle: Some(DutyCycle::new(60)),
                 duty_cycle_curve: Some(control_curve()),
             }),
         ),
@@ -763,7 +763,7 @@ pub fn canonical_shot() -> ShotLog {
             water_level: None,
             // Not the first variant, so a variant-index off-by-one cannot encode as zero
             // either way and pass.
-            output: Output::FixedDutyCycle(42),
+            output: Output::FixedDutyCycle(DutyCycle::new(42)),
         },
     );
     let _ = boiler_samples.insert(
@@ -794,7 +794,7 @@ pub fn canonical_shot() -> ShotLog {
         output_temperature: Some(78.5),
         output_electrical_conductivity: Some(1250.0),
         extraction_rate: Some(0.125),
-        pump_output: Output::FixedDutyCycle(65),
+        pump_output: PumpOutput::FixedDutyCycle(HexadecimalDutyCycle::new(65)),
         shot_state: Some(ShotState::Saturation),
         extracted_solids: Some(2.25),
         output_volume: Some(24.0),

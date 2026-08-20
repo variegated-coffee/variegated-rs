@@ -22,7 +22,7 @@ use embedded_graphics::mono_font::ascii::{FONT_10X20, FONT_6X10, FONT_7X13};
 use embedded_graphics::text::{Alignment, TextStyleBuilder};
 use embedded_graphics::text::renderer::CharacterStyle;
 use oled_async::{displays, prelude::*, Builder};
-use variegated_controller_types::{BoilerControlMode, GroupBrewControlMode, MachineMode, Status, Output as ControllerOutput, RoutineIndex, PeripheralType};
+use variegated_controller_types::{BoilerControlMode, DutyCycleType, GroupBrewControlMode, MachineMode, Status, Output as ControllerOutput, PumpOutput, RoutineIndex, PeripheralType};
 use variegated_controller_types::Output::PidOutput;
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::single_boiler_state;
@@ -585,7 +585,7 @@ impl DisplayController {
         };
 
             Text::with_text_style(
-                format!("{:.0}%", boiler_status.output.duty_cycle()).as_str(),
+                format!("{}%", boiler_status.output.duty_cycle().value()).as_str(),
                 Point::new(128, 32),
                 self.text_style_medium_small,
                 TextStyleBuilder::new()
@@ -920,7 +920,7 @@ impl DisplayController {
                     .unwrap();
             }
 
-            Text::with_text_style(&format!("Pump:{:.0}%", group_status.pump_output.duty_cycle()), Point::new(128, 53), self.text_style_small,
+            Text::with_text_style(&format!("Pump:{}%", group_status.pump_output.duty_cycle().value()), Point::new(128, 53), self.text_style_small,
                 TextStyleBuilder::new()
                     .alignment(Alignment::Right)
                     .baseline(Baseline::Top)
@@ -1324,11 +1324,11 @@ impl DisplayController {
 
         let pump_dc = match group_status.control_state.mode {
             GroupBrewControlMode::FixedDutyCycle => group_status.control_state.values.duty_cycle,
-            _ => 0
+            _ => DutyCycleType::OFF
         };
 
         if let Some(pressure) = boiler_status.pressure {
-            Text::with_baseline(format!("P: {:.2} bar (PT {:.0}%)", pressure, pump_dc).as_str(), Point::new(0, 7), self.text_style_small, Baseline::Top)
+            Text::with_baseline(format!("P: {:.2} bar (PT {}%)", pressure, pump_dc.value()).as_str(), Point::new(0, 7), self.text_style_small, Baseline::Top)
                 .draw(&mut self.display)
                 .unwrap();
         }
@@ -1339,7 +1339,9 @@ impl DisplayController {
                 .unwrap();
         }
 
-        Text::with_baseline(format!("Pump: {:.0} % Boil: {:.0}%", group_status.pump_output.duty_cycle(), boiler_status.output.duty_cycle()).as_str(), Point::new(0, 21), self.text_style_small, Baseline::Top)
+        // This is the debug screen, so the pump shows its raw value as well as the percent:
+        // the raw one is what the PID and the hardware actually work in.
+        Text::with_baseline(format!("Pump: {}/255 Boil: {}%", group_status.pump_output.hexadecimal_duty_cycle().value(), boiler_status.output.duty_cycle().value()).as_str(), Point::new(0, 21), self.text_style_small, Baseline::Top)
             .draw(&mut self.display)
             .unwrap();
 
@@ -1353,7 +1355,7 @@ impl DisplayController {
         }
 
         match group_status.pump_output {
-            ControllerOutput::PidOutput(pump_pid) => {
+            PumpOutput::PidOutput(pump_pid) => {
                 Text::with_baseline(format!("Pump P: {:.0} I: {:.0} D: {:.0}", pump_pid.p, pump_pid.i, pump_pid.d).as_str(), Point::new(0, 35), self.text_style_small, Baseline::Top)
                     .draw(&mut self.display)
                     .unwrap();

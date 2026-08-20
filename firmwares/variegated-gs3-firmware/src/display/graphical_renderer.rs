@@ -1037,11 +1037,11 @@ impl GraphicalDisplayState {
             if let Some(pressure) = boiler.pressure {
                 status_line.push_str(&format!("{:.1}b", pressure));
             }
-            let duty = boiler.output.duty_cycle();
+            let duty = boiler.output.duty_cycle().value();
             if !status_line.is_empty() {
-                status_line.push_str(&format!(" {:.0}%", duty));
+                status_line.push_str(&format!(" {}%", duty));
             } else {
-                status_line.push_str(&format!("{:.0}%", duty));
+                status_line.push_str(&format!("{}%", duty));
             }
 
             small_font.render_aligned(
@@ -1106,7 +1106,7 @@ impl GraphicalDisplayState {
 
             // Duty cycle (small, 12pt)
             small_font.render_aligned(
-                format_args!("{:.0}%", boiler.output.duty_cycle()),
+                format_args!("{}%", boiler.output.duty_cycle().value()),
                 Point::new(RIGHT_PANEL_X + RIGHT_PANEL_WIDTH / 2, y),
                 VerticalPosition::Top,
                 HorizontalAlignment::Center,

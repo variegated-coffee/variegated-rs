@@ -238,7 +238,22 @@ use crate::Status;
 ///   transition bug survived two shots -- with only measurements logged, what the machine
 ///   had been asked for could only be reconstructed from the PID's proportional term and
 ///   its acting gain.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x97;
+/// * `0x98` -- the pump reports on its own scale. [`crate::GroupStatus`]'s `pump_output`
+///   became a [`crate::PumpOutput`], whose duty cycle runs 0-255 rather than 0-100, because
+///   100 steps is too coarse for the pump PID to correct in. Boilers keep [`crate::Output`]
+///   and their percentages.
+///
+///   **A retype, not an append, and the first bump here where the bytes do not move.** Every
+///   preceding entry describes a desynchronisation: a field appeared or changed width and an
+///   older peer read the following field's bytes as this one's. `DutyCycle` and
+///   `HexadecimalDutyCycle` are both newtypes over `u8` and postcard encodes a newtype struct
+///   as its inner value, so the frame is the same length with the same bytes in the same
+///   places. An older peer parses it cleanly and reports a pump running at 2.55x what it is,
+///   with nothing malformed anywhere to give it away.
+///
+///   Mandatory in both directions for exactly that reason. A desync is at least loud; this is
+///   silent, and the version is the only thing that can catch it.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x98;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

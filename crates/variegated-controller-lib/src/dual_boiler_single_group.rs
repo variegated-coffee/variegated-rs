@@ -21,7 +21,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, FillConfiguration, GroupConfiguration, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
@@ -229,7 +229,7 @@ impl Default for DualBoilerSingleGroupEphemeralConfiguration {
             group_brew_control_state: GroupBrewControlState {
                 mode: GroupBrewControlMode::FixedDutyCycle,
                 values: GroupBrewControlTargetValues {
-                    duty_cycle: 100,
+                    duty_cycle: DutyCycleType::FULL,
                     ..GroupBrewControlTargetValues::default()
                 },
             },
@@ -338,7 +338,7 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
                 supply_tank_index: Some(0),
             },
             water_tap: WaterTapConfiguration {
-                pump_strategy: WaterDispersalPumpStrategy::AlwaysPump(100),
+                pump_strategy: WaterDispersalPumpStrategy::AlwaysPump(DutyCycleType::FULL),
                 temperature_target: None,
                 max_dispense_time_seconds: None,
                 flow_rate_limit: None,
@@ -372,7 +372,7 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             default_group_brew_control_state: GroupBrewControlState {
                 mode: GroupBrewControlMode::FixedDutyCycle,
                 values: GroupBrewControlTargetValues {
-                    duty_cycle: 100,
+                    duty_cycle: DutyCycleType::FULL,
                     ..GroupBrewControlTargetValues::default()
                 },
             },
@@ -765,7 +765,8 @@ impl<
             fill_mechanism,
             brew_boiler_pid: super::limited_pid(),
             steam_boiler_pid: super::limited_pid(),
-            pump_pid: super::limited_pid(),
+            // 0-255, not 0-100: the pump PID computes on the pump's own scale.
+            pump_pid: super::hexadecimal_limited_pid(),
             last_brew_boiler_output: 0.0,
             last_steam_boiler_output: 0.0,
             configuration_store: settings_store,
@@ -1319,7 +1320,7 @@ impl<
     // Safety interlock logic
     async fn update_brew_boiler(&mut self, delta_t: f32) -> Output {
         if !self.brew_boiler_enabled {
-            self.brew_boiler.set_heating_element_duty_cycle(0).await;
+            self.brew_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
             return Output::Off;
         }
 
@@ -1336,7 +1337,7 @@ impl<
                 self.brew_boiler.get_pressure().unwrap_or(0.0) as f32
             }
             BoilerControlMode::Off => {
-                self.brew_boiler.set_heating_element_duty_cycle(0).await;
+                self.brew_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
                 return Output::Off;
             }
         };
@@ -1387,14 +1388,14 @@ impl<
         }
 
         // Set duty cycle directly - coordination handled by hardware device
-        self.brew_boiler.set_heating_element_duty_cycle(brew_demand as u8).await;
+        self.brew_boiler.set_heating_element_duty_cycle(DutyCycleType::from_f32(brew_demand)).await;
 
         Output::PidOutput(brew_pid_out)
     }
 
     async fn update_steam_boiler(&mut self, delta_t: f32) -> Output {
         if !self.steam_boiler_enabled {
-            self.steam_boiler.set_heating_element_duty_cycle(0).await;
+            self.steam_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
             return Output::Off;
         }
 
@@ -1411,7 +1412,7 @@ impl<
                 self.steam_boiler.get_pressure().unwrap_or(0.0) as f32
             }
             BoilerControlMode::Off => {
-                self.steam_boiler.set_heating_element_duty_cycle(0).await;
+                self.steam_boiler.set_heating_element_duty_cycle(DutyCycleType::OFF).await;
                 return Output::Off;
             }
         };
@@ -1456,15 +1457,20 @@ impl<
         }
 
         // Set duty cycle directly - coordination handled by hardware device
-        self.steam_boiler.set_heating_element_duty_cycle(steam_demand as u8).await;
+        self.steam_boiler.set_heating_element_duty_cycle(DutyCycleType::from_f32(steam_demand)).await;
 
         Output::PidOutput(steam_pid_out)
     }
 
-    fn apply_pump_configuration_limits(&self, duty_cycle: u8, is_off: bool) -> u8 {
+    /// Clamp a commanded duty cycle to the operator's configured pump limits.
+    ///
+    /// The limits are stored as percentages -- they are an operator setting, and they stay
+    /// on the scale the editor shows -- so they are converted to the pump's scale here
+    /// rather than compared against it directly.
+    fn apply_pump_configuration_limits(&self, duty_cycle: HexadecimalDutyCycleType, is_off: bool) -> HexadecimalDutyCycleType {
         // If pump is off, always return 0 regardless of min_duty_cycle
         if is_off {
-            return 0;
+            return HexadecimalDutyCycleType::OFF;
         }
 
         // Apply pump configuration limits if configured
@@ -1473,12 +1479,12 @@ impl<
 
             // Apply minimum duty cycle limit
             if let Some(min_duty) = config.min_duty_cycle {
-                limited_duty = limited_duty.max(min_duty);
+                limited_duty = limited_duty.max(min_duty.into());
             }
 
             // Apply maximum duty cycle limit
             if let Some(max_duty) = config.max_duty_cycle {
-                limited_duty = limited_duty.min(max_duty);
+                limited_duty = limited_duty.min(max_duty.into());
             }
 
             limited_duty
@@ -1487,7 +1493,7 @@ impl<
         }
     }
 
-    async fn update_group_pump(&mut self, delta_t: f32) -> Output {
+    async fn update_group_pump(&mut self, delta_t: f32) -> PumpOutput {
         // Calculate elapsed time for curve evaluation if needed
         let elapsed_seconds = self.curve_start_time
             .map(|start| {
@@ -1543,40 +1549,55 @@ impl<
 
         let pump_pid_out = self.pump_pid.step(PidIn::new(pump_pv, delta_t));
 
+        // Everything below the controller is on the pump's 0-255 scale; the operator's
+        // percentages are converted here, once, on the way in.
         match control_state.mode {
             GroupBrewControlMode::Off => {
-                let duty_cycle = self.apply_pump_configuration_limits(0, true);
+                let duty_cycle = self.apply_pump_configuration_limits(HexadecimalDutyCycleType::OFF, true);
                 self.group.set_brewing_state(false, duty_cycle).await;
-                Output::Off
+                PumpOutput::Off
             },
             GroupBrewControlMode::FullOn => {
-                let duty_cycle = self.apply_pump_configuration_limits(100, false);
+                let duty_cycle = self.apply_pump_configuration_limits(HexadecimalDutyCycleType::FULL, false);
                 self.group.set_brewing_state(true, duty_cycle).await;
-                Output::FixedDutyCycle(duty_cycle)
+                PumpOutput::FixedDutyCycle(duty_cycle)
             },
             GroupBrewControlMode::FixedDutyCycle => {
-                let duty_cycle = self.apply_pump_configuration_limits(control_state.values.duty_cycle, false);
+                let duty_cycle = self.apply_pump_configuration_limits(control_state.values.duty_cycle.into(), false);
                 self.group.set_brewing_state(true, duty_cycle).await;
-                Output::FixedDutyCycle(duty_cycle)
+                PumpOutput::FixedDutyCycle(duty_cycle)
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
-                let target_duty_cycle = control_state.values.duty_cycle_curve.evaluate(elapsed_seconds).clamp(0.0, 100.0) as u8;
-                let duty_cycle = self.apply_pump_configuration_limits(target_duty_cycle, false);
+                // The curve is authored in percent and evaluates to an `f32`, so going
+                // through `DutyCycle` costs no resolution -- the narrowing to a byte happens
+                // once, on the far side of the conversion.
+                let target_percent = DutyCycleType::from_f32(
+                    control_state.values.duty_cycle_curve.evaluate(elapsed_seconds),
+                );
+                let duty_cycle = self.apply_pump_configuration_limits(target_percent.into(), false);
                 self.group.set_brewing_state(true, duty_cycle).await;
-                Output::FixedDutyCycle(duty_cycle)
+                PumpOutput::FixedDutyCycle(duty_cycle)
             }
             _ => {
-                let duty_cycle = self.apply_pump_configuration_limits(pump_pid_out.out as u8, false);
+                // The PID computes natively in 0-255, so this narrows but does not rescale.
+                let duty_cycle = self.apply_pump_configuration_limits(
+                    HexadecimalDutyCycleType::from_f32(pump_pid_out.out),
+                    false,
+                );
                 self.group.set_brewing_state(true, duty_cycle).await;
-                Output::PidOutput(PidOut { out: duty_cycle as f32, ..pump_pid_out })
+                // `out` is republished as the *limited* duty so the status reports what the
+                // pump was actually given rather than what the PID asked for.
+                PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..pump_pid_out })
             },
         }
     }
 
-    fn apply_water_tap_pump_configuration_limits(&self, duty_cycle: u8, is_off: bool) -> u8 {
+    /// The water tap's copy of [`Self::apply_pump_configuration_limits`], reading the tap's
+    /// own `pump_configuration`. Same percentage-to-raw conversion, same reason.
+    fn apply_water_tap_pump_configuration_limits(&self, duty_cycle: HexadecimalDutyCycleType, is_off: bool) -> HexadecimalDutyCycleType {
         // If pump is off, always return 0 regardless of min_duty_cycle
         if is_off {
-            return 0;
+            return HexadecimalDutyCycleType::OFF;
         }
 
         // Apply pump configuration limits if configured
@@ -1585,12 +1606,12 @@ impl<
 
             // Apply minimum duty cycle limit
             if let Some(min_duty) = config.min_duty_cycle {
-                limited_duty = limited_duty.max(min_duty);
+                limited_duty = limited_duty.max(min_duty.into());
             }
 
             // Apply maximum duty cycle limit
             if let Some(max_duty) = config.max_duty_cycle {
-                limited_duty = limited_duty.min(max_duty);
+                limited_duty = limited_duty.min(max_duty.into());
             }
 
             limited_duty
@@ -1599,20 +1620,21 @@ impl<
         }
     }
 
-    async fn update_water_tap(&mut self, _delta_t: f32) -> Output {
+    async fn update_water_tap(&mut self, _delta_t: f32) -> PumpOutput {
         if self.water_tap_dispensing {
-            // Apply water dispersal pump strategy
-            let base_duty_cycle = match self.configuration.persistent.water_tap.pump_strategy {
-                WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
-                WaterDispersalPumpStrategy::AlwaysPump(duty_cycle) => duty_cycle, // Pump at specified duty cycle
+            // Apply water dispersal pump strategy. The strategy is an operator setting and
+            // so is in percent; the pump is not.
+            let base_duty_cycle: HexadecimalDutyCycleType = match self.configuration.persistent.water_tap.pump_strategy {
+                WaterDispersalPumpStrategy::NoPump => HexadecimalDutyCycleType::OFF, // Valve opens but no pump
+                WaterDispersalPumpStrategy::AlwaysPump(duty_cycle) => duty_cycle.into(), // Pump at specified duty cycle
             };
             let duty_cycle = self.apply_water_tap_pump_configuration_limits(base_duty_cycle, false);
             self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
-            Output::FixedDutyCycle(duty_cycle)
+            PumpOutput::FixedDutyCycle(duty_cycle)
         } else {
-            let duty_cycle = self.apply_water_tap_pump_configuration_limits(0, true);
+            let duty_cycle = self.apply_water_tap_pump_configuration_limits(HexadecimalDutyCycleType::OFF, true);
             self.water_tap.set_water_dispensing_state(false, duty_cycle).await;
-            Output::Off
+            PumpOutput::Off
         }
     }
 
@@ -1642,7 +1664,7 @@ impl<
         }
     }
 
-    async fn send_status(&mut self, brew_boiler_output: Output, steam_boiler_output: Output, pump_output: Output) {
+    async fn send_status(&mut self, brew_boiler_output: Output, steam_boiler_output: Output, pump_output: PumpOutput) {
         let brew_boiler_status = BoilerStatus {
             temperature: self.brew_boiler.get_temperature(),
             pressure: self.brew_boiler.get_pressure(),
@@ -2413,8 +2435,17 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
 
-                    // Get current duty cycle from the control state configuration
-                    let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
+                    // Get current duty cycle from the control state configuration. This is a
+                    // percentage, and the PID's integral is in the pump's 0-255 units, so it
+                    // has to be converted rather than passed through -- seeding a 0-255 loop
+                    // with a percentage would start the pump at 1/2.55 of the intended output.
+                    //
+                    // Note this reads the `FixedDutyCycle` *target* rather than the duty the
+                    // pump is actually running at, which `pump_transfer::last_commanded_duty`
+                    // explains is only right when the transfer comes from duty-cycle mode.
+                    // Pre-existing, and the single-boiler controller no longer does it.
+                    let current_duty_cycle: HexadecimalDutyCycleType =
+                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
                     let current_pressure = self.group.get_pressure().unwrap_or(0.0);
 
                     // Set up PID for pressure control
@@ -2422,9 +2453,9 @@ impl<
                     self.pump_pid.set_parameters(self.configuration.persistent.group.pressure_pid_parameters);
 
                     // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_pressure as f32);
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_pressure as f32);
 
-                    log_info!("Set pressure integral based on duty cycle {} and pressure {}", current_duty_cycle, current_pressure);
+                    log_info!("Set pressure integral based on duty cycle {}/255 and pressure {}", current_duty_cycle.value(), current_pressure);
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
@@ -2433,8 +2464,10 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
 
-                    // Get current duty cycle from the control state configuration
-                    let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
+                    // A percentage, converted to the PID's 0-255 units. See the pressure
+                    // case above for both this and the target-versus-actual caveat.
+                    let current_duty_cycle: HexadecimalDutyCycleType =
+                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
                     let current_flow_rate = self.group.get_input_flow_rate().unwrap_or(0.0);
 
                     // Set up PID for flow rate control
@@ -2442,9 +2475,9 @@ impl<
                     self.pump_pid.set_parameters(self.configuration.persistent.group.flow_rate_pid_parameters);
 
                     // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_flow_rate as f32);
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_flow_rate as f32);
 
-                    log_info!("Set flow rate integral based on duty cycle {} and flow rate {}", current_duty_cycle, current_flow_rate);
+                    log_info!("Set flow rate integral based on duty cycle {}/255 and flow rate {}", current_duty_cycle.value(), current_flow_rate);
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
@@ -2453,8 +2486,10 @@ impl<
                 if group_index == 0 {
                     log_info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
 
-                    // Get current duty cycle from the control state configuration
-                    let current_duty_cycle = self.configuration.ephemeral.group_brew_control_state.values.duty_cycle;
+                    // A percentage, converted to the PID's 0-255 units. See the pressure
+                    // case above for both this and the target-versus-actual caveat.
+                    let current_duty_cycle: HexadecimalDutyCycleType =
+                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
                     let current_output_flow_rate = self.group.get_output_flow_rate().unwrap_or(0.0);
 
                     // Set up PID for output flow rate control
@@ -2462,9 +2497,9 @@ impl<
                     self.pump_pid.set_parameters(self.configuration.persistent.group.output_flow_rate_pid_parameters);
 
                     // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle as f32, current_output_flow_rate as f32);
+                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_output_flow_rate as f32);
 
-                    log_info!("Set output flow rate integral based on duty cycle {} and output flow rate {}", current_duty_cycle, current_output_flow_rate);
+                    log_info!("Set output flow rate integral based on duty cycle {}/255 and output flow rate {}", current_duty_cycle.value(), current_output_flow_rate);
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
@@ -2801,7 +2836,7 @@ impl<
 
             self.start_manual_shot_log();
 
-            self.group.set_brewing_state(true, 0).await;
+            self.group.set_brewing_state(true, HexadecimalDutyCycleType::OFF).await;
 
             // Give initial PID boost for temperature drop compensation
             self.brew_boiler_pid.ki.accumulate += 50.0;
@@ -2853,7 +2888,7 @@ impl<
 
             self.finish_manual_shot_log();
 
-            self.group.set_brewing_state(false, 0).await;
+            self.group.set_brewing_state(false, HexadecimalDutyCycleType::OFF).await;
 
             let _ = self.group.scale_set_configuration(ScaleConfiguration {
                 zero_tracking: Some(true),
@@ -2987,9 +3022,9 @@ impl<
             log_info!("Starting water tap dispensing");
             self.water_tap_dispensing = true;
             // Apply water dispersal pump strategy
-            let base_duty_cycle = match self.configuration.persistent.water_tap.pump_strategy {
-                WaterDispersalPumpStrategy::NoPump => 0, // Valve opens but no pump
-                WaterDispersalPumpStrategy::AlwaysPump(duty_cycle) => duty_cycle, // Pump at specified duty cycle
+            let base_duty_cycle: HexadecimalDutyCycleType = match self.configuration.persistent.water_tap.pump_strategy {
+                WaterDispersalPumpStrategy::NoPump => HexadecimalDutyCycleType::OFF, // Valve opens but no pump
+                WaterDispersalPumpStrategy::AlwaysPump(duty_cycle) => duty_cycle.into(), // Pump at specified duty cycle
             };
             let duty_cycle = self.apply_water_tap_pump_configuration_limits(base_duty_cycle, false);
             self.water_tap.set_water_dispensing_state(true, duty_cycle).await;
@@ -3000,7 +3035,7 @@ impl<
         if self.water_tap_dispensing {
             log_info!("Stopping water tap dispensing");
             self.water_tap_dispensing = false;
-            self.water_tap.set_water_dispensing_state(false, 0).await;
+            self.water_tap.set_water_dispensing_state(false, HexadecimalDutyCycleType::OFF).await;
         }
     }
 

@@ -51,7 +51,12 @@ pub struct GroupBrewControlTargetValues {
     pub pressure_curve: ControlCurve,
     pub output_flow_rate: FlowRateType,
     pub output_flow_rate_curve: ControlCurve,
-    pub duty_cycle: u8,
+    /// A percentage. This is an operator-authored setpoint, so it stays on the scale an
+    /// operator reasons in; the conversion to the pump's 0-255 scale happens once, in the
+    /// controller, at the point the mechanism is driven.
+    pub duty_cycle: DutyCycleType,
+    /// Also authored in percent, and evaluated as an `f32`, so nothing is lost crossing to
+    /// the pump's scale.
     pub duty_cycle_curve: ControlCurve,
 }
 
@@ -64,7 +69,7 @@ impl Default for GroupBrewControlTargetValues {
             pressure_curve: ControlCurve { a: 0.0, b: 0.0, c: 9.0, min: 0.0, max: 15.0 },
             output_flow_rate: 2.0,  // Default 2.0 ml/s output
             output_flow_rate_curve: ControlCurve { a: 0.0, b: 2.0, c: 0.0, min: 0.0, max: 10.0 },
-            duty_cycle: 100,  // Default 100%
+            duty_cycle: DutyCycle::FULL,  // Default 100%
             duty_cycle_curve: ControlCurve { a: 0.0, b: 0.0, c: 100.0, min: 0.0, max: 100.0 },
         }
     }
@@ -82,7 +87,8 @@ pub struct GroupBrewControlTargetValuesUpdate {
     pub pressure_curve: Option<ControlCurve>,
     pub output_flow_rate: Option<FlowRateType>,
     pub output_flow_rate_curve: Option<ControlCurve>,
-    pub duty_cycle: Option<u8>,
+    /// A percentage -- see [`GroupBrewControlTargetValues::duty_cycle`].
+    pub duty_cycle: Option<DutyCycleType>,
     pub duty_cycle_curve: Option<ControlCurve>,
 }
 
@@ -105,6 +111,11 @@ impl Default for GroupBrewControlState {
     }
 }
 
+/// What a **heating element** is being driven at, as a percentage.
+///
+/// The pump has its own carrier, [`PumpOutput`], because the two run on different scales --
+/// see [`crate::duty_cycle`]. Splitting them is what stops a 0-255 pump value being read as
+/// a percentage, which is a difference of 2.55x that looks entirely plausible in a log.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -119,10 +130,49 @@ pub enum Output {
 impl Output {
     pub fn duty_cycle(&self) -> DutyCycleType {
         match self {
-            Output::Off => 0,
-            Output::FixedDutyCycle(duty_cycle) => *duty_cycle as DutyCycleType,
-            Output::PidOutput(pid_out) => pid_out.out as DutyCycleType,
+            Output::Off => DutyCycle::OFF,
+            Output::FixedDutyCycle(duty_cycle) => *duty_cycle,
+            Output::PidOutput(pid_out) => DutyCycle::from_f32(pid_out.out),
         }
+    }
+}
+
+/// What the **pump** is being driven at, on the pump's own 0-255 scale.
+///
+/// `PidOutput`'s `out` is denominated in that scale too: the pump PID computes natively in
+/// 0-255, so its integrator, clamps and gains are all in those units.
+///
+/// Both scales are readable from here -- [`PumpOutput::hexadecimal_duty_cycle`] is what was
+/// commanded, and [`PumpOutput::duty_cycle`] derives the percentage for the surfaces that
+/// display one. Only the raw value travels on the wire; the percentage is computed, so the
+/// two can never disagree.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PumpOutput {
+    #[default]
+    Off,
+    FixedDutyCycle(HexadecimalDutyCycleType),
+    PidOutput(PidOut<f32>),
+}
+
+impl PumpOutput {
+    /// What was commanded, 0-255.
+    pub fn hexadecimal_duty_cycle(&self) -> HexadecimalDutyCycleType {
+        match self {
+            PumpOutput::Off => HexadecimalDutyCycle::OFF,
+            PumpOutput::FixedDutyCycle(duty_cycle) => *duty_cycle,
+            // Saturating rather than a bare cast: an unclamped PID output used to be able
+            // to produce a "percentage" of 254, which then overflowed arithmetic downstream
+            // that trusted the 0-100 bound.
+            PumpOutput::PidOutput(pid_out) => HexadecimalDutyCycle::from_f32(pid_out.out),
+        }
+    }
+
+    /// The same value as a percentage, for display. Lossy, and derived rather than stored.
+    pub fn duty_cycle(&self) -> DutyCycleType {
+        self.hexadecimal_duty_cycle().into()
     }
 }
 

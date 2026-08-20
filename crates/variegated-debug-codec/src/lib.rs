@@ -679,8 +679,9 @@ mod tests {
     use variegated_control_algorithm::pid::PidOut;
     use variegated_controller_types::{
         BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus,
-        CommsStatus, GroupBrewControlState, GroupStatus, MachineMode, Output, PeripheralInfo,
-        PeripheralType, PreviousBrewInfo, RoutineExecutionStatus, RoutineIndex, ShotState, Status,
+        CommsStatus, DutyCycle, GroupBrewControlState, GroupStatus, HexadecimalDutyCycle,
+        MachineMode, Output, PeripheralInfo, PeripheralType, PreviousBrewInfo, PumpOutput,
+        RoutineExecutionStatus, RoutineIndex, ShotState, Status,
         SteamWandStatus, TankStatus, WaterTapStatus, WirelessConnectionStatus, MAX_BOILERS,
         MAX_GROUPS, MAX_PERIPHERALS, MAX_STEAM_WANDS, MAX_TANKS, MAX_WATER_TAPS,
     };
@@ -1790,7 +1791,7 @@ mod tests {
                     temperature: Some(93.5),
                     pressure: Some(1.2),
                     water_level: Some(80),
-                    output: Output::FixedDutyCycle(42),
+                    output: Output::FixedDutyCycle(DutyCycle::new(42)),
                     control_state: BoilerControlState {
                         mode: BoilerControlMode::Temperature,
                         values: BoilerControlTargetValues {
@@ -1832,7 +1833,7 @@ mod tests {
                     input_flow_rate: Some(2.4),
                     output_weight: Some(18.6),
                     temperature: Some(92.8),
-                    pump_output: Output::FixedDutyCycle(70),
+                    pump_output: PumpOutput::FixedDutyCycle(HexadecimalDutyCycle::new(70)),
                     ..GroupStatus::default()
                 },
             )
@@ -1936,7 +1937,7 @@ mod tests {
                         output_temperature: Some(88.0),
                         output_electrical_conductivity: Some(0.4),
                         extraction_rate: Some(0.9),
-                        pump_output: Output::PidOutput(PidOut::new(
+                        pump_output: PumpOutput::PidOutput(PidOut::new(
                             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,
                         )),
                         control_state: GroupBrewControlState::default(),
