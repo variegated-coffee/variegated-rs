@@ -317,7 +317,7 @@ pub struct SingleBoilerSingleGroupController<
     bluetooth_associations_loaded: bool,
     bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
     bluetooth_status: BluetoothScanStatus,
-    bluetooth_publish_pending: bool,
+    configuration_publish_pending: bool,
     bluetooth_scan_deadline: Option<Instant>,
 
     // Wi-Fi credentials, at their own key in the settings flash range. Same reasoning as
@@ -478,7 +478,7 @@ impl<
             bluetooth_associations_loaded: false,
             bluetooth_scan_sender,
             bluetooth_status: BluetoothScanStatus::default(),
-            bluetooth_publish_pending: false,
+            configuration_publish_pending: false,
             bluetooth_scan_deadline: None,
             wifi_store,
             wifi_credentials: StoredWifiCredentials::default(),
@@ -530,7 +530,7 @@ impl<
         if self.bluetooth_store.save_settings(&self.bluetooth_associations).await.is_err() {
             log_warn!("Failed to save Bluetooth associations");
         }
-        self.bluetooth_publish_pending = true;
+        self.configuration_publish_pending = true;
     }
 
     /// Persist the Wi-Fi credentials and arrange for the comms processor to hear about it.
@@ -551,7 +551,13 @@ impl<
         if self.shot_upload_store.save_settings(&self.shot_upload_config).await.is_err() {
             log_warn!("Failed to save shot upload config");
         }
+        // Two flags, two destinations. This one sends the full config -- token included -- to
+        // the comms processor on its own watch.
         self.shot_upload_publish_pending = true;
+        // And this one republishes `Configuration`, which carries the redacted
+        // `ShotUploadView` the browser reads. Without it the settings panel showed a stale
+        // endpoint for up to ten seconds after an edit.
+        self.configuration_publish_pending = true;
     }
 
     /// Forget the stored network, persistently.
@@ -621,7 +627,7 @@ impl<
                 log_info!("Loaded {} Bluetooth associations", self.bluetooth_associations.0.len());
                 // The comms processor asks at boot, but cannot tell a slow answer from no
                 // answer, so publish once regardless.
-                self.bluetooth_publish_pending = true;
+                self.configuration_publish_pending = true;
             }
 
             // Same lazy load, same reasoning, for the credentials.
@@ -651,6 +657,11 @@ impl<
                     if self.shot_upload_config.token.is_some() { "configured" } else { "none stored" }
                 );
                 self.shot_upload_publish_pending = true;
+                // Explicitly, rather than relying on the Bluetooth block above having already
+                // set it this iteration. That happens to be true today and is not a property
+                // either block states; reordering or removing that one would leave the stored
+                // upload settings unpublished until something else dirtied the configuration.
+                self.configuration_publish_pending = true;
             }
 
             // Credentials go out on their own channel, never inside `Configuration` --
@@ -684,8 +695,8 @@ impl<
 
             // Check if configuration changed and publish if it did
             let current_config = self.current_configuration();
-            if current_config != last_configuration || self.bluetooth_publish_pending {
-                self.bluetooth_publish_pending = false;
+            if current_config != last_configuration || self.configuration_publish_pending {
+                self.configuration_publish_pending = false;
                 let config = self.general_configuration(current_config.clone());
                 self.configuration_channel_sender.publish_immediate(config);
                 last_configuration = current_config;
@@ -705,8 +716,8 @@ impl<
 
                     // Check if configuration changed after handling command
                     let current_config = self.current_configuration();
-                    if current_config != last_configuration || self.bluetooth_publish_pending {
-                        self.bluetooth_publish_pending = false;
+                    if current_config != last_configuration || self.configuration_publish_pending {
+                        self.configuration_publish_pending = false;
                         let config = self.general_configuration(current_config.clone());
                         self.configuration_channel_sender.publish_immediate(config);
                         last_configuration = current_config;
@@ -1626,9 +1637,13 @@ impl<
             MachineCommand::RemoveRoutine(idx) => {
                 match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
                     Ok(mut repo) => {
-                        let res = repo.remove_routine(idx).await;
-                        if res.is_none() {
-                            log_warn!("Failed to remove routine at index {:?}: no such routine", idx);
+                        match repo.remove_routine(idx).await {
+                            Ok(Some(_)) => {}
+                            // Two different problems, and they used to be the same answer:
+                            // a client naming an index that is not there, versus a flash
+                            // write that failed.
+                            Ok(None) => log_warn!("No routine at index {:?} to remove", idx),
+                            Err(e) => log_warn!("Failed to remove routine at index {:?}: {}", idx, e),
                         }
                     }
                     Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),

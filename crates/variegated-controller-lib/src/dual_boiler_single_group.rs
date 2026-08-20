@@ -530,7 +530,22 @@ pub struct DualBoilerSingleGroupController<
     bluetooth_associations: BluetoothAssociations,
     bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
     bluetooth_status: BluetoothScanStatus,
-    bluetooth_publish_pending: bool,
+    /// Set when something folded into `Configuration` *after* the comparison in
+    /// [`Self::publish_configuration_if_changed`] has changed.
+    ///
+    /// That comparison is on `DualBoilerSingleGroupConfiguration`, which holds the persistent
+    /// and ephemeral machine configuration and nothing else.
+    /// [`Self::create_general_configuration`] then folds in three more things that live in
+    /// stores of their own -- the schedules, the Bluetooth associations and the shot-upload
+    /// view -- and a change to any of them is therefore invisible to that comparison. Without
+    /// this flag such a change reached the browser only when the ten-second periodic publish
+    /// came round.
+    ///
+    /// **One flag for all of them rather than one each.** The condition they share is "the
+    /// published configuration is stale for a reason the comparison cannot see", and a flag
+    /// per field is one more chance to add a fourth field and forget. It was
+    /// `bluetooth_publish_pending` when the associations were the only such field.
+    configuration_publish_pending: bool,
     // When the current scan should be considered over even if the comms processor never
     // says so. Without it a comms reset mid-scan would leave `scanning` latched true and
     // the UI's scan button disabled until the next reboot.
@@ -787,7 +802,7 @@ impl<
             bluetooth_associations: BluetoothAssociations::default(),
             bluetooth_scan_sender,
             bluetooth_status: BluetoothScanStatus::default(),
-            bluetooth_publish_pending: false,
+            configuration_publish_pending: false,
             bluetooth_scan_deadline: None,
             wifi_store,
             wifi_credentials: StoredWifiCredentials::default(),
@@ -952,7 +967,7 @@ impl<
         // So a change here is invisible to that comparison and needs to say so itself,
         // or an association would not reach the comms processor until something else
         // happened to dirty the configuration.
-        self.bluetooth_publish_pending = true;
+        self.configuration_publish_pending = true;
     }
 
     /// Persist the Wi-Fi credentials, and tell the comms processor they changed.
@@ -964,7 +979,7 @@ impl<
     /// Unlike the association list this deliberately does **not** ride on the
     /// `Configuration` publish. That path ends at the browser, and a password has no
     /// business on it -- so this needs a flag of its own rather than reusing
-    /// `bluetooth_publish_pending`'s trick of dirtying the configuration.
+    /// `configuration_publish_pending`'s trick of dirtying the configuration.
     /// Forget the stored network, persistently.
     ///
     /// Writing the cleared value is the whole point: the state this reproduces is a machine
@@ -1014,7 +1029,13 @@ impl<
             }
             Err(_) => log_warn!("Failed to acquire shot_upload_store lock for save (timeout)"),
         }
+        // Two flags, two destinations, and they are not interchangeable. This one sends the
+        // full config -- token included -- to the comms processor on its own watch.
         self.shot_upload_publish_pending = true;
+        // And this one republishes `Configuration`, which carries the redacted `ShotUploadView`
+        // the browser reads. Without it the settings panel showed a stale endpoint for up to
+        // ten seconds after an edit, exactly as the schedule list did.
+        self.configuration_publish_pending = true;
     }
 
     pub async fn task(&mut self) {
@@ -1036,7 +1057,7 @@ impl<
         log_info!("Loaded {} Bluetooth associations", self.bluetooth_associations.0.len());
         // The comms processor asks for these itself at boot, but it has no way to know
         // whether this processor was simply slow to answer, so publish once regardless.
-        self.bluetooth_publish_pending = true;
+        self.configuration_publish_pending = true;
 
         // Once, before the loop, for the same reason as the association list above.
         self.wifi_credentials = match self.wifi_store.lock().await.load_settings().await {
@@ -1073,6 +1094,11 @@ impl<
             if self.shot_upload_config.token.is_some() { "configured" } else { "none stored" }
         );
         self.shot_upload_publish_pending = true;
+        // Explicitly, rather than relying on the association load above having already set it.
+        // That is true today -- this whole prologue is straight-line before the loop -- but it
+        // is not a property either block states, and the failure it would produce is a stored
+        // endpoint the settings panel never shows.
+        self.configuration_publish_pending = true;
 
         loop {
             // A scan the comms processor never reported the end of -- because it reset,
@@ -1302,8 +1328,8 @@ impl<
             }
         }
 
-        if self.configuration != previous_configuration || self.bluetooth_publish_pending {
-            self.bluetooth_publish_pending = false;
+        if self.configuration != previous_configuration || self.configuration_publish_pending {
+            self.configuration_publish_pending = false;
             self.publish_general_configuration().await;
 
             return self.configuration.clone();
@@ -2294,31 +2320,37 @@ impl<
             MachineCommand::RemoveScheduleItem(idx) => {
                 log_info!("Removing schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => {
-                        let res = store.remove_schedule(idx as usize).await;
-                        if res.is_none() {
-                            log_warn!("Failed to remove schedule at index {}: index out of bounds", idx);
-                        }
-                    }
+                    Ok(mut store) => match store.remove_schedule(idx as usize).await {
+                        Ok(Some(_)) => self.configuration_publish_pending = true,
+                        // Distinguished from the arm below, because they are different
+                        // problems: this one is a client naming an index that is not there,
+                        // that one is a flash write that failed.
+                        Ok(None) => log_warn!("No schedule at index {} to remove", idx),
+                        Err(e) => log_warn!("Failed to remove schedule at index {}: {}", idx, e),
+                    },
                     Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::AddScheduleItem(item) => {
                 log_info!("Adding new schedule item");
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => store.add_schedule(item).await,
+                    Ok(mut store) => match store.add_schedule(item).await {
+                        Ok(index) => {
+                            log_info!("Added schedule at index {}", index);
+                            self.configuration_publish_pending = true;
+                        }
+                        Err(e) => log_warn!("Failed to add schedule: {}", e),
+                    },
                     Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::UpdateScheduleItem(idx, item) => {
                 log_info!("Updating schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => {
-                        let res = store.update_schedule(idx as usize, item).await;
-                        if res.is_err() {
-                            log_warn!("Failed to update schedule at index {}: index out of bounds", idx);
-                        }
-                    }
+                    Ok(mut store) => match store.update_schedule(idx as usize, item).await {
+                        Ok(()) => self.configuration_publish_pending = true,
+                        Err(e) => log_warn!("Failed to update schedule at index {}: {}", idx, e),
+                    },
                     Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
@@ -2335,9 +2367,13 @@ impl<
             MachineCommand::RemoveRoutine(idx) => {
                 match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
                     Ok(mut repo) => {
-                        let res = repo.remove_routine(idx).await;
-                        if res.is_none() {
-                            log_warn!("Failed to remove routine at index {}: index out of bounds", idx);
+                        match repo.remove_routine(idx).await {
+                            Ok(Some(_)) => {}
+                            // Two different problems, and they used to be the same answer:
+                            // a client naming an index that is not there, versus a flash
+                            // write that failed.
+                            Ok(None) => log_warn!("No routine at index {} to remove", idx),
+                            Err(e) => log_warn!("Failed to remove routine at index {}: {}", idx, e),
                         }
                     }
                     Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
@@ -2379,6 +2415,15 @@ impl<
                     log_warn!("Failed to send OptimizeRoutines command: channel full");
                 }
             }
+            // **No `configuration_publish_pending`, deliberately.** The compaction happens
+            // later and in `storage_task`, not here, so a flag set now would advertise a
+            // change that has not happened yet. And it would advertise nothing anyway:
+            // `Configuration.schedules` is a `Vec<ScheduleItem>` carrying no indices, so
+            // renumbering is invisible to a browser.
+            //
+            // @todo It is *not* invisible to the GS3 panel, whose menu resolves a schedule by
+            // storage index. Optimizing while a schedule screen is open can leave that screen
+            // pointing at a different schedule. Pre-existing, and out of scope here.
             MachineCommand::OptimizeScheduleStorage => {
                 log_info!("Sending OptimizeSchedules to storage task");
                 if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeSchedules) {

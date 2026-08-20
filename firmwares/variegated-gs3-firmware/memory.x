@@ -2,7 +2,15 @@ MEMORY {
     /*
      * The RP2350 has either external or internal flash.
      *
-     * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
+     * This board carries 8 MiB. The 2 MiB below is a deliberately conservative
+     * declaration, not the hardware limit -- the line above used to read "2 MiB is a
+     * safe default here, although a Pico 2 has 4 MiB", which was upstream template
+     * text and got mistaken for a fact about this board when sizing a dependency.
+     *
+     * So `region FLASH overflowed` here is a budget decision, not a wall: raising this
+     * is one line, and there is 6 MiB behind it. Note that the storage ranges are
+     * addressed separately -- routines at 0x0008_0000, schedules at 0x0040_0000 -- so
+     * raising this length is not free of interactions with them.
      */
     FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
     /*

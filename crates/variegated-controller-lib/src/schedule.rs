@@ -15,6 +15,48 @@ use crate::flash::BorrowedFlash;
 use variegated_controller_types::{MachineCommand, ScheduleItem};
 use variegated_timekeeping::TimeKeeper;
 
+/// Does `trigger` fire at `time`?
+///
+/// A free function rather than a closure inside the store, because it is the one piece of this
+/// file that two callers must agree on and the only one a host test can state on its own -- it
+/// needs no store, no flash and no [`TimeKeeper`], since a `DateTimeInZone` can be built
+/// directly.
+///
+/// **Minute resolution, deliberately.** [`run_schedule`] wakes five seconds past each minute,
+/// so seconds are ignored entirely and a schedule fires at most once per minute per pass.
+///
+/// A `None` `on_days` means every day; an *empty* day set means no day at all. Those are
+/// different answers and collapsing them would turn a schedule that can never fire into a
+/// daily one.
+pub fn trigger_matches(
+    trigger: &variegated_controller_types::ScheduleTrigger,
+    time: variegated_timekeeping::DateTimeInZone,
+) -> bool {
+    if !trigger.enabled {
+        return false;
+    }
+
+    if trigger.on_hour != time.hour() as u8 || trigger.on_minute != time.minute() as u8 {
+        return false;
+    }
+
+    if let Some(ref days) = trigger.on_days {
+        if !days.contains(&time.weekday()) {
+            return false;
+        }
+    }
+
+    // A dated trigger fires on that date and no other, which is also what makes it
+    // self-expiring: once the date is past, nothing matches it again.
+    if let Some(trigger_date) = trigger.on_date {
+        if time.date_naive() != trigger_date {
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Calculate when a schedule will next trigger
 fn calculate_next_trigger(trigger: &variegated_controller_types::ScheduleTrigger, now: variegated_timekeeping::DateTimeInZone) -> Option<variegated_timekeeping::DateTimeInZone> {
     use variegated_timekeeping::TimeKeeper;
@@ -94,16 +136,65 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
         });
 
         if let Some(now) = now {
+            // Collected, and the guard released, before anything is sent. Two reasons, both
+            // load-bearing:
+            //
+            // * The iterator this replaced held the store's `&mut self` borrow for the whole
+            //   loop, so writing `enabled = false` back inside it was `E0499`.
+            //
+            // * `command_channel` is ten deep and its consumer is the controller's own task.
+            //   Awaiting a `send` on a full channel while holding this lock stalls
+            //   `create_general_configuration`, whose 100 ms `with_timeout` on this very lock
+            //   then expires -- and its timeout path publishes an **empty** schedule list to
+            //   every browser and to the comms processor. The GS3 panel already drops this
+            //   lock before sending; this was the last place that did not.
             let mut store_guard = store.lock().await;
-            let schedules = store_guard.schedules_triggering_at(now).await;
+            let triggering = store_guard.schedules_triggering_at_with_indices(now).await;
 
-            for schedule in schedules {
+            // Spent *before* the actions are dispatched, not after. A one-shot whose action is
+            // `SetMachineMode(On)` must not be able to fire twice if the sends below park, and
+            // this loop's next pass is a minute away either way.
+            //
+            // **Disabled, not removed.** The user wrote this schedule; re-enabling or re-timing
+            // it is one press where re-creating it is not. `get_next_schedule` filters on
+            // `enabled`, so it leaves the "next scheduled" display either way, and the row stays
+            // visible in the menu and the browser as *spent* rather than vanishing unexplained.
+            let mut spent_any = false;
+            for (index, item) in &triggering {
+                if !item.trigger_at.once {
+                    continue;
+                }
+
+                let mut updated = item.clone();
+                updated.trigger_at.enabled = false;
+                match store_guard.update_schedule(*index, updated).await {
+                    Ok(()) => {
+                        log_info!("Schedule {} was once-only; disabled", index);
+                        spent_any = true;
+                    }
+                    // Logged and then ignored: a flash write that failed must not stop the
+                    // machine doing what it was told to do at this minute. The cost is a
+                    // one-shot that fires again after a reboot, which is the lesser failure.
+                    Err(e) => log_warn!("Failed to disable one-shot schedule {}: {}", index, e),
+                }
+            }
+            drop(store_guard);
+
+            for (_, schedule) in &triggering {
                 log_info!("Schedule triggered: {:?}", schedule);
                 for action in &schedule.commands {
                     let command = action.to_machine_command();
                     command_channel.send(command).await;
                     log_info!("Sent scheduled action: {:?}", action);
                 }
+            }
+
+            // The store just changed and nothing else knows. `RequestConfiguration` is the
+            // controller's "republish what you have", and it is this task's only route to a
+            // browser -- without it a schedule that has just spent itself keeps reading as
+            // enabled until something else dirties the configuration.
+            if spent_any {
+                command_channel.send(MachineCommand::RequestConfiguration).await;
             }
         }
 
@@ -130,7 +221,17 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
 // borrowed from `&mut self`.
 #[allow(async_fn_in_trait)]
 pub trait ScheduleStore {
-    async fn add_schedule(&mut self, item: ScheduleItem);
+    /// Store a new schedule, and say where it went.
+    ///
+    /// `Err` rather than a panic. This is reached from `MachineCommand::AddScheduleItem` --
+    /// so from a browser, the debug link or the GS3 panel -- and a storage range that had
+    /// filled up used to take the machine down with
+    /// `expect("Failed to store schedule in flash")`.
+    ///
+    /// The index is returned because it is not the caller's to predict: the store fills holes
+    /// left by [`Self::remove_schedule`], so it is neither the count nor the last index plus
+    /// one. `RoutineRepository::add_routine` already answers the same way.
+    async fn add_schedule(&mut self, item: ScheduleItem) -> Result<usize, &'static str>;
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem>;
 
     /// Every stored schedule, with the index it is stored under.
@@ -146,7 +247,13 @@ pub trait ScheduleStore {
     /// No default body: a store added later has to answer this deliberately, because the
     /// obvious default -- enumerating [`Self::get_schedules`] -- is exactly the bug.
     async fn iterate_schedules_with_indices(&mut self) -> impl Iterator<Item = (usize, &ScheduleItem)>;
-    async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem>;
+    /// Forget a stored schedule.
+    ///
+    /// `Ok(None)` means there was nothing at `index`. `Err` means there *was* and it could not
+    /// be erased. Those used to be the same answer: the flash write's `Result` was discarded
+    /// with `let _ =` and the cache entry removed *first*, so a failed erase reported success,
+    /// the schedule disappeared from every UI, and it came back at the next boot.
+    async fn remove_schedule(&mut self, index: usize) -> Result<Option<ScheduleItem>, &'static str>;
     async fn update_schedule(&mut self, index: usize, item: ScheduleItem) -> Result<(), &'static str>;
     async fn get_schedule_count(&mut self) -> usize;
     async fn optimize_storage(&mut self) -> Result<(), &'static str>;
@@ -180,43 +287,30 @@ pub trait ScheduleStore {
         next_schedule
     }
 
-    async fn schedules_triggering_at(&mut self, time: variegated_timekeeping::DateTimeInZone) -> impl Iterator<Item = &ScheduleItem> {
-        let hour = time.hour() as u8;
-        let minute = time.minute() as u8;
-        let weekday = time.weekday();
-        let date = time.date_naive();
-
-        let schedules = self.get_schedules().await;
-
-        schedules.filter(move |schedule| {
-            let trigger = &schedule.trigger_at;
-
-            // Check if enabled
-            if !trigger.enabled {
-                return false;
-            }
-
-            // Check hour and minute
-            if trigger.on_hour != hour || trigger.on_minute != minute {
-                return false;
-            }
-
-            // Check day of week if specified
-            if let Some(ref days) = trigger.on_days {
-                if !days.contains(&weekday) {
-                    return false;
-                }
-            }
-
-            // Check specific date if specified
-            if let Some(trigger_date) = trigger.on_date {
-                if date != trigger_date {
-                    return false;
-                }
-            }
-
-            true
-        })
+    /// Every schedule that fires at `time`, with the index it is stored under.
+    ///
+    /// **Owned, and that is the whole point.** The iterator this replaced borrowed `&mut self`
+    /// for as long as it was alive, so writing back to the store while walking it -- which is
+    /// exactly what honouring [`ScheduleTrigger::once`] requires -- was `E0499`. Collecting
+    /// also lets [`run_schedule`] release the store lock before it sends anything on the
+    /// command channel; see the note there, because that matters more than it looks.
+    ///
+    /// The indices are the same sparse storage indices
+    /// [`Self::iterate_schedules_with_indices`] yields, for the same reason: every write
+    /// command names one, and the *n*th value is not index *n* after a removal.
+    ///
+    /// Defaulted rather than required, unlike `iterate_schedules_with_indices`: this body is
+    /// derivable from that one without the bug that motivated its "no default body" note,
+    /// because it is that method it enumerates.
+    async fn schedules_triggering_at_with_indices(
+        &mut self,
+        time: variegated_timekeeping::DateTimeInZone,
+    ) -> Vec<(usize, ScheduleItem)> {
+        self.iterate_schedules_with_indices()
+            .await
+            .filter(|(_, item)| trigger_matches(&item.trigger_at, time))
+            .map(|(index, item)| (index, item.clone()))
+            .collect()
     }
 }
 
@@ -235,7 +329,7 @@ impl InMemoryScheduleStore {
 }
 
 impl ScheduleStore for InMemoryScheduleStore {
-    async fn add_schedule(&mut self, item: ScheduleItem) {
+    async fn add_schedule(&mut self, item: ScheduleItem) -> Result<usize, &'static str> {
         // Find the first available index (hole-filling strategy)
         let index = (0..self.next_index)
             .find(|&i| !self.schedules.contains_key(&i))
@@ -247,6 +341,9 @@ impl ScheduleStore for InMemoryScheduleStore {
             });
 
         self.schedules.insert(index, item);
+        // Infallible here, and the `Result` is the trait's rather than this store's: the
+        // flash-backed one is the one that can fail.
+        Ok(index)
     }
 
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem> {
@@ -257,8 +354,8 @@ impl ScheduleStore for InMemoryScheduleStore {
         self.schedules.iter().map(|(index, item)| (*index, item))
     }
 
-    async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem> {
-        self.schedules.remove(&index)
+    async fn remove_schedule(&mut self, index: usize) -> Result<Option<ScheduleItem>, &'static str> {
+        Ok(self.schedules.remove(&index))
     }
 
     async fn update_schedule(&mut self, index: usize, item: ScheduleItem) -> Result<(), &'static str> {
@@ -387,7 +484,10 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
             Cache::new_uncached(),
         );
 
-        let key = index as u16;
+        // `try_from`, not `as`. The flash key is the storage index narrowed to sixteen bits,
+        // and a silent wrap would write schedule 65 536 over schedule 0 -- a data loss that
+        // presents as a schedule the user never created.
+        let key = u16::try_from(index).map_err(|_| "Schedule index does not fit a u16 flash key")?;
 
         storage.store_item(
             &mut self.deserialization_buffer,
@@ -405,22 +505,27 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageScheduleStore<'a,
 }
 
 impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorageScheduleStore<'a, M, T> {
-    async fn add_schedule(&mut self, item: ScheduleItem) {
-        self.load_from_flash().await.ok().unwrap();
+    async fn add_schedule(&mut self, item: ScheduleItem) -> Result<usize, &'static str> {
+        // `?`, not `.ok().unwrap()`. A flash range that will not load is a reason to refuse the
+        // write, not to panic -- and this is reached from a web request.
+        self.load_from_flash().await?;
 
-        // Find the first available index (hole-filling strategy)
-        let index = (0..self.next_index)
-            .find(|&i| !self.cache.contains_key(&i))
-            .unwrap_or_else(|| {
-                // No holes found, use next_index and increment it
-                let idx = self.next_index;
-                self.next_index += 1;
-                idx
-            });
+        // Hole-filling: reuse the first index a removal left free.
+        let hole = (0..self.next_index).find(|i| !self.cache.contains_key(i));
+        let index = hole.unwrap_or(self.next_index);
 
+        // Flash first, cache second, `next_index` last -- the order `update_schedule` already
+        // used. The previous order advanced `next_index` *before* the write, so a failed write
+        // burned an index; that only looked harmless because the `expect` that followed had
+        // already killed the machine.
         let opt = Some(item);
-        self.store_in_flash(index, &opt).await.expect("Failed to store schedule in flash");
+        self.store_in_flash(index, &opt).await?;
         self.cache.insert(index, opt.unwrap());
+        if hole.is_none() {
+            self.next_index += 1;
+        }
+
+        Ok(index)
     }
 
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem> {
@@ -441,14 +546,23 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
         self.cache.iter().map(|(index, item)| (*index, item))
     }
 
-    async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem> {
-        let schedule = self.cache.remove(&index);
-        if schedule.is_some() {
-            let opt: Option<ScheduleItem> = None;
-            let _ = self.store_in_flash(index, &opt).await;
+    async fn remove_schedule(&mut self, index: usize) -> Result<Option<ScheduleItem>, &'static str> {
+        // This was the only method here that never loaded. On a cold store a remove read an
+        // empty cache, answered "nothing there", and left the item in flash to reappear at the
+        // next boot.
+        self.load_from_flash().await?;
+
+        if !self.cache.contains_key(&index) {
+            return Ok(None);
         }
 
-        schedule
+        // Flash first, cache second. The reverse -- which this did -- leaves RAM claiming a
+        // schedule flash still holds, and the disagreement only surfaces after a reboot, by
+        // which time nothing connects it to the deletion that failed.
+        let opt: Option<ScheduleItem> = None;
+        self.store_in_flash(index, &opt).await?;
+
+        Ok(self.cache.remove(&index))
     }
 
     async fn update_schedule(&mut self, index: usize, item: ScheduleItem) -> Result<(), &'static str> {
@@ -480,12 +594,14 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
         self.load_from_flash().await?;
 
         // Collect schedules and reassign to consecutive indices (0, 1, 2, ...)
+        //
+        // **The cache is deliberately not cleared here.** It used to be emptied before the
+        // erase below, so a `?` on that erase returned with RAM empty and flash intact: every
+        // later read answered "no schedules" against a store that still had them, with no
+        // error anywhere, because `cache_initialized` was still true.
         let schedules_to_store: Vec<ScheduleItem> = self.cache.values()
             .cloned()
             .collect();
-
-        // Clear the cache as we'll rebuild it with new indices
-        self.cache.clear();
 
         // Remove everything
         {
@@ -502,18 +618,267 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
                 .map_err(|_| "Failed to remove schedule item in flash")?;
         }
 
-        // Re-store all schedules with consecutive indices starting from 0
+        // Past this point flash has been erased and `schedules_to_store` is the only copy of
+        // the machine's schedules, so **nothing below may return early**. The `?` that used to
+        // be on `store_in_flash` dropped that local on the way out and lost every schedule the
+        // machine had -- not a divergence, an erasure. Keep going, keep whatever lands, and
+        // report at the end; a later `optimize_storage` or any `update_schedule` can then
+        // write the rest.
         log_info!("Rewriting {} schedules with compacted indices", schedules_to_store.len());
+        let mut rebuilt: BTreeMap<usize, ScheduleItem> = BTreeMap::new();
+        let mut first_error: Option<&'static str> = None;
         for (new_index, schedule) in schedules_to_store.iter().enumerate() {
             let opt = Some(schedule.clone());
-            self.store_in_flash(new_index, &opt).await?;
-            self.cache.insert(new_index, schedule.clone());
+            match self.store_in_flash(new_index, &opt).await {
+                Ok(()) => {
+                    rebuilt.insert(new_index, schedule.clone());
+                }
+                Err(e) => {
+                    log_warn!("Failed to rewrite schedule {} during optimization: {}", new_index, e);
+                    let _ = first_error.get_or_insert(e);
+                }
+            }
+
+            // Yield, so a long rewrite cannot starve the watchdog. The routine repository's
+            // optimizer already does this and this one did not, which on a full store is the
+            // difference between a compaction and a reset.
+            Timer::after_millis(1).await;
         }
 
-        // Reset next_index to the number of schedules
-        self.next_index = schedules_to_store.len();
+        // The cache is replaced only now, and only with what flash actually took, so RAM and
+        // flash agree even on the partial-failure path. Holes are fine -- `add_schedule` fills
+        // them, which is what its hole-filling strategy is for.
+        self.cache = rebuilt;
+        self.next_index = self.cache.keys().next_back().map_or(0, |k| k + 1);
 
-        log_info!("Schedule storage optimization complete, next_index reset to {}", self.next_index);
-        Ok(())
+        match first_error {
+            Some(e) => Err(e),
+            None => {
+                log_info!(
+                    "Schedule storage optimization complete, next_index reset to {}",
+                    self.next_index
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use chrono::{NaiveDate, Weekday};
+    use heapless::index_set::FnvIndexSet;
+    use variegated_controller_types::{MachineMode, ScheduleAction, ScheduleTrigger};
+    use variegated_timekeeping::DateTimeInZone;
+
+    /// Drive one of [`InMemoryScheduleStore`]'s futures to completion.
+    ///
+    /// Safe here and only here: none of that store's methods actually suspend -- they are
+    /// `async` to satisfy the trait, and every body is straight-line over a `BTreeMap`.
+    /// `block_on` busy-polls with a no-op waker and never re-enters the executor, so pointing
+    /// it at anything that genuinely awaits deadlocks. `sd_card.rs` carries the scar tissue.
+    ///
+    /// The flash-backed [`SequentialStorageScheduleStore`] is deliberately **not** covered by
+    /// any of this: it needs a `MultiwriteNorFlash`, which a host build has no implementation
+    /// of. Its error paths are covered by review and by the on-target build only.
+    fn run<T>(future: impl core::future::Future<Output = T>) -> T {
+        embassy_futures::block_on(future)
+    }
+
+    /// 2026-08-20 is a Thursday, which the day-set test below depends on.
+    fn at(hour: u32, minute: u32) -> DateTimeInZone {
+        DateTimeInZone::Utc(
+            NaiveDate::from_ymd_opt(2026, 8, 20)
+                .unwrap()
+                .and_hms_opt(hour, minute, 0)
+                .unwrap()
+                .and_utc(),
+        )
+    }
+
+    fn trigger(hour: u8, minute: u8) -> ScheduleTrigger {
+        ScheduleTrigger {
+            on_hour: hour,
+            on_minute: minute,
+            on_days: None,
+            on_date: None,
+            enabled: true,
+            once: false,
+        }
+    }
+
+    fn item(trigger_at: ScheduleTrigger) -> ScheduleItem {
+        ScheduleItem {
+            trigger_at,
+            commands: vec![ScheduleAction::SetMachineMode(MachineMode::On)],
+        }
+    }
+
+    // ---- trigger_matches ------------------------------------------------------------------
+
+    #[test]
+    fn trigger_matches_on_hour_and_minute() {
+        let t = trigger(7, 30);
+        assert!(trigger_matches(&t, at(7, 30)));
+        assert!(!trigger_matches(&t, at(7, 31)));
+        assert!(!trigger_matches(&t, at(8, 30)));
+    }
+
+    #[test]
+    fn trigger_matches_refuses_a_disabled_trigger() {
+        let mut t = trigger(7, 30);
+        t.enabled = false;
+        assert!(!trigger_matches(&t, at(7, 30)));
+    }
+
+    #[test]
+    fn trigger_matches_respects_on_days() {
+        let mut days: FnvIndexSet<Weekday, 8> = FnvIndexSet::new();
+        let _ = days.insert(Weekday::Thu);
+        let mut t = trigger(7, 30);
+        t.on_days = Some(days);
+        assert!(trigger_matches(&t, at(7, 30)));
+
+        let mut other: FnvIndexSet<Weekday, 8> = FnvIndexSet::new();
+        let _ = other.insert(Weekday::Mon);
+        t.on_days = Some(other);
+        assert!(!trigger_matches(&t, at(7, 30)));
+    }
+
+    /// An *empty* day set can never fire, and must not be read as "every day". Collapsing the
+    /// two would turn a schedule that never runs into a daily one.
+    #[test]
+    fn an_empty_day_set_never_matches() {
+        let mut t = trigger(7, 30);
+        t.on_days = Some(FnvIndexSet::new());
+        assert!(!trigger_matches(&t, at(7, 30)));
+
+        t.on_days = None;
+        assert!(trigger_matches(&t, at(7, 30)), "None must still mean every day");
+    }
+
+    #[test]
+    fn trigger_matches_respects_on_date() {
+        let mut t = trigger(7, 30);
+        t.on_date = NaiveDate::from_ymd_opt(2026, 8, 20);
+        assert!(trigger_matches(&t, at(7, 30)));
+
+        t.on_date = NaiveDate::from_ymd_opt(2026, 8, 21);
+        assert!(!trigger_matches(&t, at(7, 30)));
+    }
+
+    // ---- the store ------------------------------------------------------------------------
+
+    #[test]
+    fn add_schedule_fills_holes_and_reports_the_index() {
+        let mut store = InMemoryScheduleStore::new();
+        assert_eq!(run(store.add_schedule(item(trigger(6, 0)))).unwrap(), 0);
+        assert_eq!(run(store.add_schedule(item(trigger(7, 0)))).unwrap(), 1);
+        assert_eq!(run(store.add_schedule(item(trigger(8, 0)))).unwrap(), 2);
+
+        assert!(run(store.remove_schedule(1)).unwrap().is_some());
+
+        // The hole, not 3. This is why the index cannot be derived from the count.
+        assert_eq!(run(store.add_schedule(item(trigger(9, 0)))).unwrap(), 1);
+    }
+
+    #[test]
+    fn remove_schedule_distinguishes_absent_from_present() {
+        let mut store = InMemoryScheduleStore::new();
+        run(store.add_schedule(item(trigger(6, 0)))).unwrap();
+
+        assert!(run(store.remove_schedule(0)).unwrap().is_some());
+        // Absent is `Ok(None)`, not an error. `Err` is reserved for a write that failed, which
+        // this store cannot do -- that is the distinction the old `Option` return could not
+        // make and the flash-backed store needed.
+        assert!(run(store.remove_schedule(0)).unwrap().is_none());
+        assert!(run(store.remove_schedule(99)).unwrap().is_none());
+    }
+
+    /// A firing schedule must report its *storage* index, not its position in the list.
+    ///
+    /// `[0, 2]` is the shape hole-filling produces after a removal. A caller using the position
+    /// would name index 1 for the second entry and rewrite a schedule the user never touched --
+    /// or, once the hole is filled, a different one entirely.
+    #[test]
+    fn triggering_indices_survive_a_removal() {
+        let mut store = InMemoryScheduleStore::new();
+        run(store.add_schedule(item(trigger(6, 0)))).unwrap();
+        run(store.add_schedule(item(trigger(7, 0)))).unwrap();
+        run(store.add_schedule(item(trigger(8, 0)))).unwrap();
+        run(store.remove_schedule(1)).unwrap();
+
+        let firing = run(store.schedules_triggering_at_with_indices(at(8, 0)));
+        assert_eq!(firing.len(), 1);
+        assert_eq!(firing[0].0, 2, "reported its position rather than its storage index");
+
+        // And once the hole is filled, the new occupant is index 1 while sorting third by time.
+        assert_eq!(run(store.add_schedule(item(trigger(9, 0)))).unwrap(), 1);
+        let firing = run(store.schedules_triggering_at_with_indices(at(9, 0)));
+        assert_eq!(firing[0].0, 1);
+    }
+
+    #[test]
+    fn only_matching_schedules_are_reported() {
+        let mut store = InMemoryScheduleStore::new();
+        run(store.add_schedule(item(trigger(6, 0)))).unwrap();
+        run(store.add_schedule(item(trigger(7, 0)))).unwrap();
+
+        assert_eq!(run(store.schedules_triggering_at_with_indices(at(7, 0))).len(), 1);
+        assert!(run(store.schedules_triggering_at_with_indices(at(5, 0))).is_empty());
+    }
+
+    /// The sequence [`run_schedule`] performs for a spent one-shot.
+    ///
+    /// The item must still be **there**, at the **same index**, and merely disabled -- so the
+    /// user can re-enable or re-time it rather than re-create it, and so nothing renumbers
+    /// under an open menu. Driving `run_schedule` itself would need timers and a channel; this
+    /// covers the decision it makes.
+    #[test]
+    fn a_once_schedule_is_disabled_not_removed() {
+        let mut store = InMemoryScheduleStore::new();
+        let mut t = trigger(7, 30);
+        t.once = true;
+        run(store.add_schedule(item(t))).unwrap();
+
+        let firing = run(store.schedules_triggering_at_with_indices(at(7, 30)));
+        assert_eq!(firing.len(), 1);
+
+        for (index, fired) in &firing {
+            let mut updated = fired.clone();
+            updated.trigger_at.enabled = false;
+            run(store.update_schedule(*index, updated)).unwrap();
+        }
+
+        assert_eq!(run(store.get_schedule_count()), 1, "the item was removed, not disabled");
+
+        let stored: Vec<(usize, ScheduleItem)> = run(store.iterate_schedules_with_indices())
+            .map(|(index, item)| (index, item.clone()))
+            .collect();
+        assert_eq!(stored[0].0, 0, "the storage index moved");
+        assert!(!stored[0].1.trigger_at.enabled);
+        assert!(stored[0].1.trigger_at.once, "the once flag itself must survive");
+        assert_eq!(stored[0].1.commands.len(), 1, "the actions must survive");
+
+        // And it does not fire again.
+        assert!(run(store.schedules_triggering_at_with_indices(at(7, 30))).is_empty());
+    }
+
+    #[test]
+    fn optimize_storage_compacts_indices() {
+        let mut store = InMemoryScheduleStore::new();
+        run(store.add_schedule(item(trigger(6, 0)))).unwrap();
+        run(store.add_schedule(item(trigger(7, 0)))).unwrap();
+        run(store.add_schedule(item(trigger(8, 0)))).unwrap();
+        run(store.remove_schedule(0)).unwrap();
+
+        run(store.optimize_storage()).unwrap();
+
+        let indices: Vec<usize> =
+            run(store.iterate_schedules_with_indices()).map(|(index, _)| index).collect();
+        assert_eq!(indices, vec![0, 1]);
+        assert_eq!(run(store.get_schedule_count()), 2);
     }
 }
