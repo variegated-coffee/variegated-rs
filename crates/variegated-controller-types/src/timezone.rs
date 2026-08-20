@@ -32,9 +32,29 @@ pub const TIMEZONE_NAME_LEN: usize = 64;
 /// deserialize -- so the fallback is the same value in all three cases rather than three
 /// different kinds of nothing.
 ///
-/// **Scheduling only.** Shot logs, the debug bus and the DS3231 re-anchor stay on UTC by
-/// design -- see `shot_log.rs` and `shot_log_storage.rs`. Changing this must never move a
-/// timestamp that has already been written.
+/// # What the zone governs, exhaustively
+///
+/// **The machine keeps time in UTC. This changes two things and nothing else:**
+///
+/// 1. **How times are displayed** -- `Status::current_local_time`, and the clock both GS3
+///    panels draw. These are the only `TimeKeeper::now_local()` callers outside the scheduler.
+/// 2. **Schedule item times**, which are *always* local. `ScheduleTrigger`'s `on_hour` /
+///    `on_minute` / `on_days` / `on_date` are wall-clock in this zone: `run_schedule` matches
+///    them against `now_local()` and `calculate_next_trigger` resolves them through
+///    `TimeKeeper::timezone()`. A 07:00 warm-up stays 07:00 across a DST change, which is the
+///    entire reason a named zone is stored rather than a fixed offset.
+///
+/// **Everything else is UTC and must stay UTC:**
+///
+/// - The **RTC**. `anchor_from_rtc` reads the DS3231 as UTC and `sync_rtc` writes
+///   `now_utc().naive_utc()` back, so the TCXO holds UTC in both directions. Nothing here can
+///   affect that: `set_timezone` touches only the zone field, which `now_utc()` never reads.
+/// - **Shot logs**, stamped `recorded_at_unix_millis` from `instant_to_datetime` (a
+///   `DateTime<Utc>`), and filed on the SD card by UTC day.
+/// - **The debug bus** and the shot-log serial in the firmware's `main`.
+///
+/// So changing this never moves a timestamp that has already been written, and never
+/// reinterprets one that has.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
