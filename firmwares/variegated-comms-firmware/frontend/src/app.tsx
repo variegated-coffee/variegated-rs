@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { ScheduleBuilder } from './components/ScheduleBuilder';
 import { BluetoothPanel } from './components/BluetoothPanel';
 import { ShotUploadPanel } from './components/ShotUploadPanel';
@@ -27,6 +27,15 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
 
+  // Whether a machine definition has arrived, readable from inside the mount effect.
+  //
+  // A ref rather than reading `machineDefinition`, because the effect below runs once with
+  // `[]` deps and everything it closes over is frozen at the first render -- where that
+  // state is `null`. The give-up timeout needs to know what is true when it *fires*, ten
+  // seconds later, and state cannot tell it. Adding the state to the dep array is not the
+  // alternative: it would tear down and recreate the WebSocket connection on every update.
+  const machineDefinitionArrived = useRef(false);
+
   // JSON modal states
   const [showStatusJson, setShowStatusJson] = useState(false);
   const [showConfigJson, setShowConfigJson] = useState(false);
@@ -41,22 +50,23 @@ export function App() {
 
     // Create WebSocket service with callbacks
     const wsService = createWebSocketService(wsUrl, {
+      // Neither of these clears `loading` any more, and neither ever did.
+      //
+      // They used to read `if (loading && machineDefinition)` and `if (loading && status)`,
+      // which could not fire: this effect has `[]` deps, so both callbacks closed over the
+      // first render's values -- `loading` permanently `true`, `status` and
+      // `machineDefinition` permanently `null` -- and the conjunctions were therefore
+      // permanently false. The dedicated effect below, which has real dependencies, is what
+      // has actually been clearing `loading`.
       onStatusUpdate: (newStatus) => {
         setStatus(newStatus);
-        // Clear loading state once we get first status
-        if (loading && machineDefinition) {
-          setLoading(false);
-        }
       },
       onConfigurationUpdate: (newConfig) => {
         setConfig(newConfig);
       },
       onMachineDefinition: (def) => {
+        machineDefinitionArrived.current = true;
         setMachineDefinition(def);
-        // Clear loading state if we already have status
-        if (loading && status) {
-          setLoading(false);
-        }
       },
       onRoutinesUpdate: (newRoutines) => {
         setRoutines(newRoutines);
@@ -89,14 +99,25 @@ export function App() {
     // Connect to WebSocket
     wsService.connect();
 
-    // Set a timeout to clear loading state if initial data doesn't arrive
+    // Give up waiting for the initial data and show the app anyway.
+    //
+    // The condition reads the ref, not the state, and that is the whole point: this closure
+    // was written as `if (!machineDefinition)` against a value frozen at `null` on the first
+    // render, so it was **always** true and this **always** set "Timeout waiting for machine
+    // definition" -- ten seconds into every session, including perfectly healthy ones.
+    //
+    // It was invisible while connected, because the error screen is gated on
+    // `error && !connected`. It surfaced later: the first time the socket dropped, the
+    // operator was told the machine definition had timed out rather than that the connection
+    // had gone.
+    //
+    // `setLoading(false)` is now unconditional. It is a no-op if the effect below already
+    // cleared it, and guarding it on a stale `loading` bought nothing.
     const loadingTimeout = setTimeout(() => {
-      if (loading) {
-        setLoading(false);
-        if (!machineDefinition) {
-          setError('Timeout waiting for machine definition');
-        }
+      if (!machineDefinitionArrived.current) {
+        setError('Timeout waiting for machine definition');
       }
+      setLoading(false);
     }, 10000);
 
     return () => {

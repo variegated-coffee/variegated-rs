@@ -42,6 +42,23 @@ run() {
 # `load_settings` maps a deserialization error to `Default`.
 run "variegated-controller-types" -p variegated-controller-types --no-default-features --features serde,std,sequential-storage "$@"
 
+# The WebSocket wire contract: the variant discriminants of `WsMessage`, and the frame-size
+# bounds that `websocket.rs` and the frontend both enforce.
+#
+# The discriminants are a contract with firmware **already flashed onto machines**. That
+# transport carries no version byte and no handshake, so a commit that reorders the enum for
+# readability compiles everywhere, passes everything else, and silently mis-decodes against
+# every deployed machine. Nothing else in the tree catches that.
+#
+# It is here rather than in `variegated-cli`, which used to hold hand-copied mirrors and
+# pinned these numbers beside them: that crate is a separate workspace, so this gate never ran
+# its suite -- and the mirror had drifted past `ShotLogEvent` without anything noticing.
+#
+# No feature flags. This crate's `variegated-controller-types` dependency is
+# `default-features = false, features = ["serde"]`, so defmt stays off and the host linker has
+# nothing to choke on.
+run "variegated-comms-api-types" -p variegated-comms-api-types "$@"
+
 # Shot-log upload: URL parsing, HTTP status policy and request framing.
 #
 # It lives outside `variegated-comms-firmware` because that crate sets `[lib] harness =

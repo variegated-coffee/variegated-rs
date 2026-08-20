@@ -180,12 +180,9 @@ export function buildRoutineUrl(identifier: RoutineIdentifier): string {
   return `/routines/${identifier.type}/${identifier.index}`;
 }
 
-/**
- * Build a URL for running a routine
- */
-export function buildRunRoutineUrl(identifier: RoutineIdentifier): string {
-  return `/command/run-routine/${identifier.type}/${identifier.index}`;
-}
+// `buildRunRoutineUrl` was here, pointing at `POST /command/run-routine/{type}/{index}`. It had
+// **no callers** — running a routine has gone through `ws.runRoutine()` since the WebSocket
+// grew a method for it, and the route it named is gone.
 
 /**
  * Get the display name for a routine type

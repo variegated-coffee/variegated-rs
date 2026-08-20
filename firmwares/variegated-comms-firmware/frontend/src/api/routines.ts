@@ -1,33 +1,51 @@
-import { Routine, RoutineIndex, RoutineIndexSchema, RoutineSchema } from '../schemas/schemas';
-import { RoutineIdentifier, buildRoutineUrl } from '../utils/routineHelpers';
-import { deleteRequest, fetchPostcard, postPostcard, putPostcard } from '../utils/postcard';
+import { serialize, deserialize } from '@variegated-coffee/serde-postcard-ts';
+import { ClientQuery, QueryOk, Routine, RoutineIndex, RoutineSchema } from '../schemas/schemas';
+import { RoutineIdentifier, indexFromIdentifier } from '../utils/routineHelpers';
+import { getWebSocketService } from '../services/websocket';
 
 /**
- * Routine definitions, over HTTP.
+ * Routine definitions, over the WebSocket.
  *
- * The WebSocket carries the *summary* list -- names, types and counts, enough to render
- * the picker -- and definitions come from here, one at a time. That split is the whole
- * point of the design: the comms processor has a 56 kB heap shared with Wi-Fi, BLE and the
- * ESPHome server, and it used to hold every routine's full definition permanently in order
- * to serve an editor that opens one of them occasionally.
+ * The socket carries the *summary* list — names, types and counts, enough to render the
+ * picker — and definitions are fetched one at a time. That split is the whole point of the
+ * design and has not changed: the comms processor has a 56 kB heap shared with Wi-Fi, BLE and
+ * the ESPHome server, and it used to hold every routine's full definition permanently in
+ * order to serve an editor that opens one of them occasionally.
  *
- * Writes are here too, and not only for symmetry. `MachineCommand::AddRoutine` over the
- * socket *could not work*: the server's inbound frame buffer is 256 bytes and a real
- * routine serialises to several kilobytes, so every save was rejected and took the
- * connection down with it. See the `frame_buf` note in the firmware's `websocket.rs`.
+ * # This was HTTP, for two reasons, and both are gone
+ *
+ * The first was size: the server's inbound frame buffer was a fixed 256 bytes and a real
+ * routine serialises to kilobytes, so every save was rejected and took the connection down
+ * with it. Inbound frames are heap-backed now and bounded at `MAX_CLIENT_FRAME_LEN`, which is
+ * `ROUTINE_MAX_ENCODED_LEN + 256` — sized for exactly this.
+ *
+ * The second was answers: a write wants to know whether the routine was stored, and
+ * `CommandAck` only ever said "queued". `WsMessage::Query` answers the question itself, and
+ * carries `RoutineWriteError` whole. **The socket now reports this better than HTTP did** —
+ * HTTP projected six outcomes onto three status codes and this module read only the number,
+ * so `Immutable` and `TooLarge` both surfaced as `status: 400`.
+ *
+ * A routine travels as opaque postcard bytes in both directions, so the machine never decodes
+ * one. See `EncodedPayload` in `ws_types.rs`.
  */
 
 /**
  * Exactly one routine request in flight, ever.
  *
- * The device answers a routine GET by waking the application processor over UART and
- * streaming the definition back a kilobyte at a time, behind a lock that already
- * serialises the exchange. A second concurrent request would therefore not go faster --
- * it would queue *inside the firmware*, where nothing can reorder it and a user's click
- * would sit behind however many prefetches happened to be ahead of it.
+ * The device answers by waking the application processor over UART, collecting the
+ * definition a kilobyte at a time behind `ROUTINE_LOCK`, which already serialises the
+ * exchange machine-wide. A second concurrent request would therefore not go faster — it
+ * would queue *inside the firmware*, where nothing can reorder it and a user's click would
+ * sit behind however many prefetches happened to be ahead of it.
  *
- * Queueing on this side instead means the queue is ours to reorder, which is what
- * `priority` is for.
+ * Queueing on this side instead means the queue is ours to reorder, which is what `priority`
+ * is for.
+ *
+ * **The reason got stronger when this moved off HTTP, not weaker.** It used to be that the
+ * device had two HTTP handler slots and the UART round trip behind them was the scarce part.
+ * Now there is one WebSocket connection, and serving a query blocks the 5 Hz status push for
+ * its duration — so an unqueued burst of prefetches would visibly freeze the live readouts.
+ * `PREFETCH_GAP_MS` in `state/routineBodies.ts` is the other half of that.
  */
 type Priority = 'user' | 'prefetch';
 
@@ -114,9 +132,16 @@ export function fetchRoutine(
   id: RoutineIdentifier,
   priority: Priority = 'user'
 ): Promise<Routine> {
-  return enqueue(routineKey(id), priority, () =>
-    fetchPostcard(buildRoutineUrl(id), RoutineSchema)
-  );
+  return enqueue(routineKey(id), priority, async () => {
+    const result = await query({ type: 'RoutineDefinition', value: indexFromIdentifier(id) });
+    if (result.type !== 'RoutineDefinition') {
+      throw new Error('The machine answered a different question');
+    }
+    // The machine returns the routine still postcard-encoded, so it never has to decode one
+    // itself — see `EncodedPayload` in `ws_types.rs`. `seq(u8)` decodes to a number array,
+    // hence the conversion; the bytes are the same either way.
+    return deserialize(RoutineSchema, new Uint8Array(result.value)).value;
+  });
 }
 
 /**
@@ -145,18 +170,54 @@ function enqueueWrite<T>(key: string, run: () => Promise<T>): Promise<T> {
  * just made.
  */
 export function createRoutine(routine: Routine): Promise<RoutineIndex> {
-  return enqueueWrite('custom:new', () =>
-    postPostcard('/routines/custom', routine, RoutineSchema, RoutineIndexSchema)
-  );
+  return enqueueWrite('custom:new', () => writeRoutine(null, routine));
 }
 
 /** Replace the routine at an index, or place one there if the slot is empty. */
-export function saveRoutine(id: RoutineIdentifier, routine: Routine): Promise<void> {
-  return enqueueWrite(routineKey(id), () =>
-    putPostcard(buildRoutineUrl(id), routine, RoutineSchema)
-  );
+export async function saveRoutine(id: RoutineIdentifier, routine: Routine): Promise<void> {
+  await enqueueWrite(routineKey(id), () => writeRoutine(indexFromIdentifier(id), routine));
 }
 
-export function deleteRoutine(id: RoutineIdentifier): Promise<void> {
-  return enqueueWrite(routineKey(id), () => deleteRequest(buildRoutineUrl(id)));
+/**
+ * Send a routine and find out whether it was stored.
+ *
+ * `index === null` creates a custom routine and the machine chooses the slot, which is why
+ * both paths return a `RoutineIndex` rather than only the create.
+ *
+ * The routine is encoded here and travels as bytes, so the comms processor passes it through
+ * to the validator untouched. That is what keeps a `Malformed` answer meaning "this is not a
+ * routine" rather than "the middle hop re-encoded it".
+ */
+async function writeRoutine(index: RoutineIndex | null, routine: Routine): Promise<RoutineIndex> {
+  const result = await query({
+    type: 'WriteRoutine',
+    value: { index, routine: Array.from(serialize(RoutineSchema, routine)) },
+  });
+  if (result.type !== 'RoutineStored') {
+    throw new Error('The machine answered a different question');
+  }
+  return result.value;
+}
+
+export async function deleteRoutine(id: RoutineIdentifier): Promise<void> {
+  // A command rather than a query, because deletion always was one: `DELETE /routines/...`
+  // answered 204 the moment `RemoveRoutine` was queued, never having waited to hear whether
+  // the routine went. The ack says exactly as much, so nothing is lost — and the list that
+  // arrives afterwards is what actually confirms it.
+  await enqueueWrite(routineKey(id), async () => {
+    const ws = getWebSocketService();
+    if (!ws) {
+      throw new Error('Not connected to the machine');
+    }
+    await ws.sendCommandAwaitingAck({ type: 'RemoveRoutine', value: indexFromIdentifier(id) });
+  });
+}
+
+/** Run one query, or fail with a message worth showing. */
+function query(q: ClientQuery): Promise<QueryOk> {
+  const ws = getWebSocketService();
+  if (!ws) {
+    return Promise.reject(new Error('Not connected to the machine'));
+  }
+  return ws.sendQuery(q);
 }

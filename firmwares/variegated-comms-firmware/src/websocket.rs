@@ -17,11 +17,58 @@ use variegated_controller_types::MachineCommand;
 // in three copies of the same loop -- one of which was in a function nothing called.
 use crate::api_types::RoutineSummaryStorage;
 use crate::channels::{
-    ApplicationStatusSubscriber, ApplicationConfigurationSubscriber, ApplicationRoutineSubscriber,
-    ShotLogEventSubscriber,
-    CONFIG_REQUEST, MACHINE_DEFINITION, ROUTINE_CACHE, MACHINE_COMMAND_CAPACITY,
+    routine_request, routine_write, shot_log_request, ApplicationConfigurationSubscriber,
+    ApplicationRoutineSubscriber, ApplicationStatusSubscriber, RoutineReply, ShotLogEventSubscriber,
+    ShotLogReply, ShotLogRequest, CONFIG_REQUEST, MACHINE_COMMAND_CAPACITY, MACHINE_DEFINITION,
+    ROUTINE_CACHE,
 };
-use crate::ws_types::WsMessage;
+use crate::ws_types::{
+    ClientQuery, QueryError, QueryOk, QueryOutcome, WsMessage, MAX_CLIENT_FRAME_LEN,
+    MAX_WS_FRAME_LEN,
+};
+
+/// How long a routine read may take before the machine is declared unresponsive.
+///
+/// The same figures `http.rs` used, and deliberately the same rather than tuned for this
+/// transport: they bound the *machine's* turnaround, which does not change with who asked.
+const ROUTINE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longer than a read, because a write is several chunks out plus a flash erase.
+const ROUTINE_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const SHOT_LOG_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Payloads up to this length are read into the connection's inline buffer and allocate
+/// nothing. Longer ones spill to the heap; see the buffer note in
+/// `handle_websocket_connection`.
+///
+/// An implementation detail of this server rather than a wire fact, which is why it lives
+/// here and not beside `MAX_CLIENT_FRAME_LEN` in the shared crate. Nothing off-device may
+/// depend on it: a client cannot tell which side of it a message landed on.
+const WS_INLINE_FRAME_LEN: usize = 256;
+
+/// Where an inbound frame's payload ended up.
+///
+/// Two cases rather than always-heap because most frames on this socket are a handful of
+/// bytes, and a `Vec` per frame would be an allocation per ping on a heap that peaked 424
+/// bytes short of its ceiling during a TLS shot upload. See
+/// `docs/comms-firmware-memory-budget.md`.
+///
+/// `Spilled` owns its bytes rather than borrowing a caller-held buffer, deliberately: the
+/// allocation is then freed when the frame result drops at the end of the loop iteration,
+/// so its residency is "handling one frame" rather than "until the next frame arrives",
+/// which on an idle socket is unbounded.
+enum FramePayload<'a> {
+    Inline(&'a [u8]),
+    Spilled(Vec<u8>),
+}
+
+impl FramePayload<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline(bytes) => bytes,
+            Self::Spilled(bytes) => bytes.as_slice(),
+        }
+    }
+}
 
 /// WebSocket server task - listens for WebSocket connections and handles them
 #[embassy_executor::task]
@@ -40,10 +87,11 @@ pub async fn websocket_server_task(
     // and `.stack` is the SRAM remainder (see the heap note in `main.rs`). Every byte
     // here is a byte the deepest postcard recursion does not get.
     //
-    // `rx` is the receive window for a direction that only ever carries
-    // `RequestMachineDefinition`, `RequestRoutines` and `SendMachineCommand` -- and
-    // `MachineCommand` is 128 bytes. 1 kB is already eight times the largest thing a
-    // client can say.
+    // `rx` is the receive window, and it does **not** have to cover a whole frame. The
+    // payload read in `receive_frame_rx` loops until it has `payload_len` bytes, so a
+    // larger message simply takes more turns through this window; 1 kB is a throughput
+    // choice, not a ceiling. The ceiling is `MAX_WS_FRAME_LEN`, enforced against the
+    // declared length before anything is allocated.
     //
     // `tx` stays at 4 kB and should not be cut. It is the window for the *server's*
     // pushes, and a `MachineDefinition` serialises into the low thousands; shrinking
@@ -154,32 +202,50 @@ async fn handle_websocket_connection(
 
     // Buffers for frame processing.
     //
-    // `frame_buf` bounds the largest payload a client may send: `receive_frame_rx`
-    // rejects anything longer outright. The client half of `WsMessage` is
-    // `RequestMachineDefinition`, `RequestRoutines` and `SendMachineCommand`, and
-    // `MachineCommand` is 128 bytes, so 256 is double the largest legal frame. It was
-    // 2048, which bought nothing: a frame between 256 and 2048 bytes is not a message
-    // this server has a variant for, so accepting it only moves the failure from
-    // "payload too large" to a postcard error.
+    // Buffers for frame processing.
     //
-    // That reasoning was true of the *type* and false in practice for a while, and it is
-    // worth saying why. `MachineCommand` is 128 bytes in memory because its `Routine`
-    // payload sits behind `Vec` and `String` pointers -- but `AddRoutine` and
-    // `UpdateRoutine` *serialise* to the whole definition, several kilobytes of it. The
-    // frontend saved routines that way, so every real save was rejected here and took the
-    // connection down with it. Routine writes now go over HTTP, where the body limit is
-    // sized for them, and nothing a client can say on this socket carries a routine any
-    // more. See `api/routines.ts` in the frontend.
+    // `frame_buf` is the *inline* buffer, not the frame ceiling. Those were the same number
+    // until this change and the conflation was expensive: as a local of an
+    // `#[embassy_executor::task]` this array lives in the task's future in `.bss` for the
+    // life of the firmware, and on this chip `.stack` is the SRAM left after `.data` and
+    // `.bss`, so the size was chosen for what could be kept resident -- and then enforced as
+    // a protocol limit, with `receive_frame_rx` *closing the connection* on anything over
+    // it. 256 was never a protocol fact: `edge-ws` handles 64-bit lengths and `rx_buffer`
+    // above is four times larger.
     //
-    // `header_buf` is *not* a send buffer, whatever its old name suggested. The
-    // payload never passes through it -- `send_frame_tx` writes the serialised
-    // `FrameHeader` here and then writes the payload straight from its own slice in a
-    // second `write_all`. An unmasked header is at most 10 bytes (2 + 8 for a 64-bit
-    // extended length; the 4 mask bytes are client-to-server only, and this side
-    // always sends `mask_key: None`). `serialize` bounds-checks against
-    // `serialized_len`, so 16 is margin over a hard maximum, not a guess. This was
-    // 2048 bytes to hold 10.
-    let mut frame_buf = [0u8; 256];
+    // It cost this protocol two features. `AddRoutine` and `UpdateRoutine` *serialise* to a
+    // whole definition, several kilobytes of it, so every routine save the frontend made was
+    // rejected here and took the socket down with it; `SetShotUploadSettings` is ~330 bytes
+    // and missed by less. Both moved to HTTP to get out from under a number that only ever
+    // described this array.
+    //
+    // Now anything longer than this spills to a transient heap allocation and the ceiling is
+    // `MAX_CLIENT_FRAME_LEN`. Note what that buys and what it deliberately does not:
+    //
+    // * **Steady state allocates nothing.** Every ordinary frame -- a one-byte
+    //   `RequestMachineDefinition`, a ping, a `SendMachineCommand` -- fits here, so the
+    //   common path is exactly as cheap as before.
+    // * **A spill is released at the end of the loop iteration**, not retained. A single
+    //   `Vec` reused across frames was the obvious alternative and is worse: it holds its
+    //   high-water mark for the life of the connection, so one large settings write plus a
+    //   browser left open overnight guarantees those bytes are still resident during a TLS
+    //   upload -- the exact window where the heap peaked 424 bytes short of its ceiling.
+    //   Transient-and-rare beats resident-and-small here.
+    //
+    // Staying at 256 rather than growing to fit `SetShotUploadSettings` inline is also
+    // deliberate. The extra bytes would cost `.stack` one for one, forever, and would leave
+    // the spill path exercised only by something nobody sends -- dead code until the day it
+    // matters. Letting the one message we deliberately moved onto this socket be the thing
+    // that exercises it is worth more than the allocation it costs.
+    //
+    // `header_buf` is *not* a send buffer, whatever its old name suggested. The payload never
+    // passes through it -- `send_frame_tx` writes the serialised `FrameHeader` here and then
+    // writes the payload straight from its own slice in a second `write_all`. An unmasked
+    // header is at most 10 bytes (2 + 8 for a 64-bit extended length; the 4 mask bytes are
+    // client-to-server only, and this side always sends `mask_key: None`). `serialize`
+    // bounds-checks against `serialized_len`, so 16 is margin over a hard maximum, not a
+    // guess. This was 2048 bytes to hold 10.
+    let mut frame_buf = [0u8; WS_INLINE_FRAME_LEN];
     let mut header_buf = [0u8; 16];
 
     // Split socket into read and write halves for concurrent access
@@ -326,6 +392,12 @@ async fn handle_websocket_connection(
         // Now handle the completed frame
         match frame_result {
             Ok((frame_type, payload)) => {
+                // Shadow the `FramePayload` with a plain slice so every arm below reads the
+                // same whichever side of `WS_INLINE_FRAME_LEN` the frame landed on. Any
+                // spill stays alive until the end of this match -- one socket write at
+                // worst, in a window where answering `RequestMachineDefinition` allocates
+                // 3.6 kB anyway.
+                let payload = payload.as_slice();
                 match frame_type {
                     FrameType::Binary(_) => {
                         // Log raw bytes for debugging
@@ -336,7 +408,7 @@ async fn handle_websocket_connection(
                         // is `async`, so whatever is passed into it by value lives in
                         // this task's future for the life of the firmware -- and the
                         // decoded `WsMessage` is 3664 bytes against `ClientRequest`'s
-                        // ~132. See the type's doc comment.
+                        // ~660. See the type's doc comment.
                         let request = match postcard::from_bytes::<WsMessage>(payload) {
                             Ok(msg) => ClientRequest::from_ws(msg),
                             Err(e) => {
@@ -351,6 +423,7 @@ async fn handle_websocket_connection(
                                 &mut socket_tx,
                                 &mut header_buf,
                                 &command_sender,
+                                checkin,
                             ).await?;
                         }
                     }
@@ -391,10 +464,18 @@ async fn handle_websocket_connection(
 // select cancellations -- the loop never selects over a read that owns the whole socket.
 
 /// Receive a WebSocket frame using TcpReader
+///
+/// `buf` is the connection's inline buffer. A payload that fits it is read there and handed
+/// back borrowed; anything longer spills to a fresh allocation owned by the returned
+/// [`FramePayload`]. Nothing outside this function may assume `buf`'s contents survive the
+/// next call.
+///
+/// The length check is against the *declared* length, before anything is allocated, so a
+/// peer claiming a multi-gigabyte payload is refused without allocating for it.
 async fn receive_frame_rx<'a>(
     reader: &mut TcpReader<'_>,
     buf: &'a mut [u8],
-) -> Result<(FrameType, &'a [u8]), &'static str> {
+) -> Result<(FrameType, FramePayload<'a>), &'static str> {
     let mut header_buf = [0u8; 14];
     let mut total_read = 0;
 
@@ -432,13 +513,48 @@ async fn receive_frame_rx<'a>(
     let (header, _) = FrameHeader::deserialize(&header_buf[..full_header_len])
         .map_err(|_| "Failed to deserialize frame header")?;
 
+    // Checked against the *declared* length, before anything is allocated, so this costs
+    // nothing to refuse. The old message said only "too large"; the length is the one fact
+    // that makes the line actionable, because it says whether a client is a little over or
+    // talking nonsense.
     let payload_len = header.payload_len as usize;
-    if payload_len > buf.len() {
+    if payload_len > MAX_CLIENT_FRAME_LEN {
+        log_warn!(
+            "Client frame of {} bytes exceeds the {} byte limit; closing",
+            payload_len,
+            MAX_CLIENT_FRAME_LEN
+        );
         return Err("Frame payload too large");
     }
 
-    if payload_len > 0 {
-        let payload_buf = &mut buf[..payload_len];
+    if payload_len == 0 {
+        log_debug!("Received frame with no payload");
+        return Ok((header.frame_type, FramePayload::Inline(&[])));
+    }
+
+    // Decide where the payload goes before reading a byte of it, so the read loop below has
+    // one destination and no branch inside it.
+    //
+    // `try_reserve_exact`, not `with_capacity` or `vec![0; n]`: those call
+    // `handle_alloc_error`, which on this firmware is a panic. The entire point of bounding
+    // this is that a large frame arriving mid-TLS-handshake must fail the *frame*, not the
+    // machine. Do not "simplify" this.
+    let spilled = payload_len > buf.len();
+    let mut spill: Vec<u8> = Vec::new();
+    if spilled {
+        spill
+            .try_reserve_exact(payload_len)
+            .map_err(|_| "Out of memory for frame payload")?;
+        spill.resize(payload_len, 0);
+    }
+
+    {
+        let payload_buf: &mut [u8] = if spilled {
+            &mut spill[..]
+        } else {
+            &mut buf[..payload_len]
+        };
+
         let mut payload_read = 0;
         while payload_read < payload_len {
             let n = embedded_io_async::Read::read(reader, &mut payload_buf[payload_read..]).await
@@ -449,20 +565,28 @@ async fn receive_frame_rx<'a>(
             payload_read += n;
         }
 
-        log_info!("Before unmask: {:?}, mask_key: {:?}", &payload_buf[..core::cmp::min(payload_len, 16)], header.mask_key);
-
         if let Some(mask_key) = header.mask_key {
             FrameHeader::mask_with(payload_buf, Some(mask_key), 0);
         }
 
-        log_info!("After unmask: {:?}", &payload_buf[..core::cmp::min(payload_len, 16)]);
-
-        Ok((header.frame_type, &buf[..payload_len]))
-    } else {
-        log_info!("Received frame with no payload");
-
-        Ok((header.frame_type, &[]))
+        log_debug!(
+            "Received {} byte payload ({}): {:?}",
+            payload_len,
+            if spilled { "spilled" } else { "inline" },
+            &payload_buf[..core::cmp::min(payload_len, 16)]
+        );
     }
+
+    // The inner block scoped the `&mut` reborrow, so this shared reborrow of the `'a`
+    // parameter is what leaves the function.
+    Ok((
+        header.frame_type,
+        if spilled {
+            FramePayload::Spilled(spill)
+        } else {
+            FramePayload::Inline(&buf[..payload_len])
+        },
+    ))
 }
 
 /// Send a WebSocket frame using TcpWriter
@@ -506,16 +630,173 @@ async fn send_frame_tx(
 /// consuming it is deliberate: the natural call is
 /// `encode_ws_message(&WsMessage::Foo(..))`, where the argument is a temporary that
 /// dies at the end of the statement.
+///
+/// # The outbound bound, and exactly what it does not do
+///
+/// [`MAX_WS_FRAME_LEN`] is enforced here, the single funnel every server-originated payload
+/// passes through. The only `send_frame_tx` calls that bypass it are the `Ping` echo --
+/// already bounded by [`MAX_CLIENT_FRAME_LEN`] -- and the empty `Close`.
+///
+/// **The check is post-hoc, and must not be read as protection against the allocation.** By
+/// the time the length is known, `to_allocvec` has already allocated it, and geometric growth
+/// means transiently up to about twice the final size. Bounding the allocation would mean
+/// `try_reserve`-ing `MAX_WS_FRAME_LEN` and encoding with `to_slice` -- an 8 kB allocation on
+/// every frame of a 5 Hz status push, which is far worse than what it would prevent.
+///
+/// What this does buy: an oversized frame never reaches the wire, and a line appears in the
+/// log naming the size. Before it there was no bound of any kind on this side.
 fn encode_ws_message(msg: &WsMessage<'_>) -> Result<Vec<u8>, &'static str> {
-    postcard::to_allocvec(msg).map_err(|_| "Failed to serialize message")
+    let bytes = postcard::to_allocvec(msg).map_err(|_| "Failed to serialize message")?;
+
+    if bytes.len() > MAX_WS_FRAME_LEN {
+        log_warn!(
+            "Refusing to send a {} byte message: over the {} byte ceiling",
+            bytes.len(),
+            MAX_WS_FRAME_LEN
+        );
+        return Err("Message too large to send");
+    }
+
+    Ok(bytes)
+}
+
+/// Await a query while keeping the connection's check-in row honest.
+///
+/// **This exists because of a mismatch between two timeouts, not because of anything the
+/// query does.** `variegated_checkin::HEARTBEAT` is 5 s and the update loop -- which is where
+/// this task normally checks in -- is not running while a query is being served, because
+/// `handle_client_request_tx` is awaited outside the `join`. A routine write may take
+/// [`ROUTINE_WRITE_TIMEOUT`], which is 10 s, so a perfectly healthy save would take the
+/// websocket row amber and then red. That is a false alarm on the one table an operator
+/// consults to find out what is wedged, and a table that cries wolf is worse than no table.
+///
+/// The future is created once and polled through `&mut`, never dropped and rebuilt, so this
+/// is cancel-safe by construction -- which matters here more than usual: `routine_write`
+/// holds `ROUTINE_LOCK` across a multi-chunk write, and dropping it midway would release the
+/// lock with the far side still mid-sequence.
+///
+/// It does **not** address the other half: status pushes are still paused for the duration.
+/// That was a deliberate choice against restructuring the connection loop, and a routine
+/// prefetch walks every routine, so the pause is real. If it ever needs fixing, the fix is a
+/// pending-query arm in the update loop's `select`, not a change here.
+async fn await_query<F: core::future::Future>(
+    future: F,
+    checkin: &variegated_checkin::CheckinHandle,
+) -> F::Output {
+    let mut future = core::pin::pin!(future);
+    loop {
+        match with_timeout(variegated_checkin::HEARTBEAT / 2, &mut future).await {
+            Ok(output) => return output,
+            Err(_) => checkin.good(),
+        }
+    }
+}
+
+/// Serve a [`ClientQuery`], and say what happened.
+///
+/// Every arm answers -- there is no path that leaves a client waiting for a reply that never
+/// comes, because the id it correlates on would then leak until its own timeout fired.
+async fn serve_query(query: ClientQuery, checkin: &variegated_checkin::CheckinHandle) -> QueryOutcome {
+    match query {
+        // Reassembled here rather than streamed, and that is a fix rather than a compromise.
+        // The HTTP route wrote each chunk into an already-committed 200 as it arrived, taking
+        // `ROUTINE_LOCK` per chunk -- so a save landing between two of them spliced an old
+        // head onto a new tail, and postcard being positional, the result decoded into a
+        // routine nobody wrote. Only a changed encoded length caught it. Buffering the whole
+        // thing means one lock-consistent answer or none.
+        ClientQuery::RoutineDefinition(index) => {
+            let mut body: Vec<u8> = Vec::new();
+            let mut offset: u16 = 0;
+
+            loop {
+                match await_query(routine_request(index, offset, ROUTINE_TIMEOUT), checkin).await {
+                    Ok(RoutineReply::Chunk { offset: reply_offset, bytes, last, .. }) => {
+                        // The link carries no correlation id; the echoed offset is the only
+                        // evidence this chunk answers this request.
+                        if reply_offset != offset {
+                            log_error!("Routine chunk out of order: wanted {}, got {}", offset, reply_offset);
+                            return QueryOutcome::Failed(QueryError::Unavailable);
+                        }
+                        if bytes.is_empty() && !last {
+                            log_error!("Routine chunk was empty before the last one");
+                            return QueryOutcome::Failed(QueryError::Unavailable);
+                        }
+                        offset += bytes.len() as u16;
+                        body.extend_from_slice(&bytes);
+                        if last {
+                            return QueryOutcome::Ok(QueryOk::RoutineDefinition(body));
+                        }
+                    }
+                    Ok(RoutineReply::NotFound(_)) => {
+                        return QueryOutcome::Failed(QueryError::NotFound);
+                    }
+                    Ok(_) => {
+                        log_error!("Routine fetch: unexpected reply kind");
+                        return QueryOutcome::Failed(QueryError::Unavailable);
+                    }
+                    Err(_) => {
+                        log_error!("Routine fetch timed out at offset {}", offset);
+                        return QueryOutcome::Failed(QueryError::Unavailable);
+                    }
+                }
+            }
+        }
+
+        // The bytes go to the application processor exactly as the client sent them. Nothing
+        // here decodes a `Routine` -- see `EncodedPayload` -- so `Malformed` keeps meaning
+        // "the client sent something that is not a routine" rather than "the middle hop
+        // re-encoded it differently".
+        ClientQuery::WriteRoutine { index, routine } => {
+            match await_query(routine_write(index, routine, ROUTINE_WRITE_TIMEOUT), checkin).await {
+                Ok(variegated_controller_types::RoutineWriteOutcome::Stored(stored)) => {
+                    log_info!("Routine stored");
+                    QueryOutcome::Ok(QueryOk::RoutineStored(stored))
+                }
+                Ok(variegated_controller_types::RoutineWriteOutcome::Failed(error)) => {
+                    log_warn!("Routine write refused");
+                    QueryOutcome::Failed(QueryError::RoutineWrite(error))
+                }
+                Err(_) => {
+                    log_error!("Routine write got no answer");
+                    QueryOutcome::Failed(QueryError::Unavailable)
+                }
+            }
+        }
+
+        ClientQuery::ShotLogPage(request) => {
+            match await_query(shot_log_request(ShotLogRequest::List(request), SHOT_LOG_TIMEOUT), checkin).await {
+                Ok(ShotLogReply::List(list)) => QueryOutcome::Ok(QueryOk::ShotLogPage(list)),
+                Ok(ShotLogReply::Error(error)) => {
+                    log_warn!("Shot log listing refused");
+                    QueryOutcome::Failed(QueryError::ShotLogStorage(error))
+                }
+                Ok(_) => {
+                    log_error!("Shot log listing: unexpected reply kind");
+                    QueryOutcome::Failed(QueryError::Unavailable)
+                }
+                Err(_) => {
+                    log_error!("Shot log listing got no answer");
+                    QueryOutcome::Failed(QueryError::Unavailable)
+                }
+            }
+        }
+    }
 }
 
 /// What a client actually asked for.
 ///
 /// `WsMessage` is the wire envelope for *both* directions, which is why it is 3664
-/// bytes: it has to be able to hold a `MachineDefinition`. Only three of its variants
-/// can ever arrive *from* a client, and the largest thing among them is a 128-byte
-/// `MachineCommand`, so this is around 132 bytes.
+/// bytes: it has to be able to hold a `MachineDefinition`. Only five of its variants can
+/// ever arrive *from* a client, and the largest thing among them is a `MachineCommand`, so
+/// this is around 660 bytes.
+///
+/// **That figure was recorded here as 128 for a long time and it was wrong.**
+/// `MachineCommand` is ~656 bytes, because `AddRoutine(Routine)` inlines a heapless-`Vec`-
+/// heavy `Routine`; `MACHINE_COMMAND_CHANNEL` measures 5,296 bytes for 8 slots, which is
+/// where the real number is visible. It is worth stating correctly because it is the number
+/// the next person will use to justify the next decision -- and note the argument for this
+/// type is unaffected: 660 against 3664 is still 5.5x, and the narrowing still earns its
+/// place.
 ///
 /// Narrowing to it immediately after `from_bytes`, in a statement with no `.await`,
 /// is what keeps the envelope out of the task's future: the handler below is `async`,
@@ -524,7 +805,14 @@ enum ClientRequest {
     MachineDefinition,
     Routines,
     Configuration,
-    Command(MachineCommand),
+    /// `None` for the fire-and-forget `SendMachineCommand`, `Some(id)` for the correlated
+    /// form. Carrying the id here rather than splitting into two variants keeps the one
+    /// `try_send` call site: the only difference downstream is whether an ack is written.
+    Command(MachineCommand, Option<u32>),
+    /// A question with an answer. Carries a `Vec<u8>` handle for a routine write rather than
+    /// a decoded `Routine`, so this enum stays around 660 bytes and the narrowing above keeps
+    /// doing its job.
+    Query(u32, ClientQuery),
 }
 
 impl ClientRequest {
@@ -535,7 +823,11 @@ impl ClientRequest {
             WsMessage::RequestMachineDefinition => Some(Self::MachineDefinition),
             WsMessage::RequestRoutines => Some(Self::Routines),
             WsMessage::RequestConfiguration => Some(Self::Configuration),
-            WsMessage::SendMachineCommand(cmd) => Some(Self::Command(cmd)),
+            WsMessage::SendMachineCommand(cmd) => Some(Self::Command(cmd, None)),
+            WsMessage::SendMachineCommandWithId { id, command } => {
+                Some(Self::Command(command, Some(id)))
+            }
+            WsMessage::Query { id, query } => Some(Self::Query(id, query)),
             _ => {
                 log_warn!("Received unexpected message type from client");
                 None
@@ -565,6 +857,7 @@ async fn handle_client_request_tx(
     writer: &mut TcpWriter<'_>,
     header_buf: &mut [u8],
     command_sender: &Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
+    checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), &'static str> {
     match request {
         ClientRequest::MachineDefinition => {
@@ -573,7 +866,27 @@ async fn handle_client_request_tx(
                 let guard = MACHINE_DEFINITION.lock().await;
                 match guard.as_ref() {
                     Some(machine_def) => {
-                        encode_ws_message(&WsMessage::MachineDefinition(machine_def.clone()))?
+                        // Fail *soft*, and note that this became reachable when
+                        // `encode_ws_message` gained its size bound -- before that it could
+                        // only fail on OOM. Propagating with `?` returns from
+                        // `handle_websocket_connection`, which closes the connection; a
+                        // client that reconnects asks the same question and gets the same
+                        // answer, so the result is a reconnect storm rather than a message
+                        // saying what is wrong. The fallback ack is a few dozen bytes and
+                        // cannot itself trip the bound.
+                        match encode_ws_message(&WsMessage::MachineDefinition(
+                            machine_def.clone(),
+                        )) {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                log_error!("Cannot send the machine definition: {}", e);
+                                encode_ws_message(&WsMessage::CommandAck {
+                                    id: 0,
+                                    success: false,
+                                    error: Some("Machine definition too large to send"),
+                                })?
+                            }
+                        }
                     }
                     None => {
                         log_warn!("Machine definition not available, sending error");
@@ -593,9 +906,20 @@ async fn handle_client_request_tx(
             let encoded = {
                 let guard = ROUTINE_CACHE.lock().await;
                 match guard.as_ref() {
-                    Some(summaries) => encode_ws_message(&WsMessage::RoutinesUpdate(
+                    // Fails soft for the reason given on the arm above.
+                    Some(summaries) => match encode_ws_message(&WsMessage::RoutinesUpdate(
                         RoutineSummaryStorage::from_list(summaries),
-                    ))?,
+                    )) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            log_error!("Cannot send the routine list: {}", e);
+                            encode_ws_message(&WsMessage::CommandAck {
+                                id: 0,
+                                success: false,
+                                error: Some("Routine list too large to send"),
+                            })?
+                        }
+                    },
                     None => {
                         log_warn!("Routines not available, sending error");
                         encode_ws_message(&WsMessage::CommandAck {
@@ -625,11 +949,40 @@ async fn handle_client_request_tx(
             log_info!("Received RequestConfiguration, asking the application processor");
             CONFIG_REQUEST.signal(());
         }
-        ClientRequest::Command(cmd) => {
-            log_info!("Received SendMachineCommand, forwarding");
-            if command_sender.try_send(cmd).is_err() {
+        // The ack, where one was asked for, reports whether the command was *queued* --
+        // see `WsMessage::SendMachineCommandWithId` for why that is the honest claim and
+        // what a client should watch for confirmation that it was applied.
+        //
+        // `try_send` rather than `send` deliberately: this runs on the same executor as
+        // the task draining the channel, and blocking here would park the socket's whole
+        // receive half behind a queue only that task can move. A full channel is a real
+        // condition to report, not one to wait out.
+        ClientRequest::Command(cmd, id) => {
+            log_info!("Received machine command, forwarding");
+            let queued = command_sender.try_send(cmd).is_ok();
+            if !queued {
                 log_warn!("Command channel full, dropping command");
             }
+
+            if let Some(id) = id {
+                let encoded = encode_ws_message(&WsMessage::CommandAck {
+                    id,
+                    success: queued,
+                    error: (!queued).then_some("Command channel full"),
+                })?;
+                send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+            }
+        }
+        // The one arm that blocks. `serve_query` awaits the application processor for up to
+        // ten seconds, during which the update loop in the other half of the `join` is not
+        // running -- see `await_query` for what that costs and what is done about it.
+        ClientRequest::Query(id, query) => {
+            let outcome = serve_query(query, checkin).await;
+            // Encoded and sent in separate statements, like every other reply here: a
+            // `QueryOk::RoutineDefinition` owns a couple of kilobytes and must not be alive
+            // across the write.
+            let encoded = encode_ws_message(&WsMessage::QueryReply { id, outcome })?;
+            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
         }
     }
     Ok(())

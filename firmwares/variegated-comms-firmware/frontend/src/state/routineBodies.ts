@@ -7,11 +7,17 @@ import { RoutineIdentifier } from '../utils/routineHelpers';
  * Every routine's definition, fetched in the background one at a time.
  *
  * **Prefetched, not fetched on demand**, and the reason is which side is short of
- * resources. The browser has orders of magnitude more memory than either processor; what
- * is scarce is the device's HTTP server -- two handler slots -- and the UART round trip
- * behind it. Walking the list serially while the user reads it spends time that was going
- * to be idle anyway, so by the time they open the editor the definition is already here,
- * and the machine never sees more than one routine request at once.
+ * resources. The browser has orders of magnitude more memory than either processor; what is
+ * scarce is the machine's attention and the UART round trip behind it. Walking the list
+ * serially while the user reads it spends time that was going to be idle anyway, so by the
+ * time they open the editor the definition is already here, and the machine never sees more
+ * than one routine request at once.
+ *
+ * That last clause got sharper when routines moved off HTTP. It used to be about two HTTP
+ * handler slots; now there is **one WebSocket connection**, and serving a routine query
+ * blocks the 5 Hz status push for its duration. `PREFETCH_GAP_MS` below is therefore not
+ * politeness — without it, a walk across a full routine list would visibly stall the live
+ * readouts.
  *
  * Fetching on click would put that round trip on the critical path of every interaction,
  * and a screen that renders several routines would fire a burst of them at a server that

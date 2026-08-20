@@ -1,12 +1,32 @@
-import { ShotAnnotations, ShotAnnotationsSchema, ShotLogId, ShotLogList, ShotLogListSchema } from '../schemas/schemas';
-import { deleteRequest, fetchPostcard, postEmpty, putPostcard } from '../utils/postcard';
+import {
+  ClientQuery,
+  MachineCommand,
+  QueryOk,
+  ShotAnnotations,
+  ShotLogId,
+  ShotLogList,
+} from '../schemas/schemas';
+import { getWebSocketService } from '../services/websocket';
+
+/**
+ * How many entries one page asks for — `SHOT_LOG_PAGE_LEN` in the Rust types.
+ *
+ * A maximum, not a promise. The machine ends a page early when the entries are heavy enough
+ * to threaten `SHOT_LOG_LIST_BUDGET`, which is set by the *inter-processor* link's 4 kB
+ * accumulator rather than by anything on this side. Hand-mirrored, like
+ * `ROUTINE_FORMAT_VERSION` in `routineHelpers.ts`: the schema exporter emits types, not
+ * constants.
+ */
+const SHOT_LOG_PAGE_LEN = 10;
 
 /**
  * Shot logs live on the machine's SD card, not in the WebSocket status stream.
  *
  * That is why this module talks HTTP while `api/bluetooth.ts` next to it talks over the
- * socket: a page is ten entries and a download is tens of kilobytes, and the WebSocket's
- * inbound frames are capped at 256 bytes.
+ * socket: a page is ten entries and a download is tens of kilobytes, which is well past
+ * what belongs in a single message on a status stream regardless of what the frame limit
+ * happens to be. (It was 256 bytes when this split was made; it is 8 KiB now, and a
+ * download still does not belong here.)
  *
  * Nothing here is live -- a page is a snapshot from when it was asked for. What keeps a
  * rendered list current is the other direction: the machine pushes a `ShotLogEvent` when
@@ -59,41 +79,50 @@ export interface ShotLogPageOptions {
  * than the entry count** to decide whether another page exists; a short page is not the
  * last page.
  *
- * The count is the machine's, not ours: there is no `limit` parameter, so a client cannot
- * ask for a page the link cannot carry.
+ * The count is the machine's, not ours: `limit` is fixed at `SHOT_LOG_PAGE_LEN`, so a client
+ * cannot ask for a page the link cannot carry.
  *
- * Paths are segments rather than a query string because the firmware's router matches
- * paths exactly and parses no query at all.
+ * Three HTTP routes collapsed into this one query when the listing moved onto the socket —
+ * `/shots`, `/shots/before/…` and `/shots/day/…` were only ever three spellings of one
+ * `ShotLogListRequest`, because the firmware's router matches paths exactly and parses no
+ * query string. The filter is a field again.
  *
  * `day` is callable but nothing in the UI passes it yet.
  */
 export async function fetchShotLogs(options: ShotLogPageOptions = {}): Promise<ShotLogList> {
   const { day, before } = options;
 
-  let path: string;
-  if (day !== undefined) {
-    const dayPath = day === 'NODATE' ? 'NODATE' : String(day).padStart(8, '0');
-    path = before
-      ? `/shots/day/${dayPath}/before/${shotTimePath(before)}`
-      : `/shots/day/${dayPath}`;
-  } else {
-    path = before
-      ? `/shots/before/${shotDayPath(before)}/${shotTimePath(before)}`
-      : '/shots';
-  }
+  const result = await query({
+    type: 'ShotLogPage',
+    value: {
+      limit: SHOT_LOG_PAGE_LEN,
+      before: before ?? null,
+      day:
+        day === undefined
+          ? { type: 'All' }
+          : day === 'NODATE'
+            ? { type: 'Undated' }
+            : { type: 'Day', value: day },
+    },
+  });
 
-  return fetchPostcard(path, ShotLogListSchema);
+  if (result.type !== 'ShotLogPage') {
+    throw new Error('The machine answered a different question');
+  }
+  return result.value;
 }
 
 /**
  * Remove a shot from the card.
  *
- * **Queued, not confirmed.** A 200 means the command reached the machine's command
- * channel; whether the file is gone arrives afterwards as a `ShotLogEvent` of kind
- * `Deleted`. A delete that fails on the card produces no event, and the row stays.
+ * **Queued, not confirmed, exactly as before.** The ack means the command reached the
+ * machine's command channel — which is all the old `DELETE /shots/…` 200 meant too, since
+ * that route also only `try_send`'d. Whether the file is gone arrives afterwards as a
+ * `ShotLogEvent` of kind `Deleted`; a delete that fails on the card produces no event, and
+ * the row stays.
  */
 export async function deleteShotLog(id: ShotLogId): Promise<void> {
-  return deleteRequest(`/shots/${shotDayPath(id)}/${shotTimePath(id)}`);
+  return command({ type: 'DeleteShotLog', value: id });
 }
 
 /**
@@ -107,11 +136,7 @@ export async function setShotAnnotations(
   id: ShotLogId,
   annotations: ShotAnnotations
 ): Promise<void> {
-  return putPostcard(
-    `/shots/${shotDayPath(id)}/${shotTimePath(id)}/annotations`,
-    annotations,
-    ShotAnnotationsSchema
-  );
+  return command({ type: 'SetShotAnnotations', value: [id, annotations] });
 }
 
 /**
@@ -120,15 +145,50 @@ export async function setShotAnnotations(
  * Cleared by the machine when a shot finishes, so this is set per shot rather than once.
  */
 export async function setPendingAnnotations(annotations: ShotAnnotations): Promise<void> {
-  return putPostcard('/shots/pending', annotations, ShotAnnotationsSchema);
+  return command({ type: 'SetPendingShotAnnotations', value: annotations });
+}
+
+/** One query, or a failure message worth showing. */
+async function query(q: ClientQuery): Promise<QueryOk> {
+  const ws = getWebSocketService();
+  if (!ws) {
+    throw new Error('Not connected to the machine');
+  }
+  return ws.sendQuery(q);
+}
+
+/**
+ * One command, awaiting its ack.
+ *
+ * Every shot *mutation* is a `MachineCommand` and always was — the HTTP routes that carried
+ * them did nothing but `try_send`. So these are commands rather than queries, and the ack
+ * carries precisely as much information as the status code it replaces.
+ */
+async function command(c: MachineCommand): Promise<void> {
+  const ws = getWebSocketService();
+  if (!ws) {
+    throw new Error('Not connected to the machine');
+  }
+  return ws.sendCommandAwaitingAck(c);
 }
 
 /**
  * Read a group's scale and record what it says as the dose for the next shot.
  *
- * Refused by the machine if that scale has no reading, rather than recording a zero --
- * the failure surfaces as a 503, not as a dose of 0 g.
+ * **This lost a failure mode when it moved off HTTP.** `POST
+ * /command/tag-dose-from-scale/{group}` was refused with a 503 when the scale had no reading,
+ * rather than recording a zero — so the caller learned the dose had not been tagged. The
+ * WebSocket ack resolves once the command is queued, which a machine with a silent scale does
+ * just as readily. The dose is still not recorded as 0 g; the difference is that nothing tells
+ * the browser so.
+ *
+ * Recovering it needs a reply from the application processor, which the inter-processor link
+ * has no correlation id to carry. Worth revisiting if operators start losing doses silently.
  */
 export async function tagDoseFromScale(groupIndex: number): Promise<void> {
-  return postEmpty(`/command/tag-dose-from-scale/${groupIndex}`);
+  const ws = getWebSocketService();
+  if (!ws) {
+    throw new Error('Not connected to the machine');
+  }
+  return ws.tagDoseFromScale(groupIndex);
 }

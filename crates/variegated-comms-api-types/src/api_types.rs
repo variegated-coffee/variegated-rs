@@ -1,12 +1,12 @@
-//! API request/response types for HTTP endpoints
+//! Response types for the HTTP endpoints that are left.
+//!
+//! This module was "API request/response types" and was mostly *request* bodies -- eight
+//! `Set*Request` structs, one per `/command/*` route. Those routes are gone and so are the
+//! structs; what remains is the one type the surviving HTTP surface actually returns.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use serde::{Serialize, Deserialize};
-use variegated_controller_types::{
-    RoutineIndex, RoutineSummary, RoutineSummaryList, BoilerControlMode, GroupBrewControlMode,
-    ControlCurve, PidParameters, PumpConfiguration, ShotUploadSettings
-};
+use variegated_controller_types::{RoutineIndex, RoutineSummary, RoutineSummaryList};
 
 /// Every stored routine, summarised and split by index kind.
 ///
@@ -53,89 +53,28 @@ impl RoutineSummaryStorage {
     }
 }
 
-/// Request to set boiler control mode and targets
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetBoilerControlRequest {
-    pub boiler_index: u8,
-    pub mode: BoilerControlMode,
-    pub target_temperature: Option<f32>,
-    pub target_pressure: Option<f32>,
-}
+// Seven `Set*Request` types were here -- boiler control, group control, PID parameters, the
+// three pump configurations and steam valve openness -- and all seven have gone the same way
+// as `SetShotUploadSettingsRequest` below, for a related but distinct reason.
+//
+// They were HTTP request bodies for `/command/*` routes that each deserialised one of them,
+// built a `MachineCommand` and pushed it onto the same channel `WsMessage::SendMachineCommand`
+// uses. The frontend had already stopped sending any of them: `services/websocket.ts` grew a
+// method per command, and by the time these were deleted **no file outside the generated
+// `schemas.ts` named a single one of them.** They were duplicated surface kept alive only by
+// the routes that parsed them.
+//
+// `SetPidParametersRequest` is the one worth remembering. It carried `target_type: String`,
+// matched against five string literals to reconstruct a `PidParameterTarget` the WebSocket had
+// been carrying as a typed enum all along. Deleting it removed a stringly-typed edge from the
+// wire, not merely a redundant route.
 
-/// Request to set group brew control mode and targets
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetGroupControlRequest {
-    pub group_index: u8,
-    pub mode: GroupBrewControlMode,
-    pub duty_cycle: Option<u8>,
-    pub flow_rate: Option<f32>,
-    pub pressure: Option<f32>,
-    pub output_flow_rate: Option<f32>,
-    pub duty_cycle_curve: Option<ControlCurve>,
-    pub flow_rate_curve: Option<ControlCurve>,
-    pub pressure_curve: Option<ControlCurve>,
-    pub output_flow_rate_curve: Option<ControlCurve>,
-}
-
-/// Request to set PID parameters for a controller
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetPidParametersRequest {
-    pub target_type: String,
-    pub index: u32,
-    pub pid_parameters: PidParameters,
-}
-
-/// Request to set group pump configuration
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetGroupPumpConfigurationRequest {
-    pub group_index: u8,
-    pub pump_configuration: PumpConfiguration,
-}
-
-/// Request to set water tap pump configuration
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetWaterTapPumpConfigurationRequest {
-    pub water_tap_index: u8,
-    pub pump_configuration: PumpConfiguration,
-}
-
-/// Request to set boiler fill pump configuration
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetFillPumpConfigurationRequest {
-    pub boiler_index: u8,
-    pub pump_configuration: PumpConfiguration,
-}
-
-/// Request to set steam valve openness
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetSteamValveOpennessRequest {
-    pub steam_wand_index: u8,
-    pub openness: u8,
-}
-
-/// Request to set the shot-log upload settings.
-///
-/// # Why this is HTTP and not a WebSocket command
-///
-/// Every other setting the SPA edits goes over the WebSocket as a `SendMachineCommand`.
-/// This one cannot: `websocket.rs` reads inbound frames into a fixed `[u8; 256]` and
-/// **closes the connection** on anything longer, and a maximal payload here is ~326 bytes
-/// -- 1 + 2 + 255 for the endpoint, 1 + 1 + 64 for the token. An endpoint past roughly 186
-/// characters would silently kill the socket. Routine saves moved to HTTP for exactly this
-/// reason.
-///
-/// Carries [`ShotUploadSettings`] whole rather than restating its fields, so the three-way
-/// token semantics have one definition. **The `Set` arm is a secret**; the type's `Debug`
-/// and `defmt::Format` elide it.
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-pub struct SetShotUploadSettingsRequest {
-    pub settings: ShotUploadSettings,
-}
+// `SetShotUploadSettingsRequest` was here, and it existed only to carry
+// `MachineCommand::SetShotUploadSettings` over HTTP -- because `websocket.rs` read inbound
+// frames into a fixed `[u8; 256]` and *closed the connection* on anything longer, while a
+// maximal payload is ~326 bytes (1 + 2 + 255 for the endpoint, 1 + 1 + 64 for the token). An
+// endpoint past roughly 186 characters silently killed the socket.
+//
+// Inbound frames are now heap-backed and bounded by `ws_types::MAX_WS_MESSAGE_LEN`, so the
+// setting travels as the command it always was, and the wrapper type, the route and its
+// schema root went with it. See `frontend/src/api/shotUpload.ts`.

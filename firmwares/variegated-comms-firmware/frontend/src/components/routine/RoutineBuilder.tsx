@@ -51,11 +51,11 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
     setTimeout(() => setError(null), 5000);
   };
 
-  // Every mutation now awaits a real answer from the machine and reports it. These used
-  // to be fire-and-forget commands on the WebSocket followed by an unconditional success
-  // toast -- which was wrong twice over: the save could not work at all (a routine
-  // exceeds the socket's 256-byte inbound frame), and nothing would have said so if it
-  // had merely failed.
+  // Every mutation awaits a real answer from the machine and reports it. These used to be
+  // fire-and-forget commands on the WebSocket followed by an unconditional success toast --
+  // which was wrong twice over: the save could not work at all (a routine exceeded the
+  // socket's then-256-byte inbound frame), and nothing would have said so if it had merely
+  // failed. The size limit is gone, but "await a real answer" is the part that mattered.
   //
   // No `setTimeout` refresh either. The application processor pushes fresh summaries as
   // soon as a write lands, so waiting a second was a guess in place of an answer.

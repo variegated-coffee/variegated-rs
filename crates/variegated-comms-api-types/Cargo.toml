@@ -19,6 +19,12 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 variegated-controller-types = { path = "../variegated-controller-types", default-features = false, features = ["serde"] }
 variegated-postcard-schema = { path = "../variegated-postcard-schema", optional = true }
 
+[dev-dependencies]
+# The wire-contract tests encode with the same postcard the transport uses -- pinning a
+# discriminant by hand would not exercise the serde path that actually produces it.
+postcard = { workspace = true, features = ["alloc"] }
+heapless = { workspace = true }
+
 [features]
 default = []
 # Describe these types for the TypeScript schema generator. Host-only; the firmware

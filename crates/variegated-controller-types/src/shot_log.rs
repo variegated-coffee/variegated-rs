@@ -475,9 +475,12 @@ pub const SHOT_LOG_PAGE_LEN: u16 = 10;
 /// a frame at or over that length is not truncated on arrival -- it is *lost*: the
 /// accumulator overruns, discards and resynchronises on the next sentinel, so an
 /// oversized reply is indistinguishable from a dead link. A maximal [`ShotLogListEntry`]
-/// weighs about 561 bytes, so eight annotation-heavy shots already overrun. The previous
-/// fixed cap of fifty had that failure latent in it, and it was never hit only because no
-/// real card carried full annotation blocks.
+/// weighs **820 bytes**, so five annotation-heavy shots already overrun. The previous fixed
+/// cap of fifty had that failure latent in it, and it was never hit only because no real
+/// card carried full annotation blocks.
+///
+/// That figure read 561 for a while and was wrong: it predates `tasting_notes`, which adds
+/// 1 + 2 + 256. The conclusion did not change, which is exactly why nobody noticed.
 ///
 /// 3,800 leaves 296 bytes for the reply's own discriminant, the vector's length prefix,
 /// the `truncated` flag and COBS' one-in-254 overhead.

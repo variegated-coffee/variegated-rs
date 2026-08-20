@@ -27,7 +27,7 @@ interpret.
 
 | what | where |
 |---|---|
-| RAM-resident sections and the largest static objects | `scripts/memory-report.sh` |
+| RAM-resident sections and the largest static objects | `firmwares/variegated-comms-firmware/scripts/memory-report.sh` |
 | `Heap high-water N bytes of M (K free now)` | `debug/snapshot.rs::report_heap_high_water`, 1 Hz, new 4 kB maxima only |
 | `Stack high-water N bytes of M (K free)` | `debug/snapshot.rs::report_stack_high_water`, same rule |
 | `heap free N` brackets around a suspect region | `debug::snapshot::heap_free()`, called from `wifi::try_candidate` and `improv::improv_task` |
@@ -44,7 +44,7 @@ difference is that region's cost. That is what finally settled the argument belo
 
 Peaks taken across a full Improv provisioning cycle with a BLE client connected, which is
 this firmware's peak-memory event. Capacities are linker facts, re-measured with
-`scripts/memory-report.sh` against the current tree:
+`firmwares/variegated-comms-firmware/scripts/memory-report.sh` against the current tree:
 
 * **stack peak 94,028** of **96,480** — **2,452 bytes of headroom**.
 * **heap peak 82,356** of 122,880 (64 kB `#[ram(reclaimed)]` + 56 kB in `.bss`) — ~40 kB
@@ -87,8 +87,76 @@ rust-size -A ../../target/riscv32imac-unknown-none-elf/comms-release/variegated-
 | + the shot uploader itself (task future, 2nd event subscriber) | 251,456 | 90,256 |
 | `heap_allocator!` 56 kB → 64 kB, after the heap ran out during a handshake | 259,688 | 82,024 |
 | **+ `ShotUploadView` on `Configuration`** | 259,800 | **81,912** |
+| *(unrecorded work between these two rows -- see the note below)* | 273,656 | 68,312 |
+| heap-spilling inbound WebSocket frames + a bound in both directions | 273,704 | 68,200 |
+| deleting `/command/*`, routine CRUD and the shot-log listing from HTTP | **273,512** | **68,712** |
 
-That last row is 112 bytes, and it was 1,552 before the field was changed from
+### `.stack` is 13.7 kB lower than this table used to admit
+
+The `ShotUploadView` row was the last one recorded, and the tree moved a long way past it
+before anyone measured again. The figures above it are history; the two figures that describe
+the firmware **now** are the last two rows, both taken with `rust-size -A` against a
+`comms-release` build on 2026-08-20.
+
+`.bss` grew 13,856 bytes and `.stack` therefore fell by the same order, to **68,200**. That is
+below *every* figure this document records as having survived, including the 87,256 called
+"the lowest observed to survive" and the 90,144 that overflowed inside
+`esp_radio::wifi::new()`. Read the warning at the top of this file before reacting to that:
+those observations "do not form a bound and must not be read as one", and they predate the
+churn fix that took post-provisioning heap usage from ~115 kB to ~74 kB. But **nothing has
+confirmed 68,200 on hardware**, and no one decided to spend those 13.9 kB -- they accumulated
+one unmeasured change at a time, which is the failure mode this table exists to prevent.
+Whatever else happens, do not add `.bss` without measuring.
+
+The prose heading further down that says ".stack sits at 90,256" is stale twice over: it was
+already contradicted by this table's own last row when it was written.
+
+### The WebSocket row, and what it deliberately did not do
+
++48 bytes of `.bss`, and that near-zero is the design rather than a happy accident. Inbound
+frames were capped at 256 bytes because `frame_buf` was a `[u8; 256]` in the websocket task's
+future -- permanent `.bss`, and therefore permanent `.stack`, spent on a ceiling that had
+already forced routine writes and shot-upload settings onto HTTP.
+
+The array stays exactly the same size. What changed is that it is now the *inline* buffer
+rather than the limit: a payload longer than it spills to a transient heap allocation bounded
+by `MAX_CLIENT_FRAME_LEN` (2,304 bytes), and the spill is freed at the end of the loop
+iteration that handles the frame. The +48 is the `FramePayload` enum and the new
+`SendMachineCommandWithId` arm.
+
+**A single per-connection `Vec` reused across frames was the obvious alternative and was
+rejected on this document's own evidence.** It would hold its high-water mark for the life of
+the connection, so one large settings write plus a browser left open overnight puts those
+bytes in the heap during a TLS upload -- where the measured peak is 122,456 of 122,880, i.e.
+424 bytes of margin. Transient-and-rare beats resident-and-small at that margin. Steady state
+now allocates nothing at all: every ordinary frame fits the inline buffer.
+
+The outbound direction gained a bound for the first time (`MAX_WS_FRAME_LEN`, 8,192). Note
+what it does not do: the check is post-hoc, after `to_allocvec` has already allocated. It
+stops an oversized frame reaching the wire and logs it; it does not protect the heap.
+
+### Moving the API off HTTP, and why the interesting number is flash
+
+The row after it is the larger change and the smaller RAM story: 17 `/command/*` routes, all
+five routine routes and the three shot-log listing routes left `http.rs` for the WebSocket,
+along with eight `Set*Request` body types and their postcard deserialisers. `.bss` moved by
+**−192 bytes** and `.stack` by **+512**, which is close enough to nothing.
+
+**`.text` fell 49,018 bytes and `.rodata` 5,632** — about 54.6 kB of flash, against the
+209,476 that MbedTLS added and whose fit against the partition table is still unconfirmed
+further down this document. That is the reason to record this row at all; the RAM figures are
+noise and the flash figure is not.
+
+What is left on the HTTP server is the SPA, `/status`, `/configuration`,
+`/machine-definition`, the schedules, and one shot-log route: the per-shot download. That one
+stays because it is a genuine stream — tens of kilobytes through a 1 kB buffer into an
+already-committed 200, arriving with a `Content-Disposition` filename that a bare
+`<a download>` uses with no JavaScript. A frame-based transport would have to assemble it in
+browser memory and synthesise a blob URL to achieve less.
+
+---
+
+The `ShotUploadView` row is 112 bytes, and it was 1,552 before the field was changed from
 `heapless::String<255>` to `alloc::String`. **`Configuration` is the most expensive struct
 in this firmware to widen**: it is held inline in the cache, the pubsub channel and several
 task futures, so 256 bytes of inline string is 256 bytes six times over. A published type
@@ -124,18 +192,24 @@ Two things came out of that, and the second is the general lesson:
 `TLS session: heap free X -> Y`, so the next run attributes the cost directly instead of
 leaving it to be inferred from a high-water mark.
 
-### `.stack` sits at 90,256, which also needs confirming on hardware
+### `.stack` sits at 68,200, which badly needs confirming on hardware
 
-**This is the open question in this firmware.** The figure is below the 94,028 recorded
-peak and a hair above the 90,144 that overflowed inside `esp_radio::wifi::new()` -- but
-both of those are historical observations, and the judgement made when this landed was that
-they predate the churn fix that took post-provisioning usage from ~115 kB to ~74 kB and are
-therefore pessimistic.
+**This is the open question in this firmware, and it has got sharper rather than softer.**
+This section used to say 90,256, which was stale even against the table above it when it was
+written; the measured figure as of 2026-08-20 is **68,200**. That is below the 94,028 recorded
+peak, below the 87,256 recorded as the lowest figure observed to survive, and 21,944 *below*
+the 90,144 that overflowed inside `esp_radio::wifi::new()`.
+
+Those are all historical observations, and the standing judgement is that they predate the
+churn fix that took post-provisioning usage from ~115 kB to ~74 kB and are therefore
+pessimistic. That judgement may well still hold. But it was made about a figure 22 kB higher
+than the current one, so **it should not be assumed to carry**, and nothing has tested 68,200
+against the peak-memory event.
 
 **Settle it by reading the device, not this document.** `Stack high-water N bytes of M`
 is logged at 1 Hz by `debug/snapshot.rs` on every new 4 kB maximum. Flash, provision over
 Improv with a BLE client connected -- the peak-memory event -- take a shot with uploads
-configured, and read the line. If it approaches 90,256, the levers are in "Not yet spent"
+configured, and read the line. If it approaches 68,200, the levers are in "Not yet spent"
 below; they return `.stack` directly, which is what the feature-level knobs cannot do.
 
 Note also that a TLS handshake adds stack depth of its own that no prior peak includes:
@@ -238,7 +312,7 @@ that would be wire-compatible). Neither is worth doing without a measurement say
 
 ## Where the statics actually are
 
-From `scripts/memory-report.sh`, for whoever needs the next 10 kB:
+From `firmwares/variegated-comms-firmware/scripts/memory-report.sh`, for whoever needs the next 10 kB:
 
 | bytes | what |
 |---|---|

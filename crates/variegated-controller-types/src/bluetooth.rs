@@ -38,9 +38,13 @@ pub const MAX_BLUETOOTH_PERIPHERALS: usize = 4;
 /// Longest peripheral name carried on the wire.
 ///
 /// Bounded rather than a `String` because these travel inside `Status` and
-/// `Configuration`, which are already the two largest messages on the link, and because
-/// the WebSocket server accepts client frames of at most 256 bytes -- an association
-/// command has to fit in one.
+/// `Configuration`, which are already the two largest messages on the link -- and those are
+/// held inline in several statics on the comms processor, where `.stack` is whatever RWDATA
+/// is left after `.bss`, so a byte here is a byte several times over.
+///
+/// It was also once bounded by the WebSocket's 256-byte inbound frame, which an association
+/// command had to fit in one of. That constraint is gone -- inbound frames are heap-backed
+/// now -- but the size argument above never depended on it and still holds on its own.
 ///
 /// It is also a *trust* boundary. The default name is whatever a device advertised, so
 /// any radio in range chooses these bytes; truncation to this length must be done on a

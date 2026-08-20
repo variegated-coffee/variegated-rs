@@ -206,9 +206,9 @@ export function StateConditionEditor({ condition, onChange, parameters, derivedP
       case 'ExtractedSolidsAbove':
       case 'ExtractedSolidsBelow':
         return 'ExtractedSolids';
+      // All three are a phase, not a level. Nothing to label.
       case 'Brewing':
       case 'NotBrewing':
-      // A phase, not a level. Nothing to label.
       case 'ShotStateReached':
         return null;
     }

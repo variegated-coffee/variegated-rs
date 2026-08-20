@@ -43,7 +43,9 @@ use std::collections::BTreeMap;
 use heapless::index_map::FnvIndexMap;
 use serde::Serialize;
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
-use variegated_comms_api_types::ws_types::WsMessage;
+use variegated_comms_api_types::ws_types::{
+    ClientQuery, QueryError, QueryOk, QueryOutcome, WsMessage,
+};
 use variegated_control_algorithm::pid::{Limits, PidOut};
 use variegated_controller_types::*;
 
@@ -892,6 +894,73 @@ pub fn all() -> Vec<Fixture> {
             "ws_request_configuration",
             "WsMessageSchema",
             &WsMessage::RequestConfiguration,
+        ),
+        // A query and its answer, and the answer is the one that matters: it carries a
+        // routine as an opaque `Vec<u8>`, which is the **first** use of a byte payload in
+        // any schema this tree generates. `Node::Seq(U8)` has emitter support and the
+        // TypeScript runtime has `seq`, but nothing has ever exercised the pair, so this
+        // fixture is what proves a postcard message nested inside a postcard message
+        // survives the round trip byte-for-byte in both languages.
+        //
+        // The payload is a real encoded `Routine` rather than arbitrary bytes, so a failure
+        // here is a failure of the thing the frontend will actually do.
+        fixture::<WsMessage>(
+            "ws_query",
+            "WsMessageSchema",
+            &WsMessage::Query {
+                id: 7,
+                query: ClientQuery::RoutineDefinition(RoutineIndex::Custom(3)),
+            },
+        ),
+        fixture::<WsMessage>(
+            "ws_query_reply",
+            "WsMessageSchema",
+            &WsMessage::QueryReply {
+                id: 7,
+                outcome: QueryOutcome::Ok(QueryOk::RoutineDefinition(
+                    postcard::to_allocvec(&routine()).expect("the fixture routine encodes"),
+                )),
+            },
+        ),
+        // The error arm, separately: `Result` is a two-variant enum on the wire and the
+        // `Err` side is the half a client only exercises when something has gone wrong,
+        // which is exactly when a decoding bug is most expensive.
+        fixture::<WsMessage>(
+            "ws_query_reply_error",
+            "WsMessageSchema",
+            &WsMessage::QueryReply {
+                id: 8,
+                outcome: QueryOutcome::Failed(QueryError::NotFound),
+            },
+        ),
+        // The correlated command, and the reason it is worth a fixture rather than trusting
+        // the `MachineCommand` one above: this variant is a `u32` in front of a payload the
+        // schema already covers, so the thing that can go wrong is not the command's
+        // encoding but the *framing* around it -- a TypeScript struct-variant that writes
+        // the id in the wrong place, or reads it out of the command's first bytes. That
+        // failure is invisible to a round trip on either side alone and shows up here as a
+        // byte mismatch.
+        //
+        // `SetShotUploadSettings` specifically, because it is the command that moved onto
+        // this transport and therefore the one whose encoding is newly load-bearing.
+        fixture::<WsMessage>(
+            "ws_command_with_id",
+            "WsMessageSchema",
+            &WsMessage::SendMachineCommandWithId {
+                id: 0xDEAD_BEEF,
+                command: MachineCommand::SetShotUploadSettings(ShotUploadSettings {
+                    endpoint: Some(
+                        heapless::String::try_from("https://plantlet.example/api/shots").unwrap(),
+                    ),
+                    enabled: true,
+                    // `Keep`, not `Set`: this is what the settings UI actually sends when the
+                    // password box is left blank, and it is the arm whose mis-decode would
+                    // de-provision a machine rather than merely fail.
+                    token: ShotUploadTokenUpdate::Keep,
+                    server_key: None,
+                    device_key: ShotUploadKeyUpdate::Keep,
+                }),
+            },
         ),
         fixture("shot_log_list", "ShotLogListSchema", &shot_log_list()),
         fixture(

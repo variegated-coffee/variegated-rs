@@ -54,23 +54,9 @@ export async function putPostcard<S extends Schema>(url: string, data: InferType
   }
 }
 
-/**
- * POST with no body, for commands whose only argument is in the path.
- *
- * Sits beside `deleteRequest` rather than in an api module because it is the same kind of
- * thing: a request shape, not a postcard concern. Several `/command/...` routes on the
- * device take this form, and each was otherwise reaching for a bare `fetch` with its own
- * hand-rolled status check.
- */
-export async function postEmpty(url: string): Promise<void> {
-  const response = await fetch(url, {
-    method: 'POST',
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
-  }
-}
+// `postEmpty` was here — a bodyless POST for commands whose only argument was in the path.
+// Every route that took that shape was a `/command/...` one, and they have all moved onto the
+// WebSocket, so it lost its last caller with `tagDoseFromScale`.
 
 export async function deleteRequest(url: string): Promise<void> {
   const response = await fetch(url, {

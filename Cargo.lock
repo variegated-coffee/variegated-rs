@@ -5076,6 +5076,8 @@ dependencies = [
 name = "variegated-comms-api-types"
 version = "0.1.0"
 dependencies = [
+ "heapless 0.9.3",
+ "postcard",
  "serde",
  "variegated-controller-types",
  "variegated-postcard-schema",

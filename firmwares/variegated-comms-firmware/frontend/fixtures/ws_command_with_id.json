@@ -1,0 +1,14 @@
+{
+  "SendMachineCommandWithId": {
+    "id": 3735928559,
+    "command": {
+      "SetShotUploadSettings": {
+        "endpoint": "https://plantlet.example/api/shots",
+        "enabled": true,
+        "token": "Keep",
+        "server_key": null,
+        "device_key": "Keep"
+      }
+    }
+  }
+}

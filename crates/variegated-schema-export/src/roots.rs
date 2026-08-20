@@ -1,11 +1,6 @@
 //! The types the frontend speaks, and everything reachable from them.
 
-use variegated_comms_api_types::api_types::{
-    RoutineSummaryStorage, SetBoilerControlRequest, SetFillPumpConfigurationRequest,
-    SetGroupControlRequest, SetGroupPumpConfigurationRequest, SetPidParametersRequest,
-    SetShotUploadSettingsRequest, SetSteamValveOpennessRequest,
-    SetWaterTapPumpConfigurationRequest,
-};
+use variegated_comms_api_types::api_types::RoutineSummaryStorage;
 use variegated_comms_api_types::ws_types::WsMessage;
 use variegated_controller_types::{
     Configuration, MachineCommand, MachineDefinition, Routine, RoutineIndex, ShotLog,
@@ -46,25 +41,21 @@ pub fn registry() -> Registry {
 
     // A routine definition, fetched and saved one at a time over HTTP.
     //
-    // An explicit root rather than a type reached transitively. It used to arrive through
-    // `MachineCommand::AddRoutine`, which the frontend no longer sends -- a definition is
-    // several kilobytes and the WebSocket's inbound frames are capped at 256 bytes. The
-    // frontend still needs this schema for `GET`/`PUT /routines/{type}/{index}`, and that
-    // should not depend on a command variant it has stopped using.
+    // An explicit root rather than a type reached transitively. It does arrive through
+    // `MachineCommand::AddRoutine`, but the frontend does not send that -- routine writes go
+    // over HTTP, where the response says whether the routine was stored. The frontend needs
+    // this schema for `GET`/`PUT /routines/{type}/{index}` regardless, and that should not
+    // depend on a command variant it has stopped using.
     reg.root::<Routine>();
     // The `POST` response: a create is assigned its index by the machine, so this is how
     // a client learns where its routine landed.
     reg.root::<RoutineIndex>();
 
-    // HTTP request bodies.
-    reg.root::<SetBoilerControlRequest>();
-    reg.root::<SetGroupControlRequest>();
-    reg.root::<SetPidParametersRequest>();
-    reg.root::<SetGroupPumpConfigurationRequest>();
-    reg.root::<SetWaterTapPumpConfigurationRequest>();
-    reg.root::<SetFillPumpConfigurationRequest>();
-    reg.root::<SetSteamValveOpennessRequest>();
-    reg.root::<SetShotUploadSettingsRequest>();
+    // **No HTTP request bodies any more.** There were eight roots here, one per `/command/*`
+    // route that parsed a `Set*Request` struct. Every one of those commands travels as a
+    // `MachineCommand` inside `WsMessage` now, so their schemas arrive transitively through the
+    // envelope rather than needing a root of their own -- and the wrapper structs themselves
+    // are gone. See the note where they were defined in `api_types.rs`.
 
     reg
 }

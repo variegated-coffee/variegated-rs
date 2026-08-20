@@ -223,7 +223,10 @@ needed.
 
 Associations arrive in `ConfigurationUpdate` and scan results in `StatusUpdate`, both already
 handled by the WebSocket service; only outbound convenience methods are new. Client→server
-frames are capped at 256 bytes (`websocket.rs:149`), which is why the name is bounded at 24.
+frames were capped at 256 bytes when this was written, which is why the name is bounded at
+24. That cap is gone — inbound frames are heap-backed and bounded by `MAX_WS_MESSAGE_LEN` —
+but the bound stayed: `BluetoothName` travels inside `Status` and `Configuration`, which are
+held inline in several statics, and that argument never depended on the frame size.
 
 ## Build order
 

@@ -1042,9 +1042,10 @@ where
                 //
                 // `!entries.is_empty()` is load-bearing: without it an entry heavier
                 // than the whole budget would return an empty page with `truncated` set,
-                // and a client paging on that would loop forever. A maximal entry is
-                // ~561 bytes against a 3,800-byte budget, so this cannot fire today; it
-                // costs one comparison and removes the class.
+                // and a client paging on that would loop forever. A maximal entry is 820
+                // bytes against a 3,800-byte budget, so this cannot fire today; it costs
+                // one comparison and removes the class. (820, not the ~561 this said
+                // before — that figure predates `tasting_notes`.)
                 let cost = entry.encoded_len_upper_bound();
                 if cost > budget && !entries.is_empty() {
                     truncated = true;
