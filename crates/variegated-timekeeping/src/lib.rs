@@ -257,6 +257,49 @@ impl TimeZoneWrapper {
     }
 }
 
+impl TimeZoneWrapper {
+    /// Resolve an IANA zone name.
+    ///
+    /// `None` for a name this build does not know, and that is a real case rather than a
+    /// theoretical one: the tz database is trimmed at build time by
+    /// `CHRONO_TZ_TIMEZONE_FILTER`, so a zone stored by a firmware built with a wider filter --
+    /// or a name typed into the browser -- will not be found. Callers must fall back to UTC
+    /// and **say so**. Accepting silently is the failure that matters here, because a machine
+    /// an hour out looks exactly like a machine that is right.
+    ///
+    /// `""`, `"UTC"` and `"Etc/UTC"` are answered without consulting the database at all, so
+    /// the default resolves whatever the filter is set to -- including in a build with
+    /// `named-timezones` off entirely, where every other name is `None`.
+    pub fn from_iana_name(name: &str) -> Option<TimeZoneWrapper> {
+        if matches!(name, "" | "UTC" | "Etc/UTC") {
+            return Some(TimeZoneWrapper::Utc);
+        }
+
+        #[cfg(feature = "named-timezones")]
+        {
+            <Tz as core::str::FromStr>::from_str(name).ok().map(TimeZoneWrapper::Named)
+        }
+        #[cfg(not(feature = "named-timezones"))]
+        {
+            None
+        }
+    }
+
+    /// The IANA name of this zone, where it has one.
+    ///
+    /// `Utc` answers `"UTC"`. A `Fixed` offset has no IANA name and answers `None` -- it is a
+    /// number of seconds, not a place, and inventing `"Etc/GMT+1"` for it would claim a zone
+    /// with DST rules it does not have.
+    pub fn iana_name(&self) -> Option<&'static str> {
+        match self {
+            TimeZoneWrapper::Utc => Some("UTC"),
+            #[cfg(feature = "named-timezones")]
+            TimeZoneWrapper::Named(tz) => Some(tz.name()),
+            TimeZoneWrapper::Fixed(_) => None,
+        }
+    }
+}
+
 #[cfg(feature = "named-timezones")]
 impl From<Tz> for TimeZoneWrapper {
     fn from(tz: Tz) -> Self {
@@ -606,5 +649,103 @@ impl TimeKeeper {
             opt.as_ref()
                 .map_or(false, |s| s.anchor_instant.is_some() && s.anchor_datetime.is_some())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// UTC resolves whatever the database contains, and without consulting it.
+    ///
+    /// This is the path every unconfigured machine takes -- `TimezoneSetting::default()` is the
+    /// empty string -- so it must not depend on the build-time filter at all.
+    #[test]
+    fn utc_resolves_without_the_database() {
+        for name in ["", "UTC", "Etc/UTC"] {
+            assert!(
+                matches!(TimeZoneWrapper::from_iana_name(name), Some(TimeZoneWrapper::Utc)),
+                "{name:?} did not resolve to UTC"
+            );
+        }
+    }
+
+    /// An unknown name is refused rather than quietly becoming UTC.
+    ///
+    /// The caller is what falls back, and it logs when it does. If this returned `Some(Utc)`
+    /// there would be nothing anywhere distinguishing "the user asked for UTC" from "the user
+    /// asked for a zone this firmware has never heard of".
+    #[test]
+    fn an_unknown_name_is_refused() {
+        assert!(TimeZoneWrapper::from_iana_name("Not/AZone").is_none());
+        // Case matters: chrono-tz's `case-insensitive` feature is off.
+        assert!(TimeZoneWrapper::from_iana_name("europe/stockholm").is_none());
+    }
+
+    /// **What the shipped `CHRONO_TZ_TIMEZONE_FILTER` actually resolves.**
+    ///
+    /// This is the highest-value test in the crate. That filter is a build-time regex living in
+    /// three `.cargo/config.toml` files and nothing else observes it, so without this a
+    /// widened one is discovered as a `region FLASH overflowed` at some future date, and a
+    /// narrowed one is discovered by a user whose schedules quietly run in UTC.
+    ///
+    /// Both directions are asserted deliberately: that Europe is present, *and* that
+    /// everything else is absent. A test that only checked the first would pass just as well
+    /// against the unfiltered 7.2 MB table.
+    #[cfg(feature = "named-timezones")]
+    #[test]
+    fn the_filter_is_what_it_says_it_is() {
+        assert!(
+            TimeZoneWrapper::from_iana_name("Europe/Stockholm").is_some(),
+            "Europe/Stockholm is what the shipped filter names, and it did not resolve"
+        );
+
+        for outside in ["Europe/London", "America/New_York", "Asia/Tokyo"] {
+            assert!(
+                TimeZoneWrapper::from_iana_name(outside).is_none(),
+                "{outside} resolved -- the timezone filter is wider than the config says"
+            );
+        }
+
+        // chrono-tz's filtering is documented as *liberal*: naming a zone pulls in the ones it
+        // is linked to, and `Europe/Stockholm` is a link to `Europe/Berlin` in the modern
+        // database. Asserted rather than left to chance, because it is the difference between
+        // "the filter does what it says" and "the filter happens to be wider today" -- and if
+        // a future tzdb re-canonicalises Stockholm, this is where that shows up.
+        assert!(
+            TimeZoneWrapper::from_iana_name("Europe/Berlin").is_some(),
+            "Europe/Berlin no longer arrives as Stockholm's link target; the comment above is stale"
+        );
+    }
+
+    /// A named zone must carry its DST rules, not merely its name.
+    ///
+    /// This is what proves the *filtered* table still holds transition data: Stockholm is
+    /// UTC+1 in January and UTC+2 in July, and a table trimmed down to names alone would
+    /// report the same offset for both. Without DST there is no reason to prefer a named zone
+    /// over a fixed offset in the first place.
+    #[cfg(feature = "named-timezones")]
+    #[test]
+    fn a_named_zone_carries_its_dst() {
+        let zone = TimeZoneWrapper::from_iana_name("Europe/Stockholm").expect("shipped filter");
+
+        let winter = zone
+            .to_local(DateTime::from_timestamp(1_767_225_600, 0).expect("2026-01-01T00:00:00Z"));
+        let summer = zone
+            .to_local(DateTime::from_timestamp(1_782_864_000, 0).expect("2026-07-01T00:00:00Z"));
+
+        // Same instant expressed locally, an hour further from UTC in summer.
+        assert_eq!(winter.hour(), 1, "expected UTC+1 in January");
+        assert_eq!(summer.hour(), 2, "expected UTC+2 in July");
+    }
+
+    /// The name survives a round trip, which is what makes storing a name rather than a `Tz`
+    /// workable at all.
+    #[cfg(feature = "named-timezones")]
+    #[test]
+    fn a_resolved_zone_reports_its_own_name() {
+        let zone = TimeZoneWrapper::from_iana_name("Europe/Stockholm").expect("shipped filter");
+        assert_eq!(zone.iana_name(), Some("Europe/Stockholm"));
+        assert_eq!(TimeZoneWrapper::Utc.iana_name(), Some("UTC"));
     }
 }

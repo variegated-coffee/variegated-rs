@@ -8,7 +8,6 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::pin::Pin;
-use chrono::FixedOffset;
 use defmt::unwrap;
 use variegated_log::{log_error, log_info, log_warn};
 use heapless::index_map::FnvIndexMap;
@@ -57,6 +56,7 @@ use variegated_controller_types::SteamWandDefinition;
 use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
 use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_controller_types::shot_upload::ShotUploadConfig;
+use variegated_controller_types::timezone::TimezoneSetting;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
 use variegated_hal::gpio::gpio_binary_solenoid_valve::GpioBinarySolenoidValve;
@@ -489,12 +489,17 @@ type WifiStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex,
 /// Same reasoning again; only the payload type and the key differ.
 type ShotUploadStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, ShotUploadConfig>;
 
+/// The machine's timezone, in the same settings range under a key of its own. Same reasoning
+/// again; only the payload type and the key differ.
+type TimezoneStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, TimezoneSetting>;
+
 type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
 type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
 type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
 type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
 type WifiStoreMutex = Mutex<SyncSendRawMutex, WifiStoreType>;
 type ShotUploadStoreMutex = Mutex<SyncSendRawMutex, ShotUploadStoreType>;
+type TimezoneStoreMutex = Mutex<SyncSendRawMutex, TimezoneStoreType>;
 type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
 /// Core 1's stack.
@@ -1164,6 +1169,7 @@ static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
 static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u16, 2>> = StaticCell::new();
 static WIFI_STORE: StaticCell<WifiStoreMutex> = StaticCell::new();
 static SHOT_UPLOAD_STORE: StaticCell<ShotUploadStoreMutex> = StaticCell::new();
+static TIMEZONE_STORE: StaticCell<TimezoneStoreMutex> = StaticCell::new();
 /// Accepted provisioning-window requests, carrying the duration in milliseconds; zero
 /// means close. Crosses cores like the scan channel above, hence `SyncSendRawMutex`.
 ///
@@ -2500,11 +2506,16 @@ async fn main_task(
     };
     rtc.configure(&config).await.unwrap();
 
-    // Initialize TimeKeeper with timezone
-    //TimeKeeper::init(Tz::Europe__Stockholm);
-    // `east_opt` rather than the deprecated `east`: it returns `None` for out-of-range
-    // offsets instead of panicking, and zero is trivially in range.
-    TimeKeeper::init(FixedOffset::east_opt(0).expect("zero is a valid UTC offset"));
+    // UTC to start with; the stored zone is applied by `set_timezone` once the settings stores
+    // exist. `init` takes the constant because it panics if called twice, so it cannot be the
+    // thing a configuration change goes through -- and `set_timezone` returns
+    // `Err(Uninitialized)` unless `init` has run, so the order is not a style choice.
+    //
+    // `chrono::Utc` rather than `FixedOffset::east_opt(0)`: `impl From<Utc> for
+    // TimeZoneWrapper` exists, and this way the starting value is the same
+    // `TimeZoneWrapper::Utc` that `from_iana_name("")` returns, rather than a fixed offset
+    // that merely behaves like it. Two representations of UTC in one clock is one too many.
+    TimeKeeper::init(chrono::Utc);
 
     // Seed the clock from the DS3231 before anything else can ask what time it is.
     //
@@ -2720,7 +2731,7 @@ async fn main_task(
     // All four stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
     // `variegated_controller_lib::settings::machine_stores`.
-    let (settings_storage, bluetooth_store, wifi_store, shot_upload_store) =
+    let (settings_storage, bluetooth_store, wifi_store, shot_upload_store, timezone_store) =
         variegated_controller_lib::settings::machine_stores::<
             SyncSendRawMutex,
             SettingsFlashType,
@@ -2778,6 +2789,39 @@ async fn main_task(
     // Shot-log upload endpoint and token, at a key of their own in the settings range.
     let shot_upload_store_ref = SHOT_UPLOAD_STORE.init(Mutex::new(shot_upload_store));
     let shot_upload_config_watch = SHOT_UPLOAD_CONFIG_WATCH.init(Watch::new());
+
+    // The machine's timezone, at a key of its own in the settings range.
+    let timezone_store_ref = TIMEZONE_STORE.init(Mutex::new(timezone_store));
+
+    // Told to the `TimeKeeper` **here**, before anything is spawned, rather than in the
+    // controller's first pass. The scheduler and the controller start together, and a scheduler
+    // tick taken before the store had been read would be a tick in the wrong zone -- which on a
+    // machine whose whole job is heating at a particular hour is the one bug this feature
+    // exists to avoid.
+    //
+    // `TimeKeeper::init` is not the entry point: it panics if called twice, and it has already
+    // run above because `anchor_from_rtc` depends on it. `set_timezone` is the mutable one.
+    //
+    // Logs are unaffected either way -- every timestamp written to a shot log or the SD card
+    // goes through `now_utc`, which does not consult this.
+    let stored_timezone = timezone_store_ref.lock().await.load_settings().await.unwrap_or_default();
+    match variegated_timekeeping::TimeZoneWrapper::from_iana_name(stored_timezone.as_str()) {
+        Some(zone) => {
+            let _ = TimeKeeper::set_timezone(zone);
+            log_info!(
+                "Timezone: {}",
+                if stored_timezone.is_utc() { "UTC" } else { stored_timezone.as_str() }
+            );
+        }
+        // A zone this build's trimmed database does not carry -- most likely a machine moved
+        // to a firmware built with a narrower `CHRONO_TZ_TIMEZONE_FILTER`. UTC and a warning
+        // rather than a panic: the machine still makes coffee, and its schedules are an hour
+        // or so out with a log line saying exactly why.
+        None => log_warn!(
+            "Stored timezone {} is not in this firmware's database; falling back to UTC",
+            stored_timezone.as_str()
+        ),
+    }
 
     log_info!("Configuration loaded");
 
@@ -3350,6 +3394,7 @@ async fn main_task(
         Some(wifi_provisioning_channel.sender()),
         Some(wifi_credentials_watch.sender()),
         shot_upload_store_ref,
+        timezone_store_ref,
         Some(shot_upload_config_watch.sender()),
         peripheral_registry,
         machine_definition,

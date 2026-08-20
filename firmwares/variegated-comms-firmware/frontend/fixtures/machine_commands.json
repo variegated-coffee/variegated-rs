@@ -599,5 +599,10 @@
         "Set": "0w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3gm"
       }
     }
+  },
+  {
+    "SetTimezone": {
+      "name": "Europe/Stockholm"
+    }
   }
 ]

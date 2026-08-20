@@ -369,6 +369,10 @@ export const TankStatusSchema = struct({
   water_level: option(u8())
 });
 
+export const TimezoneSettingSchema = struct({
+  name: string()
+});
+
 export const WaterTapStatusSchema = struct({
   is_dispensing: bool()
 });
@@ -843,7 +847,8 @@ export const ConfigurationSchema = struct({
   steam_wand_configurations: map(u8(), SteamWandConfigurationSchema),
   schedules: seq(ScheduleItemSchema),
   bluetooth_peripherals: seq(BluetoothPeripheralAssociationSchema),
-  shot_upload: ShotUploadViewSchema
+  shot_upload: ShotUploadViewSchema,
+  timezone: TimezoneSettingSchema
 });
 
 export const RoutineStepSchema = struct({
@@ -954,7 +959,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   RequestConfiguration: unitVariant('RequestConfiguration'),
   DeleteShotLog: newtypeVariant('DeleteShotLog', ShotLogIdSchema),
   SetShotUploadConfig: newtypeVariant('SetShotUploadConfig', ShotUploadConfigSchema),
-  SetShotUploadSettings: newtypeVariant('SetShotUploadSettings', ShotUploadSettingsSchema)
+  SetShotUploadSettings: newtypeVariant('SetShotUploadSettings', ShotUploadSettingsSchema),
+  SetTimezone: newtypeVariant('SetTimezone', TimezoneSettingSchema)
 });
 
 export const QueryOutcomeSchema = enumType('QueryOutcome', {
@@ -1097,6 +1103,7 @@ export type SteamWandStatus = InferType<typeof SteamWandStatusSchema>;
 export type TankConfiguration = InferType<typeof TankConfigurationSchema>;
 export type TankDefinition = InferType<typeof TankDefinitionSchema>;
 export type TankStatus = InferType<typeof TankStatusSchema>;
+export type TimezoneSetting = InferType<typeof TimezoneSettingSchema>;
 export type TransitionOrigin = InferType<typeof TransitionOriginSchema>;
 export type WaterDispersalPumpStrategy = InferType<typeof WaterDispersalPumpStrategySchema>;
 export type WaterTapConfiguration = InferType<typeof WaterTapConfigurationSchema>;

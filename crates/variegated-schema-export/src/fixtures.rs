@@ -505,6 +505,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             DeleteShotLog(_) => {}
             SetShotUploadConfig(_) => {}
             SetShotUploadSettings(_) => {}
+            SetTimezone(_) => {}
         }
     }
 
@@ -700,6 +701,13 @@ fn machine_commands() -> Vec<MachineCommand> {
                 heapless::String::try_from("0w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3ge1r70w3gm").unwrap(),
             ),
         }),
+        // A zone name with a `/` in it and a length that is neither zero nor a round number,
+        // so a decoder that mishandled the varint length prefix on a `heapless::String` shows
+        // up here rather than only for the empty default.
+        SetTimezone(
+            variegated_controller_types::timezone::TimezoneSetting::new("Europe/Stockholm")
+                .expect("fits"),
+        ),
     ]
 }
 

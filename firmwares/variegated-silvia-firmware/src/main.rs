@@ -463,12 +463,13 @@ async fn main_task(spawner: Spawner) -> ! {
     // dual-boiler this is seeded only from SNTP, but that is the difference between a clock
     // that arrives late and no clock at all.
     //
-    // UTC, matching the dual-boiler. Neither board has a timezone in its configuration yet.
-    // `east_opt` rather than the deprecated `east`: it returns `None` for out-of-range
-    // offsets instead of panicking, and zero is trivially in range.
-    variegated_timekeeping::TimeKeeper::init(
-        chrono::FixedOffset::east_opt(0).expect("zero is a valid UTC offset"),
-    );
+    // UTC to start with, matching the dual-boiler; the stored zone is applied by
+    // `set_timezone` once the settings stores exist, further down.
+    //
+    // `chrono::Utc` rather than `FixedOffset::east_opt(0)`: `impl From<Utc> for
+    // TimeZoneWrapper` exists, so the starting value is the same `TimeZoneWrapper::Utc` that
+    // `from_iana_name("")` returns rather than a fixed offset that merely behaves like it.
+    variegated_timekeeping::TimeKeeper::init(chrono::Utc);
 
     defmt::info!("Starting!");
 
@@ -573,13 +574,37 @@ async fn main_task(spawner: Spawner) -> ! {
     // All four stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
     // `variegated_controller_lib::settings::machine_stores`.
-    let (mut settings_storage, bluetooth_store, wifi_store, shot_upload_store) =
+    let (mut settings_storage, bluetooth_store, wifi_store, shot_upload_store, mut timezone_store) =
         variegated_controller_lib::settings::machine_stores::<
             _,
             _,
             SingleBoilerSingleGroupPersistentConfiguration,
         >(flash);
     let _configuration = settings_storage.load_settings().await.unwrap_or_default();
+
+    // Told to the `TimeKeeper` here, before anything is spawned and before the store is moved
+    // into the controller. `TimeKeeper::init` above took UTC because it panics if called twice
+    // and so cannot be the thing a configuration change goes through; `set_timezone` is the
+    // mutable one, and it needs `init` to have run first.
+    //
+    // Logs are unaffected: every timestamp written to a shot log goes through `now_utc`, which
+    // does not consult this.
+    let stored_timezone = timezone_store.load_settings().await.unwrap_or_default();
+    match variegated_timekeeping::TimeZoneWrapper::from_iana_name(stored_timezone.as_str()) {
+        Some(zone) => {
+            let _ = variegated_timekeeping::TimeKeeper::set_timezone(zone);
+            info!(
+                "Timezone: {}",
+                if stored_timezone.is_utc() { "UTC" } else { stored_timezone.as_str() }
+            );
+        }
+        // A zone this build's trimmed database does not carry. UTC and a warning rather than a
+        // panic: the machine still makes coffee, with a log line saying why its clock is off.
+        None => warn!(
+            "Stored timezone {} is not in this firmware's database; falling back to UTC",
+            stored_timezone.as_str()
+        ),
+    }
 
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
@@ -865,6 +890,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(wifi_provisioning_channel.sender()),
         Some(wifi_credentials_watch.sender()),
         shot_upload_store,
+        timezone_store,
         Some(shot_upload_config_watch.sender()),
         Some(watchdog),
         // shot_log_sender: this board has no SD card -- this crate has no

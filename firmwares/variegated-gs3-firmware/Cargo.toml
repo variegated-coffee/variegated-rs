@@ -57,7 +57,12 @@ variegated-nv3007 = { version = "0.1.0", path = "../../crates/variegated-nv3007"
 variegated-comms = { version = "0.1.0", path = "../../crates/variegated-comms" }
 # `debug-bus` installs the `log` -> debug bus bridge; see `bus_sink::init()` in main.
 variegated-log = { version = "0.1.0", path = "../../crates/variegated-log", features = ["debug-bus", "rp235xb"] }
-variegated-timekeeping = { version = "0.1.0", path = "../../crates/variegated-timekeeping", features = ["defmt"] }
+# `named-timezones` is what makes `TimeZoneWrapper::from_iana_name` able to resolve anything
+# but UTC -- without it every stored zone is refused and the machine silently keeps UTC time.
+# Which zones the table actually contains is set by `CHRONO_TZ_TIMEZONE_FILTER` in
+# `.cargo/config.toml`; see the comment there, and `variegated-timekeeping`'s host test, which
+# is what asserts the two agree.
+variegated-timekeeping = { version = "0.1.0", path = "../../crates/variegated-timekeeping", features = ["defmt", "named-timezones"] }
 variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../../crates/variegated-rp235x-atomic-raw-mutex", features = ["defmt"] }
 variegated-menu = { version = "0.1.0", path = "../../crates/variegated-menu", features = ["defmt"] }
 variegated-machine-menu = { version = "0.1.0", path = "../../crates/variegated-machine-menu", features = ["defmt"] }

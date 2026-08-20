@@ -264,16 +264,20 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
             }}
           >
             <span style={{ fontWeight: '500' }}>Time:</span>
+            {/*
+              Rendered as sent, not re-parsed. `current_local_time` is a chrono `NaiveDateTime`
+              -- an ISO-8601 string with no offset -- already in the *machine's* zone.
+
+              `new Date(s)` parses an offset-less form in the *browser's* zone and
+              `toLocaleString` formats it back in the same zone, so the two conversions cancel
+              and the old code was right by accident. They stop cancelling across a DST
+              transition in the browser's zone, where a wall-clock time that is ambiguous or
+              does not exist there is shifted by an hour -- on a machine whose entire point is
+              doing something at a particular hour. It also forced `en-US` MM/DD/YYYY on
+              everyone regardless of locale.
+            */}
             <span style={{ fontSize: '0.875rem', fontWeight: '500', fontFamily: 'monospace' }}>
-              {new Date(status.current_local_time).toLocaleString('en-US', {
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                hour12: false
-              })}
+              {status.current_local_time.replace('T', ' ')}
             </span>
           </div>
         )}

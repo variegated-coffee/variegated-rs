@@ -25,3 +25,9 @@ target = "thumbv8m.main-none-eabihf"
 [env]
 DEFMT_LOG = "debug"
 EMBASSY_EXECUTOR_TASK_ARENA_SIZE="262144"
+# Which IANA zones this firmware's timezone database contains. **Kept identical to the root
+# `.cargo/config.toml` and the GS3's** -- cargo resolves this file from the working directory,
+# so a filter that differs between a root build and a `cd`-in build produces two firmwares with
+# different timezone tables and no way to tell them apart. The full reasoning, including why
+# the feature rather than this variable is the load-bearing half, is at the root.
+CHRONO_TZ_TIMEZONE_FILTER = "^(Europe/Stockholm|UTC|Etc/UTC)$"

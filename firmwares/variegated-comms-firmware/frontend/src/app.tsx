@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { ScheduleBuilder } from './components/ScheduleBuilder';
+import { TimezonePanel } from './components/TimezonePanel';
 import { BluetoothPanel } from './components/BluetoothPanel';
 import { ShotUploadPanel } from './components/ShotUploadPanel';
 import { ShotLogPanel } from './components/ShotLogPanel';
@@ -225,8 +226,10 @@ export function App() {
           />
         </section>
 
-        {/* Schedules */}
+        {/* Schedules, and the timezone they fire on -- together, because a schedule time
+            means nothing without knowing which clock it is on. */}
         <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+          <TimezonePanel timezone={(config as Configuration)?.timezone} />
           <ScheduleBuilder schedules={(config as Configuration)?.schedules || []} />
         </section>
 

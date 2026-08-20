@@ -37,6 +37,7 @@ use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
 };
 use variegated_controller_types::shot_upload::ShotUploadConfig;
+use variegated_controller_types::timezone::TimezoneSetting;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 
 /// Persistent configuration for dual-boiler single-group machine
@@ -425,6 +426,7 @@ pub struct DualBoilerSingleGroupController<
     BluetoothStoreT: SettingsStorage<BluetoothAssociations> + 'static,
     WifiStoreT: SettingsStorage<StoredWifiCredentials> + 'static,
     UploadStoreT: SettingsStorage<ShotUploadConfig> + 'static,
+    TimezoneStoreT: SettingsStorage<TimezoneSetting> + 'static,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
@@ -607,6 +609,13 @@ pub struct DualBoilerSingleGroupController<
     // The comms processor has no flash, so this is the only copy on the machine.
     shot_upload_store: &'static Mutex<StorageM, UploadStoreT>,
     shot_upload_config: ShotUploadConfig,
+    timezone_store: &'static Mutex<StorageM, TimezoneStoreT>,
+    /// The machine's timezone, as stored. Applied to the `TimeKeeper` at boot and on change.
+    ///
+    /// Kept in RAM beside the store for `bluetooth_associations`' reason: it is read on every
+    /// configuration assembly and written only when the user changes it, and taking the
+    /// store's lock on the publish path would put a configuration publish behind a flash write.
+    timezone: TimezoneSetting,
     shot_upload_publish_pending: bool,
     // Where the config goes for the transceiver to put on the link. A `Watch` for the same
     // reason as `wifi_credentials_publisher`: only the latest value matters.
@@ -673,11 +682,12 @@ impl<
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     UploadStoreT: SettingsStorage<ShotUploadConfig>,
+    TimezoneStoreT: SettingsStorage<TimezoneSetting>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
 /*    fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -715,6 +725,7 @@ impl<
         // with no comms processor.
         wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
         shot_upload_store: &'static Mutex<StorageM, UploadStoreT>,
+        timezone_store: &'static Mutex<StorageM, TimezoneStoreT>,
         // Where the shot-log upload config goes for the transceiver to put on the link.
         // `None` on a machine with no comms processor -- which is also a machine that
         // cannot upload anything, so the config is stored and simply never acted on.
@@ -814,6 +825,8 @@ impl<
             shot_upload_store,
             shot_upload_config: ShotUploadConfig::default(),
             shot_upload_publish_pending: false,
+            timezone_store,
+            timezone: TimezoneSetting::default(),
             shot_upload_config_publisher,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
@@ -943,6 +956,8 @@ impl<
         // reduces it to `token_set: bool`, so there is no path from here to the browser
         // carrying the secret even if someone later assigns the whole config by mistake.
         configuration.shot_upload = (&self.shot_upload_config).into();
+        // From the RAM copy for the same reason as the two above.
+        configuration.timezone = self.timezone.clone();
 
         configuration
     }
@@ -1038,6 +1053,23 @@ impl<
         self.configuration_publish_pending = true;
     }
 
+    /// Persist the timezone, and republish the configuration that carries it.
+    ///
+    /// No watch of its own, unlike the shot-upload config: the comms processor has no use for
+    /// the zone -- it keeps time in UTC and sends UTC seconds — and the browser reads it from
+    /// `Configuration`.
+    async fn save_timezone(&mut self) {
+        match with_timeout(Duration::from_millis(100), self.timezone_store.lock()).await {
+            Ok(mut store) => {
+                if store.save_settings(&self.timezone).await.is_err() {
+                    log_warn!("Failed to save timezone");
+                }
+            }
+            Err(_) => log_warn!("Failed to acquire timezone_store lock for save (timeout)"),
+        }
+        self.configuration_publish_pending = true;
+    }
+
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
         let mut last_published_configuration = self.configuration.clone();
@@ -1099,6 +1131,17 @@ impl<
         // is not a property either block states, and the failure it would produce is a stored
         // endpoint the settings panel never shows.
         self.configuration_publish_pending = true;
+
+        // The stored zone, into RAM only. The `TimeKeeper` was already told in `main`, before
+        // any task was spawned, because the scheduler and this controller start together and a
+        // scheduler tick taken before this point would be a tick in the wrong zone.
+        self.timezone = match self.timezone_store.lock().await.load_settings().await {
+            Ok(setting) => setting,
+            Err(_) => {
+                log_warn!("Failed to load timezone; assuming UTC");
+                TimezoneSetting::default()
+            }
+        };
 
         loop {
             // A scan the comms processor never reported the end of -- because it reset,
@@ -2800,6 +2843,26 @@ impl<
                 log_info!("Identify requested");
                 if let Some(publisher) = self.identify_publisher.as_ref() {
                     publisher.send(Instant::now());
+                }
+            }
+            MachineCommand::SetTimezone(setting) => {
+                match variegated_timekeeping::TimeZoneWrapper::from_iana_name(setting.as_str()) {
+                    Some(zone) => {
+                        // Applied before it is stored, so a `TimeKeeper` that refuses it does
+                        // not leave flash claiming a zone the scheduler is not using.
+                        if let Err(e) = TimeKeeper::set_timezone(zone) {
+                            log_warn!("Failed to apply timezone: {:?}", e);
+                        } else {
+                            log_info!("Timezone set to {}", setting.as_str());
+                            self.timezone = setting;
+                            self.save_timezone().await;
+                        }
+                    }
+                    // Refused, not stored. This firmware's database is trimmed at build time,
+                    // so "unknown" here usually means "outside the region this build carries"
+                    // rather than "misspelt" -- and either way the honest outcome is that the
+                    // machine keeps the zone it had, and says so.
+                    None => log_warn!("Refusing unknown timezone: {}", setting.as_str()),
                 }
             }
             MachineCommand::RequestConfiguration => {
