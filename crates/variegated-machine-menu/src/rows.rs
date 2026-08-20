@@ -30,6 +30,8 @@
 use alloc::format;
 use alloc::string::String;
 
+use crate::schedule::TimeEdit;
+
 /// The display's width, in characters.
 pub const COLUMNS: usize = 16;
 
@@ -65,6 +67,22 @@ pub fn list_rows(title: &str, selected: usize, total: usize, label: &str, value:
 /// what this panel could say about a setting.
 pub fn editor_rows(title: &str, value: &str) -> (String, String) {
     (format!("{:<16.16}", title), format!("{:>16.16}", value))
+}
+
+/// The time editor's two rows, and the column the blinking cursor sits on.
+///
+/// Row 2 is [`editor_rows`]' `{:>16}`, so `HH:MM` occupies the last five columns and the
+/// cursor lands on 11 for the hours or 14 for the minutes. The column comes from
+/// [`TimeEdit::cursor_column`] rather than from a second set of literals here, so the
+/// character LCD's cursor and the TFT's colouring cannot disagree about which field is
+/// selected.
+///
+/// **The cursor is the only way this panel can mark a selection inside a value.** The HD44780
+/// has no inverse video and no second colour; its blinking block is a real alternating
+/// inversion of one character cell, and that cell is what this names.
+pub fn time_editor_rows(title: &str, time: &TimeEdit) -> (String, String, u8) {
+    let (row1, row2) = editor_rows(title, time.text().as_str());
+    (row1, row2, time.cursor_column())
 }
 
 /// Copy `text` into `out`, replacing anything a panel cannot draw.
@@ -130,6 +148,28 @@ mod tests {
         assert_eq!(rows.0, "Settings     3/9");
         assert_eq!(rows.1, "Brew mode    Prs");
         assert_exact_width(&rows);
+    }
+
+    /// The time editor's rows obey the same exact-width rule as every other screen, and its
+    /// cursor lands inside the display on the field it claims to mark.
+    ///
+    /// A cursor column past the sixteenth character would put the HD44780's blinking block in
+    /// DDRAM the panel does not show, which reads as the cursor having vanished rather than as
+    /// an error.
+    #[test]
+    fn a_time_editor_row_is_exactly_the_display_width_and_its_cursor_stays_on_screen() {
+        let mut time = TimeEdit::new(7, 30);
+
+        for expected_digit in [b'0', b'3'] {
+            let (row1, row2, col) = time_editor_rows("Time", &time);
+            assert_exact_width(&(row1, row2.clone()));
+            assert!((col as usize) < COLUMNS, "cursor column {col} is off the display");
+            assert_eq!(
+                row2.as_bytes()[col as usize], expected_digit,
+                "cursor is not on the selected field in {row2:?}"
+            );
+            time.next_field();
+        }
     }
 
     #[test]

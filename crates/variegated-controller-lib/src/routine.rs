@@ -885,7 +885,14 @@ pub trait RoutineRepository {
     async fn add_internal_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str>;
 
     /// Remove a routine by its index. Returns the removed routine, or None if it doesn't exist.
-    async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine>;
+    /// Forget a stored routine.
+    ///
+    /// `Ok(None)` means there was nothing at `index`, or that it was an `Internal` routine,
+    /// which is read-only. `Err` means the routine *was* there and could not be erased -- a
+    /// distinction the previous `Option` return could not make, because the flash write's
+    /// `Result` was discarded with `let _ =` and the cache entry removed first. See the
+    /// identical fix on `ScheduleStore::remove_schedule`.
+    async fn remove_routine(&mut self, index: RoutineIndex) -> Result<Option<Routine>, &'static str>;
 
     /// Update or create a routine at the specified index (works for any variant: Internal, Function, or Custom).
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str>;
@@ -1091,25 +1098,33 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         Ok(())
     }
 
-    async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine> {
+    async fn remove_routine(&mut self, index: RoutineIndex) -> Result<Option<Routine>, &'static str> {
         // Prevent removal of Internal routines (they are read-only)
         if matches!(index, RoutineIndex::Internal(_)) {
             log_info!("Cannot remove internal routine at index {:?}", index);
-            return None;
+            return Ok(None);
         }
+
+        self.load_from_flash().await?;
 
         let storage_index = index.to_storage_index();
-        let routine = self.cache.remove(&storage_index);
-        if routine.is_some() {
-            let opt: Option<Routine> = None;
-            let _ = self.store_in_flash(storage_index, &opt).await;
-            // Inside the `is_some`, so an index that held nothing raises nothing. The
-            // comms processor would discard that push after comparing against its cache,
-            // but "the list changed" should not be said when it did not.
-            notify_routines_changed();
+        if !self.cache.contains_key(&storage_index) {
+            return Ok(None);
         }
 
-        routine
+        // Flash first, cache second. The reverse -- which this did, with the write's error
+        // discarded -- left RAM claiming a routine flash still held, and reported success for
+        // a deletion that had not happened.
+        let opt: Option<Routine> = None;
+        self.store_in_flash(storage_index, &opt).await?;
+        let routine = self.cache.remove(&storage_index);
+
+        // Still inside the "there was something there" path, so an index that held nothing
+        // raises nothing -- and now also past the write, so a failed erase no longer announces
+        // a change that did not happen.
+        notify_routines_changed();
+
+        Ok(routine)
     }
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {
@@ -1265,10 +1280,10 @@ impl RoutineRepository for InMemoryRoutineRepository {
         Ok(())
     }
 
-    async fn remove_routine(&mut self, index: RoutineIndex) -> Option<Routine> {
+    async fn remove_routine(&mut self, index: RoutineIndex) -> Result<Option<Routine>, &'static str> {
         // Prevent removal of Internal routines (they are read-only)
         if matches!(index, RoutineIndex::Internal(_)) {
-            return None;
+            return Ok(None);
         }
 
         let storage_index = index.to_storage_index();
@@ -1279,7 +1294,9 @@ impl RoutineRepository for InMemoryRoutineRepository {
             notify_routines_changed();
         }
 
-        routine
+        // Infallible here, and the `Result` is the trait's rather than this repository's:
+        // the flash-backed one is the one that can fail.
+        Ok(routine)
     }
 
     async fn update_routine(&mut self, index: RoutineIndex, routine: Routine) -> Result<(), &'static str> {

@@ -56,7 +56,10 @@ variegated-debug = { version = "0.1.0", path = "../../crates/variegated-debug", 
 variegated-comms = { version = "0.1.0", path = "../../crates/variegated-comms" }
 # `debug-bus` installs the `log` -> debug bus bridge; see `bus_sink::init()` in main.
 variegated-log = { version = "0.1.0", path = "../../crates/variegated-log", features = ["debug-bus", "rp235xb"] }
-variegated-timekeeping = { version = "0.1.0", path = "../../crates/variegated-timekeeping", features = ["defmt"] }
+# `named-timezones` for the GS3's reason -- see that manifest. This board has no scheduler, so
+# the zone reaches only its clock display and the browser, but a machine whose clock reads UTC
+# while the other's reads local would be a difference with nothing behind it.
+variegated-timekeeping = { version = "0.1.0", path = "../../crates/variegated-timekeeping", features = ["defmt", "named-timezones"] }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal.workspace = true

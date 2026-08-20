@@ -71,3 +71,32 @@ DEFMT_LOG = "debug"
 # ever applied to builds run from the repo root -- silently giving those half the arena.
 # The two firmware crates' own configs also say 262144, so all three now agree.
 EMBASSY_EXECUTOR_TASK_ARENA_SIZE="262144"
+# Which IANA zones a firmware's timezone database contains, as a regex read by
+# `chrono-tz-build` at build time.
+#
+# **It only takes effect because `variegated-timekeeping`'s `named-timezones` feature turns on
+# `chrono-tz/filter-by-regex`.** Without that feature chrono-tz uses its prebuilt table, this
+# variable is not read at all, and the binary carries the whole world: 7.2 MB of generated
+# source, several hundred KB of `.rodata`. Europe alone is tens of KB.
+#
+# The board has 8 MiB of flash and `memory.x` declares 2 MiB of it, so an over-wide filter is a
+# link-time `region FLASH overflowed` rather than a bricked machine -- but it is still a
+# deliberate budget rather than something to discover by trying.
+#
+# **Stockholm only, as the default.** These are Magnus's machines; a machine that needs another
+# zone gets a firmware built with a wider filter. Note that chrono-tz's filtering is documented
+# as *liberal* -- naming a zone pulls in the zones it is linked to -- so the table may contain
+# slightly more than this line names. `variegated-timekeeping`'s host test asserts what is
+# actually reachable rather than what this regex appears to say.
+#
+# `UTC` and `Etc/UTC` are spelled out even though `TimeZoneWrapper::from_iana_name` answers
+# them without consulting the database, so that the *table* contains them too.
+#
+# Not `force = true`: an operator building a machine for another continent should be able to
+# export a wider filter and win. The host test pins what the shipped filter resolves, so a
+# widened one is reported rather than silently shipped.
+#
+# **Change this in all three copies of this file at once.** Cargo resolves this file from the
+# working directory, and a filter that differs between a root build and a `cd`-in build
+# produces two firmwares with different timezone tables and no way to tell them apart.
+CHRONO_TZ_TIMEZONE_FILTER = "^(Europe/Stockholm|UTC|Etc/UTC)$"

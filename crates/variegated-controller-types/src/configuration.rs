@@ -32,6 +32,22 @@ pub struct Configuration {
     ///
     /// **The token is not here, and must never be.** See [`ShotUploadView::token_set`].
     pub shot_upload: ShotUploadView,
+    /// The machine's timezone, as an IANA zone name.
+    ///
+    /// Same shape as `bluetooth_peripherals` and `shot_upload` above and for the same reason:
+    /// stored under a settings key of its own -- not in the persistent configuration blob --
+    /// and folded in when the configuration is assembled for publishing.
+    ///
+    /// Here because there is nowhere else for it to be. `Configuration` is the only settings
+    /// payload a browser receives, so without this field the timezone would be write-only from
+    /// the web: a user could set it and never be told what it currently is, which is worse
+    /// than not offering the setting at all.
+    ///
+    /// Not reduced to a bool the way `shot_upload.token_set` is. A zone name is a label, not a
+    /// secret.
+    ///
+    /// **Scheduling only.** Every log timestamp stays UTC regardless of this.
+    pub timezone: TimezoneSetting,
 }
 
 /// What the browser is allowed to know about the shot-upload configuration.
@@ -106,6 +122,8 @@ impl Configuration {
             schedules: vec![],
             bluetooth_peripherals: BluetoothPeripheralList::new(),
             shot_upload: ShotUploadView::default(),
+            // Empty is UTC, which is what an unconfigured machine keeps time in.
+            timezone: TimezoneSetting::default(),
         }
     }
 

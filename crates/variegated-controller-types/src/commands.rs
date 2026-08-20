@@ -260,6 +260,26 @@ pub enum MachineCommand {
     /// `ShotUploadConfig`'s are: this variant reaches the debug wire and the TCP debug
     /// server.
     SetShotUploadSettings(crate::shot_upload::ShotUploadSettings),
+
+    /// Set the machine's timezone, by IANA zone name.
+    ///
+    /// **Appended, not inserted.**
+    ///
+    /// Stored under a settings key of its own -- `settings::key::TIMEZONE` in
+    /// `variegated-controller-lib` -- rather than in the configuration blob, because postcard
+    /// is positional and that blob carries no version, so appending there would reset every
+    /// machine's stored configuration once.
+    ///
+    /// Applied to the `TimeKeeper` as well as stored, so a change takes effect on the next
+    /// scheduler tick rather than at the next boot.
+    ///
+    /// **Scheduling only.** Shot logs and the debug bus stay on UTC; nothing this command does
+    /// may move a timestamp that has already been written.
+    ///
+    /// A name this firmware's trimmed database does not contain is *refused* and logged, and
+    /// the machine keeps the zone it had. Storing an unresolvable name would leave the browser
+    /// displaying a zone the scheduler is not using.
+    SetTimezone(crate::timezone::TimezoneSetting),
 }
 
 impl MachineCommand {
@@ -332,6 +352,7 @@ impl MachineCommand {
             MachineCommand::SetPendingShotAnnotations(_) => "SetPendingShotAnnotations",
             MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
             MachineCommand::DeleteShotLog(_) => "DeleteShotLog",
+            MachineCommand::SetTimezone(_) => "SetTimezone",
             MachineCommand::SetShotUploadConfig(_) => "SetShotUploadConfig",
             MachineCommand::SetShotUploadSettings(_) => "SetShotUploadSettings",
         }
@@ -403,6 +424,9 @@ impl defmt::Format for MachineCommand {
             // `{}` on the config, not its fields, for the same reason as the line above:
             // the type's own `Format` elides the token and reaching past it would defeat
             // that. This one grants write access to an account on a public service.
+            // The zone name, not the whole struct: it is the only field, and a name is not a
+            // secret -- unlike the upload config beside it, whose impl elides its token.
+            MachineCommand::SetTimezone(tz) => defmt::write!(f, "SetTimezone({})", tz.as_str()),
             MachineCommand::SetShotUploadConfig(c) => defmt::write!(f, "SetShotUploadConfig({})", c),
             // `{}` on the whole value again, not its fields: `ShotUploadSettings` derives
             // `Format`, but its `token` field's impl is hand-written and elides. Reaching

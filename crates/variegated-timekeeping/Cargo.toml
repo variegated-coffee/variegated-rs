@@ -9,12 +9,21 @@ keywords = ["embedded", "async", "datetime", "timezone"]
 categories = ["embedded", "date-and-time", "no-std"]
 
 [lib]
-test = false
+# `test` is no longer `false`. It was, because the dev-dependencies below were unconditional
+# and on-target, so nothing here could link on a host -- not because anything here is
+# untestable. `TimeZoneWrapper::from_iana_name` is pure, and it is the one function in this
+# crate whose wrongness is silent: an unresolved zone falls back to UTC and the machine keeps
+# time that merely looks right.
 bench = false
 
 [features]
 default = []
-named-timezones = ["dep:chrono-tz"]
+# `filter-by-regex` is not optional here, and is the load-bearing half. Without it chrono-tz
+# uses its prebuilt table -- 7.2 MB of generated source, several hundred KB of `.rodata` -- and
+# `CHRONO_TZ_TIMEZONE_FILTER` is not even read, because chrono-tz's whole `build.rs` body is
+# behind that feature. Which zones a firmware actually carries is then set by that variable in
+# the `[env]` block of each `.cargo/config.toml`; see the comment there.
+named-timezones = ["dep:chrono-tz", "chrono-tz/filter-by-regex"]
 defmt = ["dep:defmt", "embassy-time/defmt", "embassy-sync/defmt"]
 serde = ["chrono/serde"]
 
@@ -26,8 +35,16 @@ chrono-tz = { workspace = true, optional = true }
 defmt = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The two symbols a host test binary needs in order to link, and that a library crate must
+# never provide: a time driver for `_embassy_time_now`, and a `critical_section::Impl` for
+# `STATE`'s `CriticalSectionRawMutex`. Same note as `variegated-checkin`.
+embassy-time = { workspace = true, features = ["mock-driver"] }
+critical-section = { version = "1.2", features = ["std"] }
+
+# The on-target example rig. Behind a target cfg so a host test build does not try to compile
+# a Cortex-M PAC -- which is what made this crate untestable off-target in the first place.
+[target.'cfg(target_os = "none")'.dev-dependencies]
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
-embassy-time = { workspace = true, features = ["defmt"] }
 embassy-rp = { workspace = true, features = ["defmt", "time-driver", "rp235xb"] }
 cortex-m-rt.workspace = true
 defmt.workspace = true

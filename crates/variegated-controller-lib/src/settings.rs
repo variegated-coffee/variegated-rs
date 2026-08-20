@@ -33,6 +33,13 @@ pub mod key {
     /// the debug bus by `MachineCommand::SetShotUploadConfig`, and pushed to the comms
     /// processor, which has no flash to keep it in.
     pub const SHOT_UPLOAD_CONFIG: u8 = 3;
+    /// The machine's timezone, as an IANA zone name. Scheduling runs on it; logs stay UTC.
+    ///
+    /// A key of its own, and that is the whole reason it is not a field on the configuration
+    /// blob: appending there would make every previously stored copy fail to deserialize, and
+    /// `load_settings` maps that to `Default` -- a silent factory reset of every machine's
+    /// boiler setpoints in the field, to buy one string. See the note on this module.
+    pub const TIMEZONE: u8 = 4;
 }
 
 /// The flash range every settings store lives in.
@@ -43,10 +50,10 @@ pub mod key {
 /// finding six literals across two binaries, and getting one wrong reads as that machine
 /// having been reset to defaults rather than as a mistake.
 ///
-/// The three stores that share it are distinguished by [`key`], not by address.
+/// The stores that share it are distinguished by [`key`], not by address.
 pub const SETTINGS_RANGE: Range<u32> = 0x0000_0000..0x0008_0000;
 
-/// The four stores every machine keeps, over one flash range.
+/// The five stores every machine keeps, over one flash range.
 ///
 /// Returned rather than boxed into a struct because each has a different `SettingsT` and
 /// the caller wraps them in `Mutex`es of its own choosing.
@@ -61,6 +68,7 @@ pub fn machine_stores<'a, M, T, ConfigT>(
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::bluetooth::BluetoothAssociations>,
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::wifi::StoredWifiCredentials>,
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::shot_upload::ShotUploadConfig>,
+    SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::timezone::TimezoneSetting>,
 )
 where
     M: RawMutex,
@@ -91,6 +99,11 @@ where
             flash,
             SETTINGS_RANGE,
             key::SHOT_UPLOAD_CONFIG,
+        ),
+        SequentialStorageSettingsStorage::new_with_key(
+            flash,
+            SETTINGS_RANGE,
+            key::TIMEZONE,
         ),
     )
 }

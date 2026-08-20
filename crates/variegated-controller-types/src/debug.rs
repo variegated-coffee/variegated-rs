@@ -253,7 +253,23 @@ use crate::Status;
 ///
 ///   Mandatory in both directions for exactly that reason. A desync is at least loud; this is
 ///   silent, and the version is the only thing that can catch it.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x98;
+/// * `0x99` -- the machine has a timezone. [`crate::Configuration`] gained a trailing
+///   `timezone`, and [`crate::MachineCommand`] gained `SetTimezone`, both appended.
+///
+///   The `Configuration` half is the mandatory one, for `0x8B`'s reason again: it is a struct,
+///   postcard has no length prefix to resynchronise on, and `Configuration` reaches the debug
+///   wire inside `Status` -- so an older peer reads the first byte of the zone name as the
+///   start of the next field and everything after it is garbage.
+///
+///   The `MachineCommand` half is the ordinary device-inbound append. It carries no secret,
+///   unlike `0x8E` and `0x90`, so what a mismatch would allow here is a mis-set clock rather
+///   than a leaked token -- but a mis-set clock is a machine that heats at the wrong hour,
+///   which is the whole feature.
+///
+///   Unlike `0x90` and `0x93` this touches **no stored settings blob**. The zone lives at
+///   `settings::key::TIMEZONE`, a key of its own, precisely so that adding it does not reset
+///   every machine's configuration once. That was chosen, not stumbled into.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x99;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

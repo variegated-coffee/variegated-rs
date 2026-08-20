@@ -37,6 +37,7 @@ use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
 };
 use variegated_controller_types::shot_upload::ShotUploadConfig;
+use variegated_controller_types::timezone::TimezoneSetting;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 
 /// Persistent configuration for dual-boiler single-group machine
@@ -425,6 +426,7 @@ pub struct DualBoilerSingleGroupController<
     BluetoothStoreT: SettingsStorage<BluetoothAssociations> + 'static,
     WifiStoreT: SettingsStorage<StoredWifiCredentials> + 'static,
     UploadStoreT: SettingsStorage<ShotUploadConfig> + 'static,
+    TimezoneStoreT: SettingsStorage<TimezoneSetting> + 'static,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
@@ -530,7 +532,22 @@ pub struct DualBoilerSingleGroupController<
     bluetooth_associations: BluetoothAssociations,
     bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
     bluetooth_status: BluetoothScanStatus,
-    bluetooth_publish_pending: bool,
+    /// Set when something folded into `Configuration` *after* the comparison in
+    /// [`Self::publish_configuration_if_changed`] has changed.
+    ///
+    /// That comparison is on `DualBoilerSingleGroupConfiguration`, which holds the persistent
+    /// and ephemeral machine configuration and nothing else.
+    /// [`Self::create_general_configuration`] then folds in three more things that live in
+    /// stores of their own -- the schedules, the Bluetooth associations and the shot-upload
+    /// view -- and a change to any of them is therefore invisible to that comparison. Without
+    /// this flag such a change reached the browser only when the ten-second periodic publish
+    /// came round.
+    ///
+    /// **One flag for all of them rather than one each.** The condition they share is "the
+    /// published configuration is stale for a reason the comparison cannot see", and a flag
+    /// per field is one more chance to add a fourth field and forget. It was
+    /// `bluetooth_publish_pending` when the associations were the only such field.
+    configuration_publish_pending: bool,
     // When the current scan should be considered over even if the comms processor never
     // says so. Without it a comms reset mid-scan would leave `scanning` latched true and
     // the UI's scan button disabled until the next reboot.
@@ -592,6 +609,13 @@ pub struct DualBoilerSingleGroupController<
     // The comms processor has no flash, so this is the only copy on the machine.
     shot_upload_store: &'static Mutex<StorageM, UploadStoreT>,
     shot_upload_config: ShotUploadConfig,
+    timezone_store: &'static Mutex<StorageM, TimezoneStoreT>,
+    /// The machine's timezone, as stored. Applied to the `TimeKeeper` at boot and on change.
+    ///
+    /// Kept in RAM beside the store for `bluetooth_associations`' reason: it is read on every
+    /// configuration assembly and written only when the user changes it, and taking the
+    /// store's lock on the publish path would put a configuration publish behind a flash write.
+    timezone: TimezoneSetting,
     shot_upload_publish_pending: bool,
     // Where the config goes for the transceiver to put on the link. A `Watch` for the same
     // reason as `wifi_credentials_publisher`: only the latest value matters.
@@ -658,11 +682,12 @@ impl<
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     UploadStoreT: SettingsStorage<ShotUploadConfig>,
+    TimezoneStoreT: SettingsStorage<TimezoneSetting>,
     const N_CHANNEL: usize,
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
 /*    fn current_configuration(&self) -> DualBoilerSingleGroupConfiguration {
         DualBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -700,6 +725,7 @@ impl<
         // with no comms processor.
         wifi_credentials_publisher: Option<embassy_sync::watch::Sender<'a, ChannelM, StoredWifiCredentials, 2>>,
         shot_upload_store: &'static Mutex<StorageM, UploadStoreT>,
+        timezone_store: &'static Mutex<StorageM, TimezoneStoreT>,
         // Where the shot-log upload config goes for the transceiver to put on the link.
         // `None` on a machine with no comms processor -- which is also a machine that
         // cannot upload anything, so the config is stored and simply never acted on.
@@ -787,7 +813,7 @@ impl<
             bluetooth_associations: BluetoothAssociations::default(),
             bluetooth_scan_sender,
             bluetooth_status: BluetoothScanStatus::default(),
-            bluetooth_publish_pending: false,
+            configuration_publish_pending: false,
             bluetooth_scan_deadline: None,
             wifi_store,
             wifi_credentials: StoredWifiCredentials::default(),
@@ -799,6 +825,8 @@ impl<
             shot_upload_store,
             shot_upload_config: ShotUploadConfig::default(),
             shot_upload_publish_pending: false,
+            timezone_store,
+            timezone: TimezoneSetting::default(),
             shot_upload_config_publisher,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
@@ -928,6 +956,8 @@ impl<
         // reduces it to `token_set: bool`, so there is no path from here to the browser
         // carrying the secret even if someone later assigns the whole config by mistake.
         configuration.shot_upload = (&self.shot_upload_config).into();
+        // From the RAM copy for the same reason as the two above.
+        configuration.timezone = self.timezone.clone();
 
         configuration
     }
@@ -952,7 +982,7 @@ impl<
         // So a change here is invisible to that comparison and needs to say so itself,
         // or an association would not reach the comms processor until something else
         // happened to dirty the configuration.
-        self.bluetooth_publish_pending = true;
+        self.configuration_publish_pending = true;
     }
 
     /// Persist the Wi-Fi credentials, and tell the comms processor they changed.
@@ -964,7 +994,7 @@ impl<
     /// Unlike the association list this deliberately does **not** ride on the
     /// `Configuration` publish. That path ends at the browser, and a password has no
     /// business on it -- so this needs a flag of its own rather than reusing
-    /// `bluetooth_publish_pending`'s trick of dirtying the configuration.
+    /// `configuration_publish_pending`'s trick of dirtying the configuration.
     /// Forget the stored network, persistently.
     ///
     /// Writing the cleared value is the whole point: the state this reproduces is a machine
@@ -1014,7 +1044,30 @@ impl<
             }
             Err(_) => log_warn!("Failed to acquire shot_upload_store lock for save (timeout)"),
         }
+        // Two flags, two destinations, and they are not interchangeable. This one sends the
+        // full config -- token included -- to the comms processor on its own watch.
         self.shot_upload_publish_pending = true;
+        // And this one republishes `Configuration`, which carries the redacted `ShotUploadView`
+        // the browser reads. Without it the settings panel showed a stale endpoint for up to
+        // ten seconds after an edit, exactly as the schedule list did.
+        self.configuration_publish_pending = true;
+    }
+
+    /// Persist the timezone, and republish the configuration that carries it.
+    ///
+    /// No watch of its own, unlike the shot-upload config: the comms processor has no use for
+    /// the zone -- it keeps time in UTC and sends UTC seconds — and the browser reads it from
+    /// `Configuration`.
+    async fn save_timezone(&mut self) {
+        match with_timeout(Duration::from_millis(100), self.timezone_store.lock()).await {
+            Ok(mut store) => {
+                if store.save_settings(&self.timezone).await.is_err() {
+                    log_warn!("Failed to save timezone");
+                }
+            }
+            Err(_) => log_warn!("Failed to acquire timezone_store lock for save (timeout)"),
+        }
+        self.configuration_publish_pending = true;
     }
 
     pub async fn task(&mut self) {
@@ -1036,7 +1089,7 @@ impl<
         log_info!("Loaded {} Bluetooth associations", self.bluetooth_associations.0.len());
         // The comms processor asks for these itself at boot, but it has no way to know
         // whether this processor was simply slow to answer, so publish once regardless.
-        self.bluetooth_publish_pending = true;
+        self.configuration_publish_pending = true;
 
         // Once, before the loop, for the same reason as the association list above.
         self.wifi_credentials = match self.wifi_store.lock().await.load_settings().await {
@@ -1073,6 +1126,22 @@ impl<
             if self.shot_upload_config.token.is_some() { "configured" } else { "none stored" }
         );
         self.shot_upload_publish_pending = true;
+        // Explicitly, rather than relying on the association load above having already set it.
+        // That is true today -- this whole prologue is straight-line before the loop -- but it
+        // is not a property either block states, and the failure it would produce is a stored
+        // endpoint the settings panel never shows.
+        self.configuration_publish_pending = true;
+
+        // The stored zone, into RAM only. The `TimeKeeper` was already told in `main`, before
+        // any task was spawned, because the scheduler and this controller start together and a
+        // scheduler tick taken before this point would be a tick in the wrong zone.
+        self.timezone = match self.timezone_store.lock().await.load_settings().await {
+            Ok(setting) => setting,
+            Err(_) => {
+                log_warn!("Failed to load timezone; assuming UTC");
+                TimezoneSetting::default()
+            }
+        };
 
         loop {
             // A scan the comms processor never reported the end of -- because it reset,
@@ -1302,8 +1371,8 @@ impl<
             }
         }
 
-        if self.configuration != previous_configuration || self.bluetooth_publish_pending {
-            self.bluetooth_publish_pending = false;
+        if self.configuration != previous_configuration || self.configuration_publish_pending {
+            self.configuration_publish_pending = false;
             self.publish_general_configuration().await;
 
             return self.configuration.clone();
@@ -2294,31 +2363,37 @@ impl<
             MachineCommand::RemoveScheduleItem(idx) => {
                 log_info!("Removing schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => {
-                        let res = store.remove_schedule(idx as usize).await;
-                        if res.is_none() {
-                            log_warn!("Failed to remove schedule at index {}: index out of bounds", idx);
-                        }
-                    }
+                    Ok(mut store) => match store.remove_schedule(idx as usize).await {
+                        Ok(Some(_)) => self.configuration_publish_pending = true,
+                        // Distinguished from the arm below, because they are different
+                        // problems: this one is a client naming an index that is not there,
+                        // that one is a flash write that failed.
+                        Ok(None) => log_warn!("No schedule at index {} to remove", idx),
+                        Err(e) => log_warn!("Failed to remove schedule at index {}: {}", idx, e),
+                    },
                     Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::AddScheduleItem(item) => {
                 log_info!("Adding new schedule item");
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => store.add_schedule(item).await,
+                    Ok(mut store) => match store.add_schedule(item).await {
+                        Ok(index) => {
+                            log_info!("Added schedule at index {}", index);
+                            self.configuration_publish_pending = true;
+                        }
+                        Err(e) => log_warn!("Failed to add schedule: {}", e),
+                    },
                     Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
             MachineCommand::UpdateScheduleItem(idx, item) => {
                 log_info!("Updating schedule item at index {}", idx);
                 match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => {
-                        let res = store.update_schedule(idx as usize, item).await;
-                        if res.is_err() {
-                            log_warn!("Failed to update schedule at index {}: index out of bounds", idx);
-                        }
-                    }
+                    Ok(mut store) => match store.update_schedule(idx as usize, item).await {
+                        Ok(()) => self.configuration_publish_pending = true,
+                        Err(e) => log_warn!("Failed to update schedule at index {}: {}", idx, e),
+                    },
                     Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
                 }
             }
@@ -2335,9 +2410,13 @@ impl<
             MachineCommand::RemoveRoutine(idx) => {
                 match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
                     Ok(mut repo) => {
-                        let res = repo.remove_routine(idx).await;
-                        if res.is_none() {
-                            log_warn!("Failed to remove routine at index {}: index out of bounds", idx);
+                        match repo.remove_routine(idx).await {
+                            Ok(Some(_)) => {}
+                            // Two different problems, and they used to be the same answer:
+                            // a client naming an index that is not there, versus a flash
+                            // write that failed.
+                            Ok(None) => log_warn!("No routine at index {} to remove", idx),
+                            Err(e) => log_warn!("Failed to remove routine at index {}: {}", idx, e),
                         }
                     }
                     Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
@@ -2379,6 +2458,15 @@ impl<
                     log_warn!("Failed to send OptimizeRoutines command: channel full");
                 }
             }
+            // **No `configuration_publish_pending`, deliberately.** The compaction happens
+            // later and in `storage_task`, not here, so a flag set now would advertise a
+            // change that has not happened yet. And it would advertise nothing anyway:
+            // `Configuration.schedules` is a `Vec<ScheduleItem>` carrying no indices, so
+            // renumbering is invisible to a browser.
+            //
+            // @todo It is *not* invisible to the GS3 panel, whose menu resolves a schedule by
+            // storage index. Optimizing while a schedule screen is open can leave that screen
+            // pointing at a different schedule. Pre-existing, and out of scope here.
             MachineCommand::OptimizeScheduleStorage => {
                 log_info!("Sending OptimizeSchedules to storage task");
                 if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeSchedules) {
@@ -2755,6 +2843,26 @@ impl<
                 log_info!("Identify requested");
                 if let Some(publisher) = self.identify_publisher.as_ref() {
                     publisher.send(Instant::now());
+                }
+            }
+            MachineCommand::SetTimezone(setting) => {
+                match variegated_timekeeping::TimeZoneWrapper::from_iana_name(setting.as_str()) {
+                    Some(zone) => {
+                        // Applied before it is stored, so a `TimeKeeper` that refuses it does
+                        // not leave flash claiming a zone the scheduler is not using.
+                        if let Err(e) = TimeKeeper::set_timezone(zone) {
+                            log_warn!("Failed to apply timezone: {:?}", e);
+                        } else {
+                            log_info!("Timezone set to {}", setting.as_str());
+                            self.timezone = setting;
+                            self.save_timezone().await;
+                        }
+                    }
+                    // Refused, not stored. This firmware's database is trimmed at build time,
+                    // so "unknown" here usually means "outside the region this build carries"
+                    // rather than "misspelt" -- and either way the honest outcome is that the
+                    // machine keeps the zone it had, and says so.
+                    None => log_warn!("Refusing unknown timezone: {}", setting.as_str()),
                 }
             }
             MachineCommand::RequestConfiguration => {

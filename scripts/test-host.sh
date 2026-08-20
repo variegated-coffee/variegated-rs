@@ -88,6 +88,14 @@ run "variegated-machine-menu" -p variegated-machine-menu "$@"
 # plain `u64` rather than an `embassy_time::Instant`, so a test binary has no
 # `_embassy_time_now` to link against.
 run "variegated-buttons" -p variegated-buttons "$@"
+# Timezone resolution, and -- the reason this suite exists -- what the shipped
+# `CHRONO_TZ_TIMEZONE_FILTER` actually contains. That regex lives in three
+# `.cargo/config.toml` files and nothing else observes it, so a widened one would otherwise be
+# found as a link-time flash overflow and a narrowed one by a user whose schedules quietly ran
+# in UTC. `named-timezones` is required, not optional: without it there is no database to
+# assert anything about. The variable reaches this from the root config, because `run` is
+# invoked with the repo root as the working directory.
+run "variegated-timekeeping" -p variegated-timekeeping --features named-timezones "$@"
 run "variegated-debug (source-application)" -p variegated-debug --features source-application,std "$@"
 run "variegated-debug (source-comms)" -p variegated-debug --features source-comms,std "$@"
 run "variegated-instrumentation" -p variegated-instrumentation --features instrumentation "$@"

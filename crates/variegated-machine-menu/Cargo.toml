@@ -13,6 +13,12 @@ license = "MIT OR Apache-2.0"
 defmt = { workspace = true, optional = true }
 heapless.workspace = true
 
+# For `Weekday` and `NaiveDate`, which `ScheduleTrigger` is expressed in. Already a
+# non-optional dependency of `variegated-controller-types`, so this adds nothing to the
+# graph -- it only names what this crate reads directly rather than reaching through a
+# re-export.
+chrono.workspace = true
+
 # `default-features = false` is not optional. This crate's default set pulls defmt in
 # unconditionally, which would defeat the opt-in above. `double_boiler`/`single_group` are
 # pure marker features that gate nothing in that crate, so dropping them costs nothing.
