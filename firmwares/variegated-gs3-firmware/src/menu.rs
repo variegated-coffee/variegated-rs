@@ -26,17 +26,21 @@ use variegated_controller_types::{
 };
 use variegated_machine_menu::{
     boiler_temperature_adjustable, format_value, parameter_adjustable, parameter_geometry,
-    parameter_row, ParameterListChrome, ParameterRow, ParameterValues, RoutineRows, UnitStyle,
-    VALUE_TEXT_LEN,
+    parameter_row, ParameterListChrome, ParameterRow, ParameterValues, RoutineRows, ScheduleChange,
+    ScheduleRow, ScheduleRows, TimeEdit, UnitStyle, VALUE_TEXT_LEN,
 };
 use variegated_menu::{Adjustable, ListGeometry, MenuStack};
 
 /// How deep the menu stack can go.
 ///
-/// The deepest path is `Root -> Routines -> RoutineParameters -> EditParameter`, which is
-/// **exactly four**. There is no spare level: `MenuStack::push` returns `false` on a full
-/// stack and changes nothing, so a fifth would read as a button that does nothing, which is
-/// the failure mode `geometry`'s `wrap` exists to avoid. Add a level and raise this.
+/// Two paths reach the bottom, both **exactly four**:
+/// `Root -> Routines -> RoutineParameters -> EditParameter`, and
+/// `Root -> Schedules -> ScheduleItem -> EditScheduleTime`.
+///
+/// There is no spare level: `MenuStack::push` returns `false` on a full stack and changes
+/// nothing, so a fifth would read as a button that does nothing, which is the failure mode
+/// `geometry`'s `wrap` exists to avoid. Add a level and raise this -- which is what anything
+/// below a schedule's fields, such as a recurrence editor or an action list, would need.
 pub const MENU_MAX_DEPTH: usize = 4;
 
 /// Rows on screen at once on the 428x168 TFT. See `render_menu`.
@@ -98,32 +102,58 @@ pub enum MenuId {
     WifiInfo,
     /// One row per Bluetooth association.
     Bluetooth,
+    /// Every stored schedule, one row each.
+    Schedules,
+    /// One schedule's three editable facts: time, recurrence, enabled.
+    ///
+    /// Carries the **storage index**, for [`MenuId::RoutineParameters`]' reason and one
+    /// sharper: schedule indices are not merely ordered differently, they are *sparse*.
+    /// `ScheduleStore::add_schedule` fills holes left by `remove_schedule`, so the *n*th row
+    /// is not index *n* -- and `MachineCommand::UpdateScheduleItem` names the index. Deriving
+    /// it from a row position would rewrite a different schedule than the one on screen.
+    ScheduleItem(u32),
+    /// Editing that schedule's trigger time.
+    EditScheduleTime(u32),
+}
+
+/// What shape of screen a frame is, which is what decides what buttons 1-4 do.
+///
+/// An **exhaustive match rather than a `matches!`**, so that a new variant is a compile error
+/// here rather than silently answering "list" -- which would put buttons 1 and 2 on a
+/// selection, on a screen that has no rows to select. That was [`MenuId::is_editor`]'s reason
+/// and it is unchanged; this only widens the answer from two cases to three, in one place
+/// rather than two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum MenuKind {
+    /// Rows. 1 and 2 move the selection, 3 activates, 4 pops.
+    List,
+    /// One number. 1 and 2 move it, 3 confirms, 4 cancels.
+    NumberEditor,
+    /// One time. 1 and 2 move a field, 3 switches field, **4 commits** -- there is no cancel.
+    TimeEditor,
 }
 
 impl MenuId {
-    /// Whether this frame edits a value rather than showing a list.
-    ///
-    /// An editor has no rows, and buttons 1 and 2 move the *value* rather than the selection.
-    ///
-    /// An **exhaustive match rather than a `matches!`**, so that a new variant is a compile
-    /// error here rather than silently answering `false` -- which would put buttons 1 and 2
-    /// on a selection, on a screen that has no rows to select. This was the same trap
-    /// `confirm_editor` carried in its `_ => None`, and it is worth closing the same way.
-    pub const fn is_editor(&self) -> bool {
+    /// What shape of screen this frame is. See [`MenuKind`].
+    pub const fn kind(&self) -> MenuKind {
         match self {
             MenuId::EditParameter { .. }
             | MenuId::EditBrewTemperature
             | MenuId::EditSteamTemperature
-            | MenuId::EditBrewTarget => true,
+            | MenuId::EditBrewTarget => MenuKind::NumberEditor,
+            MenuId::EditScheduleTime(_) => MenuKind::TimeEditor,
             MenuId::Root
             | MenuId::Settings
             | MenuId::Routines
             | MenuId::RoutineParameters(_)
             | MenuId::Scale
             | MenuId::WifiInfo
-            | MenuId::Bluetooth => false,
+            | MenuId::Bluetooth
+            | MenuId::Schedules
+            | MenuId::ScheduleItem(_) => MenuKind::List,
         }
     }
+
 }
 
 /// What activating a fixed row does, and what its value column reads.
@@ -175,6 +205,15 @@ pub enum MenuItemKind {
     WifiRssi,
     /// The DHCP address. Read-only.
     WifiIp,
+    /// Opens the schedules submenu.
+    OpenSchedules,
+    /// Edits a schedule's trigger time.
+    ScheduleTime,
+    /// When a schedule repeats. Read-only -- a day set is seven independent switches and a
+    /// date is a calendar, neither of which four buttons can express.
+    ScheduleRecurrence,
+    /// Toggles whether a schedule fires. Acts in place, like a Bluetooth row.
+    ScheduleEnabled,
     /// Leaves the current menu; at the root that closes it.
     Exit,
 }
@@ -221,10 +260,27 @@ pub struct MenuItem {
 /// Routines first: it is what the menu gets opened for. Settings is the thing you visit when
 /// something has changed, and on a panel that shows one row at a time on the character LCD,
 /// the order *is* the number of presses.
+/// Four rows against [`MENU_VISIBLE_ROWS`], so the root still fits without scrolling.
 const ROOT_ITEMS: &[MenuItem] = &[
     MenuItem { label: "Routines", kind: MenuItemKind::OpenRoutines },
+    MenuItem { label: "Schedules", kind: MenuItemKind::OpenSchedules },
     MenuItem { label: "Settings", kind: MenuItemKind::OpenSettings },
     MenuItem { label: "Exit menu", kind: MenuItemKind::Exit },
+];
+
+/// One schedule's three rows, and only three.
+///
+/// **Fixed, not derived from the schedule.** A schedule can carry any number of actions and an
+/// arbitrary day set; neither is editable from four buttons, and a row per action would make
+/// this list change length between schedules -- which the button task and both renderers each
+/// resolve a selection index against independently.
+///
+/// Time first, because it is the one that gets changed. Recurrence is here read-only so that
+/// someone about to move 07:30 can see it is the weekdays one before they do.
+const SCHEDULE_ITEM_ITEMS: &[MenuItem] = &[
+    MenuItem { label: "Time", kind: MenuItemKind::ScheduleTime },
+    MenuItem { label: "Recurrence", kind: MenuItemKind::ScheduleRecurrence },
+    MenuItem { label: "Enabled", kind: MenuItemKind::ScheduleEnabled },
 ];
 
 /// Settings, in the order the tree gives: the numbers you change while tasting first, then
@@ -266,7 +322,7 @@ const WIFI_INFO_ITEMS: &[MenuItem] = &[
 
 /// Every fixed row in this file, for the width assertion below.
 const ALL_ITEM_TABLES: &[&[MenuItem]] =
-    &[ROOT_ITEMS, SETTINGS_ITEMS, SCALE_ITEMS, WIFI_INFO_ITEMS];
+    &[ROOT_ITEMS, SETTINGS_ITEMS, SCALE_ITEMS, WIFI_INFO_ITEMS, SCHEDULE_ITEM_ITEMS];
 
 /// Twelve characters, and this is checked at compile time rather than trusted.
 ///
@@ -316,6 +372,9 @@ fn fixed_items(menu: MenuId, data: &MenuData) -> &'static [MenuItem] {
         MenuId::Settings => SETTINGS_ITEMS,
         MenuId::Scale => scale_items(data),
         MenuId::WifiInfo => WIFI_INFO_ITEMS,
+        // `ScheduleItem` deliberately does not route through here. Its rows are
+        // `MenuRow::ScheduleField`, not plain `MenuRow::Item`, because two of the three read
+        // something out of the schedule and `value`/`info_value` see only a row.
         _ => &[],
     }
 }
@@ -362,6 +421,17 @@ pub struct MenuData<'a> {
     /// does. `None` before the first `Configuration` arrives, which makes the screen briefly
     /// empty rather than wrong.
     pub bluetooth: Option<&'a BluetoothPeripheralList>,
+    /// Every stored schedule, for [`MenuId::Schedules`] and the menus below it.
+    ///
+    /// **Published rather than fetched per side**, unlike [`Self::routines`]. Two sides
+    /// fetching a sparse-indexed list independently is two chances to disagree about its
+    /// length -- and this list changes *under* the user, because toggling `Enabled` rewrites
+    /// it. The button task builds it once from the store and publishes it in
+    /// [`MenuConfigSnapshot`], which is the route [`Self::bluetooth`] already takes.
+    ///
+    /// `None` before the first publish, which makes the screen briefly empty rather than
+    /// wrong. An *empty* list is a different and legitimate answer.
+    pub schedules: Option<&'a ScheduleRows>,
     /// The unit [`MenuId::EditBrewTarget`] is currently editing. See [`editor_unit`].
     pub brew_target_unit: Option<ParameterUnit>,
 }
@@ -371,6 +441,16 @@ impl MenuData<'_> {
     fn param_count(&self) -> usize {
         self.routine.map_or(0, |r| r.parameters().len())
     }
+}
+
+/// The row for a storage index, if the list has arrived and still holds it.
+///
+/// `None` covers two situations that look the same from here and are both handled the same
+/// way: the list has not been published yet, and the schedule was deleted from the web while
+/// its screen was open. Both leave a screen with no rows rather than a screen showing another
+/// schedule's values under this one's title.
+fn schedule_row<'a>(data: &MenuData<'a>, index: u32) -> Option<&'a ScheduleRow> {
+    data.schedules?.iter().find(|row| row.index == index)
 }
 
 /// Data an open menu needs that only an async fetch can supply.
@@ -480,6 +560,33 @@ pub enum MenuRow<'a> {
         /// Whether it is currently switched on.
         enabled: bool,
     },
+    /// One schedule in the schedules list.
+    Schedule {
+        /// The **storage** index. What activating this names, and what
+        /// `MachineCommand::UpdateScheduleItem` takes. Sparse -- see
+        /// [`MenuId::ScheduleItem`].
+        index: u32,
+        /// `HH:MM <action>`, built by `variegated_machine_menu::schedule_label`.
+        ///
+        /// Owned for [`MenuRow::BluetoothPeripheral`]'s structural reason rather than its
+        /// safety one -- there is no externally-chosen text here to sanitise, but [`label`]
+        /// returns a borrow and a schedule has no stored name to borrow. A `MenuRow` is built
+        /// per lookup and dropped with the frame, so this costs nothing on the `Watch`, which
+        /// is why [`ScheduleRow`] itself carries no strings.
+        label: heapless::String<{ variegated_machine_menu::SCHEDULE_LABEL_LEN }>,
+        /// Whether it currently fires, for the value column.
+        enabled: bool,
+    },
+    /// One of the three rows inside a schedule.
+    ///
+    /// Carries the schedule as well as the table entry, because two of the three read
+    /// something out of it -- and because [`value`] and [`info_value`] see only a row.
+    ScheduleField {
+        /// Its table entry, for the label and for which of the three this is.
+        item: &'a MenuItem,
+        /// Which schedule, and what it currently says.
+        schedule: &'a ScheduleRow,
+    },
     /// The row at the bottom of a parameter screen that runs the routine.
     Run {
         index: RoutineIndex,
@@ -503,11 +610,19 @@ pub fn row_count(menu: MenuId, data: &MenuData) -> usize {
         // The parameters, then Run. A routine with no parameters still gets the screen, and
         // it is one row long -- see `activate`.
         MenuId::RoutineParameters(_) => data.param_count() + 1,
+        MenuId::Schedules => data.schedules.map_or(0, |rows| rows.len()),
+        // Three rows, but only once the schedule is actually there. A schedule deleted from
+        // the web while its screen is open leaves an empty list rather than three rows
+        // reading another schedule's values.
+        MenuId::ScheduleItem(index) => {
+            if schedule_row(data, index).is_some() { SCHEDULE_ITEM_ITEMS.len() } else { 0 }
+        }
         // An editor has no rows.
         MenuId::EditParameter { .. }
         | MenuId::EditBrewTemperature
         | MenuId::EditSteamTemperature
-        | MenuId::EditBrewTarget => 0,
+        | MenuId::EditBrewTarget
+        | MenuId::EditScheduleTime(_) => 0,
     }
 }
 
@@ -561,6 +676,17 @@ pub fn row<'a>(menu: MenuId, index: usize, data: &MenuData<'a>) -> Option<MenuRo
                 name: r.name.as_str(),
                 runnable: r.runnable,
             }),
+        MenuId::Schedules => data.schedules?.get(index).map(|schedule| MenuRow::Schedule {
+            index: schedule.index,
+            label: variegated_machine_menu::schedule_label(schedule),
+            enabled: schedule.enabled,
+        }),
+        MenuId::ScheduleItem(schedule_index) => {
+            let schedule = schedule_row(data, schedule_index)?;
+            SCHEDULE_ITEM_ITEMS
+                .get(index)
+                .map(|item| MenuRow::ScheduleField { item, schedule })
+        }
         MenuId::RoutineParameters(routine_index) => {
             let routine = data.routine?;
             match parameter_row(index, routine.parameters().len(), PARAMETER_CHROME) {
@@ -584,7 +710,8 @@ pub fn row<'a>(menu: MenuId, index: usize, data: &MenuData<'a>) -> Option<MenuRo
         MenuId::EditParameter { .. }
         | MenuId::EditBrewTemperature
         | MenuId::EditSteamTemperature
-        | MenuId::EditBrewTarget => None,
+        | MenuId::EditBrewTarget
+        | MenuId::EditScheduleTime(_) => None,
     }
 }
 
@@ -613,6 +740,8 @@ pub fn label<'r>(row: &'r MenuRow<'_>, ctx: &MenuContext) -> &'r str {
         MenuRow::BluetoothPeripheral { name, .. } if name.is_empty() => "(unnamed)",
         MenuRow::BluetoothPeripheral { name, .. } => name,
         MenuRow::ScaleAction { item, .. } => item.label,
+        MenuRow::Schedule { label, .. } => label,
+        MenuRow::ScheduleField { item, .. } => item.label,
         MenuRow::Run { .. } => "Run routine",
     }
 }
@@ -640,6 +769,14 @@ pub fn title<'a>(menu: MenuId, data: &MenuData<'a>) -> &'a str {
         MenuId::Scale => "Scale",
         MenuId::WifiInfo => "Wi-Fi Info",
         MenuId::Bluetooth => "Bluetooth",
+        MenuId::Schedules => "Schedules",
+        // Not the schedule's own label, the way a routine's parameter screen is titled with
+        // its name -- a `Routine` owns a `String` this can borrow, and a `ScheduleRow`
+        // deliberately owns no strings at all so that sixty-four of them stay cheap on the
+        // `Watch`. The schedule was chosen one press ago and its three rows spell out what it
+        // is, which is the same trade `EditBrewTarget` makes above.
+        MenuId::ScheduleItem(_) => "Schedule",
+        MenuId::EditScheduleTime(_) => "Time",
     }
 }
 
@@ -654,6 +791,11 @@ pub fn empty_label(menu: MenuId) -> &'static str {
     match menu {
         MenuId::Bluetooth => "None paired",
         MenuId::Routines => "No routines",
+        MenuId::Schedules => "No schedules",
+        // Covers both "the list has not arrived" and "deleted from the web while this screen
+        // was open", which are indistinguishable from here and want the same answer: better
+        // than three rows drawn from a schedule that is no longer there.
+        MenuId::ScheduleItem(_) => "No schedule",
         // Every other menu has fixed rows and cannot be empty. Reached only if one grows a
         // data-driven list without coming here, so it says nothing rather than guessing.
         _ => "",
@@ -971,15 +1113,22 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
             MenuItemKind::WifiSsid | MenuItemKind::WifiRssi | MenuItemKind::WifiIp => {
                 ctx.wifi.is_none().then_some(MenuValue::Text(UNAVAILABLE))
             }
+            // The three schedule field kinds are reached only as `MenuRow::ScheduleField`,
+            // below, which is what carries the schedule their values come from. A bare
+            // `MenuRow::Item` with one of these kinds is a row this file did not build.
             MenuItemKind::OpenSettings
             | MenuItemKind::OpenRoutines
             | MenuItemKind::OpenScale
             | MenuItemKind::OpenWifiInfo
             | MenuItemKind::OpenBluetooth
+            | MenuItemKind::OpenSchedules
             | MenuItemKind::Standby
             | MenuItemKind::ScaleTare
             | MenuItemKind::ScaleZeroCalibrate
             | MenuItemKind::ScaleCalibrate100g
+            | MenuItemKind::ScheduleTime
+            | MenuItemKind::ScheduleRecurrence
+            | MenuItemKind::ScheduleEnabled
             | MenuItemKind::Exit => None,
         },
         MenuRow::Parameter { param, value, .. } => {
@@ -988,6 +1137,20 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
         MenuRow::BluetoothPeripheral { enabled, .. } => {
             Some(MenuValue::Text(if *enabled { "ON" } else { "OFF" }))
         }
+        // The list row's value is the switch, so a user can see at a glance which schedules
+        // are live without opening each one. The time is already in the label.
+        MenuRow::Schedule { enabled, .. } => {
+            Some(MenuValue::Text(if *enabled { "ON" } else { "OFF" }))
+        }
+        MenuRow::ScheduleField { item, schedule } => match item.kind {
+            MenuItemKind::ScheduleEnabled => {
+                Some(MenuValue::Text(if schedule.enabled { "ON" } else { "OFF" }))
+            }
+            // `07:30` is five characters and a recurrence up to thirty-two, against a
+            // four-column value field. Both take `info_value` instead, for the reason the
+            // Wi-Fi rows do.
+            _ => None,
+        },
         // Only ever "switched off" -- an unsupporting scale has no calibration row at all.
         MenuRow::ScaleAction { available: false, .. } => Some(MenuValue::Text(NO_SENSOR)),
         MenuRow::ScaleAction { .. } => None,
@@ -1032,6 +1195,26 @@ pub fn info_value(
     ssid: &str,
 ) -> Option<heapless::String<INFO_TEXT_LEN>> {
     use core::fmt::Write;
+
+    // A schedule's time and recurrence take this path for the Wi-Fi rows' reason: `07:30` is
+    // five characters and a recurrence up to thirty-two, against a four-column value field.
+    // In a list row they would not truncate, they would be cut to `07:3` and `Week`.
+    if let MenuRow::ScheduleField { item, schedule } = row {
+        let mut out = heapless::String::new();
+        match item.kind {
+            MenuItemKind::ScheduleTime => {
+                let _ = write!(out, "{:02}:{:02}", schedule.hour, schedule.minute);
+            }
+            MenuItemKind::ScheduleRecurrence => {
+                let _ = out.push_str(
+                    variegated_machine_menu::schedule_recurrence(schedule).as_str(),
+                );
+            }
+            // `Enabled` is `ON`/`OFF`, which fits a value column. See `value`.
+            _ => return None,
+        }
+        return Some(out);
+    }
 
     let MenuRow::Item(item) = row else { return None };
     if !item.kind.is_info() {
@@ -1109,6 +1292,31 @@ pub enum MenuActivation {
     /// with no sign anything had happened. Every other state transition on this panel --
     /// the `{5,3}` power chord, running a routine -- also leaves the menu behind.
     CommandAndClose(MachineCommand),
+    /// Open the time editor, seeded from the stored trigger.
+    ///
+    /// Separate from [`Self::Edit`] because a time is not an `Adjustable`: it wraps where a
+    /// clamped number saturates, it has two fields, and button 3 switches between them where
+    /// on a number it confirms.
+    EditTime {
+        /// The editor frame to push.
+        menu: MenuId,
+        /// What it starts at.
+        value: TimeEdit,
+    },
+    /// Rewrite one stored schedule.
+    ///
+    /// Names the *change* rather than carrying a `ScheduleItem`, because applying one needs
+    /// the stored item and this function has only a row. The button task resolves it against
+    /// the store in its async loop -- reading the item there, rather than from a cache, is
+    /// what stops a schedule edited from the web a second ago being silently reverted.
+    ///
+    /// Not a [`Self::Command`], because building the command is the part that has to await.
+    UpdateSchedule {
+        /// The storage index. Sparse -- see [`MenuId::ScheduleItem`].
+        index: u32,
+        /// What to change about it.
+        change: ScheduleChange,
+    },
     /// Close the menu, then run this routine. In that order, and the order is the point:
     /// see the note on the variant's only caller.
     RunRoutine(RoutineIndex),
@@ -1272,6 +1480,13 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
             MenuItemKind::WifiSsid | MenuItemKind::WifiRssi | MenuItemKind::WifiIp => {
                 MenuActivation::Refuse
             }
+            MenuItemKind::OpenSchedules => MenuActivation::Enter(MenuId::Schedules),
+            // Reached only through `MenuRow::ScheduleField`, which carries the schedule these
+            // act on. A bare `Item` with one of these kinds is a row this file did not build,
+            // so refusing is the safe reading -- the same rule as the calibration rows above.
+            MenuItemKind::ScheduleTime
+            | MenuItemKind::ScheduleRecurrence
+            | MenuItemKind::ScheduleEnabled => MenuActivation::Refuse,
             MenuItemKind::Exit => MenuActivation::Pop,
         },
 
@@ -1313,6 +1528,30 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
         MenuRow::Parameter { routine, position, param, value } => MenuActivation::Edit {
             menu: MenuId::EditParameter { routine: *routine, position: *position as u8 },
             value: parameter_adjustable(param, *value),
+        },
+
+        // Selecting a schedule opens its fields; it never toggles it. Same rule as a routine
+        // above: what a press does has to be predictable before it is made, and this list's
+        // rows differ from each other only in a time and a word.
+        MenuRow::Schedule { index, .. } => MenuActivation::Enter(MenuId::ScheduleItem(*index)),
+
+        MenuRow::ScheduleField { item, schedule } => match item.kind {
+            MenuItemKind::ScheduleTime => MenuActivation::EditTime {
+                menu: MenuId::EditScheduleTime(schedule.index),
+                value: TimeEdit::new(schedule.hour, schedule.minute),
+            },
+            // Read-only, and the value column already shows it. Refused rather than silently
+            // ignored so the press is at least logged, and so that a recurrence editor added
+            // later has to say so here.
+            MenuItemKind::ScheduleRecurrence => MenuActivation::Refuse,
+            // Toggles in place, like a Bluetooth association: no screen for a switch with two
+            // positions, both of which are already visible in the value column.
+            MenuItemKind::ScheduleEnabled => MenuActivation::UpdateSchedule {
+                index: schedule.index,
+                change: ScheduleChange::Enabled(!schedule.enabled),
+            },
+            // Not a kind `SCHEDULE_ITEM_ITEMS` contains.
+            _ => MenuActivation::Refuse,
         },
 
         // The controller refuses `RunRoutine` outright unless the machine is On, and the menu
@@ -1416,6 +1655,14 @@ pub fn confirm_editor(menu: MenuId, value: f32, config: &MenuConfig) -> Option<M
         }
         // A routine parameter's value never leaves the button task until the routine runs.
         MenuId::EditParameter { .. } => None,
+        // **Committed by `handle_time_editor_press`, not here.** This function's input is an
+        // `f32` and a time is two `u8`s, so it could not be reached without a wider parameter
+        // anyway -- and widening it would still not be enough. `MenuData::schedules` holds
+        // *rows*, not `ScheduleItem`s, and `UpdateScheduleItem` replaces the item wholesale:
+        // building one needs the stored `on_days`, `on_date`, `once` and `commands`, which
+        // only the store has. Reading those from the store at commit time rather than from a
+        // cache is what stops a schedule edited from the web a second ago being reverted.
+        MenuId::EditScheduleTime(_) => None,
         // Not an editor. Listed rather than wildcarded so that a new editor frame is a
         // compile error here -- this was the one non-exhaustive match in the file, and a
         // missing arm is a confirm that silently does nothing.
@@ -1425,7 +1672,9 @@ pub fn confirm_editor(menu: MenuId, value: f32, config: &MenuConfig) -> Option<M
         | MenuId::RoutineParameters(_)
         | MenuId::Scale
         | MenuId::WifiInfo
-        | MenuId::Bluetooth => None,
+        | MenuId::Bluetooth
+        | MenuId::Schedules
+        | MenuId::ScheduleItem(_) => None,
     }
 }
 
@@ -1441,6 +1690,43 @@ fn unit_adjustable(unit: ParameterUnit, current: f32) -> Adjustable {
 
 /// The GS3's menu stack, as published and as drawn.
 pub type GsMenu = MenuStack<MenuId, MENU_MAX_DEPTH>;
+
+/// What an open editor frame is editing.
+///
+/// **An enum rather than a second `Option` field on [`MenuSnapshot`].** Two options admit four
+/// states, of which two are nonsense -- both set, and neither set on a screen that *is* an
+/// editor -- and every reader would then have to re-derive from the [`MenuId`] which of the
+/// two applies. That is three independent derivations (the button task and both renderers) of
+/// a fact the payload can simply carry, and this file's whole contract is that the two sides
+/// never decide the same thing separately. It also leaves `pop_menu` one field to clear
+/// rather than two, and the one that gets missed is always the second.
+///
+/// `Copy`, because [`MenuSnapshot`] is a `Watch` payload and must stay so.
+#[derive(Debug, Clone, Copy, PartialEq, defmt::Format)]
+pub enum EditorState {
+    /// A quantity with a range and a step.
+    Number(Adjustable),
+    /// A schedule's trigger time.
+    Time(TimeEdit),
+}
+
+impl EditorState {
+    /// The `Adjustable`, for the paths that only ever see a number.
+    pub const fn number(self) -> Option<Adjustable> {
+        match self {
+            Self::Number(adjustable) => Some(adjustable),
+            Self::Time(_) => None,
+        }
+    }
+
+    /// The `TimeEdit`, for the paths that only ever see a time.
+    pub const fn time(self) -> Option<TimeEdit> {
+        match self {
+            Self::Time(time) => Some(time),
+            Self::Number(_) => None,
+        }
+    }
+}
 
 /// What the button task publishes for the displays to draw.
 ///
@@ -1458,8 +1744,8 @@ pub struct MenuSnapshot {
     pub stack: GsMenu,
     /// Whether a provisioning command is still unconfirmed. See [`MenuContext::wifi_pending`].
     pub wifi_pending: bool,
-    /// The value being edited, when the top frame is an editor.
-    pub editor: Option<Adjustable>,
+    /// What is being edited, when the top frame is an editor. See [`EditorState`].
+    pub editor: Option<EditorState>,
     /// What has been dialled into the open routine's parameters.
     ///
     /// Carried rather than left in the button task because the parameter *list* has to draw
@@ -1537,18 +1823,29 @@ pub type MenuSender = embassy_sync::watch::Sender<
 /// tasks, and this mirrors it.
 ///
 /// **The displays are one hop behind the button task**, which applies a `Configuration` to
-/// itself and then publishes this. That is deliberate and bounded: it affects the brew
-/// target row's *label* and the editor's unit, never a row count -- [`MenuData`]'s
-/// `scale_calibration` and `bluetooth` are what decide how many rows a menu has, and the
-/// first of those comes from the immutable `MachineDefinition`. A label that lags one status
-/// period is a cosmetic difference; a row count that lags would put the selection on a
-/// different row on each side.
+/// itself and then publishes this. That is deliberate and bounded, but *not* because row
+/// counts stay off this path -- an earlier version of this comment claimed they did, and it
+/// was wrong even then: `row_count(MenuId::Bluetooth)` reads `data.bluetooth`, which on the
+/// display side comes from this very watch, and `MenuId::Schedules` now does the same.
+///
+/// What actually makes it safe is that the button task is the **sole builder** of both lists
+/// and the sole owner of the selection. The displays cannot compute a different length,
+/// because they do not compute one at all; they redraw a list and a selection that were
+/// consistent when they were published together. A display can hold a new `MenuSnapshot`
+/// against an older `MenuConfigSnapshot` for one frame, since the two watches deliver
+/// independently -- that is cosmetic and self-correcting, and it predates schedules.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MenuConfigSnapshot {
     /// The scalars. See [`MenuConfig`].
     pub config: MenuConfig,
     /// The Bluetooth associations, for that submenu's rows. At most four.
     pub bluetooth: BluetoothPeripheralList,
+    /// Every stored schedule, for [`MenuId::Schedules`] and the menus below it.
+    ///
+    /// Here rather than in [`MenuSnapshot`] for the Bluetooth list's reason -- that payload is
+    /// `Copy` and this is a `heapless::Vec`. Built by the button task rather than fetched by
+    /// each side; see [`MenuData::schedules`].
+    pub schedules: ScheduleRows,
 }
 
 /// Named for [`MenuSender`]'s reason.

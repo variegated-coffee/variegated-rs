@@ -110,32 +110,25 @@ impl GraphicalDisplayState {
         }
     }
 
-    /// Format schedule commands as a brief summary
+    /// Format schedule commands as a brief summary.
+    ///
+    /// **Delegates to the same summary the Schedules menu uses**, so the idle screen and the
+    /// menu cannot call one action two different things.
+    ///
+    /// It also fixes what this used to do. Formatting `MachineMode` with `{:?}` produced
+    /// `PowerSaveStandby` -- sixteen characters against a 200 px box -- and every font here is
+    /// a u8g2 `_tr` whose `render_aligned` resolves the whole bounding box before drawing, so
+    /// an over-wide string is dropped **entirely** rather than truncated. That line rendered
+    /// blank, which reads as a schedule with no actions rather than as one that would not fit.
     fn format_schedule_commands(&self, schedule: &ScheduleItem) -> String {
-        use variegated_controller_types::ScheduleAction;
+        use variegated_machine_menu::{schedule_action_summary, ScheduleActionKind};
 
-        if schedule.commands.is_empty() {
-            return "No actions".to_string();
+        let kind = ScheduleActionKind::of(&schedule.commands);
+        let mut out = schedule_action_summary(kind).to_string();
+        if schedule.commands.len() > 1 {
+            out.push('+');
         }
-
-        // Show first action as representative
-        match &schedule.commands[0] {
-            ScheduleAction::SetMachineMode(mode) => {
-                format!("{:?}", mode)
-            }
-            ScheduleAction::RunRoutine(idx, _) => {
-                format!("Run Routine {}", idx)
-            }
-            ScheduleAction::CancelRoutine => {
-                "Cancel Routine".to_string()
-            }
-            ScheduleAction::SetBoilerControlTarget(idx, mode, _) => {
-                format!("Boiler {} {:?}", idx, mode)
-            }
-            ScheduleAction::SetBoilerControlTargetValues(idx, _) => {
-                format!("Boiler {} values", idx)
-            }
-        }
+        out
     }
 
     /// Format shot state for display with appropriate color
@@ -272,8 +265,12 @@ impl GraphicalDisplayState {
         ).ok();
 
         // An editor frame has no rows: one big value, and buttons that move it.
-        if frame.id.is_editor() {
-            return self.render_menu_editor(display, frame.id, &data, &font);
+        match frame.id.kind() {
+            menu::MenuKind::NumberEditor => {
+                return self.render_menu_editor(display, frame.id, &data, &font)
+            }
+            menu::MenuKind::TimeEditor => return self.render_menu_time_editor(display, &font),
+            menu::MenuKind::List => {}
         }
 
         Line::new(
@@ -438,7 +435,7 @@ impl GraphicalDisplayState {
 
         // Nothing to edit means the frame was pushed without a value, which the button task
         // does not do. Draw the hints anyway rather than an empty screen.
-        if let Some(editor) = self.shared_state.menu.editor {
+        if let Some(editor) = self.shared_state.menu.editor.and_then(menu::EditorState::number) {
             let value = MenuValue::Number {
                 value: editor.value(),
                 unit: menu::editor_unit(menu, data),
@@ -459,6 +456,87 @@ impl GraphicalDisplayState {
             // `-` and `+` on both screens, and reusing a vertical word for a number would
             // suggest the mapping had changed when it has not.
             format_args!("1 Less   2 More   3 Confirm   4 Cancel"),
+            Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
+            VerticalPosition::Top,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(Rgb565::WHITE),
+            display
+        ).ok();
+
+        Ok(())
+    }
+
+    /// The time editor: `HH:MM`, with the field the buttons are moving drawn white and the
+    /// other grey.
+    ///
+    /// **Three runs rather than one string, and their positions are computed rather than
+    /// aligned.** `render_aligned` takes one colour for the whole string, and three separately
+    /// centred pieces would not line up as a time -- so the whole is measured once,
+    /// the left edge derived from that, and each run advanced past by its own *measured*
+    /// width. Measured rather than drawn: `render` returns an `Err` for a glyph it cannot
+    /// resolve, and stepping by a drawn width would collapse every run after a failed one on
+    /// top of its neighbour.
+    ///
+    /// Grey rather than hidden, and rather than dimmed by half-drawing: `CSS_GRAY` against
+    /// this panel's black is legibly a second state, and the user has to see both fields at
+    /// once to read the time they are setting.
+    fn render_menu_time_editor<D>(
+        &self,
+        display: &mut D,
+        font: &FontRenderer,
+    ) -> Result<(), D::Error>
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 16;
+        /// The field buttons 1 and 2 are moving.
+        const SELECTED: Rgb565 = Rgb565::WHITE;
+        /// The one they are not.
+        const UNSELECTED: Rgb565 = Rgb565::CSS_GRAY;
+
+        // Nothing to edit means the frame was pushed without a value, which the button task
+        // does not do. Draw the hints anyway rather than an empty screen.
+        if let Some(time) = self.shared_state.menu.editor.and_then(menu::EditorState::time) {
+            let large = FontRenderer::new::<u8g2_font_logisoso32_tr>();
+            let text = time.text();
+            let (start, end) = time.field_span();
+
+            // The three runs: before the selected field, the field itself, and after it. One
+            // of the outer two is always empty, which renders as nothing and advances by zero.
+            let runs = [
+                (&text[..start], UNSELECTED),
+                (&text[start..end], SELECTED),
+                (&text[end..], UNSELECTED),
+            ];
+
+            let top = Point::new(0, EFFECTIVE_CENTER_Y - 16);
+            let width = large
+                .get_rendered_dimensions(text.as_str(), top, VerticalPosition::Top)
+                .map(|dimensions| dimensions.advance.x)
+                .unwrap_or(0);
+
+            let mut pen = Point::new(EFFECTIVE_CENTER_X - width / 2, top.y);
+            for (run, color) in runs {
+                if run.is_empty() {
+                    continue;
+                }
+
+                large
+                    .render(run, pen, VerticalPosition::Top, FontColor::Transparent(color), display)
+                    .ok();
+
+                pen.x += large
+                    .get_rendered_dimensions(run, pen, VerticalPosition::Top)
+                    .map(|dimensions| dimensions.advance.x)
+                    .unwrap_or(0);
+            }
+        }
+
+        font.render_aligned(
+            // `4 Done`, not `4 Back`: this editor has no cancel, and the hint row is the only
+            // place on either panel that can say so *before* the press. `3 Field` for the same
+            // reason -- button 3 confirms on every other editor and does not here.
+            format_args!("1 Less  2 More  3 Field  4 Done"),
             Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
             VerticalPosition::Top,
             HorizontalAlignment::Center,

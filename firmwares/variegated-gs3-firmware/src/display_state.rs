@@ -132,6 +132,13 @@ pub struct DisplayState {
     /// does not keep the `Configuration`, and the list is at most four entries of a name and
     /// a few scalars.
     bluetooth: Option<variegated_controller_types::bluetooth::BluetoothPeripheralList>,
+    /// The schedule list, for the Schedules submenu.
+    ///
+    /// **Not fetched by this task**, unlike `menu_routines`. The button task is the sole
+    /// builder and publishes it here, because a sparse-indexed list fetched independently on
+    /// two sides is two chances to disagree about its length -- and this one changes under the
+    /// user, since toggling `Enabled` rewrites it.
+    schedules: Option<variegated_machine_menu::ScheduleRows>,
 }
 
 impl DisplayState {
@@ -151,6 +158,7 @@ impl DisplayState {
             dose_popup_until: None,
             menu_config: None,
             bluetooth: None,
+            schedules: None,
         }
     }
 
@@ -158,6 +166,7 @@ impl DisplayState {
     pub fn update_menu_config(&mut self, snapshot: crate::menu::MenuConfigSnapshot) {
         self.menu_config = Some(snapshot.config);
         self.bluetooth = Some(snapshot.bluetooth);
+        self.schedules = Some(snapshot.schedules);
     }
 
     /// The configuration projection, or its `Default` before the first one arrives.
@@ -198,6 +207,7 @@ impl DisplayState {
                 &self.status.peripheral_status,
             ),
             bluetooth: self.bluetooth.as_ref(),
+            schedules: self.schedules.as_ref(),
             brew_target_unit: crate::menu::brew_target_unit(&self.menu_config()),
         }
     }
@@ -215,6 +225,10 @@ impl DisplayState {
     pub fn release_menu_data(&mut self) {
         self.menu_routines = None;
         self.menu_routine = None;
+        // **`schedules` is deliberately not cleared.** It arrives on the config watch rather
+        // than from a fetch here, so nothing in this task would ask for it again -- dropping
+        // it would leave the Schedules list blank until the button task next happened to
+        // republish, which on an unchanged machine is never.
     }
 
     /// Whether the dose popup is on screen right now.

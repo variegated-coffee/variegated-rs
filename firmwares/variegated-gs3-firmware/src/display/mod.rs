@@ -290,10 +290,15 @@ pub async fn lcd_display_task(
             if let Err(_e) = display_state.update_display_efficient(&mut lcd).await {
                 defmt::error!("Failed to update LCD efficiently");
                 // Fallback: try the old method once as recovery
-                let (row1, row2) = display_state.get_display_text().await;
+                let frame = display_state.get_display_text().await;
                 if lcd.clear().await.is_ok() {
-                    let _ = lcd.write_str(row1.chars()).await;
-                    let _ = lcd.write_line(1, row2.chars()).await;
+                    // The cursor is device state and `clear()` does not touch it, so a
+                    // recovery that skipped this could leave the time editor's blinking block
+                    // on whatever screen came next.
+                    let _ = lcd.set_cursor_blinking(false).await;
+                    let _ = lcd.set_cursor_visible(false).await;
+                    let _ = lcd.write_str(frame.row1.chars()).await;
+                    let _ = lcd.write_line(1, frame.row2.chars()).await;
                 }
             }
         }

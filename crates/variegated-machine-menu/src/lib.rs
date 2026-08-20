@@ -34,6 +34,7 @@ mod format;
 mod listing;
 mod parameters;
 mod rows;
+mod schedule;
 mod temperature;
 
 pub use brew::{
@@ -45,6 +46,14 @@ pub use parameters::{
     parameter_adjustable, parameter_bounds, parameter_geometry, parameter_row,
     ParameterListChrome, ParameterRow, ParameterValues, MAX_ROUTINE_PARAMETERS,
 };
-pub use rows::{drawable, editor_rows, info_rows, list_rows, push_drawable, COLUMNS};
+pub use rows::{
+    drawable, editor_rows, info_rows, list_rows, push_drawable, time_editor_rows, COLUMNS,
+};
+pub use schedule::{
+    apply_schedule_change, schedule_action_summary, schedule_label, schedule_recurrence,
+    schedule_rows, DaySet, ScheduleActionKind, ScheduleChange, ScheduleRow, ScheduleRows,
+    TimeEdit, TimeField, MAX_MENU_SCHEDULES, MINUTE_STEP, SCHEDULE_LABEL_LEN,
+    SCHEDULE_RECURRENCE_LEN, TIME_TEXT_LEN,
+};
 pub use temperature::{boiler_temperature_adjustable, BOILER_TEMPERATURE_STEP};
 

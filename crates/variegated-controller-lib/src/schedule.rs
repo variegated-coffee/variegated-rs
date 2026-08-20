@@ -132,6 +132,20 @@ pub async fn run_schedule<M1: RawMutex, M2: RawMutex, ScheduleStoreT: ScheduleSt
 pub trait ScheduleStore {
     async fn add_schedule(&mut self, item: ScheduleItem);
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem>;
+
+    /// Every stored schedule, with the index it is stored under.
+    ///
+    /// **Not derivable from [`Self::get_schedules`]**, which yields `BTreeMap::values()` and so
+    /// discards them. The indices are sparse: `add_schedule` fills holes left by
+    /// `remove_schedule`, so after one removal the *n*th value is no longer index *n*. Every
+    /// write command -- [`MachineCommand::UpdateScheduleItem`], [`MachineCommand::RemoveScheduleItem`]
+    /// -- names the storage index, so anything that resolves a user's choice back into a command
+    /// needs this rather than a position. `RoutineRepository::iterate_routines_with_indices`
+    /// exists for the same reason.
+    ///
+    /// No default body: a store added later has to answer this deliberately, because the
+    /// obvious default -- enumerating [`Self::get_schedules`] -- is exactly the bug.
+    async fn iterate_schedules_with_indices(&mut self) -> impl Iterator<Item = (usize, &ScheduleItem)>;
     async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem>;
     async fn update_schedule(&mut self, index: usize, item: ScheduleItem) -> Result<(), &'static str>;
     async fn get_schedule_count(&mut self) -> usize;
@@ -237,6 +251,10 @@ impl ScheduleStore for InMemoryScheduleStore {
 
     async fn get_schedules(&mut self) -> impl Iterator<Item = &ScheduleItem> {
         self.schedules.values()
+    }
+
+    async fn iterate_schedules_with_indices(&mut self) -> impl Iterator<Item = (usize, &ScheduleItem)> {
+        self.schedules.iter().map(|(index, item)| (*index, item))
     }
 
     async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem> {
@@ -412,6 +430,15 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> ScheduleStore for SequentialStorag
         }
 
         self.cache.values()
+    }
+
+    async fn iterate_schedules_with_indices(&mut self) -> impl Iterator<Item = (usize, &ScheduleItem)> {
+        let res = self.load_from_flash().await;
+        if res.is_err() {
+            log_info!("Error loading schedules from flash: {:?}", res.err());
+        }
+
+        self.cache.iter().map(|(index, item)| (*index, item))
     }
 
     async fn remove_schedule(&mut self, index: usize) -> Option<ScheduleItem> {

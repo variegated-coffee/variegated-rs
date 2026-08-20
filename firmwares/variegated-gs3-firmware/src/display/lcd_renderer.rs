@@ -17,6 +17,35 @@ use crate::menu::{self, MenuContext, MenuValue};
 use variegated_machine_menu::UnitStyle;
 use crate::RoutineRepositoryMutex;
 
+/// What one frame of the character LCD is: both rows, and where the cursor goes.
+///
+/// A struct rather than a second `cursor()` method beside [`LcdDisplayState::get_display_text`],
+/// because the cursor position is a property of *the frame that was chosen*: that function
+/// picks between an identify flash, a dose popup, the menu, an activity line, the provisioning
+/// rows and six machine screens, and a second method would have to make the same choice again
+/// from the same state. Two derivations of one decision is what the menu module's own docs are
+/// about.
+pub struct LcdFrame {
+    /// The context row.
+    pub row1: String,
+    /// The item row.
+    pub row2: String,
+    /// Where the HD44780's blinking block goes, as `(row, column)`, or `None` on every screen
+    /// that marks no character.
+    ///
+    /// **The `None` is not a default to be skipped.** The cursor is device state, not a drawn
+    /// glyph, so a screen that fails to turn it off inherits the previous screen's blinking
+    /// block in the middle of a temperature.
+    pub cursor: Option<(u8, u8)>,
+}
+
+impl From<(String, String)> for LcdFrame {
+    /// The nine screens that mark no character, unchanged.
+    fn from((row1, row2): (String, String)) -> Self {
+        Self { row1, row2, cursor: None }
+    }
+}
+
 /// LCD-specific display state with buffer tracking
 pub struct LcdDisplayState {
     /// Shared display state
@@ -88,8 +117,8 @@ impl LcdDisplayState {
         Some(("WiFi Setup".to_string(), second.to_string()))
     }
 
-    /// Get the formatted text for the current display state
-    pub async fn get_display_text(&self) -> (String, String) {
+    /// Get the formatted text for the current display state, and where the cursor belongs.
+    pub async fn get_display_text(&self) -> LcdFrame {
         // Ahead of the provisioning rows below: Identify is only ever sent from inside a
         // provisioning window, so anything checked after them would never be reached.
         //
@@ -102,7 +131,7 @@ impl LcdDisplayState {
             if now < until {
                 let lit = (now.as_millis() / 250) % 2 == 0;
                 let row = if lit { "*".repeat(16) } else { String::new() };
-                return (row.clone(), row);
+                return (row.clone(), row).into();
             }
         }
 
@@ -118,7 +147,7 @@ impl LcdDisplayState {
         // was -- the stack is untouched by this.
         if self.shared_state.dose_popup_active() {
             if let Some(grams) = self.shared_state.dose_popup_weight() {
-                return ("  Dose captured ".to_string(), format!("     {:.1} g", grams));
+                return ("  Dose captured ".to_string(), format!("     {:.1} g", grams)).into();
             }
         }
 
@@ -138,14 +167,14 @@ impl LcdDisplayState {
         // this on -- but `activity_overlay` already declines during a brew or a routine, which
         // is where taking the panel over would cost the most.
         if let Some(activity) = self.shared_state.activity_overlay() {
-            return (Self::center_16(activity.label()), String::new());
+            return (Self::center_16(activity.label()), String::new()).into();
         }
 
         // Ahead of the mode match rather than inside it: the window can be open in any mode,
         // and a copy of this check in each arm is a copy that will be missed when an arm is
         // added.
         if let Some(rows) = self.provisioning_rows() {
-            return rows;
+            return rows.into();
         }
 
         match self.shared_state.get_display_mode() {
@@ -168,6 +197,7 @@ impl LcdDisplayState {
                 (self.format_standby_row1(), self.format_standby_row2())
             }
         }
+        .into()
     }
 
     /// Efficiently update the LCD display by only writing changed characters
@@ -178,11 +208,11 @@ impl LcdDisplayState {
     where
         D: hd44780_controller::device::AsyncDevice,
     {
-        let (row1_text, row2_text) = self.get_display_text().await;
+        let frame = self.get_display_text().await;
 
         // Ensure text is exactly 16 characters, padding or truncating as needed
-        let row1_chars: [char; 16] = Self::pad_or_truncate_to_16(&row1_text);
-        let row2_chars: [char; 16] = Self::pad_or_truncate_to_16(&row2_text);
+        let row1_chars: [char; 16] = Self::pad_or_truncate_to_16(&frame.row1);
+        let row2_chars: [char; 16] = Self::pad_or_truncate_to_16(&frame.row2);
 
         let new_content = [row1_chars, row2_chars];
 
@@ -206,7 +236,7 @@ impl LcdDisplayState {
             self.display_buffer = new_content;
             self.display_initialized = true;
 
-            return Ok(());
+            return Self::apply_cursor(lcd, frame.cursor).await;
         }
 
         // Character-level diff update
@@ -226,6 +256,48 @@ impl LcdDisplayState {
                     }
                 } else {
                     col += 1;
+                }
+            }
+        }
+
+        Self::apply_cursor(lcd, frame.cursor).await
+    }
+
+    /// Put the HD44780's blinking block where the frame asked, or take it away.
+    ///
+    /// **After the character diff, never before.** Every `write_char` advances the DDRAM
+    /// address and the diff loop moves it explicitly, so a position set first would end up
+    /// wherever the last written character left it -- which on this panel is a block blinking
+    /// in the middle of a number.
+    ///
+    /// Both states are checked against the controller's own before being written, because this
+    /// runs at 10 Hz on the I2C bus the buttons and the LEDs share, and every screen but one
+    /// wants the cursor off. Unconditional writes would be two transactions per frame, forever,
+    /// for nothing. `RuntimeConfig::default()` has both off, so a machine that never opens the
+    /// time editor never issues one.
+    async fn apply_cursor<D>(
+        lcd: &mut Controller<D, Init>,
+        cursor: Option<(u8, u8)>,
+    ) -> Result<(), hd44780_controller::controller::Error>
+    where
+        D: hd44780_controller::device::AsyncDevice,
+    {
+        match cursor {
+            Some((row, col)) => {
+                lcd.set_cursor_position(row, col).await?;
+                if !lcd.cursor_visible() {
+                    lcd.set_cursor_visible(true).await?;
+                }
+                if !lcd.cursor_blinking() {
+                    lcd.set_cursor_blinking(true).await?;
+                }
+            }
+            None => {
+                if lcd.cursor_blinking() {
+                    lcd.set_cursor_blinking(false).await?;
+                }
+                if lcd.cursor_visible() {
+                    lcd.set_cursor_visible(false).await?;
                 }
             }
         }
@@ -343,11 +415,11 @@ impl LcdDisplayState {
     /// Everything here is ASCII, for the same reason as the TFT: the HD44780's A00 ROM has no
     /// `°` and no up/down triangles, and `pad_or_truncate_to_16` would push a multi-byte char
     /// through `write_char` unmodified.
-    fn menu_rows(&self) -> (String, String) {
+    fn menu_rows(&self) -> LcdFrame {
         const BLANK: &str = "                ";
 
         let Some(frame) = self.shared_state.menu.stack.top() else {
-            return (BLANK.to_string(), BLANK.to_string());
+            return (BLANK.to_string(), BLANK.to_string()).into();
         };
         let data = self.shared_state.menu_data();
         let ctx = MenuContext::from_status(
@@ -358,20 +430,45 @@ impl LcdDisplayState {
 
         // An editor frame has no rows: its title names the quantity and the value is the
         // whole of the screen.
-        if frame.id.is_editor() {
-            let value = self
-                .shared_state
-                .menu
-                .editor
-                .map(|editor| {
-                    MenuValue::Number {
-                        value: editor.value(),
-                        unit: menu::editor_unit(frame.id, &data),
-                    }
-                    .text(UnitStyle::Ascii)
-                })
-                .unwrap_or_default();
-            return variegated_machine_menu::editor_rows(menu::title(frame.id, &data), &value);
+        match frame.id.kind() {
+            menu::MenuKind::NumberEditor => {
+                let value = self
+                    .shared_state
+                    .menu
+                    .editor
+                    .and_then(menu::EditorState::number)
+                    .map(|editor| {
+                        MenuValue::Number {
+                            value: editor.value(),
+                            unit: menu::editor_unit(frame.id, &data),
+                        }
+                        .text(UnitStyle::Ascii)
+                    })
+                    .unwrap_or_default();
+                return variegated_machine_menu::editor_rows(
+                    menu::title(frame.id, &data),
+                    &value,
+                )
+                .into();
+            }
+            // The time editor marks its selected field with the HD44780's blinking block,
+            // which is the only thing this panel has that can highlight *inside* a value:
+            // there is no inverse video and no second colour. The column comes from
+            // `time_editor_rows`, which derives it from the same `field_span` the TFT colours
+            // by, so the two panels cannot mark different halves of the clock.
+            menu::MenuKind::TimeEditor => {
+                let Some(time) = self.shared_state.menu.editor.and_then(menu::EditorState::time)
+                else {
+                    // Pushed without a value, which the button task does not do.
+                    return (BLANK.to_string(), BLANK.to_string()).into();
+                };
+                let (row1, row2, column) = variegated_machine_menu::time_editor_rows(
+                    menu::title(frame.id, &data),
+                    &time,
+                );
+                return LcdFrame { row1, row2, cursor: Some((1, column)) };
+            }
+            menu::MenuKind::List => {}
         }
 
         let Some(row) = menu::row(frame.id, frame.nav.selected(), &data) else {
@@ -388,7 +485,8 @@ impl LcdDisplayState {
                 0,
                 menu::empty_label(frame.id),
                 "",
-            );
+            )
+            .into();
         };
 
         // An info row's value is a network name or an address -- fifteen characters or more,
@@ -397,7 +495,7 @@ impl LcdDisplayState {
         // the parent menu's own row already said which screen this is.
         let ssid = MenuContext::wifi_ssid(&self.shared_state.status);
         if let Some(value) = menu::info_value(&row, &ctx, ssid) {
-            return variegated_machine_menu::info_rows(menu::label(&row, &ctx), &value);
+            return variegated_machine_menu::info_rows(menu::label(&row, &ctx), &value).into();
         }
 
         let value = menu::value(&row, &ctx)
@@ -412,6 +510,7 @@ impl LcdDisplayState {
             menu::label(&row, &ctx),
             &value,
         )
+        .into()
     }
 
     /// Format power save standby mode row 1: "Standby" centered

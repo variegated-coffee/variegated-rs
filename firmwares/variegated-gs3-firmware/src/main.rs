@@ -3403,7 +3403,7 @@ async fn main_task(
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender(), MENU_CONFIG_WATCH.sender())));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, schedule_store_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender(), MENU_CONFIG_WATCH.sender())));
 
     // Create status subscriber for LED controller and spawn the task.
     //

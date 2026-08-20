@@ -23,6 +23,14 @@ Two things about the built tree that this document did not anticipate:
   resolve a selection index against that length independently — greying is also already this
   menu's rule for a row that cannot act.
 
+**A `Schedules` menu has since been added between `Routines` and `Settings`**, which §5 had
+excluded outright. The exclusion was narrowed rather than overturned — recurrence stays
+read-only and authoring stays in the browser — and §3.2 has the reasoning. One thing there is
+worth flagging here because it breaks a rule the rest of this document relies on: the time
+editor is the **only screen in the menu where button 4 does not mean "back"**. It commits,
+because button 3 is spent switching between hours and minutes and there is no fourth button
+left to leave by.
+
 `Zero cal` and `Cal 100 g` are conditional as §3 asked, through the previously-unread
 `PeripheralDefinition.support_calibration`: **hidden** where the fitted scale cannot
 calibrate (permanent, and the GS3's default Bluetooth scale is one), **greyed** where it can
@@ -116,11 +124,14 @@ without a trace, which is not a thing you can check by looking at the panel.)
 
 ### The depth budget is the real structural limit
 
-`MENU_MAX_DEPTH = 4`, and `Root → Settings → <group> → <editor>` is exactly four.
+`MENU_MAX_DEPTH = 4`, and **two** paths now consume all four:
+`Root → Settings → <group> → <editor>`, and
+`Root → Schedules → <schedule> → <time editor>`.
 `MenuStack::push` refuses silently on a full stack, which reads as a dead button. So Settings
 gets **one** level of grouping, and only for leaves that are actions or toggles; anything
 ending in a numeric editor must sit flat. Raising the constant is cheap if that stops being
-enough.
+enough — and it is what a *recurrence* editor under a schedule would need, which is one of the
+reasons that row is read-only rather than merely unimplemented.
 
 ---
 
@@ -260,6 +271,45 @@ app says it does not, and the flag that is supposed to decide is read by nobody.
 on the flag is a small change and is a prerequisite for the menu row; it should probably happen
 regardless of whether the row is ever built.
 
+### 3.2 Schedules — the narrow slice four buttons can express
+
+§5 excluded schedules outright, on the grounds that they need date entry. That was right about
+*recurrence* and wrong as a whole: the machine's schedules already exist, are already stored,
+and until now could not be touched from the machine itself at all. Two of a schedule's fields
+need neither text nor a calendar.
+
+```
+Schedules                      one row per stored schedule
+├── 07:30 On         ON    submenu  label is the time and the first action; value is the switch
+│   ├── Time      07:30    edit     the two-field time editor below
+│   ├── Recurrence Weekdays info     read-only
+│   └── Enabled      ON    toggle   acts in place, like a Bluetooth row
+└── 06:45 Sleep     OFF    submenu
+```
+
+**The list is ordered by storage index, not by time.** A list sorted by time reorders itself
+the instant a time is edited, so the row under the user's finger after committing would be a
+different schedule from the one they just changed.
+
+**The time editor is the one screen where button 4 does not mean "back".** A time has two
+fields and this panel has four buttons, so button 3 is spent switching between hours and
+minutes — which leaves 4 as the only way off the screen, and a 4 that discarded the edit would
+make the screen a dead end. So it commits, and the hint row says `4 Done` rather than `4 Back`
+because that is the only place either panel can say so before the press. Minutes step by five
+and wrap within the hour; the hour never changes while the minutes are selected.
+
+Marking the selected field is the one thing the two panels genuinely cannot share. The TFT
+draws it white and the other half `CSS_GRAY`. The HD44780 has no inverse video and no second
+colour, so it parks the controller's **blinking block cursor** on the field's first digit —
+which is a real alternating inversion of one character cell, and the only highlight this panel
+has that works *inside* a value. Both derive the position from one `TimeEdit::field_span`, so
+they cannot mark different halves of the clock.
+
+What stays out, and why it is not merely unimplemented: the **recurrence** is seven independent
+switches, and editing it needs a fifth stack level this menu does not have (see §1). **Adding
+and deleting** schedules, and editing their **actions**, stay in the web UI — the panel runs
+and adjusts, it does not author. That is the same split routines already have.
+
 ---
 
 ## 4. Initial configuration — belongs elsewhere
@@ -287,7 +337,7 @@ Not on the panel. The right home differs, and the second column is the interesti
 | **All PID parameters** | 2 | `PidParameters` is three terms, each with a positive scale, a negative scale and two limits — twelve numbers per target across five targets. Sixty editor visits on four buttons. The Silvia exposes these on a *rotary encoder* and it is already unwieldy there. |
 | **`max_temperature`, `max_pressure`** | 3 | Bounds the setpoint editor a few rows above. A ceiling adjustable by the person hitting it is decoration. |
 | **`minimum_safe_level`, `fill_threshold`, `empty_threshold`** | 3 | Interlock thresholds, with dry-firing an element at the other end of the mistake. |
-| **Schedules** | 2 | Needs date and time entry. |
+| **Schedule recurrence and actions, and adding or removing a schedule** | 2 | A day set is seven independent switches, a date is a calendar, and an action list is a second menu tree. The **time** and the **enable** of a schedule that already exists are none of those, and are built — see §3.2. |
 | **Wi-Fi credentials** | 2 | Text entry, and already solved better — Improv hands the typing to a phone, which is why `Wi-Fi Setup` is a *window* and not a form. |
 | **Shot-upload endpoint and token** | 2, 3 | Text entry, and the token must never be displayed anywhere: `ShotUploadView` deliberately carries only a `token_set` bool. A panel field would have to render what it must not render. |
 | **Brew curves (`ControlCurve`)** | 2 | Arbitrary lists of points. |

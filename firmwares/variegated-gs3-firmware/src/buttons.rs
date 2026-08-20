@@ -103,13 +103,17 @@ use variegated_buttons::{
 };
 use crate::StatusSubscriber;
 use crate::menu::{
-    self, GsMenu, MenuActivation, MenuContext, MenuData, MenuFetch, MenuId, MenuItemKind, MenuRow,
-    MenuSender, MenuSnapshot, WifiRequest, LIST_FUNCTION_ROUTINES,
+    self, EditorState, GsMenu, MenuActivation, MenuContext, MenuData, MenuFetch, MenuId,
+    MenuItemKind, MenuKind, MenuRow, MenuSender, MenuSnapshot, WifiRequest,
+    LIST_FUNCTION_ROUTINES,
 };
 use variegated_controller_lib::routine::{Routine, RoutineRepository as RoutineRepositoryTrait};
+use variegated_controller_lib::schedule::ScheduleStore as ScheduleStoreTrait;
 use variegated_controller_types::Configuration;
-use variegated_machine_menu::{parameter_adjustable, routine_rows, ParameterValues, RoutineRows};
-use variegated_menu::Adjustable;
+use variegated_machine_menu::{
+    apply_schedule_change, parameter_adjustable, routine_rows, schedule_rows, ParameterValues,
+    RoutineRows, ScheduleChange,
+};
 
 /// Button indices for routine control (buttons 0-3)
 const ROUTINE_BUTTON_0: usize = 0;    // Button 1 (Pin 0) - Triggers routine 0
@@ -256,8 +260,31 @@ pub struct ButtonEventHandler {
     routine: Option<(RoutineIndex, Option<Routine>)>,
     /// What has been dialled into that routine's parameters.
     values: ParameterValues,
-    /// The value an editor frame is editing.
-    editor: Option<Adjustable>,
+    /// What an editor frame is editing. See [`EditorState`].
+    editor: Option<EditorState>,
+    /// The schedule list backing `MenuId::Schedules`, once fetched.
+    ///
+    /// **This task is the sole builder**, and publishes it to both displays in
+    /// [`MenuConfigSnapshot`] rather than letting each side fetch its own. Two sides fetching
+    /// a sparse-indexed list independently is two chances to disagree about its length, and
+    /// this list changes under the user: toggling `Enabled` rewrites it.
+    ///
+    /// `Option`, not an empty `Vec` standing in for "not yet": a machine with no schedules has
+    /// an empty list and that is a correct answer, drawn as `menu::empty_label`.
+    schedules: Option<variegated_machine_menu::ScheduleRows>,
+    /// A schedule rewrite the user has asked for and this task has not yet resolved.
+    ///
+    /// Deferred rather than turned into a command on the spot, because building the command
+    /// needs the stored `ScheduleItem` and the press path is deliberately synchronous -- the
+    /// store's lock must not be taken in the event handler, for the reason the routine
+    /// repository's is not. Resolved in the task loop, at most one iteration later.
+    pending_schedule_change: Option<(u32, ScheduleChange)>,
+    /// Whether `schedules` has changed since the display tasks were last told.
+    ///
+    /// A toggle has to reach the panels without waiting for the next `Configuration`, which
+    /// the controller republishes only every ten seconds -- and which does not currently
+    /// republish on a schedule change at all.
+    schedules_dirty: bool,
     /// What the menu reads out of `Configuration`, from that channel.
     ///
     /// A projection, not the `Configuration` it came from: that struct is far too large to
@@ -318,6 +345,9 @@ impl ButtonEventHandler {
             routine: None,
             values: ParameterValues::default(),
             editor: None,
+            schedules: None,
+            pending_schedule_change: None,
+            schedules_dirty: false,
             menu_config: crate::menu::MenuConfig::default(),
             bluetooth: None,
             button_3_hold_start: None,
@@ -381,7 +411,7 @@ impl ButtonEventHandler {
                     self.menu.top().map(|frame| frame.id)
                 {
                     if editing as usize == position {
-                        if let Some(editor) = self.editor.as_mut() {
+                        if let Some(EditorState::Number(editor)) = self.editor.as_mut() {
                             *editor = parameter_adjustable(parameter, dose);
                         }
                     }
@@ -413,6 +443,7 @@ impl ButtonEventHandler {
                 &self.peripheral_status,
             ),
             bluetooth: self.bluetooth.as_ref(),
+            schedules: self.schedules.as_ref(),
             brew_target_unit: crate::menu::brew_target_unit(&self.menu_config),
         }
     }
@@ -421,11 +452,66 @@ impl ButtonEventHandler {
     ///
     /// A `Routine` clone is not small, and holding one after the menu closed would keep it
     /// for as long as the machine stays up.
+    ///
+    /// The schedule list goes too, so that one added or deleted from the web while the menu
+    /// was shut is picked up on the next entry rather than never.
     fn release_menu_data(&mut self) {
         self.routines = None;
         self.routine = None;
         self.values = ParameterValues::default();
         self.editor = None;
+        self.schedules = None;
+        self.schedules_dirty = true;
+    }
+
+    /// Whether a schedule menu is open and its list has not been fetched.
+    fn needs_schedules(&self) -> bool {
+        self.schedules.is_none()
+            && matches!(
+                self.menu.top().map(|frame| frame.id),
+                Some(MenuId::Schedules)
+                    | Some(MenuId::ScheduleItem(_))
+                    | Some(MenuId::EditScheduleTime(_))
+            )
+    }
+
+    /// Hand the fetched schedule list over, and tell the displays.
+    fn provide_schedules(&mut self, rows: variegated_machine_menu::ScheduleRows) {
+        if self.schedules.as_ref() != Some(&rows) {
+            self.schedules_dirty = true;
+        }
+        self.schedules = Some(rows);
+    }
+
+    /// Take the outstanding schedule rewrite, if there is one.
+    fn take_pending_schedule_change(&mut self) -> Option<(u32, ScheduleChange)> {
+        self.pending_schedule_change.take()
+    }
+
+    /// Whether the displays need a fresh `MenuConfigSnapshot` because the schedules moved.
+    fn take_schedules_dirty(&mut self) -> bool {
+        core::mem::take(&mut self.schedules_dirty)
+    }
+
+    /// Apply a change to this task's own copy of a schedule row.
+    ///
+    /// **Applied locally as well as sent**, because the controller takes up to a status period
+    /// to act on the command and republishes `Configuration` only every ten seconds -- and, as
+    /// it happens, not at all on a schedule change. Without this the row the user just pressed
+    /// would keep reading its old value until they left the menu, which reads as a dead button.
+    fn apply_schedule_change_locally(&mut self, index: u32, change: ScheduleChange) {
+        let Some(rows) = self.schedules.as_mut() else { return };
+        let Some(row) = rows.iter_mut().find(|row| row.index == index) else { return };
+
+        match change {
+            ScheduleChange::Enabled(enabled) => row.enabled = enabled,
+            ScheduleChange::Time { hour, minute } => {
+                row.hour = hour;
+                row.minute = minute;
+            }
+        }
+
+        self.schedules_dirty = true;
     }
 
     /// Take what the menu needs out of a configuration.
@@ -439,6 +525,7 @@ impl ButtonEventHandler {
         crate::menu::MenuConfigSnapshot {
             config: self.menu_config,
             bluetooth: self.bluetooth.clone().unwrap_or_default(),
+            schedules: self.schedules.clone().unwrap_or_default(),
         }
     }
 
@@ -625,9 +712,11 @@ impl ButtonEventHandler {
 
         // An editor frame has no rows, and buttons 1 and 2 move the value instead of the
         // selection. 1 and 2 still mean "previous / next", whether what they step through is a
-        // list or a number.
-        if frame.id.is_editor() {
-            return self.handle_editor_press(buttons);
+        // list, a number or a pair of clock fields.
+        match frame.id.kind() {
+            MenuKind::NumberEditor => return self.handle_editor_press(buttons),
+            MenuKind::TimeEditor => return self.handle_time_editor_press(buttons),
+            MenuKind::List => {}
         }
 
         // `geometry` borrows the fetched data; take the value out before touching `self` again.
@@ -674,19 +763,22 @@ impl ButtonEventHandler {
 
         match buttons {
             SET_ROUTINE_0 => {
-                if let Some(editor) = self.editor.as_mut() {
+                if let Some(EditorState::Number(editor)) = self.editor.as_mut() {
                     editor.decrease();
                 }
                 vec![]
             }
             SET_ROUTINE_1 => {
-                if let Some(editor) = self.editor.as_mut() {
+                if let Some(EditorState::Number(editor)) = self.editor.as_mut() {
                     editor.increase();
                 }
                 vec![]
             }
             SET_ROUTINE_2 => {
-                let Some(value) = self.editor.map(|e| e.value()) else { return vec![] };
+                let Some(value) = self.editor.and_then(EditorState::number).map(|e| e.value())
+                else {
+                    return vec![];
+                };
                 // A parameter's value never leaves this task until the routine runs; only the
                 // brew setpoint produces a command, and the controller persists that itself.
                 let command = menu::confirm_editor(id, value, &self.menu_config);
@@ -698,6 +790,67 @@ impl ButtonEventHandler {
                 command.into_iter().collect()
             }
             SET_ROUTINE_3 => {
+                self.pop_menu();
+                vec![]
+            }
+            #[cfg(feature = "pwm-steam-valve")]
+            SET_STEAM_VALVE => self.cycle_steam_valve(),
+            _ => vec![],
+        }
+    }
+
+    /// Buttons on the time editor: 1 less, 2 more, 3 switches field, **4 commits**.
+    ///
+    /// 1 and 2 mean what they mean everywhere else on this panel -- `-` and `+` applied to
+    /// whichever half of `HH:MM` is selected.
+    ///
+    /// **There is no cancel, and that is the deliberate difference from every other editor
+    /// here.** A time has two fields and this panel has four buttons, so button 3 is spent on
+    /// switching between them -- which leaves 4 as the only button that can leave the screen.
+    /// A 4 that discarded the edit would make the screen a dead end with no way to keep a
+    /// change, so it commits. The hint row reads `4 Done` rather than `4 Back` for exactly
+    /// that reason: this is the one screen in the menu where 4 does not mean "back".
+    ///
+    /// The command itself is not built here. `UpdateScheduleItem` replaces the stored item
+    /// wholesale, so it needs the schedule's `on_days`, `on_date`, `once` and `commands` --
+    /// which only the store has, and reading it means awaiting a lock this synchronous path
+    /// must not take. The change is recorded and the task loop resolves it.
+    fn handle_time_editor_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
+        let Some(frame) = self.menu.top() else { return vec![] };
+        let MenuId::EditScheduleTime(index) = frame.id else { return vec![] };
+
+        match buttons {
+            SET_ROUTINE_0 => {
+                if let Some(EditorState::Time(time)) = self.editor.as_mut() {
+                    time.decrease();
+                }
+                vec![]
+            }
+            SET_ROUTINE_1 => {
+                if let Some(EditorState::Time(time)) = self.editor.as_mut() {
+                    time.increase();
+                }
+                vec![]
+            }
+            SET_ROUTINE_2 => {
+                if let Some(EditorState::Time(time)) = self.editor.as_mut() {
+                    time.next_field();
+                }
+                vec![]
+            }
+            SET_ROUTINE_3 => {
+                if let Some(time) = self.editor.and_then(EditorState::time) {
+                    defmt::info!(
+                        "Menu: committing schedule {} at {}:{}",
+                        index,
+                        time.hour(),
+                        time.minute()
+                    );
+                    self.pending_schedule_change = Some((
+                        index,
+                        ScheduleChange::Time { hour: time.hour(), minute: time.minute() },
+                    ));
+                }
                 self.pop_menu();
                 vec![]
             }
@@ -775,10 +928,25 @@ impl ButtonEventHandler {
             }
             MenuActivation::Edit { menu: editor_menu, value } => {
                 if self.menu.push(editor_menu) {
-                    self.editor = Some(value);
+                    self.editor = Some(EditorState::Number(value));
                 } else {
                     defmt::warn!("Menu: stack full, cannot edit");
                 }
+                vec![]
+            }
+            MenuActivation::EditTime { menu: editor_menu, value } => {
+                if self.menu.push(editor_menu) {
+                    self.editor = Some(EditorState::Time(value));
+                } else {
+                    defmt::warn!("Menu: stack full, cannot edit time");
+                }
+                vec![]
+            }
+            // Resolved in the task loop, which can await the store. Nothing is sent from here:
+            // building the command needs the stored `ScheduleItem`, and taking the store's
+            // lock in the event path is what this defers.
+            MenuActivation::UpdateSchedule { index, change } => {
+                self.pending_schedule_change = Some((index, change));
                 vec![]
             }
             MenuActivation::RunRoutine(index) => {
@@ -1019,6 +1187,10 @@ pub async fn button_controller_task(
     mut status_receiver: StatusSubscriber,
     mut configuration_receiver: crate::ConfigurationSubscriber,
     routine_repository: &'static crate::RoutineRepositoryMutex,
+    // Passed rather than read from `SCHEDULE_STORE_REF`, because this task is spawned from
+    // `main_task`, which is where the store is created -- exactly as `routine_repository` is.
+    // The global stays for the TFT task, which runs on core 1 and is spawned before that.
+    schedule_store: &'static crate::ScheduleStoreMutex,
     checkin: variegated_checkin::CheckinHandle,
     menu_sender: MenuSender,
     menu_config_sender: crate::menu::MenuConfigSender,
@@ -1119,6 +1291,63 @@ pub async fn button_controller_task(
                 handler.provide_routine(index, routine);
             }
             None => {}
+        }
+
+        // The schedule rows, when a menu that lists them opens. Fetched here rather than in
+        // the event path for the routine list's reason: this lock is held across a flash read.
+        //
+        // **With indices**, because `UpdateScheduleItem` names the storage index and those are
+        // sparse -- `add_schedule` fills holes left by `remove_schedule` -- so a row's position
+        // in the list is not the index it is stored under.
+        if handler.needs_schedules() {
+            let mut store = schedule_store.lock().await;
+            let rows = schedule_rows(store.iterate_schedules_with_indices().await);
+            drop(store);
+            handler.provide_schedules(rows);
+        }
+
+        // A toggled `Enabled`, or a committed time. Resolved against the store rather than a
+        // cached item, so a schedule whose days or actions were changed from the web a moment
+        // ago is not silently rewritten back to what this panel last saw.
+        if let Some((index, change)) = handler.take_pending_schedule_change() {
+            let mut store = schedule_store.lock().await;
+            let stored = store
+                .iterate_schedules_with_indices()
+                .await
+                .find(|(stored_index, _)| *stored_index as u32 == index)
+                .map(|(_, item)| item.clone());
+            drop(store);
+
+            match stored {
+                Some(item) => {
+                    let updated = apply_schedule_change(&item, change);
+                    // Locally too, and in the same breath, so the row the user just pressed
+                    // does not keep reading its old value while the controller catches up.
+                    handler.apply_schedule_change_locally(index, change);
+                    if command_sender
+                        .try_send(MachineCommand::UpdateScheduleItem(index, updated))
+                        .is_err()
+                    {
+                        defmt::warn!("Failed to send UpdateScheduleItem - channel full");
+                    }
+                }
+                // Deleted from the web while its screen was open. Refused rather than sent,
+                // since the controller would only log "index out of bounds" and the row would
+                // appear to have done nothing either way.
+                None => defmt::warn!("Menu: schedule {} is gone, not updating", index),
+            }
+        }
+
+        // A schedule change has to reach the panels without waiting for a `Configuration` --
+        // the controller republishes that only every ten seconds, and not at all on a schedule
+        // command. Gated on the dirty flag rather than run every iteration, because building
+        // the snapshot clones two lists and this loop runs at 100 Hz.
+        if handler.take_schedules_dirty() {
+            let snapshot = handler.menu_config_snapshot();
+            if Some(&snapshot) != menu_config_published.as_ref() {
+                menu_config_sender.send(snapshot.clone());
+                menu_config_published = Some(snapshot);
+            }
         }
 
         // Every iteration, not only the ones with a button sample: a provisioning command
