@@ -293,6 +293,38 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
         self
     }
 
+    /// Force the integral so that this controller's output *would have been* `selected`.
+    ///
+    /// External reset feedback, for a min-select override: two controllers run against the
+    /// same actuator, a selector takes one of their outputs, and the loser must be held at
+    /// the selected value rather than left to integrate against an error it is not driving.
+    /// Without this the deselected controller winds up, and takes over with a step when the
+    /// selector next picks it -- the same failure `pump_transfer` describes for open-to-
+    /// closed-loop transfer, in a place that recurs every iteration instead of once.
+    ///
+    /// # Why this is not [`Self::infer_and_set_integral`]
+    ///
+    /// That one is a *one-shot transfer* primitive and is wrong as a per-tick tracker in two
+    /// ways. It assumes `D` is zero, which is only true at a handover; and it zeroes the
+    /// derivative by assigning `kd.prev_measurement`, which called every tick would suppress
+    /// the deselected controller's D term entirely. This subtracts the D contribution
+    /// instead and leaves `prev_measurement` alone, so the loser keeps a live derivative and
+    /// is ready to take over.
+    ///
+    /// Takes the [`PidOut`] just produced by [`Self::step`] rather than recomputing: `p` and
+    /// `d` are already known, and re-stepping `kd` would advance its state a second time.
+    ///
+    /// # The clamp still applies
+    ///
+    /// This writes `ki.accumulate` directly, but [`Self::step`] clamps it to `ki.limits` on
+    /// the next iteration. A controller tracking an output beyond that bound cannot reach it
+    /// and will take over low. That is a tuning question about `ki.limits`, not a bug here --
+    /// see `pump_transfer`'s note on the same ceiling.
+    pub fn track_to(&mut self, selected: T, last: &PidOut<T>) -> &mut Self {
+        self.ki.accumulate = selected - last.p - last.d;
+        self
+    }
+
     pub fn set_parameters(&mut self, parameters: PidParameters<T>) -> &mut Self {
         self.kp.set_asymmetric_scale(parameters.kp.positive_scale, parameters.kp.negative_scale);
         self.kp.limits = parameters.kp.limits;

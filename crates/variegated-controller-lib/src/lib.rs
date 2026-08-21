@@ -35,6 +35,8 @@ pub mod settings;
 pub mod single_boiler_state;
 // Likewise: when the pump PID holds the output, and what it inherits when it takes over.
 pub mod pump_transfer;
+// And which loop owns the output when a limit is armed. Pure for the same reason.
+pub mod pump_limit;
 #[cfg(feature = "hardware")]
 pub mod single_boiler_single_group;
 #[cfg(feature = "hardware")]

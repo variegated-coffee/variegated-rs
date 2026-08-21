@@ -83,11 +83,19 @@ pub enum GroupBrewLimitMode {
     /// Cap flow *out of* the group, as the scale measures it.
     ///
     /// Ours alone -- neither reference format has an equivalent, since both mean pump-side
-    /// flow by "flow". It fails safe on a machine with no scale: the reading is absent, the
-    /// limit loop sees a process value of zero, its error stays positive and the selector
-    /// never picks it. Declare [`crate::SensorCapability::OutputFlowRate`] as a routine
-    /// prerequisite anyway, so a routine that depends on it refuses rather than quietly
-    /// running unlimited.
+    /// flow by "flow".
+    ///
+    /// On a machine with no scale the reading is absent and the controller substitutes zero,
+    /// permanently below any cap, so this never binds. **That is a property of the seeding
+    /// and tracking in `variegated-controller-lib`'s `pump_limit`, not of the arithmetic.**
+    /// An unseeded limit loop's first output is `kp * error` and nothing else -- for a
+    /// 1.5 ml/s cap against a reading of zero, about 15 on the pump's 0-255 scale, which
+    /// beats whatever the main loop is asking for and shuts the pump. It is safe because the
+    /// loop is seeded from the commanded output when it engages and tracked to the selected
+    /// output thereafter, so it only falls below when its own error goes negative.
+    ///
+    /// Declare [`crate::SensorCapability::OutputFlowRate`] as a routine prerequisite anyway,
+    /// so a routine that depends on this refuses rather than quietly running unlimited.
     MaxOutputFlowRate,
 }
 
