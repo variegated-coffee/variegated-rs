@@ -265,20 +265,66 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             ki: PidTerm::new(0.01, PidLimits::new_with_limits(-10.0, 10.0).unwrap()),
             kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
         };
-        let pump_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
-        let pump_output_flow_rate_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
-        };
+        // The three pump loops, on the pump's own 0-255 scale.
+        //
+        // **These were 0-100-era numbers until now.** When the pump was given its own 0-255
+        // duty cycle the single-boiler controller's defaults were rescaled by 2.55 and
+        // carry a comment saying so; these were missed, so a GS3 starting from defaults ran
+        // its pump at about 1/2.55 of the intended authority. The figures below are stated
+        // directly in duty points, which is why no scale factor appears.
+        //
+        // `kd` is zero throughout. A derivative term needs a measurement that is fresh and
+        // quiet, and neither is true here: the pressure sensor is stale for ~2.2 loop
+        // iterations and the group flow meter has a resolution floor around 0.36 ml/s.
+        //
+        // # Where the pressure gains come from
+        //
+        // Measured, not guessed: a hand-tuned set from a working machine. The kp asymmetry
+        // is the interesting part -- 1.5x stronger when *over* target -- and it is there
+        // because the pump can add pressure faster than the puck can shed it. On a declining
+        // ramp the loop sits above its target for 63-79% of its samples, so the downward
+        // direction is the one short of authority and gets the larger gain.
         let pump_pressure_params = PidParameters {
-            kp: PidTerm::new(10.0, PidLimits::default()),
-            ki: PidTerm::new(0.01, PidLimits::new_with_limits(-50.0, 80.0).unwrap()),
-            kd: PidTerm::new(30.0, PidLimits::new_with_limits(-10.0, 10.0).unwrap())
+            kp: PidTerm::new_asymmetric(20.4, 30.6, PidLimits::default()),
+            ki: PidTerm::new(0.0102, PidLimits::new_with_limits(-26.0, 128.0).unwrap()),
+            kd: PidTerm::new(0.0, PidLimits::new_with_limits(-26.0, 26.0).unwrap())
+        };
+        // # Where the flow gains come from
+        //
+        // Derived from the pressure loop above rather than tuned, by holding the
+        // dimensionless loop gain equal across the two: `kp * dProcess/dDuty`. Shot logs put
+        // the pressure loop at 20.4 * 0.0611 = 1.25, and the group flow meter's process gain
+        // at 0.0275 (ml/s) per duty point, which would match at kp = 45. That is derated to
+        // 25 because flow is measured fresh every loop iteration where pressure is stale for
+        // two, so the same static loop gain acts about twice as often -- and because flow is
+        // the noisier signal of the two.
+        //
+        // `Ti = kp/ki` stays at the pressure loop's 2.0 s. It describes the pump and puck,
+        // which are the same plant whichever quantity is being measured, so kp and ki scale
+        // together.
+        //
+        // **Symmetric, unlike pressure.** The pump is positive-displacement: cut the duty
+        // and flow falls immediately, with nothing stored to bleed off. The asymmetry above
+        // exists for a problem flow does not have.
+        let pump_flow_rate_params = PidParameters {
+            kp: PidTerm::new(25.0, PidLimits::default()),
+            ki: PidTerm::new(0.0125, PidLimits::new_with_limits(-26.0, 204.0).unwrap()),
+            kd: PidTerm::new(0.0, PidLimits::new_with_limits(-26.0, 26.0).unwrap())
+        };
+        // Roughly half the group-flow gain, with `Ti` at twice the length.
+        //
+        // Not because the process gain differs -- measured, the two are the same to within
+        // the shot-to-shot spread -- but because of *where the measurement sits*. The output
+        // loop closes around strictly more plant: the puck, the drop transit and the scale's
+        // own filtering are all inside it and outside the group-flow loop. Fluctuations in
+        // group flow produce essentially no correlated response in scale-derived flow at any
+        // lag, which is a path with almost no high-frequency transfer -- push it hard and the
+        // actuator moves, the measurement does not answer, and the accumulated correction
+        // arrives all at once. The long `Ti` is the more important half of this.
+        let pump_output_flow_rate_params = PidParameters {
+            kp: PidTerm::new(12.0, PidLimits::default()),
+            ki: PidTerm::new(0.003, PidLimits::new_with_limits(-26.0, 204.0).unwrap()),
+            kd: PidTerm::new(0.0, PidLimits::new_with_limits(-26.0, 26.0).unwrap())
         };
 
         Self {
