@@ -76,6 +76,7 @@
         },
         "control_state": {
           "mode": "PressureCurve",
+          "limit": "MaxGroupFlowRate",
           "values": {
             "flow_rate": 2.5,
             "flow_rate_curve": {
@@ -108,7 +109,10 @@
               "c": 2.0,
               "min": 0.0,
               "max": 9.0
-            }
+            },
+            "max_pressure": 9.5,
+            "max_group_flow_rate": 4.0,
+            "max_output_flow_rate": 3.0
           }
         },
         "previous_brew": {
@@ -125,6 +129,11 @@
         "brew_control_target": {
           "mode": "PressureCurve",
           "value": 7.25
+        },
+        "brew_limit": {
+          "mode": "MaxGroupFlowRate",
+          "value": 4.0,
+          "binding": true
         }
       },
       "1": {
@@ -154,6 +163,7 @@
         },
         "control_state": {
           "mode": "PressureCurve",
+          "limit": "MaxGroupFlowRate",
           "values": {
             "flow_rate": 2.5,
             "flow_rate_curve": {
@@ -186,7 +196,10 @@
               "c": 2.0,
               "min": 0.0,
               "max": 9.0
-            }
+            },
+            "max_pressure": 9.5,
+            "max_group_flow_rate": 4.0,
+            "max_output_flow_rate": 3.0
           }
         },
         "previous_brew": {
@@ -203,6 +216,11 @@
         "brew_control_target": {
           "mode": "PressureCurve",
           "value": 7.25
+        },
+        "brew_limit": {
+          "mode": "MaxGroupFlowRate",
+          "value": 4.0,
+          "binding": true
         }
       }
     },

@@ -489,7 +489,14 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
             duty_cycle_curve: groupData.duty_cycle_curve ?? null,
             flow_rate_curve: groupData.flow_rate_curve ?? null,
             pressure_curve: groupData.pressure_curve ?? null,
-            output_flow_rate_curve: groupData.output_flow_rate_curve ?? null
+            output_flow_rate_curve: groupData.output_flow_rate_curve ?? null,
+            // This panel edits the control mode and its setpoints. Limits are carried in
+            // the same update struct but are not editable here -- nothing in this frontend
+            // arms one yet -- and `null` means "leave unchanged", so saving this form
+            // cannot move a cap that was set from somewhere else.
+            max_pressure: null,
+            max_group_flow_rate: null,
+            max_output_flow_rate: null
           }
         );
         alert('Group control updated successfully!');

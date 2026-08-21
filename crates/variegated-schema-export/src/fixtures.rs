@@ -100,6 +100,9 @@ fn boiler_control_state() -> BoilerControlState {
 fn group_control_state() -> GroupBrewControlState {
     GroupBrewControlState {
         mode: GroupBrewControlMode::PressureCurve,
+        // Armed, and on the quantity a pressure-controlled stage would actually cap. An
+        // `Unlimited` fixture would exercise the field's discriminant but never its value.
+        limit: GroupBrewLimitMode::MaxGroupFlowRate,
         values: GroupBrewControlTargetValues {
             flow_rate: 2.5,
             flow_rate_curve: control_curve(),
@@ -109,6 +112,9 @@ fn group_control_state() -> GroupBrewControlState {
             output_flow_rate_curve: control_curve(),
             duty_cycle: DutyCycle::new(75),
             duty_cycle_curve: control_curve(),
+            max_pressure: 9.5,
+            max_group_flow_rate: 4.0,
+            max_output_flow_rate: 3.0,
         },
     }
 }
@@ -187,6 +193,13 @@ fn status_maximal() -> Status {
                     brew_control_target: Some(variegated_controller_types::BrewControlTarget {
                         mode: variegated_controller_types::GroupBrewControlMode::PressureCurve,
                         value: 7.25,
+                    }),
+                    // Armed *and* binding, so a generated client sees an instance of both
+                    // halves. `None` here would leave `binding` a field no example exercises.
+                    brew_limit: Some(variegated_controller_types::BrewLimitStatus {
+                        mode: variegated_controller_types::GroupBrewLimitMode::MaxGroupFlowRate,
+                        value: 4.0,
+                        binding: true,
                     }),
                 },
             )
@@ -506,6 +519,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetShotUploadConfig(_) => {}
             SetShotUploadSettings(_) => {}
             SetTimezone(_) => {}
+            SetGroupBrewLimit(..) => {}
         }
     }
 
@@ -708,6 +722,16 @@ fn machine_commands() -> Vec<MachineCommand> {
             variegated_controller_types::timezone::TimezoneSetting::new("Europe/Stockholm")
                 .expect("fits"),
         ),
+        // Armed with a value rather than disarmed: `Unlimited` with `None` would encode two
+        // tags and no payload, which tells a generated client nothing about either.
+        SetGroupBrewLimit(
+            0,
+            variegated_controller_types::GroupBrewLimitMode::MaxGroupFlowRate,
+            Some(GroupBrewControlTargetValuesUpdate {
+                max_group_flow_rate: Some(2.5),
+                ..Default::default()
+            }),
+        ),
     ]
 }
 
@@ -817,6 +841,14 @@ pub fn canonical_shot() -> ShotLog {
         brew_control_target: Some(variegated_controller_types::BrewControlTarget {
             mode: variegated_controller_types::GroupBrewControlMode::PressureCurve,
             value: 9.25,
+        }),
+        // Below `flow_out` for the same reason `brew_control_target` is not equal to
+        // `pressure`: a cap that is binding is one the flow has actually reached, and a
+        // fixture that contradicted itself would teach a reader the wrong thing.
+        brew_limit: Some(variegated_controller_types::BrewLimitStatus {
+            mode: variegated_controller_types::GroupBrewLimitMode::MaxGroupFlowRate,
+            value: 2.75,
+            binding: true,
         }),
     };
 

@@ -143,6 +143,13 @@ export const GroupBrewControlModeSchema = enumType('GroupBrewControlMode', {
   Off: unitVariant('Off')
 });
 
+export const GroupBrewLimitModeSchema = enumType('GroupBrewLimitMode', {
+  Unlimited: unitVariant('Unlimited'),
+  MaxPressure: unitVariant('MaxPressure'),
+  MaxGroupFlowRate: unitVariant('MaxGroupFlowRate'),
+  MaxOutputFlowRate: unitVariant('MaxOutputFlowRate')
+});
+
 export const HeatingElementContentionStrategySchema = enumType('HeatingElementContentionStrategy', {
   BrewPriority: unitVariant('BrewPriority'),
   SteamPriority: unitVariant('SteamPriority'),
@@ -415,6 +422,12 @@ export const BrewControlTargetSchema = struct({
   value: f32()
 });
 
+export const BrewLimitStatusSchema = struct({
+  mode: GroupBrewLimitModeSchema,
+  value: f32(),
+  binding: bool()
+});
+
 export const BrewStatusSchema = struct({
   brew_time: DurationSchema,
   brew_input_volume: option(f32()),
@@ -463,7 +476,10 @@ export const GroupBrewControlTargetValuesSchema = struct({
   output_flow_rate: f32(),
   output_flow_rate_curve: ControlCurveSchema,
   duty_cycle: DutyCycleSchema,
-  duty_cycle_curve: ControlCurveSchema
+  duty_cycle_curve: ControlCurveSchema,
+  max_pressure: f32(),
+  max_group_flow_rate: f32(),
+  max_output_flow_rate: f32()
 });
 
 export const GroupBrewControlTargetValuesUpdateSchema = struct({
@@ -474,7 +490,10 @@ export const GroupBrewControlTargetValuesUpdateSchema = struct({
   output_flow_rate: option(f32()),
   output_flow_rate_curve: option(ControlCurveSchema),
   duty_cycle: option(DutyCycleSchema),
-  duty_cycle_curve: option(ControlCurveSchema)
+  duty_cycle_curve: option(ControlCurveSchema),
+  max_pressure: option(f32()),
+  max_group_flow_rate: option(f32()),
+  max_output_flow_rate: option(f32())
 });
 
 export const GroupDefinitionSchema = struct({
@@ -684,6 +703,7 @@ export const FillConfigurationSchema = struct({
 
 export const GroupBrewControlStateSchema = struct({
   mode: GroupBrewControlModeSchema,
+  limit: GroupBrewLimitModeSchema,
   values: GroupBrewControlTargetValuesSchema
 });
 
@@ -733,7 +753,11 @@ export const RoutineCommandSchema = enumType('RoutineCommand', {
   SetGroupFixedDutyCycleWithTransition: tupleVariant('SetGroupFixedDutyCycleWithTransition', u8(), ParameterValueSchema, ParameterValueSchema, TransitionOriginSchema),
   InferGroupPressureIntegral: tupleVariant('InferGroupPressureIntegral', u8(), ParameterValueSchema),
   InferGroupFlowRateIntegral: tupleVariant('InferGroupFlowRateIntegral', u8(), ParameterValueSchema),
-  InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), ParameterValueSchema)
+  InferGroupOutputFlowRateIntegral: tupleVariant('InferGroupOutputFlowRateIntegral', u8(), ParameterValueSchema),
+  SetGroupPressureLimit: tupleVariant('SetGroupPressureLimit', u8(), ParameterValueSchema),
+  SetGroupFlowRateLimit: tupleVariant('SetGroupFlowRateLimit', u8(), ParameterValueSchema),
+  SetGroupOutputFlowRateLimit: tupleVariant('SetGroupOutputFlowRateLimit', u8(), ParameterValueSchema),
+  ClearGroupLimit: newtypeVariant('ClearGroupLimit', u8())
 });
 
 export const RoutineExitConditionSchema = enumType('RoutineExitCondition', {
@@ -817,7 +841,8 @@ export const GroupStatusSchema = struct({
   control_state: GroupBrewControlStateSchema,
   previous_brew: option(PreviousBrewInfoSchema),
   pump_rpm: option(f32()),
-  brew_control_target: option(BrewControlTargetSchema)
+  brew_control_target: option(BrewControlTargetSchema),
+  brew_limit: option(BrewLimitStatusSchema)
 });
 
 export const RoutineExitSchema = struct({
@@ -960,7 +985,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   DeleteShotLog: newtypeVariant('DeleteShotLog', ShotLogIdSchema),
   SetShotUploadConfig: newtypeVariant('SetShotUploadConfig', ShotUploadConfigSchema),
   SetShotUploadSettings: newtypeVariant('SetShotUploadSettings', ShotUploadSettingsSchema),
-  SetTimezone: newtypeVariant('SetTimezone', TimezoneSettingSchema)
+  SetTimezone: newtypeVariant('SetTimezone', TimezoneSettingSchema),
+  SetGroupBrewLimit: tupleVariant('SetGroupBrewLimit', u8(), GroupBrewLimitModeSchema, option(GroupBrewControlTargetValuesUpdateSchema))
 });
 
 export const QueryOutcomeSchema = enumType('QueryOutcome', {
@@ -1020,6 +1046,7 @@ export type BoilerDefinition = InferType<typeof BoilerDefinitionSchema>;
 export type BoilerStatus = InferType<typeof BoilerStatusSchema>;
 export type BoilerType = InferType<typeof BoilerTypeSchema>;
 export type BrewControlTarget = InferType<typeof BrewControlTargetSchema>;
+export type BrewLimitStatus = InferType<typeof BrewLimitStatusSchema>;
 export type BrewStatus = InferType<typeof BrewStatusSchema>;
 export type ClientQuery = InferType<typeof ClientQuerySchema>;
 export type CommsStatus = InferType<typeof CommsStatusSchema>;
@@ -1037,6 +1064,7 @@ export type GroupBrewControlMode = InferType<typeof GroupBrewControlModeSchema>;
 export type GroupBrewControlState = InferType<typeof GroupBrewControlStateSchema>;
 export type GroupBrewControlTargetValues = InferType<typeof GroupBrewControlTargetValuesSchema>;
 export type GroupBrewControlTargetValuesUpdate = InferType<typeof GroupBrewControlTargetValuesUpdateSchema>;
+export type GroupBrewLimitMode = InferType<typeof GroupBrewLimitModeSchema>;
 export type GroupConfiguration = InferType<typeof GroupConfigurationSchema>;
 export type GroupDefinition = InferType<typeof GroupDefinitionSchema>;
 export type GroupStatus = InferType<typeof GroupStatusSchema>;

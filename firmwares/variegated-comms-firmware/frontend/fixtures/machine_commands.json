@@ -78,7 +78,10 @@
           "c": 2.0,
           "min": 0.0,
           "max": 9.0
-        }
+        },
+        "max_pressure": 9.5,
+        "max_group_flow_rate": 4.0,
+        "max_output_flow_rate": 3.0
       }
     ]
   },
@@ -93,7 +96,10 @@
         "output_flow_rate": null,
         "output_flow_rate_curve": null,
         "duty_cycle": null,
-        "duty_cycle_curve": null
+        "duty_cycle_curve": null,
+        "max_pressure": null,
+        "max_group_flow_rate": null,
+        "max_output_flow_rate": null
       }
     ]
   },
@@ -604,5 +610,24 @@
     "SetTimezone": {
       "name": "Europe/Stockholm"
     }
+  },
+  {
+    "SetGroupBrewLimit": [
+      0,
+      "MaxGroupFlowRate",
+      {
+        "flow_rate": null,
+        "flow_rate_curve": null,
+        "pressure": null,
+        "pressure_curve": null,
+        "output_flow_rate": null,
+        "output_flow_rate_curve": null,
+        "duty_cycle": null,
+        "duty_cycle_curve": null,
+        "max_pressure": null,
+        "max_group_flow_rate": 2.5,
+        "max_output_flow_rate": null
+      }
+    ]
   }
 ]
