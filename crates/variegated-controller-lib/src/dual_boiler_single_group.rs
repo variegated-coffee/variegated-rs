@@ -17,6 +17,7 @@ use movavg::MovAvg;
 use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
+use crate::pump_limit::{self, LimitEngagement, LimitTransfer};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
@@ -453,6 +454,10 @@ pub struct DualBoilerSingleGroupController<
     brew_boiler_pid: PidCtrl<f32>,
     steam_boiler_pid: PidCtrl<f32>,
     pump_pid: PidCtrl<f32>,
+    /// The limit loop, when one is armed. A second controller against the same actuator,
+    /// selected against `pump_pid` by taking the lower output — see [`crate::pump_limit`].
+    limit_pid: PidCtrl<f32>,
+    limit_engagement: LimitEngagement,
     last_brew_boiler_output: f32,
     last_steam_boiler_output: f32,
 
@@ -795,6 +800,10 @@ impl<
             steam_boiler_pid: super::limited_pid(),
             // 0-255, not 0-100: the pump PID computes on the pump's own scale.
             pump_pid: super::hexadecimal_limited_pid(),
+            // Same clamps as the main loop: it drives the same actuator on the same scale,
+            // and is only ever holding a different quantity.
+            limit_pid: super::hexadecimal_limited_pid(),
+            limit_engagement: LimitEngagement::new(),
             last_brew_boiler_output: 0.0,
             last_steam_boiler_output: 0.0,
             configuration_store: settings_store,
@@ -1620,23 +1629,17 @@ impl<
 
         let pump_pid_out = self.pump_pid.step(PidIn::new(pump_pv, delta_t));
 
-        // Everything below the controller is on the pump's 0-255 scale; the operator's
-        // percentages are converted here, once, on the way in.
-        match control_state.mode {
-            GroupBrewControlMode::Off => {
-                let duty_cycle = self.apply_pump_configuration_limits(HexadecimalDutyCycleType::OFF, true);
-                self.group.set_brewing_state(false, duty_cycle).await;
-                PumpOutput::Off
-            },
+        // What the mode alone asks for, before any limit. Everything below the controller is
+        // on the pump's 0-255 scale; the operator's percentages are converted here, once, on
+        // the way in. `None` is `Off`: the pump is not driven, and a limit cannot change that.
+        let (brewing, main_output) = match control_state.mode {
+            GroupBrewControlMode::Off => (false, None),
             GroupBrewControlMode::FullOn => {
-                let duty_cycle = self.apply_pump_configuration_limits(HexadecimalDutyCycleType::FULL, false);
-                self.group.set_brewing_state(true, duty_cycle).await;
-                PumpOutput::FixedDutyCycle(duty_cycle)
+                (true, Some(HexadecimalDutyCycleType::FULL.value() as f32))
             },
             GroupBrewControlMode::FixedDutyCycle => {
-                let duty_cycle = self.apply_pump_configuration_limits(control_state.values.duty_cycle.into(), false);
-                self.group.set_brewing_state(true, duty_cycle).await;
-                PumpOutput::FixedDutyCycle(duty_cycle)
+                let duty_cycle: HexadecimalDutyCycleType = control_state.values.duty_cycle.into();
+                (true, Some(duty_cycle.value() as f32))
             }
             GroupBrewControlMode::FixedDutyCycleCurve => {
                 // The curve is authored in percent and evaluates to an `f32`, so going
@@ -1645,22 +1648,103 @@ impl<
                 let target_percent = DutyCycleType::from_f32(
                     control_state.values.duty_cycle_curve.evaluate(elapsed_seconds),
                 );
-                let duty_cycle = self.apply_pump_configuration_limits(target_percent.into(), false);
-                self.group.set_brewing_state(true, duty_cycle).await;
-                PumpOutput::FixedDutyCycle(duty_cycle)
+                let duty_cycle: HexadecimalDutyCycleType = target_percent.into();
+                (true, Some(duty_cycle.value() as f32))
             }
-            _ => {
-                // The PID computes natively in 0-255, so this narrows but does not rescale.
-                let duty_cycle = self.apply_pump_configuration_limits(
-                    HexadecimalDutyCycleType::from_f32(pump_pid_out.out),
-                    false,
-                );
-                self.group.set_brewing_state(true, duty_cycle).await;
-                // `out` is republished as the *limited* duty so the status reports what the
-                // pump was actually given rather than what the PID asked for.
-                PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..pump_pid_out })
-            },
+            // The PID computes natively in 0-255, so this narrows but does not rescale.
+            _ => (true, Some(pump_pid_out.out)),
+        };
+
+        // The limit loop, and the selector. See `crate::pump_limit`.
+        let commanded = main_output.unwrap_or(0.0);
+        let limit_pid_out = self.step_limit_loop(&control_state, commanded, delta_t);
+        let selection = pump_limit::select(commanded, limit_pid_out.map(|out| out.out));
+
+        // External reset feedback: whichever loop did not get the output is held at the one
+        // that did, or it winds up and takes over with a step.
+        //
+        // Note this controller steps `pump_pid` in *every* mode, including the open-loop
+        // ones -- it has never had the engagement discipline `crate::pump_transfer` added to
+        // the single-boiler controller, so its main loop still winds up against a hardcoded
+        // process value when the pump is under open-loop control. That is a pre-existing
+        // divergence and is not addressed here; tracking it when the limit wins is correct
+        // regardless.
+        if let Some(limit_out) = limit_pid_out {
+            if selection.binding {
+                self.pump_pid.track_to(selection.output, &pump_pid_out);
+            } else {
+                self.limit_pid.track_to(selection.output, &limit_out);
+            }
         }
+
+        let duty_cycle = self.apply_pump_configuration_limits(
+            HexadecimalDutyCycleType::from_f32(selection.output),
+            !brewing,
+        );
+        self.group.set_brewing_state(brewing, duty_cycle).await;
+
+        // `out` is republished as the *limited* duty so the status reports what the pump was
+        // actually given rather than what the controller asked for.
+        if !brewing {
+            PumpOutput::Off
+        } else if selection.binding {
+            // The limit loop is driving, so report its terms rather than the main loop's.
+            let limit_out = limit_pid_out.expect("binding implies a limit output");
+            PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..limit_out })
+        } else {
+            match control_state.mode {
+                GroupBrewControlMode::FullOn
+                | GroupBrewControlMode::FixedDutyCycle
+                | GroupBrewControlMode::FixedDutyCycleCurve => PumpOutput::FixedDutyCycle(duty_cycle),
+                _ => PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..pump_pid_out }),
+            }
+        }
+    }
+
+    /// Step the limit loop, or `None` if no limit is running this iteration.
+    ///
+    /// The single-boiler controller's twin, differing only in where the PID parameters live.
+    /// See its copy, and [`crate::pump_limit::LimitTransfer`] for why an engaging loop has to
+    /// inherit the commanded output.
+    fn step_limit_loop(
+        &mut self,
+        state: &GroupBrewControlState,
+        commanded: f32,
+        delta_t: f32,
+    ) -> Option<PidOut<f32>> {
+        let transfer = self.limit_engagement.transfer_for(state.mode, state.limit);
+        if transfer == LimitTransfer::Hold {
+            return None;
+        }
+
+        let setpoint = pump_limit::limit_setpoint(state.limit, &state.values)?;
+        let (pv, params) = match state.limit {
+            // `limit_setpoint` already returned `None` for this.
+            GroupBrewLimitMode::Unlimited => return None,
+            GroupBrewLimitMode::MaxPressure => (
+                self.group.get_pressure().unwrap_or(0.0) as f32,
+                self.configuration.persistent.group.pressure_pid_parameters,
+            ),
+            GroupBrewLimitMode::MaxGroupFlowRate => (
+                self.group.get_input_flow_rate().unwrap_or(0.0) as f32,
+                self.configuration.persistent.group.flow_rate_pid_parameters,
+            ),
+            // An absent scale reads as 0.0, permanently below any cap. Safe, but only
+            // because of the seeding below and the tracking above -- see
+            // `GroupBrewLimitMode::MaxOutputFlowRate`.
+            GroupBrewLimitMode::MaxOutputFlowRate => (
+                self.group.get_output_flow_rate().unwrap_or(0.0) as f32,
+                self.configuration.persistent.group.output_flow_rate_pid_parameters,
+            ),
+        };
+
+        self.limit_pid.setpoint = setpoint;
+        self.limit_pid.set_parameters(params);
+        if transfer == LimitTransfer::Engage {
+            self.limit_pid.infer_and_set_integral(commanded, pv);
+        }
+
+        Some(self.limit_pid.step(PidIn::new(pv, delta_t)))
     }
 
     /// The water tap's copy of [`Self::apply_pump_configuration_limits`], reading the tap's

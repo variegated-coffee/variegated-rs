@@ -103,7 +103,7 @@ pub enum LimitTransfer {
 /// Tracks whether the limit loop is currently running. One per group.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LimitEngagement {
-    engaged: bool,
+    engaged: Option<GroupBrewLimitMode>,
 }
 
 impl LimitEngagement {
@@ -113,30 +113,28 @@ impl LimitEngagement {
 
     /// Decide what happens to the limit loop for this mode and limit, and record it.
     ///
-    /// Re-engages whenever the limit was off and comes on — including when the *armed
-    /// quantity changes*, since a pressure cap and a flow cap are different loops with
-    /// different units and carrying an integral between them would be meaningless.
+    /// Re-engages when the limit comes on, and **also when the armed quantity changes while
+    /// it stays on**. That second case is why this remembers *which* limit rather than a
+    /// bare flag: the integral is denominated in duty cycle, but the loop's setpoint, gains
+    /// and process variable are not, so a controller carried straight from a pressure cap
+    /// into a flow cap would be holding a number it computed for a different quantity. It is
+    /// re-seeded from the commanded output instead, which means the same thing in both.
     pub fn transfer_for(
         &mut self,
         mode: GroupBrewControlMode,
         limit: GroupBrewLimitMode,
     ) -> LimitTransfer {
         if !limit_is_active(mode, limit) {
-            self.engaged = false;
+            self.engaged = None;
             return LimitTransfer::Hold;
         }
 
-        if self.engaged {
+        if self.engaged == Some(limit) {
             LimitTransfer::Continue
         } else {
-            self.engaged = true;
+            self.engaged = Some(limit);
             LimitTransfer::Engage
         }
-    }
-
-    /// Force re-engagement, for when the armed quantity changes under a still-active limit.
-    pub fn disengage(&mut self) {
-        self.engaged = false;
     }
 }
 
@@ -282,6 +280,54 @@ mod tests {
             let setpoint = limit_setpoint(limit, &values).expect("armed");
             assert!(setpoint > 0.0, "{limit:?} defaults to {setpoint}, which would strangle the shot");
         }
+    }
+
+    /// Engaging happens once. A second iteration on the same limit must not re-seed, or the
+    /// integral would be pinned to the commanded output forever and the loop would never
+    /// actually limit anything.
+    #[test]
+    fn a_limit_engages_once_and_then_continues() {
+        let mut engagement = LimitEngagement::new();
+        let mode = GroupBrewControlMode::Pressure;
+
+        assert_eq!(
+            engagement.transfer_for(mode, GroupBrewLimitMode::MaxGroupFlowRate),
+            LimitTransfer::Engage
+        );
+        assert_eq!(
+            engagement.transfer_for(mode, GroupBrewLimitMode::MaxGroupFlowRate),
+            LimitTransfer::Continue
+        );
+    }
+
+    /// Swapping the armed quantity has to re-seed. The integral is in duty cycle, but the
+    /// setpoint, gains and process variable are not -- continuing here would hold a number
+    /// computed against bar while now controlling ml/s.
+    #[test]
+    fn changing_the_armed_quantity_re_engages() {
+        let mut engagement = LimitEngagement::new();
+        let mode = GroupBrewControlMode::Pressure;
+
+        assert_eq!(
+            engagement.transfer_for(mode, GroupBrewLimitMode::MaxGroupFlowRate),
+            LimitTransfer::Engage
+        );
+        assert_eq!(
+            engagement.transfer_for(mode, GroupBrewLimitMode::MaxOutputFlowRate),
+            LimitTransfer::Engage
+        );
+    }
+
+    /// Going through `Off` must drop the engagement, so coming back seeds from whatever the
+    /// pump is doing then rather than from what it was doing before it stopped.
+    #[test]
+    fn stopping_the_pump_drops_the_engagement() {
+        let mut engagement = LimitEngagement::new();
+        let limit = GroupBrewLimitMode::MaxPressure;
+
+        assert_eq!(engagement.transfer_for(GroupBrewControlMode::Pressure, limit), LimitTransfer::Engage);
+        assert_eq!(engagement.transfer_for(GroupBrewControlMode::Off, limit), LimitTransfer::Hold);
+        assert_eq!(engagement.transfer_for(GroupBrewControlMode::Pressure, limit), LimitTransfer::Engage);
     }
 
     #[test]
