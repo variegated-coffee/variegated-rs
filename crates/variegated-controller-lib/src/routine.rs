@@ -17,7 +17,7 @@ use embedded_storage_async::nor_flash::MultiwriteNorFlash;
 use sequential_storage::cache::Cache;
 use sequential_storage::map::{MapConfig, MapStorage};
 use crate::flash::BorrowedFlash;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, BrewControlTarget, ControlCurve, ECType, ExtractedSolidsType, ExtractionRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupIndex, MachineCommand, RoutineIndex, Status, TransitionOrigin, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, BoilerIndex, BrewControlTarget, ControlCurve, ECType, ExtractedSolidsType, ExtractionRateType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, GroupIndex, MachineCommand, RoutineIndex, Status, TransitionOrigin, UserActionIndex, DutyCycleType, ValveOpenType, OutputVolumeType};
 
 // Re-export types that are commonly used by consumers of this module
 pub use variegated_controller_types::{
@@ -514,6 +514,37 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                             ..Default::default()
                         }))
                 }
+            }
+
+            // Limits. All four land on one machine command; `Unlimited` is the clear.
+            RoutineCommand::SetGroupPressureLimit(idx, pv) => {
+                MachineCommand::SetGroupBrewLimit(*idx,
+                    GroupBrewLimitMode::MaxPressure,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        max_pressure: Some(self.resolve_value(pv)),
+                        ..Default::default()
+                    }))
+            }
+            RoutineCommand::SetGroupFlowRateLimit(idx, pv) => {
+                MachineCommand::SetGroupBrewLimit(*idx,
+                    GroupBrewLimitMode::MaxGroupFlowRate,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        max_group_flow_rate: Some(self.resolve_value(pv)),
+                        ..Default::default()
+                    }))
+            }
+            RoutineCommand::SetGroupOutputFlowRateLimit(idx, pv) => {
+                MachineCommand::SetGroupBrewLimit(*idx,
+                    GroupBrewLimitMode::MaxOutputFlowRate,
+                    Some(GroupBrewControlTargetValuesUpdate {
+                        max_output_flow_rate: Some(self.resolve_value(pv)),
+                        ..Default::default()
+                    }))
+            }
+            RoutineCommand::ClearGroupLimit(idx) => {
+                // No values: disarming says nothing about what the caps were, and a routine
+                // that re-arms later restates its own.
+                MachineCommand::SetGroupBrewLimit(*idx, GroupBrewLimitMode::Unlimited, None)
             }
 
             // Bumpless transfer commands

@@ -73,6 +73,25 @@ pub struct Routine {
 /// Routines *have* now been written at 4 and are sitting in machines' flash, so this
 /// invalidates them for real: they are refused at load rather than mis-decoded, and have to
 /// be re-created. That is the trade this constant exists to make explicit.
+///
+/// # Why the limit commands did *not* bump this
+///
+/// "Bump on any change to the encoding" is written conservatively above, and appending
+/// variants to [`RoutineCommand`] is the case where it is worth being precise instead.
+/// Appending leaves every existing encoding **byte-identical**: postcard writes an enum as
+/// its declaration-order discriminant, so a routine that names none of the new variants
+/// encodes exactly as it did before. Nothing already in flash decodes differently.
+///
+/// The other direction fails closed on its own. A routine using a new variant, loaded by a
+/// firmware that does not have it, is an out-of-range discriminant — postcard returns
+/// `DeserializeBadEnum`, which `deserialize_from` already maps to `InvalidFormat`, so it is
+/// refused rather than mis-decoded. That is the same outcome a version check would produce,
+/// reached without invalidating anything.
+///
+/// Against that, bumping would refuse **every routine in every machine's flash** for a purely
+/// additive change. So: append freely and leave this alone; bump when a field is added,
+/// removed or reordered anywhere reachable from `Routine`, or when a variant is inserted
+/// rather than appended.
 pub const ROUTINE_FORMAT_VERSION: u16 = 5;
 
 #[cfg(feature = "defmt")]

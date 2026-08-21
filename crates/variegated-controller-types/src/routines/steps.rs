@@ -65,6 +65,33 @@ pub enum RoutineCommand {
     InferGroupPressureIntegral(GroupIndex, ParameterValue),
     InferGroupFlowRateIntegral(GroupIndex, ParameterValue),
     InferGroupOutputFlowRateIntegral(GroupIndex, ParameterValue),
+
+    // Limits: cap one quantity while a different one is being controlled. See
+    // [`crate::GroupBrewLimitMode`], and `variegated-controller-lib`'s `pump_limit` for how
+    // the two loops share the pump.
+    //
+    // **Appended, not inserted.** postcard encodes an enum as its declaration-order
+    // discriminant, so anything but the end renumbers every variant after it and silently
+    // mis-decodes every stored routine.
+    //
+    // A `ParameterValue` rather than an `f32`, like every other setpoint here: a quarter of
+    // the limits in real shared profiles are variable-backed, and a cap is exactly the sort
+    // of thing that belongs on the parameter screen.
+    //
+    // **Sticky, like every other setpoint.** A step that does not mention a limit keeps the
+    // last one, which is why [`Self::ClearGroupLimit`] exists. A step reachable both with and
+    // without a limit armed behaves differently depending on how it was reached -- the same
+    // hazard [`TransitionOrigin`] documents for ramps, and worth the same warning in an
+    // editor.
+    SetGroupPressureLimit(GroupIndex, ParameterValue),
+    SetGroupFlowRateLimit(GroupIndex, ParameterValue),
+    SetGroupOutputFlowRateLimit(GroupIndex, ParameterValue),
+    /// Disarm whatever limit is armed.
+    ///
+    /// For disarming *between steps*. Putting one in a routine's `finally` is redundant
+    /// rather than harmful: `finally` runs before the configuration restore, so the restore
+    /// has the last word and the routine's limit is undone whether or not it is mentioned.
+    ClearGroupLimit(GroupIndex),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
