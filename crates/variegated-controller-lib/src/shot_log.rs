@@ -162,6 +162,10 @@ impl ShotLogger {
                 // opposed to what came back. See the field's own note for why a log of only
                 // measurements hid a bug for two shots.
                 brew_control_target: group_status.brew_control_target,
+                // What was holding the pump back, if anything. Straight off the status for
+                // the same reason as `pump_rpm`: a limit applies whether or not a brew is in
+                // flight, and capping a preinfusion is one of its commonest uses.
+                brew_limit: group_status.brew_limit,
             });
         }
 

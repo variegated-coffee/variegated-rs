@@ -770,7 +770,18 @@ pub enum ShotLogEvent {
 ///   `GOLDEN_V6` and `a_version_6_file_is_refused_by_its_version` are what keep the check
 ///   honest; note that `GOLDEN_V7` differs from `GOLDEN_V6` only in the leading version
 ///   varint, and that is correct rather than a mistake.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 7;
+/// - **8** — `GroupSample` gained `brew_limit`, so a shot records what was capping the pump
+///   and when the cap was actually holding it back.
+///
+///   The same positional hazard as 6 and 7: `GroupSample` is not last in the file, so a
+///   version 7 file read as 8 consumes the water-tap map's length byte as the new option
+///   tag, and every field after it is garbage. The version check is what refuses it.
+///
+///   Worth the migration rather than deriving it: while a limit binds, the pump's PID terms
+///   belong to the *limited* quantity rather than the one `brew_control_target` names, so a
+///   reader without this field attributes a flow loop's output to a pressure setpoint and
+///   gets a plausible, wrong answer.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 8;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -989,6 +1000,26 @@ pub struct GroupSample {
     /// not last in the file, so a version 5 file read as version 6 consumes the water-tap
     /// map's length byte as this field's option tag. The version check refuses it first.
     pub brew_control_target: Option<crate::BrewControlTarget>,
+    /// The limit capping the pump at this instant, and whether it was binding.
+    ///
+    /// `None` when nothing was armed, or the group was not being driven.
+    ///
+    /// Without this a limited shot is indistinguishable from an unlimited one after the
+    /// fact. `pump_output` would show a PID's terms either way, and while the limit binds
+    /// those terms belong to a *different quantity* than [`Self::brew_control_target`] names
+    /// -- so a reader with only the old fields would attribute a flow loop's proportional
+    /// term to a pressure setpoint and get a plausible, wrong answer. `binding` is what says
+    /// which.
+    ///
+    /// The armed value is recorded rather than derived. While binding it could in principle
+    /// be read off the capped quantity's own sample, since that is what the loop is holding
+    /// -- but not while merely armed, and "a cap that never engaged on this puck" is
+    /// something a dial-in wants to see.
+    ///
+    /// Appended, with the same caveat as the two fields above: `GroupSample` is not last in
+    /// the file, so an older file read as this version consumes the water-tap map's length
+    /// byte as this field's option tag. The version check refuses it first.
+    pub brew_limit: Option<crate::BrewLimitStatus>,
 }
 
 /// Water tap sensor readings at a point in time
@@ -1350,6 +1381,18 @@ mod shot_log_sample_tests {
                         mode: crate::GroupBrewControlMode::PressureCurve,
                         value: 9.25,
                     }),
+                    // 2.75 is 0x40300000 -- exact and distinct like the rest, and set
+                    // *below* `input_flow_rate` above so the sample is internally consistent
+                    // with `binding: true`: a cap that is holding the pump back is one the
+                    // flow has actually reached.
+                    //
+                    // `MaxGroupFlowRate` rather than the first armed variant, so a
+                    // discriminant off by one shows up.
+                    brew_limit: Some(crate::BrewLimitStatus {
+                        mode: crate::GroupBrewLimitMode::MaxGroupFlowRate,
+                        value: 2.75,
+                        binding: true,
+                    }),
                 },
             )
             .unwrap();
@@ -1580,6 +1623,37 @@ mod shot_log_sample_tests {
         0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
     ];
 
+    /// The bytes version 8 produces for [`canonical_shot`], captured once when version 8
+    /// was minted.
+    ///
+    /// **Differs from [`GOLDEN_V7`] by the leading version byte and seven bytes in the
+    /// middle**, and it is worth being able to point at them: `0x01` (the `brew_limit`
+    /// option tag), `0x02` (`MaxGroupFlowRate`), `0x00 0x00 0x30 0x40` (2.75 as a
+    /// little-endian `f32`) and `0x01` (`binding`). They sit immediately after
+    /// `brew_control_target` and immediately before the water-tap map — which is precisely
+    /// the hazard the version check exists for, since a version 7 file read as version 8
+    /// would take that map's length byte as the option tag.
+    ///
+    /// Everything else is byte-identical to version 7, and that is the check worth doing
+    /// whenever this array is regenerated: a diff wider than the field you added means
+    /// something else moved too.
+    const GOLDEN_V8: &[u8] = &[
+        0x08, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
+        0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
+        0x20, 0x6c, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x6f, 0x63, 0x6f, 0x61, 0x20,
+        0x66, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01,
+        0x9c, 0xc7, 0x01, 0x01, 0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x02,
+        0xdc, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5, 0xee,
+        0x01, 0x01, 0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40, 0x01,
+        0x00, 0x00, 0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00, 0x00,
+        0x11, 0x42, 0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb, 0x42,
+        0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00,
+        0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40,
+        0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x03,
+        0x00, 0x00, 0x14, 0x41, 0x01, 0x02, 0x00, 0x00, 0x30, 0x40, 0x01,
+        0x01, 0x02, 0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    ];
+
     /// A version 3 file is rejected on its version, not decoded into nonsense.
     ///
     /// The whole point of a leading version. `recorded_at_unix_millis` was *appended* to
@@ -1675,6 +1749,27 @@ mod shot_log_sample_tests {
         }
     }
 
+    /// A version 7 file is refused on its version, for the reason 6 and 7 already establish.
+    ///
+    /// `brew_limit` was appended to `GroupSample`, which is *not* last in the file — the
+    /// water-tap map follows it. So a version 7 file read under version 8's schema takes that
+    /// map's length byte as the new field's option tag and desynchronises from there. Unlike
+    /// the 6-to-7 case it would probably fail loudly rather than lie, but "probably" is not
+    /// what the version check is for.
+    #[test]
+    fn a_version_7_file_is_refused_by_its_version() {
+        let (version, _rest) = postcard::take_from_bytes::<u32>(GOLDEN_V7).unwrap();
+        assert_eq!(version, 7, "GOLDEN_V7 must stay the version 7 file it was");
+        assert_ne!(
+            version, SHOT_LOG_FORMAT_VERSION,
+            "an old file must be distinguishable from a current one by its first byte"
+        );
+
+        if let Ok(decoded) = postcard::from_bytes::<ShotLog>(GOLDEN_V7) {
+            assert!(!decoded.version_supported());
+        }
+    }
+
     /// A shot stored by this version still decodes, byte for byte, to what it meant.
     ///
     /// This is the test that fires when someone adds, removes, reorders or retypes a field
@@ -1693,7 +1788,7 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V7,
+            GOLDEN_V8,
             "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
              see this test's doc comment before touching the golden array"
         );
@@ -1701,7 +1796,7 @@ mod shot_log_sample_tests {
         // Decoding the frozen bytes as well as comparing them: the assertion above proves
         // the writer has not moved, this proves the reader still understands what an
         // earlier build wrote.
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V7).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V8).unwrap();
         assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
         assert_eq!(decoded.metadata.recorded_at_unix_millis, Some(1_786_429_751_930));
         assert_eq!(
