@@ -553,19 +553,19 @@ fn machine_commands() -> Vec<MachineCommand> {
                 output_flow_rate_curve: Some(control_curve()),
                 duty_cycle: Some(DutyCycle::new(60)),
                 duty_cycle_curve: Some(control_curve()),
+                // Every field populated on purpose: this fixture is what the exported
+                // schema's example payload is built from, so a field left `None` here is a
+                // field the generated client never sees an instance of.
+                max_pressure: Some(9.5),
+                max_group_flow_rate: Some(4.0),
+                max_output_flow_rate: Some(3.0),
             }),
         ),
         SetGroupBrewControlTargetValues(
             1,
             GroupBrewControlTargetValuesUpdate {
-                flow_rate: None,
-                flow_rate_curve: None,
                 pressure: Some(6.0),
-                pressure_curve: None,
-                output_flow_rate: None,
-                output_flow_rate_curve: None,
-                duty_cycle: None,
-                duty_cycle_curve: None,
+                ..Default::default()
             },
         ),
         SetPidParameters(PidParameterTarget::GroupPressure(0), pid_parameters()),

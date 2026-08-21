@@ -21,7 +21,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewLimitMode, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
@@ -229,6 +229,7 @@ impl Default for DualBoilerSingleGroupEphemeralConfiguration {
         Self {
             group_brew_control_state: GroupBrewControlState {
                 mode: GroupBrewControlMode::FixedDutyCycle,
+                limit: GroupBrewLimitMode::Unlimited,
                 values: GroupBrewControlTargetValues {
                     duty_cycle: DutyCycleType::FULL,
                     ..GroupBrewControlTargetValues::default()
@@ -372,6 +373,7 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
             // Default control states (what to reset to on restart)
             default_group_brew_control_state: GroupBrewControlState {
                 mode: GroupBrewControlMode::FixedDutyCycle,
+                limit: GroupBrewLimitMode::Unlimited,
                 values: GroupBrewControlTargetValues {
                     duty_cycle: DutyCycleType::FULL,
                     ..GroupBrewControlTargetValues::default()

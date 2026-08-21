@@ -327,58 +327,34 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     GroupBrewControlMode::GroupFlowRate,
                     Some(GroupBrewControlTargetValuesUpdate {
                         flow_rate: Some(self.resolve_value(pv)),
-                        flow_rate_curve: None,
-                        pressure: None,
-                        pressure_curve: None,
-                        output_flow_rate: None,
-                        output_flow_rate_curve: None,
-                        duty_cycle: None,
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
             }
             RoutineCommand::SetGroupPressure(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
                     GroupBrewControlMode::Pressure,
                     Some(GroupBrewControlTargetValuesUpdate {
-                        flow_rate: None,
-                        flow_rate_curve: None,
                         pressure: Some(self.resolve_value(pv)),
-                        pressure_curve: None,
-                        output_flow_rate: None,
-                        output_flow_rate_curve: None,
-                        duty_cycle: None,
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
             }
             RoutineCommand::SetGroupOutputFlowRate(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
                     GroupBrewControlMode::OutputFlowRate,
                     Some(GroupBrewControlTargetValuesUpdate {
-                        flow_rate: None,
-                        flow_rate_curve: None,
-                        pressure: None,
-                        pressure_curve: None,
                         output_flow_rate: Some(self.resolve_value(pv)),
-                        output_flow_rate_curve: None,
-                        duty_cycle: None,
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
             }
             RoutineCommand::SetGroupFixedDutyCycle(idx, pv) => {
                 MachineCommand::SetGroupBrewControlTarget(*idx,
                     GroupBrewControlMode::FixedDutyCycle,
                     Some(GroupBrewControlTargetValuesUpdate {
-                        flow_rate: None,
-                        flow_rate_curve: None,
-                        pressure: None,
-                        pressure_curve: None,
-                        output_flow_rate: None,
-                        output_flow_rate_curve: None,
                         // Routines are authored in percent, so this stays a `DutyCycle`.
                         // `from_f32` clamps where the bare `as u8` it replaced did not: a
                         // routine parameter resolving above 100 used to arrive as-is.
                         duty_cycle: Some(DutyCycleType::from_f32(self.resolve_value(pv))),
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
             }
             RoutineCommand::SetGroupFullOn(idx) => {
@@ -402,13 +378,7 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                         GroupBrewControlMode::GroupFlowRate,
                         Some(GroupBrewControlTargetValuesUpdate {
                             flow_rate: Some(target_value),
-                            output_flow_rate: None,
-                            pressure: None,
-                            duty_cycle: None,
-                            flow_rate_curve: None,
-                            pressure_curve: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 } else {
                     let group = status.get_group_status(*idx);
@@ -429,14 +399,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::GroupFlowRateCurve,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
                             flow_rate_curve: Some(curve),
-                            pressure: None,
-                            pressure_curve: None,
-                            output_flow_rate: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 }
             }
@@ -449,14 +413,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::Pressure,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
-                            output_flow_rate: None,
                             pressure: Some(target_value),
-                            duty_cycle: None,
-                            flow_rate_curve: None,
-                            pressure_curve: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 } else {
                     let group = status.get_group_status(*idx);
@@ -475,14 +433,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::PressureCurve,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
-                            flow_rate_curve: None,
-                            pressure: None,
                             pressure_curve: Some(curve),
-                            output_flow_rate: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 }
             }
@@ -495,14 +447,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::OutputFlowRate,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
                             output_flow_rate: Some(target_value),
-                            pressure: None,
-                            duty_cycle: None,
-                            flow_rate_curve: None,
-                            pressure_curve: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 } else {
                     let group = status.get_group_status(*idx);
@@ -521,14 +467,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::OutputFlowRateCurve,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
-                            flow_rate_curve: None,
-                            pressure: None,
-                            pressure_curve: None,
-                            output_flow_rate: None,
                             output_flow_rate_curve: Some(curve),
-                            duty_cycle: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 }
             }
@@ -542,14 +482,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::FixedDutyCycle,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
-                            output_flow_rate: None,
-                            pressure: None,
                             duty_cycle: Some(DutyCycleType::from_f32(target_value)),
-                            flow_rate_curve: None,
-                            pressure_curve: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle_curve: None
+                            ..Default::default()
                         }))
                 } else {
                     let group = status.get_group_status(*idx);
@@ -576,14 +510,8 @@ impl<StateT, ConfigurationT> RoutineExecutionContext<StateT, ConfigurationT> {
                     MachineCommand::SetGroupBrewControlTarget(*idx,
                         GroupBrewControlMode::FixedDutyCycleCurve,
                         Some(GroupBrewControlTargetValuesUpdate {
-                            flow_rate: None,
-                            flow_rate_curve: None,
-                            pressure: None,
-                            pressure_curve: None,
-                            output_flow_rate: None,
-                            output_flow_rate_curve: None,
-                            duty_cycle: None,
-                            duty_cycle_curve: Some(curve)
+                            duty_cycle_curve: Some(curve),
+                            ..Default::default()
                         }))
                 }
             }

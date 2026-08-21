@@ -39,6 +39,65 @@ pub enum GroupBrewControlMode {
     Off                   // Pump off
 }
 
+/// Which quantity, if any, caps the pump while a *different* one is being controlled.
+///
+/// Orthogonal to [`GroupBrewControlMode`] rather than a variant of it: any brew mode can
+/// carry a limit, including the open-loop ones -- "preinfuse at fixed duty but do not exceed
+/// 4 bar" is the commonest use of one.
+///
+/// # What a limit is, and is not
+///
+/// It is **not** a clamp on the pump's output. When a limit binds, control authority moves:
+/// a pressure-controlled step that hits its flow limit stops controlling pressure and starts
+/// controlling *flow*, at the limit, until the puck lets pressure recover. Both of the
+/// formats this was built to accept work this way -- Meticulous compiles a limit into a
+/// sibling controller node, Decent carries a per-frame `MaxFlowOrPressure` -- and the
+/// mechanism here is the third form of the same idea, a min-select override. See
+/// `variegated-controller-lib`'s `pump_limit`.
+///
+/// Unit variants, like [`GroupBrewControlMode`]'s: the values live in
+/// [`GroupBrewControlTargetValues`] and this selects which one is armed. The names mirror
+/// that enum's deliberately, because each one resolves to the PID parameter set already
+/// tuned for controlling that quantity -- a limit loop is the same physical loop as the
+/// control loop, with a different setpoint.
+///
+/// **One at a time.** Not an oversight: no shared profile in either ecosystem arms more than
+/// one limit on a step, and Decent's format cannot express more than one at all.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GroupBrewLimitMode {
+    /// The pump answers to [`GroupBrewControlMode`] alone.
+    ///
+    /// A variant rather than wrapping the field in `Option`, so that the selector's match has
+    /// to name this case instead of letting it disappear into a `map`. Called `Unlimited` and
+    /// not `None` so `state.limit` never reads ambiguously against `Option::None`.
+    #[default]
+    Unlimited,
+    /// Cap pressure at the group. Pairs with a flow-controlled mode.
+    MaxPressure,
+    /// Cap flow *into* the group, as the pump measures it. Pairs with a pressure-controlled
+    /// mode, which is the commonest limit in shared profiles by a wide margin.
+    MaxGroupFlowRate,
+    /// Cap flow *out of* the group, as the scale measures it.
+    ///
+    /// Ours alone -- neither reference format has an equivalent, since both mean pump-side
+    /// flow by "flow". It fails safe on a machine with no scale: the reading is absent, the
+    /// limit loop sees a process value of zero, its error stays positive and the selector
+    /// never picks it. Declare [`crate::SensorCapability::OutputFlowRate`] as a routine
+    /// prerequisite anyway, so a routine that depends on it refuses rather than quietly
+    /// running unlimited.
+    MaxOutputFlowRate,
+}
+
+impl GroupBrewLimitMode {
+    /// Whether anything is armed.
+    pub fn is_armed(self) -> bool {
+        !matches!(self, GroupBrewLimitMode::Unlimited)
+    }
+}
+
 /// All stored target values for group brew control
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
@@ -58,6 +117,21 @@ pub struct GroupBrewControlTargetValues {
     /// Also authored in percent, and evaluated as an `f32`, so nothing is lost crossing to
     /// the pump's scale.
     pub duty_cycle_curve: ControlCurve,
+
+    // The limit setpoints. Appended, and carried all at once the way every other setpoint
+    // here is: `GroupBrewLimitMode` selects which is live, exactly as `mode` does above.
+    //
+    // **Their defaults are deliberately permissive** -- the top of each quantity's range,
+    // which is the same number the sibling `*_curve` defaults already use as their `max`.
+    // Arming a limit whose value nobody set must do nothing. A default of `0.0` would make
+    // `MaxPressure` mean "never build pressure", which is the worst possible reading of a
+    // field left untouched.
+    /// Cap for [`GroupBrewLimitMode::MaxPressure`], in bar.
+    pub max_pressure: PressureType,
+    /// Cap for [`GroupBrewLimitMode::MaxGroupFlowRate`], in ml/s.
+    pub max_group_flow_rate: FlowRateType,
+    /// Cap for [`GroupBrewLimitMode::MaxOutputFlowRate`], in ml/s.
+    pub max_output_flow_rate: FlowRateType,
 }
 
 impl Default for GroupBrewControlTargetValues {
@@ -71,6 +145,11 @@ impl Default for GroupBrewControlTargetValues {
             output_flow_rate_curve: ControlCurve { a: 0.0, b: 2.0, c: 0.0, min: 0.0, max: 10.0 },
             duty_cycle: DutyCycle::FULL,  // Default 100%
             duty_cycle_curve: ControlCurve { a: 0.0, b: 0.0, c: 100.0, min: 0.0, max: 100.0 },
+            // Permissive, and matching the `max` of the curve defaults above for the same
+            // quantities. See the field comments.
+            max_pressure: 15.0,
+            max_group_flow_rate: 10.0,
+            max_output_flow_rate: 10.0,
         }
     }
 }
@@ -90,6 +169,9 @@ pub struct GroupBrewControlTargetValuesUpdate {
     /// A percentage -- see [`GroupBrewControlTargetValues::duty_cycle`].
     pub duty_cycle: Option<DutyCycleType>,
     pub duty_cycle_curve: Option<ControlCurve>,
+    pub max_pressure: Option<PressureType>,
+    pub max_group_flow_rate: Option<FlowRateType>,
+    pub max_output_flow_rate: Option<FlowRateType>,
 }
 
 /// Complete group brew control state
@@ -99,6 +181,11 @@ pub struct GroupBrewControlTargetValuesUpdate {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GroupBrewControlState {
     pub mode: GroupBrewControlMode,
+    /// Which quantity, if any, caps the pump while `mode`'s quantity is being controlled.
+    ///
+    /// Appended after `values` would have been the tidier place topically, but this belongs
+    /// next to `mode` because that is what it is: a second selector over the same `values`.
+    pub limit: GroupBrewLimitMode,
     pub values: GroupBrewControlTargetValues,
 }
 
@@ -106,6 +193,7 @@ impl Default for GroupBrewControlState {
     fn default() -> Self {
         Self {
             mode: GroupBrewControlMode::Off,
+            limit: GroupBrewLimitMode::Unlimited,
             values: GroupBrewControlTargetValues::default(),
         }
     }

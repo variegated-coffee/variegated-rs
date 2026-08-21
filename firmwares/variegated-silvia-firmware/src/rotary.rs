@@ -253,14 +253,8 @@ impl ManualBrewParameters {
                     (GroupBrewControlMode::Off, None)
                 } else {
                     (GroupBrewControlMode::FixedDutyCycle, Some(GroupBrewControlTargetValuesUpdate {
-                        flow_rate: None,
-                        flow_rate_curve: None,
-                        pressure: None,
-                        pressure_curve: None,
-                        output_flow_rate: None,
-                        output_flow_rate_curve: None,
                         duty_cycle: Some(self.duty_cycle),
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
                 }
             }
@@ -270,13 +264,7 @@ impl ManualBrewParameters {
                 } else {
                     (GroupBrewControlMode::GroupFlowRate, Some(GroupBrewControlTargetValuesUpdate {
                         flow_rate: Some(self.flow_rate),
-                        flow_rate_curve: None,
-                        pressure: None,
-                        pressure_curve: None,
-                        output_flow_rate: None,
-                        output_flow_rate_curve: None,
-                        duty_cycle: None,
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
                 }
             }
@@ -285,14 +273,8 @@ impl ManualBrewParameters {
                     (GroupBrewControlMode::Off, None)
                 } else {
                     (GroupBrewControlMode::Pressure, Some(GroupBrewControlTargetValuesUpdate {
-                        flow_rate: None,
-                        flow_rate_curve: None,
                         pressure: Some(self.pressure),
-                        pressure_curve: None,
-                        output_flow_rate: None,
-                        output_flow_rate_curve: None,
-                        duty_cycle: None,
-                        duty_cycle_curve: None
+                        ..Default::default()
                     }))
                 }
             }
