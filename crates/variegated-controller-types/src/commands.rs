@@ -280,6 +280,22 @@ pub enum MachineCommand {
     /// the machine keeps the zone it had. Storing an unresolvable name would leave the browser
     /// displaying a zone the scheduler is not using.
     SetTimezone(crate::timezone::TimezoneSetting),
+
+    /// Arm, change or disarm the group's brew limit.
+    ///
+    /// **Appended, not inserted** -- postcard encodes an enum as its declaration-order
+    /// discriminant, so anything but the end renumbers every variant after it.
+    ///
+    /// Deliberately its own command rather than a fourth argument on
+    /// [`Self::SetGroupBrewControlTarget`]. Adding one there would renumber that variant's
+    /// tuple, which is a live wire format; and it would force every mode change to restate
+    /// the limit, when the two are independent -- a step may change what it controls without
+    /// touching what caps it, and the other way round.
+    ///
+    /// [`GroupBrewLimitMode::Unlimited`] disarms. The values update is optional for the same
+    /// reason it is on the mode command: arming a limit whose value is already stored should
+    /// not require restating it.
+    SetGroupBrewLimit(GroupIndex, GroupBrewLimitMode, Option<GroupBrewControlTargetValuesUpdate>),
 }
 
 impl MachineCommand {
@@ -353,6 +369,7 @@ impl MachineCommand {
             MachineCommand::TagDoseFromScale(_) => "TagDoseFromScale",
             MachineCommand::DeleteShotLog(_) => "DeleteShotLog",
             MachineCommand::SetTimezone(_) => "SetTimezone",
+            MachineCommand::SetGroupBrewLimit(_, _, _) => "SetGroupBrewLimit",
             MachineCommand::SetShotUploadConfig(_) => "SetShotUploadConfig",
             MachineCommand::SetShotUploadSettings(_) => "SetShotUploadSettings",
         }
@@ -427,6 +444,7 @@ impl defmt::Format for MachineCommand {
             // The zone name, not the whole struct: it is the only field, and a name is not a
             // secret -- unlike the upload config beside it, whose impl elides its token.
             MachineCommand::SetTimezone(tz) => defmt::write!(f, "SetTimezone({})", tz.as_str()),
+            MachineCommand::SetGroupBrewLimit(idx, limit, values) => defmt::write!(f, "SetGroupBrewLimit({}, {:?}, {:?})", idx, limit, values),
             MachineCommand::SetShotUploadConfig(c) => defmt::write!(f, "SetShotUploadConfig({})", c),
             // `{}` on the whole value again, not its fields: `ShotUploadSettings` derives
             // `Format`, but its `token` field's impl is hand-written and elides. Reaching

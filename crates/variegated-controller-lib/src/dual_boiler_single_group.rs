@@ -22,7 +22,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewLimitMode, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
@@ -2108,6 +2108,26 @@ impl<
     /// Handles commands eligible for routine "finally" blocks (cleanup commands).
     /// This is the main command executor for all non-routine-lifecycle commands,
     /// whether from external sources or routine steps.
+    /// Apply a values update to the group's brew control state, field by field.
+    ///
+    /// The single-boiler controller's twin. One place, because three commands now carry the
+    /// same update — the mode command, the values command and the limit command — and three
+    /// copies of eleven `if let`s is how one of them ends up silently missing a field.
+    fn apply_group_brew_values(&mut self, update: GroupBrewControlTargetValuesUpdate) {
+        let values = &mut self.configuration.ephemeral.group_brew_control_state.values;
+        if let Some(flow_rate) = update.flow_rate { values.flow_rate = flow_rate; }
+        if let Some(curve) = update.flow_rate_curve { values.flow_rate_curve = curve; }
+        if let Some(pressure) = update.pressure { values.pressure = pressure; }
+        if let Some(curve) = update.pressure_curve { values.pressure_curve = curve; }
+        if let Some(output_flow) = update.output_flow_rate { values.output_flow_rate = output_flow; }
+        if let Some(curve) = update.output_flow_rate_curve { values.output_flow_rate_curve = curve; }
+        if let Some(duty) = update.duty_cycle { values.duty_cycle = duty; }
+        if let Some(curve) = update.duty_cycle_curve { values.duty_cycle_curve = curve; }
+        if let Some(max) = update.max_pressure { values.max_pressure = max; }
+        if let Some(max) = update.max_group_flow_rate { values.max_group_flow_rate = max; }
+        if let Some(max) = update.max_output_flow_rate { values.max_output_flow_rate = max; }
+    }
+
     async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::StartBrewing(_) => {
@@ -2292,30 +2312,7 @@ impl<
                     }
                     self.configuration.ephemeral.group_brew_control_state.mode = mode;
                     if let Some(update) = values_update {
-                        if let Some(flow_rate) = update.flow_rate {
-                            self.configuration.ephemeral.group_brew_control_state.values.flow_rate = flow_rate;
-                        }
-                        if let Some(curve) = update.flow_rate_curve {
-                            self.configuration.ephemeral.group_brew_control_state.values.flow_rate_curve = curve;
-                        }
-                        if let Some(pressure) = update.pressure {
-                            self.configuration.ephemeral.group_brew_control_state.values.pressure = pressure;
-                        }
-                        if let Some(curve) = update.pressure_curve {
-                            self.configuration.ephemeral.group_brew_control_state.values.pressure_curve = curve;
-                        }
-                        if let Some(output_flow) = update.output_flow_rate {
-                            self.configuration.ephemeral.group_brew_control_state.values.output_flow_rate = output_flow;
-                        }
-                        if let Some(curve) = update.output_flow_rate_curve {
-                            self.configuration.ephemeral.group_brew_control_state.values.output_flow_rate_curve = curve;
-                        }
-                        if let Some(duty) = update.duty_cycle {
-                            self.configuration.ephemeral.group_brew_control_state.values.duty_cycle = duty;
-                        }
-                        if let Some(curve) = update.duty_cycle_curve {
-                            self.configuration.ephemeral.group_brew_control_state.values.duty_cycle_curve = curve;
-                        }
+                        self.apply_group_brew_values(update);
                     }
                 } else {
                     log_error!("Invalid group index: {}", group_index);
@@ -2324,30 +2321,21 @@ impl<
             MachineCommand::SetGroupBrewControlTargetValues(group_index, update) => {
                 log_info!("Setting group brew control values for group {} to {:?}", group_index, update);
                 if group_index == 0 {
-                    if let Some(flow_rate) = update.flow_rate {
-                        self.configuration.ephemeral.group_brew_control_state.values.flow_rate = flow_rate;
+                    self.apply_group_brew_values(update);
+                } else {
+                    log_error!("Invalid group index: {}", group_index);
+                }
+            }
+            MachineCommand::SetGroupBrewLimit(group_index, limit, values_update) => {
+                log_info!("Setting group brew limit for group {} to {:?} with values {:?}", group_index, limit, values_update);
+                if group_index == 0 {
+                    self.configuration.ephemeral.group_brew_control_state.limit = limit;
+                    if let Some(update) = values_update {
+                        self.apply_group_brew_values(update);
                     }
-                    if let Some(curve) = update.flow_rate_curve {
-                        self.configuration.ephemeral.group_brew_control_state.values.flow_rate_curve = curve;
-                    }
-                    if let Some(pressure) = update.pressure {
-                        self.configuration.ephemeral.group_brew_control_state.values.pressure = pressure;
-                    }
-                    if let Some(curve) = update.pressure_curve {
-                        self.configuration.ephemeral.group_brew_control_state.values.pressure_curve = curve;
-                    }
-                    if let Some(output_flow) = update.output_flow_rate {
-                        self.configuration.ephemeral.group_brew_control_state.values.output_flow_rate = output_flow;
-                    }
-                    if let Some(curve) = update.output_flow_rate_curve {
-                        self.configuration.ephemeral.group_brew_control_state.values.output_flow_rate_curve = curve;
-                    }
-                    if let Some(duty) = update.duty_cycle {
-                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle = duty;
-                    }
-                    if let Some(curve) = update.duty_cycle_curve {
-                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle_curve = curve;
-                    }
+                    // No `curve_start_time` handling, unlike the mode command: a limit is a
+                    // constant, and arming one must not restart the ramp a curve mode is
+                    // partway through.
                 } else {
                     log_error!("Invalid group index: {}", group_index);
                 }
