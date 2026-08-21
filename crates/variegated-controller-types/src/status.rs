@@ -445,6 +445,44 @@ pub struct GroupStatus {
     /// **Appended.** postcard is positional and `Status` crosses both the inter-processor
     /// UART and the debug wire.
     pub brew_control_target: Option<BrewControlTarget>,
+    /// The limit capping the pump, and whether it is actually holding it back right now.
+    ///
+    /// `None` when nothing is armed, or when the group is not being driven. Distinct from
+    /// [`Self::brew_control_target`] on purpose: that says what the machine is *aiming* at,
+    /// this says what is *stopping* it, and during a binding limit those are two different
+    /// quantities in two different units.
+    ///
+    /// `brew_control_target` deliberately keeps reporting the main setpoint while a limit
+    /// binds, so [`crate::TransitionOrigin::CurrentTarget`] still resolves to the quantity a
+    /// routine's ramp is authored in. Without this field a consumer could not tell a shot
+    /// that tracked its setpoint from one that spent twenty seconds pinned against a cap.
+    ///
+    /// **Appended.** postcard is positional and `Status` crosses both the inter-processor
+    /// UART and the debug wire.
+    pub brew_limit: Option<BrewLimitStatus>,
+}
+
+/// What is capping a group's pump, and whether the cap is currently doing anything.
+///
+/// See [`GroupStatus::brew_limit`]. Carried whole rather than as a bare bool for the same
+/// reason [`BrewControlTarget`] carries its mode: the number alone is ambiguous, since 2.5 is
+/// a plausible cap in bar and in ml/s.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrewLimitStatus {
+    /// Which quantity is capped. Never [`crate::GroupBrewLimitMode::Unlimited`] -- that is
+    /// what the enclosing `Option`'s `None` means.
+    pub mode: crate::GroupBrewLimitMode,
+    /// The cap, in that quantity's own unit.
+    pub value: f32,
+    /// Whether the limit loop is the one driving the pump this instant.
+    ///
+    /// **Armed is a setting; binding is a thing that is happening.** A profile may arm a cap
+    /// that never engages on a given puck, and that shot is not the same shot as one that
+    /// spent half its time limited.
+    pub binding: bool,
 }
 
 /// What a group's pump is being driven towards. See [`GroupStatus::brew_control_target`].

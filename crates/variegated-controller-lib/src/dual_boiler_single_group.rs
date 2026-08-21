@@ -22,7 +22,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, WaterTapConfiguration, TankConfiguration, TankStatus, RoutineParameters, MachineMode, SteamWandControlState, SteamWandConfiguration, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
@@ -458,6 +458,9 @@ pub struct DualBoilerSingleGroupController<
     /// selected against `pump_pid` by taking the lower output — see [`crate::pump_limit`].
     limit_pid: PidCtrl<f32>,
     limit_engagement: LimitEngagement,
+    /// What the last `update_pump` decided about the limit, for the status publisher — which
+    /// runs on its own cadence and cannot recompute it. See [`GroupStatus::brew_limit`].
+    last_brew_limit: Option<BrewLimitStatus>,
     last_brew_boiler_output: f32,
     last_steam_boiler_output: f32,
 
@@ -804,6 +807,7 @@ impl<
             // and is only ever holding a different quantity.
             limit_pid: super::hexadecimal_limited_pid(),
             limit_engagement: LimitEngagement::new(),
+            last_brew_limit: None,
             last_brew_boiler_output: 0.0,
             last_steam_boiler_output: 0.0,
             configuration_store: settings_store,
@@ -1660,6 +1664,17 @@ impl<
         let limit_pid_out = self.step_limit_loop(&control_state, commanded, delta_t);
         let selection = pump_limit::select(commanded, limit_pid_out.map(|out| out.out));
 
+        // Remembered rather than recomputed: the status publisher runs on its own cadence and
+        // has no way to know whether the limit was the loop that won.
+        self.last_brew_limit = pump_limit::limit_setpoint(control_state.limit, &control_state.values)
+            // `None` while the loop is not running, which is what `Off` and unarmed both mean.
+            .filter(|_| limit_pid_out.is_some())
+            .map(|value| BrewLimitStatus {
+                mode: control_state.limit,
+                value,
+                binding: selection.binding,
+            });
+
         // External reset feedback: whichever loop did not get the output is held at the one
         // that did, or it winds up and takes over with a step.
         //
@@ -1917,6 +1932,8 @@ impl<
                     None
                 }
             },
+            // Set by `update_pump`, which is the only place that knows whether the limit won.
+            brew_limit: self.last_brew_limit,
         };
 
         // Calculate current timestamp if we have comms_status

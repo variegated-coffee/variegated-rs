@@ -269,7 +269,15 @@ use crate::Status;
 ///   Unlike `0x90` and `0x93` this touches **no stored settings blob**. The zone lives at
 ///   `settings::key::TIMEZONE`, a key of its own, precisely so that adding it does not reset
 ///   every machine's configuration once. That was chosen, not stumbled into.
-pub const DEBUG_PROTOCOL_VERSION: u8 = 0x99;
+/// - `0x9A` — `GroupStatus` gained `brew_limit`, so a group can say what is capping its pump
+///   and whether the cap is currently binding. Appended, but `Status` reaches the debug wire
+///   and postcard is positional, so an older peer would read the option tag as the start of
+///   whatever it expected next and mis-decode the rest of the frame.
+///
+///   Nothing here is stored, so unlike `0x90` and `0x93` this resets no settings blob: the
+///   field lives in `GroupBrewControlState`, which is in the *ephemeral* half of the
+///   configuration and never written to flash.
+pub const DEBUG_PROTOCOL_VERSION: u8 = 0x9A;
 
 /// Maximum number of counters or indicators carried in one sample frame.
 ///

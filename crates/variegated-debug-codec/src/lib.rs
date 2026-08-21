@@ -1958,6 +1958,15 @@ mod tests {
                                 value: f32::MAX,
                             },
                         ),
+                        // `Some`, like everything else here: this fixture exists to be the
+                        // largest a `Status` can encode to, and a `None` would understate it.
+                        brew_limit: Some(
+                            variegated_controller_types::BrewLimitStatus {
+                                mode: variegated_controller_types::GroupBrewLimitMode::MaxOutputFlowRate,
+                                value: f32::MAX,
+                                binding: true,
+                            },
+                        ),
                     },
                 )
                 .unwrap();

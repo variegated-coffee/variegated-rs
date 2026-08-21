@@ -15,7 +15,7 @@ use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
 use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -257,6 +257,9 @@ pub struct SingleBoilerSingleGroupController<
     /// selected against `pump_pid` by taking the lower output — see [`crate::pump_limit`].
     limit_pid: PidCtrl<f32>,
     limit_engagement: LimitEngagement,
+    /// What the last `update_pump` decided about the limit, for the status publisher — which
+    /// runs on its own cadence and cannot recompute it. See [`GroupStatus::brew_limit`].
+    last_brew_limit: Option<BrewLimitStatus>,
     configuration_store: SettingsStoreT,
     persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration,
     ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration,
@@ -469,6 +472,7 @@ impl<
             // and is only ever holding a different quantity.
             limit_pid: super::hexadecimal_limited_pid(),
             limit_engagement: LimitEngagement::new(),
+            last_brew_limit: None,
             configuration_store: settings_store,
             persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration::default(),
             ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration::default(),
@@ -1062,6 +1066,20 @@ impl<
         let limit_pid_out = self.step_limit_loop(&actual_pump_control_state, commanded, delta_t);
         let selection = pump_limit::select(commanded, limit_pid_out.map(|out| out.out));
 
+        // Remembered rather than recomputed: the status publisher runs on its own cadence and
+        // has no way to know whether the limit was the loop that won.
+        self.last_brew_limit = pump_limit::limit_setpoint(
+            actual_pump_control_state.limit,
+            &actual_pump_control_state.values,
+        )
+        // `None` while the loop is not running, which is what `Off` and unarmed both mean.
+        .filter(|_| limit_pid_out.is_some())
+        .map(|value| BrewLimitStatus {
+            mode: actual_pump_control_state.limit,
+            value,
+            binding: selection.binding,
+        });
+
         // External reset feedback. Whichever loop did *not* get the output is forced to the
         // one that did, or it integrates against an error it is not driving, winds up, and
         // takes over with a step the next time it wins. An open-loop main mode has no
@@ -1318,6 +1336,8 @@ impl<
                     None
                 }
             },
+            // Set by `update_pump`, which is the only place that knows whether the limit won.
+            brew_limit: self.last_brew_limit,
         };
 
         // Calculate current timestamp if we have comms_status
