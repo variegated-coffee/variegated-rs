@@ -2440,6 +2440,18 @@ impl<
             let status = self.previous_status.as_ref().unwrap_or(&default_status);
             let finally_commands = routine.finally(status);
 
+            // `finally` runs *before* the restore, so that nothing a routine sets outlives
+            // it. These commands are for actions -- stopping a brew, taring a scale -- and
+            // any configuration one of them touches is undone by the restore below. That is
+            // the intended reading rather than a side effect: a routine's effects end with
+            // the routine.
+            //
+            // It used to run last, which made `finally` the one hole in that rule: a
+            // `SetGroupPressure` there survived the routine and nothing said so.
+            for cmd in finally_commands {
+                self.handle_routine_finally_commands(cmd).await;
+            }
+
             // Restore saved configuration by splitting into persistent and ephemeral parts
             let saved_config = &routine.saved_configuration;
             self.persistent_configuration = saved_config.persistent;
@@ -2447,12 +2459,20 @@ impl<
             // Save the restored persistent configuration
             self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
             self.curve_start_time = None;  // Reset curve start time when routine exits
-            self.transition_to_state(routine.saved_state).await;
 
-            // Execute finally commands
-            for cmd in finally_commands {
-                self.handle_routine_finally_commands(cmd).await;
-            }
+            // **Never resume an active state.** The old ordering prevented this by accident:
+            // `finally`'s `StopBrewing` ran last and won. With `finally` moved ahead of the
+            // restore, handing `saved_state` straight back would resume a brew the routine
+            // had just stopped -- so an active state falls back to idle, and only an idle
+            // one is restored as-is.
+            let resume_state = match routine.saved_state {
+                SingleBoilerSingleGroupControllerState::Brewing
+                | SingleBoilerSingleGroupControllerState::PumpingToWaterTap => {
+                    SingleBoilerSingleGroupControllerState::BrewModeIdle
+                }
+                other => other,
+            };
+            self.transition_to_state(resume_state).await;
 
             // Finish shot logging
             use variegated_controller_types::ShotStatus;

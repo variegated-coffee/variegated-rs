@@ -3412,6 +3412,23 @@ impl<
                 self.stop_water_tap_dispensing().await;
             }
 
+            // `finally` runs *before* the restore, so that nothing a routine sets outlives
+            // it. These commands are for actions -- stopping a brew, taring a scale -- and
+            // any configuration one of them touches is undone by the restore below. That is
+            // the intended reading rather than a side effect: a routine's effects end with
+            // the routine.
+            //
+            // It used to run last, which made `finally` the one hole in that rule: a
+            // `SetGroupPressure` there survived the routine and nothing said so.
+            //
+            // Unlike the single-boiler controller this needs no guard against resuming an
+            // active state, because it never restored one: `saved_state` here is the `0u8`
+            // stub passed at `RoutineExecutionContext::new`, and the explicit stops above are
+            // what leave the machine idle.
+            for cmd in finally_commands {
+                self.handle_routine_finally_commands(cmd).await;
+            }
+
             self.configuration = routine.saved_configuration.clone();
 
             // Save the restored persistent configuration
@@ -3420,11 +3437,6 @@ impl<
                 Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
             }
             self.curve_start_time = None;
-
-            // Execute finally commands
-            for cmd in finally_commands {
-                self.handle_routine_finally_commands(cmd).await;
-            }
 
             // Finish shot logging
             use variegated_controller_types::ShotStatus;
