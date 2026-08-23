@@ -1143,6 +1143,11 @@ fn routine_summaries() -> RoutineSummaryStorage {
             finally_count: 0,
             // Heat-up touches no peripheral, so it runs on any machine.
             prerequisites: vec![],
+            // A fixed value rather than a real checksum: these fixtures describe *shapes*,
+            // and this one is not the encoding of any routine here. A consumer comparing it
+            // against a library routine's CRC must find no match, which is the state the
+            // "not in library" rendering exists for.
+            crc: Some(0x1111_1111),
         },
     );
     storage.function.insert(
@@ -1164,6 +1169,7 @@ fn routine_summaries() -> RoutineSummaryStorage {
                         variegated_controller_types::SensorCapability::ElectricalConductivity,
                 },
             ],
+            crc: Some(0x2222_2222),
         },
     );
 

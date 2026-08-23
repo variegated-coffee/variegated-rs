@@ -239,6 +239,26 @@ pub struct RoutineSummary {
     /// Cheap to carry and cheap to compare: `RoutinePrerequisite` is `Copy` and `Eq`, so
     /// the comms processor's equality check on the summary list stays free.
     pub prerequisites: Vec<RoutinePrerequisite>,
+
+    /// CRC-32C of the routine as it is stored, or `None` if it would not encode.
+    ///
+    /// The same value a shot log carries from format version 9 and the same one
+    /// [`Routine::stored_crc32c`] computes, so a listing, a shot and a copy of a routine held
+    /// anywhere else can all be compared without fetching anything.
+    ///
+    /// # Why a listing carries a checksum at all
+    ///
+    /// Without it, "has this routine changed?" can only be answered by fetching the whole
+    /// definition -- which is a round trip per routine over a link that reassembles through a
+    /// 4 kB accumulator, just to discover that nothing changed. The rest of this struct is a
+    /// *cheap signal*: a name and some counts that notice most edits and miss the ones that
+    /// keep them all the same. A checksum notices every edit, and costs one encode of a
+    /// routine that is already in memory.
+    ///
+    /// `None` means the routine did not fit `ROUTINE_MAX_ENCODED_LEN`, which is a routine that
+    /// could not have been stored in the first place. A consumer should read it as "unknown"
+    /// and fall back to the cheap signal, not as "no checksum".
+    pub crc: Option<u32>,
 }
 
 impl From<&Routine> for RoutineSummary {
@@ -257,6 +277,17 @@ impl From<&Routine> for RoutineSummary {
             derived_parameter_count: routine.derived_parameters.len().min(u8::MAX as usize) as u8,
             finally_count: routine.finally.len().min(u8::MAX as usize) as u8,
             prerequisites: routine.prerequisites.clone(),
+            // One postcard encode of a routine already in memory, per routine, per time the
+            // list is built. That is the whole cost of never having to fetch a definition to
+            // find out whether it changed.
+            #[cfg(feature = "serde")]
+            crc: routine.stored_crc32c(),
+            // Without `serde` there is no postcard to encode with -- and no way to serialise
+            // a summary either, so there is no wire for this to disagree with. That is the
+            // only reason this may vary by feature: a build that cannot send a listing cannot
+            // send a wrong checksum in one.
+            #[cfg(not(feature = "serde"))]
+            crc: None,
         }
     }
 }
@@ -556,10 +587,14 @@ mod routine_summary_tests {
 use sequential_storage::map::{SerializationError, Value};
 #[cfg(feature = "sequential-storage")]
 use postcard::{to_slice_crc32, from_bytes_crc32};
-#[cfg(feature = "sequential-storage")]
+
+// Gated on `serde` rather than on `sequential-storage`, because `RoutineSummary::crc` is
+// computed here and a summary's checksum must not depend on whether some other crate in the
+// graph happened to enable flash storage. See the note on the `serde` feature.
+#[cfg(feature = "serde")]
 use crc::{Crc, CRC_32_ISCSI};
 
-#[cfg(feature = "sequential-storage")]
+#[cfg(feature = "serde")]
 impl Routine {
     /// The CRC-32C that a stored copy of this routine carries in its trailer.
     ///

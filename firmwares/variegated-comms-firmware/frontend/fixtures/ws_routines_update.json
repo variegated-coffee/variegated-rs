@@ -8,7 +8,8 @@
         "parameter_count": 1,
         "derived_parameter_count": 0,
         "finally_count": 0,
-        "prerequisites": []
+        "prerequisites": [],
+        "crc": 286331153
       }
     },
     "function": {
@@ -26,7 +27,8 @@
           {
             "capability": "ElectricalConductivity"
           }
-        ]
+        ],
+        "crc": 572662306
       }
     },
     "custom": {
@@ -41,7 +43,8 @@
           {
             "capability": "Weight"
           }
-        ]
+        ],
+        "crc": 3388375537
       }
     }
   }

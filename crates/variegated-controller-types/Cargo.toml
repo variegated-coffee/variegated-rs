@@ -46,7 +46,13 @@ postcard = { workspace = true, features = ["alloc"] }
 # behind that feature. Without it the crate only compiled when some other member of
 # the graph happened to enable serde's alloc/std, so `cargo check -p
 # variegated-controller-types` failed on its own for both targets.
-serde = ["dep:serde", "variegated-control-algorithm/serde", "serde/derive", "serde/alloc", "heapless/serde"]
+# `postcard` and `crc` are here rather than only under `sequential-storage` because
+# `RoutineSummary::crc` is part of what a summary *means*, not a detail of how a routine is
+# stored. Gating the computation would make the field's value depend on which features some
+# other crate in the graph happened to turn on -- a listing that carried checksums in the
+# firmware build and `None` everywhere else, which is precisely the kind of difference nobody
+# finds until it is on hardware.
+serde = ["dep:serde", "dep:postcard", "dep:crc", "variegated-control-algorithm/serde", "serde/derive", "serde/alloc", "heapless/serde"]
 # The serde derives in this crate use `alloc::vec::Vec` and `alloc::string::String`,
 # whose Serialize/Deserialize impls live behind serde's own `alloc`/`std` feature.
 # This feature was previously `[]`, which meant the crate only ever built when some

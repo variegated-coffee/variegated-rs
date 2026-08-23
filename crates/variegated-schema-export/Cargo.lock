@@ -478,7 +478,9 @@ name = "variegated-controller-types"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crc",
  "heapless 0.9.3",
+ "postcard",
  "serde",
  "variegated-control-algorithm",
  "variegated-postcard-schema",

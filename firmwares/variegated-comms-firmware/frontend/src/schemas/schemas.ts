@@ -776,7 +776,8 @@ export const RoutineSummarySchema = struct({
   parameter_count: u8(),
   derived_parameter_count: u8(),
   finally_count: u8(),
-  prerequisites: seq(RoutinePrerequisiteSchema)
+  prerequisites: seq(RoutinePrerequisiteSchema),
+  crc: option(u32())
 });
 
 export const ScheduleItemSchema = struct({
