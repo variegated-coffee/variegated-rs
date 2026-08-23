@@ -185,6 +185,33 @@ impl UplinkHandshake {
 }
 
 /// A live session: two keys, an outbound counter and an inbound high-water mark.
+/// A record being sealed a chunk at a time, from [`UplinkSession::begin_record`].
+///
+/// Holds no key material and borrows nothing: it is the *position* within a record, so the
+/// session stays free to be read while a shot streams through it.
+pub struct RecordSealer {
+    counter: u64,
+    frame: u64,
+    frames: u64,
+    remaining: usize,
+}
+
+impl RecordSealer {
+    /// The eight bytes a record begins with, little-endian, as the receiver reads them.
+    pub fn counter_bytes(&self) -> [u8; 8] {
+        self.counter.to_le_bytes()
+    }
+
+    /// Whether every frame has been sealed.
+    ///
+    /// Worth checking before a caller claims a record is complete: a socket write that ended
+    /// early leaves a record short, and the receiver reports that as a decrypt failure rather
+    /// than as a truncation.
+    pub fn is_complete(&self) -> bool {
+        self.frame == self.frames && self.remaining == 0
+    }
+}
+
 pub struct UplinkSession {
     tx_key: <ChaCha20Poly1305 as Cipher>::Key,
     rx_key: <ChaCha20Poly1305 as Cipher>::Key,
@@ -253,6 +280,80 @@ impl UplinkSession {
             .checked_add(frames_for(plaintext.len()) as u64)
             .ok_or(NoiseError::Frame)?;
         Ok(at)
+    }
+
+    /// Begin a record that will be sealed a chunk at a time.
+    ///
+    /// # Why a record can need this
+    ///
+    /// [`Self::seal_record`] wants the whole plaintext in memory and writes the whole sealed
+    /// record into one buffer -- twice the record's size, resident at once. That is nothing
+    /// for a status and impossible for a shot: a twenty-kilobyte shot would be forty
+    /// kilobytes of heap on a chip with about twenty-six free, and the shot itself is not in
+    /// memory to begin with. It arrives a kilobyte at a time over the inter-processor link.
+    ///
+    /// So a shot is sealed as it flows: one chunk of plaintext in, one sealed chunk out,
+    /// straight onto the socket. Peak cost is one chunk each way rather than the whole record.
+    ///
+    /// # The counter is reserved here, before a byte is sent
+    ///
+    /// All of the record's nonces are claimed at this point, exactly as `seal_record` does at
+    /// the end -- so a record that is abandoned half-written cannot let the next one reuse a
+    /// nonce. The receiver requires counters to increase, not to be contiguous, so the gap a
+    /// failed record leaves behind costs nothing.
+    pub fn begin_record(&mut self, plaintext_len: usize) -> Result<RecordSealer, NoiseError> {
+        if plaintext_len == 0 {
+            return Err(NoiseError::EmptyShot);
+        }
+        if Self::sealed_len(plaintext_len) > self.peer_hello.max_frame as usize {
+            return Err(NoiseError::TooLarge);
+        }
+
+        let frames = frames_for(plaintext_len) as u64;
+        let counter = self.tx_counter;
+        self.tx_counter = counter.checked_add(frames).ok_or(NoiseError::Frame)?;
+
+        Ok(RecordSealer { counter, frame: 0, frames, remaining: plaintext_len })
+    }
+
+    /// Seal one chunk of a record begun by [`Self::begin_record`].
+    ///
+    /// Every chunk but the last must be exactly [`UPLINK_CHUNK`] bytes; the last carries the
+    /// remainder. That is not a convention this could relax -- the receiver derives frame
+    /// boundaries from the same arithmetic, so a short chunk in the middle desynchronises the
+    /// whole record.
+    ///
+    /// Takes `&self`: the counter moved when the record began, so sealing a chunk changes
+    /// nothing about the session and two records can never interleave into one nonce.
+    pub fn seal_chunk(
+        &self,
+        sealer: &mut RecordSealer,
+        plain: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, NoiseError> {
+        if sealer.frame >= sealer.frames || plain.is_empty() {
+            return Err(NoiseError::Frame);
+        }
+        // Full except for the last, which is what the receiver's schedule assumes.
+        let expected = core::cmp::min(sealer.remaining, UPLINK_CHUNK);
+        if plain.len() != expected {
+            return Err(NoiseError::Frame);
+        }
+
+        let sealed = plain.len() + UPLINK_TAG;
+        if out.len() < sealed {
+            return Err(NoiseError::Frame);
+        }
+
+        let nonce = sealer
+            .counter
+            .checked_add(sealer.frame)
+            .ok_or(NoiseError::Frame)?;
+        ChaCha20Poly1305::encrypt(&self.tx_key, nonce, &[], plain, &mut out[..sealed]);
+
+        sealer.frame += 1;
+        sealer.remaining -= plain.len();
+        Ok(sealed)
     }
 
     /// Open one record into `out`, returning the plaintext length.
@@ -488,6 +589,109 @@ mod tests {
             let m = server.open_record(&sealed[..n], &mut opened).expect("open");
             assert_eq!(&opened[..m], &plaintext[..], "len {len}");
         }
+    }
+
+    /// Seal a record the streaming way, returning the bytes a socket would carry.
+    fn stream_record(session: &mut UplinkSession, plaintext: &[u8]) -> Vec<u8> {
+        let mut sealer = session.begin_record(plaintext.len()).expect("begin");
+        let mut wire = Vec::from(sealer.counter_bytes());
+        let mut out = vec![0u8; UPLINK_CHUNK + UPLINK_TAG];
+
+        for chunk in plaintext.chunks(UPLINK_CHUNK) {
+            let n = session.seal_chunk(&mut sealer, chunk, &mut out).expect("seal chunk");
+            wire.extend_from_slice(&out[..n]);
+        }
+
+        assert!(sealer.is_complete(), "every frame must be sealed");
+        wire
+    }
+
+    /// Streaming a record produces exactly the bytes sealing it whole would.
+    ///
+    /// The assertion that makes the streaming path safe to use at all: a shot goes out
+    /// through `begin_record`/`seal_chunk` and everything else through `seal_record`, and if
+    /// those two ever disagreed the difference would show up as an authentication failure on
+    /// a server that is behaving perfectly.
+    #[test]
+    fn streaming_a_record_matches_sealing_it_whole() {
+        for len in [
+            1,
+            UPLINK_CHUNK - 1,
+            UPLINK_CHUNK,
+            UPLINK_CHUNK + 1,
+            UPLINK_CHUNK * 3,
+            UPLINK_CHUNK * 20 + 7,
+        ] {
+            let plaintext: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+            // Two sessions from the same handshake, so both start at the same counter.
+            let (mut whole, _, _) = connect();
+            let (mut streamed, mut server, _) = connect();
+
+            let mut buffer = vec![0u8; UplinkSession::sealed_len(len)];
+            let n = whole.seal_record(&plaintext, &mut buffer).expect("seal");
+            let wire = stream_record(&mut streamed, &plaintext);
+
+            assert_eq!(wire, buffer[..n], "len {len}");
+            // And the counter advanced identically, or the *next* record would diverge.
+            assert_eq!(streamed.next_tx_counter(), whole.next_tx_counter(), "len {len}");
+
+            // The real proof: a responder opens it without knowing how it was produced.
+            let mut opened = vec![0u8; len];
+            let m = server.open_record(&wire, &mut opened).expect("open");
+            assert_eq!(&opened[..m], &plaintext[..], "len {len}");
+        }
+    }
+
+    /// A short chunk anywhere but the end is refused rather than sealed.
+    ///
+    /// The receiver derives frame boundaries from the record's length, so a short frame in
+    /// the middle silently desynchronises everything after it. Catching it here turns a
+    /// corrupt record into a caller-side error.
+    #[test]
+    fn a_short_chunk_before_the_last_is_refused() {
+        let (mut client, _, _) = connect();
+        let plaintext = vec![7u8; UPLINK_CHUNK * 2];
+        let mut sealer = client.begin_record(plaintext.len()).expect("begin");
+        let mut out = vec![0u8; UPLINK_CHUNK + UPLINK_TAG];
+
+        assert!(client.seal_chunk(&mut sealer, &plaintext[..UPLINK_CHUNK - 1], &mut out).is_err());
+        // And an over-long one, which would run past the frame the receiver expects.
+        assert!(client.seal_chunk(&mut sealer, &plaintext[..], &mut out).is_err());
+    }
+
+    /// Sealing more frames than the record has is refused.
+    #[test]
+    fn sealing_past_the_end_of_a_record_is_refused() {
+        let (mut client, _, _) = connect();
+        let plaintext = vec![3u8; 10];
+        let mut sealer = client.begin_record(plaintext.len()).expect("begin");
+        let mut out = vec![0u8; UPLINK_CHUNK + UPLINK_TAG];
+
+        client.seal_chunk(&mut sealer, &plaintext, &mut out).expect("the only frame");
+        assert!(sealer.is_complete());
+        assert!(client.seal_chunk(&mut sealer, &plaintext, &mut out).is_err());
+    }
+
+    /// An abandoned record still consumes its counters.
+    ///
+    /// The property the reservation exists for: a shot that dies halfway through a socket
+    /// write must not let the next record reuse one of its nonces.
+    #[test]
+    fn an_abandoned_record_does_not_release_its_counters() {
+        let (mut client, mut server, _) = connect();
+
+        let before = client.next_tx_counter();
+        let sealer = client.begin_record(UPLINK_CHUNK * 4).expect("begin");
+        assert_eq!(client.next_tx_counter(), before + 4);
+        drop(sealer);
+
+        // The next record starts past the abandoned one, and the receiver -- which requires
+        // increase but not contiguity -- takes it.
+        let mut sealed = vec![0u8; UplinkSession::sealed_len(3)];
+        let n = client.seal_record(b"abc", &mut sealed).expect("seal");
+        let mut opened = vec![0u8; 3];
+        assert_eq!(server.open_record(&sealed[..n], &mut opened).expect("open"), 3);
     }
 
     /// A replayed record is refused, and so is a reordered one.
