@@ -29,26 +29,6 @@ const REQUEST_LEN: usize = 512;
 /// The largest frame header RFC 6455 can produce with a mask: 2 + 8 + 4.
 const MAX_FRAME_HEADER: usize = 14;
 
-/// Base64url, unpadded -- what the handshake header carries.
-///
-/// Hand-rolled rather than pulled in: this is the only base64 in the firmware, and a
-/// dependency for twenty lines that run once per connection is weight in flash for nothing.
-fn base64_url(bytes: &[u8], out: &mut heapless::String<192>) {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        let _ = out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        let _ = out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            let _ = out.push(ALPHABET[(n >> 6) as usize & 63] as char);
-        }
-        if chunk.len() > 2 {
-            let _ = out.push(ALPHABET[n as usize & 63] as char);
-        }
-    }
-}
-
 /// Decode the base64url the 101 response carries back.
 fn from_base64_url(text: &str, out: &mut [u8]) -> Result<usize, ()> {
     let mut bits = 0u32;
@@ -93,9 +73,9 @@ pub async fn upgrade(
 ) -> Result<(), ()> {
     use core::fmt::Write as _;
 
-    let mut handshake = heapless::String::<192>::new();
-    base64_url(message_one, &mut handshake);
-
+    // The shared encoder, writing straight into the request rather than through an
+    // intermediate string -- the same one the POST head uses, so the two transports cannot
+    // drift into disagreeing about padding or the url-safe alphabet.
     let mut request = heapless::String::<REQUEST_LEN>::new();
     write!(
         request,
@@ -105,10 +85,12 @@ pub async fn upgrade(
          Connection: Upgrade\r\n\
          Sec-WebSocket-Version: 13\r\n\
          Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\
-         X-Variegated-Noise: {handshake}\r\n\
-         \r\n"
+         {}: ",
+        variegated_shot_upload::noise::HANDSHAKE_HEADER
     )
     .map_err(|_| ())?;
+    variegated_shot_upload::base64::write_base64_url(&mut request, message_one).map_err(|_| ())?;
+    request.push_str("\r\n\r\n").map_err(|_| ())?;
 
     socket.write_all(request.as_bytes()).await.map_err(|_| ())?;
 

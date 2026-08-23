@@ -338,10 +338,13 @@ pub enum NoiseError {
 pub fn sealed_body_len(total: u32) -> Option<u32> {
     // Every frame carries a tag, and between them the frames carry exactly `total` bytes of
     // plaintext -- so the tags are the only overhead the frame count contributes.
+    //
+    // The handshake is **not** counted. It travels in a header from version 2 on, so the body
+    // is frames and nothing else; see `request_head`. This having included `HANDSHAKE_LEN`
+    // was version 1's shape, and a `Content-Length` still carrying it would leave the server
+    // waiting for bytes the machine has already finished sending.
     let (frames, _) = frame_schedule(total)?;
-    HANDSHAKE_LEN
-        .checked_add(total)?
-        .checked_add(FRAME_TAG.checked_mul(frames)?)
+    total.checked_add(FRAME_TAG.checked_mul(frames)?)
 }
 
 /// `(frame_count, final_frame_plaintext_len)`.
@@ -360,26 +363,52 @@ pub fn frame_schedule(total: u32) -> Option<(u32, u32)> {
     Some((frames, last))
 }
 
+/// The header the handshake travels in, on both transports.
+///
+/// The same name the WebSocket upgrade uses for its `Noise_IK` message one. Deliberately the
+/// same: the two handshakes differ, but "where a Variegated machine puts a handshake" should
+/// not, and a server reading one name is a server that cannot be wrong about which it got.
+pub const HANDSHAKE_HEADER: &str = "X-Variegated-Noise";
+
 /// The request head for a Noise body.
 ///
 /// **No `Authorization` header.** The device's static public key is the credential and it
 /// travels encrypted inside the handshake, so there is nothing here for a plaintext scheme to
 /// leak -- which is the entire reason `http+noise://` is acceptable where `http://` is not.
 ///
-/// The content type is deliberately not `application/octet-stream`: it is what lets the
-/// server route a Noise body to the responder rather than handing it to the shot decoder.
-pub fn request_head(path: &str, host: &str, content_length: u32) -> heapless::String<512> {
+/// The content type is deliberately not `application/octet-stream`. The server routes on the
+/// method and the path rather than on this, so nothing depends on it -- but a body that says
+/// it is a generic byte stream invites something in the middle to treat it as one, and this
+/// says what it actually is.
+///
+/// # The handshake is in a header, not at the front of the body
+///
+/// That is what version 2 changed, and it is why [`HELLO_VERSION`] is 2. A server can decide
+/// whether it will accept an upload from its *headers*, before reading a body that may be four
+/// megabytes -- where a body-framed handshake meant the first hundred bytes could only be
+/// judged after the request was already committed. It also makes this request the same shape
+/// as the WebSocket upgrade, which never had a body to hide anything in.
+///
+/// `content_length` is therefore the frames alone; see [`sealed_body_len`].
+pub fn request_head(
+    path: &str,
+    host: &str,
+    content_length: u32,
+    handshake: &[u8],
+) -> heapless::String<512> {
     use core::fmt::Write as _;
     let mut head = heapless::String::new();
     let _ = write!(
         head,
         "POST {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
-         Content-Type: application/vnd.variegated.shot-noise\r\n\
+         Content-Type: application/vnd.variegated.uplink\r\n\
          Content-Length: {content_length}\r\n\
          Connection: close\r\n\
-         \r\n"
+         {HANDSHAKE_HEADER}: "
     );
+    let _ = crate::base64::write_base64_url(&mut head, handshake);
+    let _ = head.push_str("\r\n\r\n");
     head
 }
 
@@ -436,11 +465,26 @@ impl NoiseSender {
     }
 }
 
+impl NoiseSender {
+    /// The handshake message, for the header it travels in.
+    ///
+    /// Exposed rather than written into the body, which is what [`Self::preamble`] used to do.
+    /// See [`request_head`] for why version 2 moved it.
+    pub fn handshake(&self) -> &[u8] {
+        &self.handshake
+    }
+}
+
 impl ChunkSealer for NoiseSender {
     const EXACT_CHUNK: Option<u32> = Some(PLAINTEXT_CHUNK);
 
+    /// Empty from version 2 on: the handshake goes in a header, so the body is frames alone.
+    ///
+    /// `send_sealed` skips an empty preamble, so this is the whole of the change on the body
+    /// side -- and the handshake is still built and still authenticates the frames, it simply
+    /// is not written here. See [`Self::handshake`] and [`request_head`].
     fn preamble(&self) -> &[u8] {
-        &self.handshake
+        &[]
     }
 
     fn content_length(&self, total: u32) -> Option<u32> {
@@ -589,13 +633,19 @@ mod tests {
         }
     }
 
-    /// Produce a full body the way the firmware would.
-    pub(super) fn upload(total: u32) -> (Vec<u8>, u32) {
+    /// One upload the way the firmware sends it: a handshake, a body, and the declared length.
+    ///
+    /// Three values rather than one buffer, because that is the shape of version 2 on the
+    /// wire. A test that sliced a handshake off the front of the body would still pass if the
+    /// firmware quietly went back to sending it there, which is exactly the regression these
+    /// vectors exist to catch.
+    pub(super) fn upload(total: u32) -> (Vec<u8>, Vec<u8>, u32) {
         let hello = Hello::new(total);
         let mut sender =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &hello).unwrap();
         let declared = sender.content_length(total).unwrap();
-        let head = request_head("/api/noise-upload", "plantlet.example", declared);
+        let handshake = sender.handshake().to_vec();
+        let head = request_head("/api/noise-upload", "plantlet.example", declared, &handshake);
 
         let mut source = Source { bytes: plaintext(total), chunk: PLAINTEXT_CHUNK };
         let first = block_on(source.chunk(id(), 0)).unwrap();
@@ -603,17 +653,19 @@ mod tests {
         block_on(send_sealed(&mut sink, &mut source, &mut sender, id(), first, &head)).unwrap();
 
         let body = sink.0[head.len()..].to_vec();
-        (body, declared)
+        // The property the whole change rests on: what follows the head is frames alone, and
+        // it is exactly as long as the `Content-Length` promised.
+        assert_eq!(body.len(), declared as usize, "the body must be what was declared");
+        (handshake, body, declared)
     }
 
     #[test]
     fn a_round_trip_recovers_the_shot_byte_for_byte() {
         for total in [1u32, 1023, 1024, 1025, 4096, 51291] {
-            let (body, _) = upload(total);
-            let mut responder =
-                Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
+            let (handshake, body, _) = upload(total);
+            let mut responder = Responder::accept(&SERVER_SECRET, &handshake).unwrap();
             assert_eq!(responder.hello, Hello::new(total), "total {total}");
-            let recovered = responder.read_body(&body[HANDSHAKE_LEN as usize..]).unwrap();
+            let recovered = responder.read_body(&body).unwrap();
             assert_eq!(recovered, plaintext(total), "total {total}");
         }
     }
@@ -624,9 +676,16 @@ mod tests {
         // the first byte goes out; a body that does not match it leaves the server blocked
         // on bytes that are never coming.
         for total in [1u32, 1023, 1024, 1025, 4096, 51291] {
-            let (body, declared) = upload(total);
+            let (handshake, body, declared) = upload(total);
             assert_eq!(body.len() as u32, declared, "total {total}");
             assert_eq!(declared, sealed_body_len(total).unwrap(), "total {total}");
+            // And the handshake is not in it. Stated rather than implied by the length,
+            // because "the body is frames alone" is the whole of what version 2 changed.
+            assert_eq!(handshake.len(), HANDSHAKE_LEN as usize, "total {total}");
+            assert!(
+                !body.starts_with(&handshake[..16]),
+                "total {total}: the handshake must not also be at the front of the body"
+            );
         }
     }
 
@@ -651,69 +710,72 @@ mod tests {
     fn the_responder_learns_the_device_public_key() {
         // The mechanism that replaces the bearer token: the server identifies the machine
         // from the handshake, and nothing identifying travels in the clear.
-        let (body, _) = upload(2048);
-        let responder = Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
+        let (handshake, _, _) = upload(2048);
+        let responder = Responder::accept(&SERVER_SECRET, &handshake).unwrap();
         assert_eq!(responder.device_public, keys().device_public());
     }
 
     #[test]
     fn a_truncated_body_is_refused() {
-        let (body, _) = upload(51291);
-        let mut responder =
-            Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
-        let frames = &body[HANDSHAKE_LEN as usize..];
+        let (handshake, frames, _) = upload(51291);
+        let mut responder = Responder::accept(&SERVER_SECRET, &handshake).unwrap();
         // One whole frame short, and one byte short. Both are bodies whose every delivered
         // frame authenticates perfectly.
         assert!(responder.read_body(&frames[..frames.len() - FRAME as usize]).is_err());
 
-        let mut responder =
-            Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
+        let mut responder = Responder::accept(&SERVER_SECRET, &handshake).unwrap();
         assert!(responder.read_body(&frames[..frames.len() - 1]).is_err());
     }
 
     #[test]
     fn reordered_frames_are_refused() {
-        let (body, _) = upload(4096);
-        let mut frames = body[HANDSHAKE_LEN as usize..].to_vec();
+        let (handshake, mut frames, _) = upload(4096);
         let f = FRAME as usize;
         let (a, b) = (frames[..f].to_vec(), frames[f..2 * f].to_vec());
         frames[..f].copy_from_slice(&b);
         frames[f..2 * f].copy_from_slice(&a);
-        let mut responder =
-            Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
+        let mut responder = Responder::accept(&SERVER_SECRET, &handshake).unwrap();
         assert!(responder.read_body(&frames).is_err());
     }
 
     #[test]
     fn a_replayed_frame_is_refused() {
-        let (body, _) = upload(4096);
-        let mut frames = body[HANDSHAKE_LEN as usize..].to_vec();
+        let (handshake, mut frames, _) = upload(4096);
         let f = FRAME as usize;
         let first = frames[..f].to_vec();
         frames[f..2 * f].copy_from_slice(&first);
-        let mut responder =
-            Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
+        let mut responder = Responder::accept(&SERVER_SECRET, &handshake).unwrap();
         assert!(responder.read_body(&frames).is_err());
     }
 
     #[test]
     fn a_flipped_bit_is_refused() {
-        let (body, _) = upload(4096);
-        for position in [0usize, 40, HANDSHAKE_LEN as usize + 5] {
-            let mut broken = body.clone();
+        let (handshake, body, _) = upload(4096);
+
+        // In the handshake: the ephemeral, and the sealed static. Both fail at `accept`.
+        for position in [0usize, 40] {
+            let mut broken = handshake.clone();
             broken[position] ^= 0x01;
-            let accepted = Responder::accept(&SERVER_SECRET, &broken[..HANDSHAKE_LEN as usize])
-                .and_then(|mut r| r.read_body(&broken[HANDSHAKE_LEN as usize..]));
-            assert!(accepted.is_err(), "a flip at {position} was accepted");
+            let accepted =
+                Responder::accept(&SERVER_SECRET, &broken).and_then(|mut r| r.read_body(&body));
+            assert!(accepted.is_err(), "a handshake flip at {position} was accepted");
         }
+
+        // And in the frames, which fails later and for a different reason -- the handshake is
+        // fine, so this is a frame that does not authenticate under a key that is correct.
+        let mut broken = body.clone();
+        broken[5] ^= 0x01;
+        let accepted =
+            Responder::accept(&SERVER_SECRET, &handshake).and_then(|mut r| r.read_body(&broken));
+        assert!(accepted.is_err(), "a body flip was accepted");
     }
 
     #[test]
     fn a_handshake_for_the_wrong_server_key_is_refused() {
         // And crucially: no plaintext comes out at all, rather than garbage.
-        let (body, _) = upload(2048);
+        let (handshake, _, _) = upload(2048);
         let other = [11u8; KEY_LEN];
-        assert!(Responder::accept(&other, &body[..HANDSHAKE_LEN as usize]).is_err());
+        assert!(Responder::accept(&other, &handshake).is_err());
     }
 
     #[test]
@@ -728,7 +790,11 @@ mod tests {
         let mut second =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes([2u8; KEY_LEN]), &hello).unwrap();
         assert_ne!(first.seal(&chunk).unwrap(), second.seal(&chunk).unwrap());
-        assert_ne!(first.preamble(), second.preamble());
+        // `handshake()`, not `preamble()`: the preamble is empty for both from version 2 on,
+        // so asserting on it would compare two empty slices and pass for the wrong reason --
+        // which is exactly what it did when the handshake moved to a header.
+        assert_ne!(first.handshake(), second.handshake());
+        assert!(!first.handshake().is_empty());
     }
 
     #[test]
@@ -793,10 +859,31 @@ mod tests {
     #[test]
     fn the_head_carries_no_authorization_header() {
         // The property that makes a plaintext scheme acceptable at all.
-        let head = request_head("/api/noise-upload", "plantlet.example", 1234);
+        let handshake = [0x5au8; HANDSHAKE_LEN as usize];
+        let head = request_head("/api/noise-upload", "plantlet.example", 1234, &handshake);
         assert!(!head.to_ascii_lowercase().contains("authorization"));
         assert!(head.contains("Content-Length: 1234\r\n"));
-        assert!(head.contains("application/vnd.variegated.shot-noise"));
+        assert!(head.contains("application/vnd.variegated.uplink"));
+    }
+
+    /// The handshake is in the head, base64url, and the head still fits its buffer.
+    ///
+    /// The fit is the part worth asserting. `request_head` builds into a
+    /// `heapless::String<512>` and ignores a capacity error, so an overflow would silently
+    /// truncate the request -- and a truncated head is a failure that looks like a network
+    /// fault rather than a buffer that is too small.
+    #[test]
+    fn the_head_carries_the_handshake_and_fits() {
+        let handshake = [0x5au8; HANDSHAKE_LEN as usize];
+        let head = request_head("/api/noise-upload", "plantlet.example", 4_194_304, &handshake);
+
+        let mut expected = alloc::string::String::new();
+        crate::base64::write_base64_url(&mut expected, &handshake).unwrap();
+        assert!(head.contains(&expected), "the handshake must be in the header");
+        assert!(head.contains(HANDSHAKE_HEADER));
+        // Complete: a truncated head would be missing the blank line that ends it.
+        assert!(head.ends_with("\r\n\r\n"), "the head must be terminated");
+        assert!(head.len() < 512, "head was {} bytes of 512", head.len());
     }
 
     #[test]
@@ -808,7 +895,7 @@ mod tests {
         let mut sender =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &hello).unwrap();
         let declared = sender.content_length(total).unwrap();
-        let head = request_head("/x", "h", declared);
+        let head = request_head("/x", "h", declared, sender.handshake());
         let mut source = Source { bytes: plaintext(total), chunk: 512 };
         let first = block_on(source.chunk(id(), 0)).unwrap();
         let mut sink = Sink(Vec::new());
@@ -909,17 +996,18 @@ mod vectors {
         ));
         out.push_str("  \"vectors\": [\n");
         for (index, total) in TOTALS.iter().enumerate() {
-            let (body, declared) = upload(*total);
+            let (handshake, body, declared) = upload(*total);
             let (frames, last) = frame_schedule(*total).unwrap();
             out.push_str("    {\n");
             out.push_str(&format!("      \"total\": {total},\n"));
             out.push_str(&format!("      \"frames\": {frames},\n"));
             out.push_str(&format!("      \"lastFrameLen\": {last},\n"));
             out.push_str(&format!("      \"contentLength\": {declared},\n"));
-            out.push_str(&format!(
-                "      \"handshake\": \"{}\",\n",
-                hex(&body[..HANDSHAKE_LEN as usize])
-            ));
+            // Two fields because the wire has two places: `handshake` is what the
+            // `X-Variegated-Noise` header carries, and `body` is what follows the head. They
+            // used to be one buffer with the first as a prefix of the second; a consumer
+            // still slicing `body` at `handshakeLen` will now fail, which is the point.
+            out.push_str(&format!("      \"handshake\": \"{}\",\n", hex(&handshake)));
             out.push_str(&format!("      \"body\": \"{}\"\n", hex(&body)));
             out.push_str(if index + 1 == TOTALS.len() { "    }\n" } else { "    },\n" });
         }

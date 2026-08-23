@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+pub mod base64;
 pub mod body;
 pub mod crockford;
 #[cfg(feature = "noise")]

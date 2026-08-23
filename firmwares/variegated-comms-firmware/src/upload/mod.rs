@@ -480,7 +480,7 @@ async fn attempt_upload(
     // the original heap exhaustion an inference rather than a reading.
     let heap_before = crate::debug::snapshot::heap_free();
 
-    let head = noise::request_head(url.path, url.host, content_length);
+    let head = noise::request_head(url.path, url.host, content_length, sender.handshake());
     let outcome = body::send_sealed(&mut socket, &mut source, &mut sender, id, first, &head).await;
 
     log_info!(
