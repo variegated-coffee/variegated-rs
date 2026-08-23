@@ -389,6 +389,53 @@ pub enum RoutineWriteError {
     UnsupportedVersion,
 }
 
+/// How a routine delete ended.
+///
+/// Shaped like [`RoutineWriteOutcome`] rather than as one flat enum, so that the failure half
+/// is a type of its own: a `QueryError` carries the failure and nothing else, and a flat enum
+/// would have put an unreachable `Deleted` inside every refusal on the wire.
+///
+/// No index in either variant. The messages that carry this echo it once, rather than every
+/// arm repeating a field that is the same in all of them.
+///
+/// **Append only** -- this crosses two links. See the note on
+/// [`crate::communication::CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutineDeleteOutcome {
+    /// Gone, and the flash write that removed it succeeded.
+    Deleted,
+    Failed(RoutineDeleteError),
+}
+
+/// Why a routine was not removed.
+///
+/// Its own type rather than a reuse of [`RoutineWriteError`], because the two disagree about
+/// the case that matters most. A write to an unoccupied index *creates* it, which is why
+/// `RoutineWriteError` deliberately has no `NotFound`; for a delete that is the most ordinary
+/// outcome there is.
+///
+/// **Append only**, like everything else that crosses these links.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoutineDeleteError {
+    /// Nothing was stored at that index.
+    ///
+    /// Distinct from [`Self::Immutable`], which the repository cannot distinguish on its own:
+    /// `remove_routine` answers `Ok(None)` for an internal index exactly as it does for an
+    /// empty one. The caller refuses internal indices before asking, which is what keeps
+    /// these two apart -- and is the same place the write path refuses them.
+    NotFound,
+    /// Internal routines are seeded at boot and cannot be removed.
+    Immutable,
+    /// The erase failed. The routine is still there.
+    Storage,
+}
+
 #[cfg(test)]
 mod routine_summary_tests {
     use super::*;

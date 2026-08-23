@@ -27,6 +27,8 @@ use variegated_controller_types::{
     PeripheralId,
     Routine,
     RoutineIndex,
+    RoutineDeleteError,
+    RoutineDeleteOutcome,
     RoutineSummary,
     RoutineSummaryList,
     RoutineWriteError,
@@ -308,6 +310,50 @@ async fn store_routine<M: embassy_sync::blocking_mutex::raw::RawMutex, R: Routin
                 RoutineWriteOutcome::Failed(RoutineWriteError::Storage)
             }
         },
+    }
+}
+
+/// Remove a routine, and say which of the four things happened.
+///
+/// The sibling of [`store_routine`], and it answers rather than logging for the reason that
+/// one does: a delete used to travel as `MachineCommand::RemoveRoutine`, which is
+/// fire-and-forget, so an erase that failed on a worn sector looked exactly like one that
+/// worked. The application processor already told these apart in its own log and threw the
+/// distinction away at the link.
+///
+/// Internal indices are refused here rather than at the repository, which is where the write
+/// path refuses them too. It is not merely for symmetry: `remove_routine` reports an internal
+/// index as `Ok(None)`, the same answer it gives for an empty slot, so a refusal that went
+/// through it would come back as "there was nothing there".
+async fn delete_routine<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository>(
+    repository: &'static embassy_sync::mutex::Mutex<M, R>,
+    index: RoutineIndex,
+) -> RoutineDeleteOutcome {
+    if matches!(index, RoutineIndex::Internal(_)) {
+        return RoutineDeleteOutcome::Failed(RoutineDeleteError::Immutable);
+    }
+
+    // Bounded, like every other repository access on this task -- see `store_routine`.
+    let mut repo = match embassy_time::with_timeout(
+        embassy_time::Duration::from_millis(100),
+        repository.lock(),
+    )
+    .await
+    {
+        Ok(repo) => repo,
+        Err(_) => {
+            error!("Failed to acquire routine_repository lock for a delete (timeout)");
+            return RoutineDeleteOutcome::Failed(RoutineDeleteError::Storage);
+        }
+    };
+
+    match repo.remove_routine(index).await {
+        Ok(Some(_)) => RoutineDeleteOutcome::Deleted,
+        Ok(None) => RoutineDeleteOutcome::Failed(RoutineDeleteError::NotFound),
+        Err(e) => {
+            error!("Failed to remove routine: {}", e);
+            RoutineDeleteOutcome::Failed(RoutineDeleteError::Storage)
+        }
     }
 }
 
@@ -967,6 +1013,23 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         // nothing, where the push that used to be here
                                         // fired regardless and relied on the far side's
                                         // cache comparison to swallow it.
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::DeleteRoutine(index) => {
+                                    let outcome = delete_routine(routine_repository, index).await;
+
+                                    // No summary push here either. A successful delete went
+                                    // through the repository, which raises
+                                    // `ROUTINES_CHANGED`, and the arm at the bottom of this
+                                    // function sends the new list -- see the longer note in
+                                    // the write arm above.
+                                    let response =
+                                        ApplicationProcessorToCommsProcessorMessage::RoutineDeleteResult {
+                                            index,
+                                            outcome,
+                                        };
+                                    if let Some(output) = frame_for_link(&response, "routine delete result") {
+                                        let _ = tx_sender.send(output).await;
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::RequestShotLogList(request) => {

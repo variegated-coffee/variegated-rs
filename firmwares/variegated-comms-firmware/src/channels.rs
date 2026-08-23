@@ -9,7 +9,7 @@ use embassy_sync::watch::Watch;
 use portable_atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
-use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
+use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineDeleteOutcome, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
     ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogList, ShotLogListEntry, ShotLogListRequest,
     ShotLogStorageError,
@@ -828,6 +828,13 @@ pub enum RoutineReply {
     NotFound(RoutineIndex),
     /// How a write ended, including the index a create was given.
     WriteResult(RoutineWriteOutcome),
+    /// How a delete ended.
+    ///
+    /// The index is not carried: [`routine_delete`] holds [`ROUTINE_LOCK`] across the whole
+    /// exchange, so the reply it is waiting for can only be the one for the index it asked
+    /// about. The link's own message echoes the index anyway, because *that* protocol has no
+    /// lock and no correlation id.
+    DeleteResult(RoutineDeleteOutcome),
 }
 
 /// A routine to be written, already encoded.
@@ -872,7 +879,10 @@ pub static ROUTINE_REQUEST: Signal<CriticalSectionRawMutex, (RoutineIndex, u16)>
 /// A routine to be written, picked up by the same task.
 pub static ROUTINE_WRITE: Signal<CriticalSectionRawMutex, RoutineWrite> = Signal::new();
 
-/// Answers to both, published by the receiver task.
+/// A routine to be removed, picked up by the same task.
+pub static ROUTINE_DELETE: Signal<CriticalSectionRawMutex, RoutineIndex> = Signal::new();
+
+/// Answers to all three, published by the receiver task.
 pub static ROUTINE_REPLY: Signal<CriticalSectionRawMutex, RoutineReply> = Signal::new();
 
 /// Serialises routine traffic to exactly one exchange in flight.
@@ -931,6 +941,31 @@ pub async fn routine_write(
         Ok(RoutineReply::WriteResult(outcome)) => Ok(outcome),
         // A chunk or a not-found in answer to a write means the two paths have crossed,
         // which the lock should prevent. Reported rather than coerced into a success.
+        Ok(_) => Err(RoutineRequestError::Mismatched),
+        Err(_) => Err(RoutineRequestError::Timeout),
+    }
+}
+
+/// Remove a routine on the application processor, and wait for it to say whether it went.
+///
+/// A round trip rather than a `MachineCommand::RemoveRoutine`, which is what this used to be
+/// and which is fire-and-forget: an erase that failed on a worn sector was indistinguishable
+/// from one that worked, and the client was told the routine was gone either way. The same
+/// argument [`routine_write`] was built on.
+///
+/// Takes [`ROUTINE_LOCK`] like the other two, so a delete cannot land between the chunks of
+/// a write or collect a reply meant for a fetch.
+pub async fn routine_delete(
+    index: RoutineIndex,
+    timeout: embassy_time::Duration,
+) -> Result<RoutineDeleteOutcome, RoutineRequestError> {
+    let _guard = ROUTINE_LOCK.lock().await;
+
+    ROUTINE_REPLY.reset();
+    ROUTINE_DELETE.signal(index);
+
+    match embassy_time::with_timeout(timeout, ROUTINE_REPLY.wait()).await {
+        Ok(RoutineReply::DeleteResult(outcome)) => Ok(outcome),
         Ok(_) => Err(RoutineRequestError::Mismatched),
         Err(_) => Err(RoutineRequestError::Timeout),
     }

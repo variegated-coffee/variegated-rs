@@ -237,6 +237,12 @@ export const PidParameterTargetSchema = enumType('PidParameterTarget', {
   GroupPressure: newtypeVariant('GroupPressure', u8())
 });
 
+export const RoutineDeleteErrorSchema = enumType('RoutineDeleteError', {
+  NotFound: unitVariant('NotFound'),
+  Immutable: unitVariant('Immutable'),
+  Storage: unitVariant('Storage')
+});
+
 export const RoutineIndexSchema = enumType('RoutineIndex', {
   Internal: newtypeVariant('Internal', u32()),
   Function: newtypeVariant('Function', u32()),
@@ -554,7 +560,8 @@ export const QueryErrorSchema = enumType('QueryError', {
   NotFound: unitVariant('NotFound'),
   Unavailable: unitVariant('Unavailable'),
   RoutineWrite: newtypeVariant('RoutineWrite', RoutineWriteErrorSchema),
-  ShotLogStorage: newtypeVariant('ShotLogStorage', ShotLogStorageErrorSchema)
+  ShotLogStorage: newtypeVariant('ShotLogStorage', ShotLogStorageErrorSchema),
+  RoutineDelete: newtypeVariant('RoutineDelete', RoutineDeleteErrorSchema)
 });
 
 export const RoutineExecutionStatusSchema = struct({
@@ -693,7 +700,8 @@ export const ClientQuerySchema = enumType('ClientQuery', {
     index: option(RoutineIndexSchema),
     routine: seq(u8())
   }),
-  ShotLogPage: newtypeVariant('ShotLogPage', ShotLogListRequestSchema)
+  ShotLogPage: newtypeVariant('ShotLogPage', ShotLogListRequestSchema),
+  DeleteRoutine: newtypeVariant('DeleteRoutine', RoutineIndexSchema)
 });
 
 export const FillConfigurationSchema = struct({
@@ -913,7 +921,8 @@ export const StatusSchema = struct({
 export const QueryOkSchema = enumType('QueryOk', {
   RoutineDefinition: newtypeVariant('RoutineDefinition', seq(u8())),
   RoutineStored: newtypeVariant('RoutineStored', RoutineIndexSchema),
-  ShotLogPage: newtypeVariant('ShotLogPage', ShotLogListSchema)
+  ShotLogPage: newtypeVariant('ShotLogPage', ShotLogListSchema),
+  RoutineDeleted: newtypeVariant('RoutineDeleted', RoutineIndexSchema)
 });
 
 export const RoutineSchema = struct({
@@ -1094,6 +1103,7 @@ export type QueryError = InferType<typeof QueryErrorSchema>;
 export type QueryOk = InferType<typeof QueryOkSchema>;
 export type QueryOutcome = InferType<typeof QueryOutcomeSchema>;
 export type RoutineCommand = InferType<typeof RoutineCommandSchema>;
+export type RoutineDeleteError = InferType<typeof RoutineDeleteErrorSchema>;
 export type RoutineExecutionStatus = InferType<typeof RoutineExecutionStatusSchema>;
 export type RoutineExit = InferType<typeof RoutineExitSchema>;
 export type RoutineExitCondition = InferType<typeof RoutineExitConditionSchema>;

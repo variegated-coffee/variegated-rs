@@ -1,9 +1,10 @@
 //! Answering a question that only the application processor can answer.
 //!
-//! Two transports ask the same three questions -- the local WebSocket server and the Plantlet
+//! Two transports ask the same questions -- the local WebSocket server and the Plantlet
 //! uplink -- and the answers have nothing to do with either. A routine's definition is
 //! reassembled from chunks over the inter-processor link, a write is a round trip with a
-//! five-way refusal, and both are the same work whoever asked.
+//! five-way refusal, a delete is a round trip with a three-way one, and all of them are the
+//! same work whoever asked.
 //!
 //! So this module owns the asking, and neither transport owns a copy of it. That is not
 //! tidiness: the reassembly below closes a specific hazard (see [`serve_query`]), and a second
@@ -21,7 +22,8 @@ use embassy_time::{with_timeout, Duration};
 use variegated_log::{log_error, log_info, log_warn};
 
 use crate::channels::{
-    routine_request, routine_write, shot_log_request, RoutineReply, ShotLogReply, ShotLogRequest,
+    routine_delete, routine_request, routine_write, shot_log_request, RoutineReply, ShotLogReply,
+    ShotLogRequest,
 };
 use crate::ws_types::{ClientQuery, QueryError, QueryOk, QueryOutcome};
 
@@ -129,6 +131,27 @@ pub async fn serve_query(
                 }
                 Err(_) => {
                     log_error!("Routine write got no answer");
+                    QueryOutcome::Failed(QueryError::Unavailable)
+                }
+            }
+        }
+
+        // The index goes to the application processor and the answer comes straight back.
+        // Nothing here decides whether the index *may* be removed -- the far side refuses an
+        // internal one, where it also refuses an internal write, so the two rules live
+        // together rather than one of them living here.
+        ClientQuery::DeleteRoutine(index) => {
+            match await_query(routine_delete(index, ROUTINE_WRITE_TIMEOUT), checkin).await {
+                Ok(variegated_controller_types::RoutineDeleteOutcome::Deleted) => {
+                    log_info!("Routine deleted");
+                    QueryOutcome::Ok(QueryOk::RoutineDeleted(index))
+                }
+                Ok(variegated_controller_types::RoutineDeleteOutcome::Failed(error)) => {
+                    log_warn!("Routine delete refused");
+                    QueryOutcome::Failed(QueryError::RoutineDelete(error))
+                }
+                Err(_) => {
+                    log_error!("Routine delete got no answer");
                     QueryOutcome::Failed(QueryError::Unavailable)
                 }
             }

@@ -160,6 +160,21 @@ pub enum UplinkQuery {
         /// A postcard-encoded `Routine`, passed through opaquely. See [`EncodedPayload`].
         routine: EncodedPayload,
     },
+
+    /// Remove a routine.
+    ///
+    /// Note what this is *not*. `MachineCommand::RemoveRoutine` already exists and already
+    /// works, and it is not what travels here: `MachineCommand` is the authority this whole
+    /// module is built to keep off the link, and admitting one variant of it would be
+    /// admitting the type. What crosses is a query with a bounded meaning -- remove this
+    /// routine, and say what happened -- which is a strictly smaller grant than "run
+    /// arbitrary commands", and it is the type that says so rather than a filter.
+    ///
+    /// A query rather than a trigger for the reason [`Self::WriteRoutine`] is one: the
+    /// command form is fire-and-forget, so a delete that failed on a worn flash sector was
+    /// indistinguishable from one that worked, and Plantlet would have dropped the row
+    /// either way.
+    DeleteRoutine(RoutineIndex),
 }
 
 /// The postcard prefix of [`UplinkMessage::ShotLog`], for a payload of `total` bytes.
@@ -215,6 +230,7 @@ impl From<UplinkQuery> for crate::ws_types::ClientQuery {
         match query {
             UplinkQuery::RoutineDefinition(index) => Self::RoutineDefinition(index),
             UplinkQuery::WriteRoutine { index, routine } => Self::WriteRoutine { index, routine },
+            UplinkQuery::DeleteRoutine(index) => Self::DeleteRoutine(index),
         }
     }
 }
@@ -343,6 +359,10 @@ mod tests {
         })
         .expect("encodes");
         assert_eq!(write[0], 1);
+
+        let delete = postcard::to_allocvec(&UplinkQuery::DeleteRoutine(RoutineIndex::Custom(0)))
+            .expect("encodes");
+        assert_eq!(delete[0], 2);
     }
 
     /// Every variant travels exactly one way, and the two acceptance predicates are exact
@@ -462,6 +482,17 @@ mod tests {
             }
             _ => panic!("a write must stay a write"),
         }
+
+        // A delete must not widen into a write. They are adjacent variants carrying the same
+        // payload shape, which is exactly the pair a hand-written match arm gets wrong -- and
+        // getting it wrong here would replace a routine with whatever bytes followed rather
+        // than removing it.
+        let delete: crate::ws_types::ClientQuery =
+            UplinkQuery::DeleteRoutine(RoutineIndex::Custom(3)).into();
+        assert!(matches!(
+            delete,
+            crate::ws_types::ClientQuery::DeleteRoutine(RoutineIndex::Custom(3))
+        ));
     }
 
     /// A maximal routine write fits what a machine will accept inbound.

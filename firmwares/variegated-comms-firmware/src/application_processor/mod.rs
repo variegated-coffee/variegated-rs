@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Timer};
-use embassy_futures::select::{select, select4, Either, Either4};
+use embassy_futures::select::{select, select3, select4, Either, Either3, Either4};
 use embassy_futures::join::join;
 use esp_hal::uart::{UartRx, UartTx};
 use esp_hal::Async;
@@ -29,7 +29,7 @@ use crate::channels::{
     SHOT_UPLOAD_CONFIG, SHOT_UPLOAD_CONFIG_RECEIVED,
     WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
     ShotLogReply, ShotLogRequest, SHOT_LOG_REPLY, SHOT_LOG_REQUEST,
-    RoutineReply, ROUTINE_REPLY, ROUTINE_REQUEST, ROUTINE_WRITE,
+    RoutineReply, ROUTINE_DELETE, ROUTINE_REPLY, ROUTINE_REQUEST, ROUTINE_WRITE,
     CONFIG_REQUEST,
 };
 use variegated_controller_types::ROUTINE_WRITE_CHUNK_LEN;
@@ -266,6 +266,13 @@ pub async fn start(
                             }
                             ApplicationProcessorToCommsProcessorMessage::RoutineWriteResult(outcome) => {
                                 ROUTINE_REPLY.signal(RoutineReply::WriteResult(outcome));
+                            }
+                            // `index` is dropped here rather than carried onward. It exists
+                            // because the *link* has no correlation id; the caller waiting
+                            // on this signal holds `ROUTINE_LOCK` across the whole exchange,
+                            // so the only delete in flight is the one it asked for.
+                            ApplicationProcessorToCommsProcessorMessage::RoutineDeleteResult { index: _, outcome } => {
+                                ROUTINE_REPLY.signal(RoutineReply::DeleteResult(outcome));
                             }
                             // The four shot-log replies, handed to whichever HTTP handler
                             // is waiting in `shot_log_request`.
@@ -611,9 +618,9 @@ pub async fn start(
                         // an HTTP client blocked on a timeout, where a dropped scan result
                         // costs nothing because the device is still advertising.
                         //
-                        // The two routine futures are one arm because they share
+                        // The three routine futures are one arm because they share
                         // `ROUTINE_LOCK` -- only one of them can be signalled at a time,
-                        // so pairing them here costs a nesting level and no fairness.
+                        // so grouping them here costs a nesting level and no fairness.
                         //
                         // A configuration request sits below both and above scan results.
                         // Below, because nothing is blocked on it -- the answer comes back
@@ -624,7 +631,11 @@ pub async fn start(
                         // still the one genuinely droppable thing here.
                         select4(
                             SHOT_LOG_REQUEST.wait(),
-                            select(ROUTINE_REQUEST.wait(), ROUTINE_WRITE.wait()),
+                            select3(
+                                ROUTINE_REQUEST.wait(),
+                                ROUTINE_WRITE.wait(),
+                                ROUTINE_DELETE.wait(),
+                            ),
                             CONFIG_REQUEST.wait(),
                             scan_result_receiver.receive(),
                         ),
@@ -805,7 +816,7 @@ pub async fn start(
                     }
                 }
                 // An HTTP handler wants one routine's definition.
-                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either::First((index, offset)))))) => {
+                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either3::First((index, offset)))))) => {
                     let message = CommsProcessorToApplicationProcessorMessage::RequestRoutineChunk {
                         index,
                         offset,
@@ -824,7 +835,7 @@ pub async fn start(
                 // The bytes came off a socket as postcard and go onto the link as
                 // postcard; nothing here decodes them. This processor does not know what
                 // a `Routine` is, which is the point -- see `RoutineWrite`.
-                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either::Second(write))))) => {
+                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either3::Second(write))))) => {
                     let total = write.bytes.len() as u16;
                     let mut offset = 0usize;
                     let mut wrote_all = true;
@@ -887,6 +898,36 @@ pub async fn start(
                                 variegated_controller_types::RoutineWriteError::Storage,
                             ),
                         ));
+                    }
+                }
+                // A client is deleting a routine.
+                //
+                // One frame, unlike a write: an index is a handful of bytes, so there is
+                // nothing to chunk and nothing to keep contiguous.
+                Either4::Fourth(Either::Second(Either::Second(Either4::Second(Either3::Third(index))))) => {
+                    let message = CommsProcessorToApplicationProcessorMessage::DeleteRoutine(index);
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
+                                log_error!("Failed to write routine delete to UART");
+                                // Nothing reached the far side, so nothing will answer.
+                                // Said now rather than left to the caller's timeout, which
+                                // is what the write arm does for a half-sent sequence.
+                                ROUTINE_REPLY.signal(RoutineReply::DeleteResult(
+                                    variegated_controller_types::RoutineDeleteOutcome::Failed(
+                                        variegated_controller_types::RoutineDeleteError::Storage,
+                                    ),
+                                ));
+                            }
+                        }
+                        Err(_) => {
+                            log_error!("Failed to serialize routine delete");
+                            ROUTINE_REPLY.signal(RoutineReply::DeleteResult(
+                                variegated_controller_types::RoutineDeleteOutcome::Failed(
+                                    variegated_controller_types::RoutineDeleteError::Storage,
+                                ),
+                            ));
+                        }
                     }
                 }
                 // A client asked for the configuration on the WebSocket.

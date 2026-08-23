@@ -268,6 +268,17 @@ pub enum ClientQuery {
     /// Listing only. A shot's *contents* are tens of kilobytes and stay on HTTP, where they
     /// stream through a 1 kB buffer and arrive with a filename.
     ShotLogPage(variegated_controller_types::shot_log::ShotLogListRequest),
+
+    /// Remove a routine, and say whether it went.
+    ///
+    /// A query rather than `MachineCommand::RemoveRoutine`, for the reason
+    /// [`Self::WriteRoutine`] is a query rather than `AddRoutine`: a command is
+    /// fire-and-forget, so a delete that failed on a worn flash sector was indistinguishable
+    /// from one that succeeded, and the client removed the row either way.
+    ///
+    /// Answered with [`QueryOk::RoutineDeleted`], or a [`QueryError::RoutineDelete`] saying
+    /// which of the three ways it did not happen.
+    DeleteRoutine(variegated_controller_types::RoutineIndex),
 }
 
 /// A successful answer to a [`ClientQuery`]. **Append only.**
@@ -281,6 +292,12 @@ pub enum QueryOk {
     RoutineStored(variegated_controller_types::RoutineIndex),
     /// One page of the listing, newest first, with `truncated` saying whether more follow.
     ShotLogPage(variegated_controller_types::shot_log::ShotLogList),
+    /// Removed, from this index.
+    ///
+    /// The index is echoed for the same reason [`Self::RoutineStored`] echoes one: a client
+    /// that named a slot gets confirmation of the slot it actually affected, rather than a
+    /// bare acknowledgement it has to trust.
+    RoutineDeleted(variegated_controller_types::RoutineIndex),
 }
 
 /// Why a [`ClientQuery`] could not be answered. **Append only.**
@@ -302,6 +319,13 @@ pub enum QueryError {
     RoutineWrite(variegated_controller_types::RoutineWriteError),
     /// Why the card could not be read.
     ShotLogStorage(variegated_controller_types::shot_log::ShotLogStorageError),
+    /// Why a [`ClientQuery::DeleteRoutine`] removed nothing.
+    ///
+    /// Its own error rather than a reuse of [`Self::RoutineWrite`], because the two disagree
+    /// about the case that matters: a write to an empty index creates it, so
+    /// `RoutineWriteError` deliberately has no way to say "there was nothing there", which is
+    /// a delete's most ordinary failure.
+    RoutineDelete(variegated_controller_types::RoutineDeleteError),
 }
 
 #[cfg(test)]
@@ -379,6 +403,86 @@ mod tests {
                 bytes[0], expected,
                 "variant discriminant moved -- the firmware's ws_types.rs is the authority"
             );
+        }
+    }
+
+    /// Pins the discriminants of the three query enums.
+    ///
+    /// The envelope test above pins [`WsMessage`], which is one layer out. These three are a
+    /// contract in exactly the same way and had no test at all: they are reached *through*
+    /// `Query` and `QueryReply`, so a reorder here is invisible to that test and just as
+    /// undetectable at run time -- a deployed frontend or CLI decodes by position and reads a
+    /// different question, or a different reason for a refusal.
+    ///
+    /// `RoutineDelete` is the one worth naming. It is an error about a routine that could not
+    /// be removed and it sits next to `RoutineWrite`, which is an error about one that could
+    /// not be stored; nothing but position tells them apart on the wire.
+    #[test]
+    fn query_variant_discriminants_are_pinned() {
+        let index = variegated_controller_types::RoutineIndex::Custom(0);
+
+        let queries: [(ClientQuery, u8); 4] = [
+            (ClientQuery::RoutineDefinition(index), 0),
+            (
+                ClientQuery::WriteRoutine {
+                    index: None,
+                    routine: vec![],
+                },
+                1,
+            ),
+            (
+                ClientQuery::ShotLogPage(
+                    variegated_controller_types::shot_log::ShotLogListRequest::newest(),
+                ),
+                2,
+            ),
+            (ClientQuery::DeleteRoutine(index), 3),
+        ];
+        for (query, expected) in queries {
+            let bytes = postcard::to_allocvec(&query).expect("encodes");
+            assert_eq!(bytes[0], expected, "a ClientQuery discriminant moved");
+        }
+
+        let oks: [(QueryOk, u8); 4] = [
+            (QueryOk::RoutineDefinition(vec![]), 0),
+            (QueryOk::RoutineStored(index), 1),
+            (
+                QueryOk::ShotLogPage(variegated_controller_types::shot_log::ShotLogList {
+                    entries: Default::default(),
+                    truncated: false,
+                }),
+                2,
+            ),
+            (QueryOk::RoutineDeleted(index), 3),
+        ];
+        for (ok, expected) in oks {
+            let bytes = postcard::to_allocvec(&ok).expect("encodes");
+            assert_eq!(bytes[0], expected, "a QueryOk discriminant moved");
+        }
+
+        let errors: [(QueryError, u8); 5] = [
+            (QueryError::NotFound, 0),
+            (QueryError::Unavailable, 1),
+            (
+                QueryError::RoutineWrite(variegated_controller_types::RoutineWriteError::Immutable),
+                2,
+            ),
+            (
+                QueryError::ShotLogStorage(
+                    variegated_controller_types::shot_log::ShotLogStorageError::CardNotPresent,
+                ),
+                3,
+            ),
+            (
+                QueryError::RoutineDelete(
+                    variegated_controller_types::RoutineDeleteError::NotFound,
+                ),
+                4,
+            ),
+        ];
+        for (error, expected) in errors {
+            let bytes = postcard::to_allocvec(&error).expect("encodes");
+            assert_eq!(bytes[0], expected, "a QueryError discriminant moved");
         }
     }
 

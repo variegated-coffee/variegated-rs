@@ -246,6 +246,18 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     /// the endpoint being present. A machine that has never been configured for uploads
     /// would otherwise ask forever.
     RequestShotUploadConfig,
+    /// Remove the routine at an index, and say whether it went.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Answered with [`ApplicationProcessorToCommsProcessorMessage::RoutineDeleteResult`].
+    ///
+    /// This does not travel as a [`MachineCommand`], despite `RemoveRoutine` existing, and
+    /// for the reason [`Self::RoutineWriteChunk`] does not use `AddRoutine`: a command is
+    /// fire-and-forget, so a delete that failed on a worn flash sector was indistinguishable
+    /// from one that succeeded. `RemoveRoutine` stays on the wire for the debug CLI, which
+    /// has no reply path to want.
+    DeleteRoutine(RoutineIndex),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -473,6 +485,19 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// [`Self::WifiCredentials`] -- and more sharply, since this token grants write access
     /// to an account on a public service.
     ShotUploadConfig(crate::shot_upload::ShotUploadConfig),
+    /// The outcome of a [`CommsProcessorToApplicationProcessorMessage::DeleteRoutine`].
+    ///
+    /// Appended, not inserted -- see the note on
+    /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+    ///
+    /// `index` is echoed for the reason [`Self::RoutineChunk`]'s is: this protocol has no
+    /// correlation id, and it is the only thing tying a reply to the request that asked for
+    /// it. It sits on the message rather than inside every arm of
+    /// [`RoutineDeleteOutcome`], which is the same in all of them.
+    RoutineDeleteResult {
+        index: RoutineIndex,
+        outcome: RoutineDeleteOutcome,
+    },
 }
 
 /// An operation on a scale, as carried by
