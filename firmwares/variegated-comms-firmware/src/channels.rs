@@ -21,7 +21,23 @@ use esphome_device::{ClientEvent, StateChange};
 pub type MachineCommandSender = Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>;
 
 // Application Status Channel
-pub const APPLICATION_STATUS_RECEIVERS: usize = 4;
+/// **Five subscribers**, and they are named here because the count silently drifted once.
+///
+/// 1. `status_listener_task`, which drains so the others do not lag
+/// 2. the HTTP server
+/// 3. the ESPHome server
+/// 4. the WebSocket server
+/// 5. the Plantlet uplink
+///
+/// This was 4 when the uplink was added, so `subscriber()` returned `None` at the fifth call
+/// and the `unwrap()` beside it panicked -- during `main`, before anything feeds the TIMG1
+/// watchdog, and with the panic message lost to the reset that followed. What reached the
+/// console was a bare `TG1_WDT_HPSYS` reboot loop naming nothing.
+///
+/// So: **this number is the number of `status_channel.subscriber()` calls that execute**, and
+/// adding one anywhere means adding one here. The list above is what makes that checkable
+/// without grepping, which is the whole reason it is written out.
+pub const APPLICATION_STATUS_RECEIVERS: usize = 5;
 pub type ApplicationStatusChannel = PubSubChannel<CriticalSectionRawMutex, Status, 1, APPLICATION_STATUS_RECEIVERS, 1>;
 pub type ApplicationStatusSubscriber = Subscriber<'static, CriticalSectionRawMutex, Status, 1, APPLICATION_STATUS_RECEIVERS, 1>;
 pub type ApplicationStatusPublisher = Publisher<'static, CriticalSectionRawMutex, Status, 1, APPLICATION_STATUS_RECEIVERS, 1>;
@@ -29,6 +45,9 @@ pub type ApplicationStatusPublisher = Publisher<'static, CriticalSectionRawMutex
 pub static STATUS_CHANNEL: StaticCell<ApplicationStatusChannel> = StaticCell::new();
 
 // Application Configuration Channel
+/// **Four subscribers**, and the channel is exactly full: the HTTP server, the ESPHome server
+/// twice (state and commands), and the WebSocket server. A fifth needs this bumped, or it
+/// fails the way the status channel did -- see [`APPLICATION_STATUS_RECEIVERS`].
 pub const APPLICATION_CONFIGURATION_RECEIVERS: usize = 4;
 pub type ApplicationConfigurationChannel = PubSubChannel<CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
 pub type ApplicationConfigurationSubscriber = Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
@@ -74,6 +93,9 @@ pub static MACHINE_DEFINITION: Mutex<CriticalSectionRawMutex, Option<MachineDefi
 pub static ROUTINE_CACHE: Mutex<CriticalSectionRawMutex, Option<RoutineSummaryList>> = Mutex::new(None);
 
 // Application Routine Channel - for pushing routine summary updates to WebSocket clients
+/// **Two subscribers**: the WebSocket server, and the Plantlet uplink. Two spare, unlike the
+/// status and configuration channels -- see [`APPLICATION_STATUS_RECEIVERS`] for what running
+/// out looks like.
 pub const APPLICATION_ROUTINE_RECEIVERS: usize = 4;
 pub type ApplicationRoutineChannel = PubSubChannel<CriticalSectionRawMutex, RoutineSummaryList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;
 pub type ApplicationRoutineSubscriber = Subscriber<'static, CriticalSectionRawMutex, RoutineSummaryList, 1, APPLICATION_ROUTINE_RECEIVERS, 1>;

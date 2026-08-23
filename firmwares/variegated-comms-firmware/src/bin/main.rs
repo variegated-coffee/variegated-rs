@@ -226,7 +226,9 @@ pub extern "Rust" fn _esp_println_timestamp() -> u64 {
 
 #[embassy_executor::task]
 async fn status_listener_task(status_channel: &'static ApplicationStatusChannel) {
-    let mut subscriber = status_channel.subscriber().unwrap();
+    let mut subscriber = status_channel
+        .subscriber()
+        .expect("APPLICATION_STATUS_RECEIVERS must count this subscriber");
     let checkin = MONITOR.claim(CheckinId::StatusListener);
     log_info!("Status listener task is started");
     loop {
@@ -1082,8 +1084,12 @@ async fn main(spawner: Spawner) -> ! {
     let command_sender = mk_static!(MachineCommandSender, command_channel.sender());
 
     // Create subscribers for cache update task
-    let http_status_subscriber = status_channel.subscriber().unwrap();
-    let http_config_subscriber = config_channel.subscriber().unwrap();
+    let http_status_subscriber = status_channel
+        .subscriber()
+        .expect("APPLICATION_STATUS_RECEIVERS must count this subscriber");
+    let http_config_subscriber = config_channel
+        .subscriber()
+        .expect("APPLICATION_CONFIGURATION_RECEIVERS must count this subscriber");
 
     // Spawn HTTP server and cache update tasks
     spawn_or_report!(spawner, "http_server", http_server_task(tcp_stack, command_sender));
@@ -1091,9 +1097,15 @@ async fn main(spawner: Spawner) -> ! {
     log_info!("HTTP server and cache update tasks spawned");
 
     // Create subscribers for ESPHome server
-    let esphome_status_subscriber = status_channel.subscriber().unwrap();
-    let esphome_config_subscriber = config_channel.subscriber().unwrap();
-    let esphome_command_config_subscriber = config_channel.subscriber().unwrap();
+    let esphome_status_subscriber = status_channel
+        .subscriber()
+        .expect("APPLICATION_STATUS_RECEIVERS must count this subscriber");
+    let esphome_config_subscriber = config_channel
+        .subscriber()
+        .expect("APPLICATION_CONFIGURATION_RECEIVERS must count this subscriber");
+    let esphome_command_config_subscriber = config_channel
+        .subscriber()
+        .expect("APPLICATION_CONFIGURATION_RECEIVERS must count this subscriber");
 
     // Spawn ESPHome server task
     spawn_or_report!(spawner, "esphome_server", esphome_server_task(
@@ -1108,10 +1120,18 @@ async fn main(spawner: Spawner) -> ! {
     log_info!("ESPHome server task spawned on port 6053");
 
     // Create subscribers for WebSocket server
-    let ws_status_subscriber = status_channel.subscriber().unwrap();
-    let ws_config_subscriber = config_channel.subscriber().unwrap();
-    let ws_routine_subscriber = routine_channel.subscriber().unwrap();
-    let ws_shot_log_subscriber = shot_log_event_channel.subscriber().unwrap();
+    let ws_status_subscriber = status_channel
+        .subscriber()
+        .expect("APPLICATION_STATUS_RECEIVERS must count this subscriber");
+    let ws_config_subscriber = config_channel
+        .subscriber()
+        .expect("APPLICATION_CONFIGURATION_RECEIVERS must count this subscriber");
+    let ws_routine_subscriber = routine_channel
+        .subscriber()
+        .expect("APPLICATION_ROUTINE_RECEIVERS must count this subscriber");
+    let ws_shot_log_subscriber = shot_log_event_channel
+        .subscriber()
+        .expect("SHOT_LOG_EVENT_RECEIVERS must count this subscriber");
 
     // Spawn WebSocket server task
     spawn_or_report!(spawner, "websocket_server", websocket_server_task(
@@ -1132,7 +1152,9 @@ async fn main(spawner: Spawner) -> ! {
     // no accelerator on this chip to route to. Both peripherals are now free.
     //
     // The task takes the `Trng` itself, for the Noise ephemeral.
-    let upload_shot_log_subscriber = shot_log_event_channel.subscriber().unwrap();
+    let upload_shot_log_subscriber = shot_log_event_channel
+        .subscriber()
+        .expect("SHOT_LOG_EVENT_RECEIVERS must count this subscriber");
     spawn_or_report!(spawner, "shot_upload", variegated_comms_firmware::upload::shot_upload_task(
         net_stack,
         upload_shot_log_subscriber,
@@ -1144,12 +1166,19 @@ async fn main(spawner: Spawner) -> ! {
     // shot finishes and is otherwise absent, while this one holds a socket open for months.
     // One task doing both would have to keep a 90-second upload from stalling the socket's
     // keepalive, which is a coordination problem neither has on its own.
-    let uplink_status_subscriber = status_channel.subscriber().unwrap();
+    // The fifth. This is the one that was not counted when the uplink task was added, and
+    // `unwrap()` on the `None` it got panicked inside `main` -- before anything feeds TIMG1,
+    // so the message never reached the console and the board just rebooted.
+    let uplink_status_subscriber = status_channel
+        .subscriber()
+        .expect("APPLICATION_STATUS_RECEIVERS must count this subscriber");
     // The second subscriber on this channel, after the websocket server's. The application
     // processor publishes only when the summary list actually changes, so this costs nothing
     // at steady state -- and it is what lets a routine saved at the machine reach Plantlet
     // without anybody pressing refresh.
-    let uplink_routine_subscriber = routine_channel.subscriber().unwrap();
+    let uplink_routine_subscriber = routine_channel
+        .subscriber()
+        .expect("APPLICATION_ROUTINE_RECEIVERS must count this subscriber");
     spawn_or_report!(spawner, "uplink", variegated_comms_firmware::uplink::uplink_task(
         net_stack,
         uplink_status_subscriber,
