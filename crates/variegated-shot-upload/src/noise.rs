@@ -101,7 +101,15 @@ pub const MAX_FRAMES: u32 = 4096;
 ///
 /// A responder for a different application, or a later revision of this one, derives a
 /// different chaining key and fails at the first tag rather than half-understanding the body.
-pub const PROLOGUE: &[u8] = b"variegated-shot-upload/noise-x/1";
+///
+/// Moved for version 2, and both halves of the change are deliberate. `shot-upload` became
+/// `uplink` because the payload is no longer a shot log but any machine-elicited message, of
+/// which a shot log is one variant. The `1` became `2` because that is what makes the flag day
+/// **cryptographic** rather than merely checked: a version 1 sender does not reach the version
+/// field to be refused politely, it fails at the first tag. Belt and braces, since the hello's
+/// version is checked too — but the two fail at different layers, and the earlier one is the
+/// one that cannot be reached by a malformed message.
+pub const PROLOGUE: &[u8] = b"variegated-uplink/noise-x/2";
 
 /// Version carried in [`Hello::version`], for the case the prologue is not enough -- a
 /// responder can say "that is version 2 and I speak 1" instead of "decryption failed".
