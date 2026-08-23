@@ -63,7 +63,6 @@ use noise_protocol::patterns::noise_x;
 use noise_protocol::{Cipher as _, CipherState, HandshakeStateBuilder, U8Array, DH};
 use noise_rust_crypto::sensitive::Sensitive;
 use noise_rust_crypto::{ChaCha20Poly1305, Sha256};
-use variegated_controller_types::shot_log::ShotLogId;
 
 use crate::body::{ChunkSealer, SealError};
 use crate::crockford::{decode_key, CrockfordError, KEY_LEN};
@@ -83,7 +82,7 @@ pub const FRAME_TAG: u32 = 16;
 pub const FRAME: u32 = PLAINTEXT_CHUNK + FRAME_TAG;
 
 /// Fixed-width encoding of [`Hello`]. See [`Hello::encode`].
-pub const HELLO_LEN: u32 = 18;
+pub const HELLO_LEN: u32 = 10;
 
 /// `e` (32) + `Enc(s)` (32 + 16) + `Enc(Hello)` (18 + 16).
 ///
@@ -106,7 +105,7 @@ pub const PROLOGUE: &[u8] = b"variegated-shot-upload/noise-x/1";
 
 /// Version carried in [`Hello::version`], for the case the prologue is not enough -- a
 /// responder can say "that is version 2 and I speak 1" instead of "decryption failed".
-pub const HELLO_VERSION: u16 = 1;
+pub const HELLO_VERSION: u16 = 2;
 
 /// X25519, implemented here rather than taken from `noise-rust-crypto`.
 ///
@@ -169,25 +168,22 @@ pub struct Hello {
     pub chunk_len: u32,
     /// The authenticated plaintext length. Truncation defence and frame schedule both.
     pub total: u32,
-    /// `YYYYMMDD`, or 0 for a shot taken before the clock was set.
-    ///
-    /// Zero rather than a tagged option because 0 is not a representable `YYYYMMDD`, so the
-    /// encoding stays fixed-width without losing the distinction.
-    pub day: u32,
-    /// `HHMMSSxx`.
-    pub time: u32,
 }
 
 impl Hello {
-    /// Build a hello for one shot.
-    pub fn new(id: ShotLogId, total: u32) -> Self {
-        Self {
-            version: HELLO_VERSION,
-            chunk_len: PLAINTEXT_CHUNK,
-            total,
-            day: id.day.unwrap_or(0),
-            time: id.time,
-        }
+    /// Build a hello for one body.
+    ///
+    /// Version 2 dropped `day` and `time`. They existed so a responder could date a version 3
+    /// shot from its filename, the responder passes `null` for that filename, and nothing on
+    /// the server ever read either field — verified across `apps/worker`'s source and tests,
+    /// where the only field of the parsed hello read anywhere is `total`. A shot on this path
+    /// carries its own timestamp.
+    ///
+    /// Dropping them is what makes this hello describe a *body* rather than a shot, which is
+    /// the point: version 2's payload is a `postcard(UplinkMessage)`, of which a shot log is
+    /// one variant.
+    pub fn new(total: u32) -> Self {
+        Self { version: HELLO_VERSION, chunk_len: PLAINTEXT_CHUNK, total }
     }
 
     /// Big-endian, in declaration order. Big-endian because this is read by hand at the
@@ -197,8 +193,6 @@ impl Hello {
         out[0..2].copy_from_slice(&self.version.to_be_bytes());
         out[2..6].copy_from_slice(&self.chunk_len.to_be_bytes());
         out[6..10].copy_from_slice(&self.total.to_be_bytes());
-        out[10..14].copy_from_slice(&self.day.to_be_bytes());
-        out[14..18].copy_from_slice(&self.time.to_be_bytes());
         out
     }
 
@@ -216,8 +210,6 @@ impl Hello {
             version: u16_at(0),
             chunk_len: u32_at(2),
             total: u32_at(6),
-            day: u32_at(10),
-            time: u32_at(14),
         })
     }
 }
@@ -469,6 +461,9 @@ mod tests {
     use crate::body::{send_sealed, Chunk, ChunkSource};
     use alloc::vec::Vec;
     use embassy_futures::block_on;
+    // Still needed here, though version 2's hello no longer carries one: `ChunkSource`
+    // addresses a shot by id, so the test source and its callers do.
+    use variegated_controller_types::shot_log::ShotLogId;
 
     const DEVICE_SECRET: [u8; KEY_LEN] = [7u8; KEY_LEN];
     const SERVER_SECRET: [u8; KEY_LEN] = [9u8; KEY_LEN];
@@ -588,7 +583,7 @@ mod tests {
 
     /// Produce a full body the way the firmware would.
     pub(super) fn upload(total: u32) -> (Vec<u8>, u32) {
-        let hello = Hello::new(id(), total);
+        let hello = Hello::new(total);
         let mut sender =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &hello).unwrap();
         let declared = sender.content_length(total).unwrap();
@@ -609,7 +604,7 @@ mod tests {
             let (body, _) = upload(total);
             let mut responder =
                 Responder::accept(&SERVER_SECRET, &body[..HANDSHAKE_LEN as usize]).unwrap();
-            assert_eq!(responder.hello, Hello::new(id(), total), "total {total}");
+            assert_eq!(responder.hello, Hello::new(total), "total {total}");
             let recovered = responder.read_body(&body[HANDSHAKE_LEN as usize..]).unwrap();
             assert_eq!(recovered, plaintext(total), "total {total}");
         }
@@ -718,7 +713,7 @@ mod tests {
         // The retry schedule runs this path again 5 s later. A fresh ephemeral is what makes
         // that safe; if it were reused, the same plaintext under the same key and nonce
         // would be a total break rather than a weakening.
-        let hello = Hello::new(id(), 1024);
+        let hello = Hello::new(1024);
         let chunk = plaintext(1024);
         let mut first =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes([1u8; KEY_LEN]), &hello).unwrap();
@@ -733,7 +728,7 @@ mod tests {
         assert_eq!(sealed_body_len(0), None);
         assert_eq!(frame_schedule(0), None);
         assert!(matches!(
-            NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &Hello::new(id(), 0)),
+            NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &Hello::new(0)),
             Err(NoiseError::EmptyShot)
         ));
     }
@@ -744,7 +739,7 @@ mod tests {
         assert_eq!(sealed_body_len(too_big), None);
         assert_eq!(frame_schedule(too_big), None);
         assert!(matches!(
-            NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &Hello::new(id(), too_big)),
+            NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &Hello::new(too_big)),
             Err(NoiseError::TooLarge)
         ));
         // And the largest legal shot is still legal.
@@ -762,15 +757,29 @@ mod tests {
 
     #[test]
     fn the_hello_round_trips_and_is_fixed_width() {
-        let hello = Hello::new(id(), 51291);
+        let hello = Hello::new(51291);
         let encoded = hello.encode();
         assert_eq!(encoded.len(), HELLO_LEN as usize);
         assert_eq!(Hello::decode(&encoded), Some(hello));
-        // An undated shot survives as day 0 rather than as a different length.
-        let undated = Hello::new(ShotLogId { day: None, time: 1 }, 10);
-        assert_eq!(undated.day, 0);
-        assert_eq!(Hello::decode(&undated.encode()), Some(undated));
+        // A one-byte-short hello is refused rather than read with a zeroed tail. The
+        // undated-shot case that used to live here went with `day` in version 2 -- the
+        // hello describes a body now, not a shot, so a shot's timestamp is no longer its
+        // business.
         assert_eq!(Hello::decode(&encoded[..HELLO_LEN as usize - 1]), None);
+    }
+
+    /// The version is what a responder reads first, and it moved.
+    ///
+    /// Pinned because the flag day rests on it: a version 1 body reaching a version 2
+    /// responder must be refused on this number rather than half-parsed. The lengths are
+    /// pinned alongside it because they are what a responder slices with before it has read
+    /// anything at all.
+    #[test]
+    fn the_hello_is_version_two_and_ten_bytes() {
+        assert_eq!(HELLO_VERSION, 2);
+        assert_eq!(HELLO_LEN, 10);
+        assert_eq!(HANDSHAKE_LEN, 32 + 48 + HELLO_LEN + FRAME_TAG);
+        assert_eq!(Hello::new(1).version, HELLO_VERSION);
     }
 
     #[test]
@@ -787,7 +796,7 @@ mod tests {
         // The check that `body::send` does not need and this transport cannot do without:
         // chunk boundaries are frame boundaries here.
         let total = 4096u32;
-        let hello = Hello::new(id(), total);
+        let hello = Hello::new(total);
         let mut sender =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &hello).unwrap();
         let declared = sender.content_length(total).unwrap();
@@ -890,8 +899,6 @@ mod vectors {
             "  \"devicePublicBase32\": \"{}\",\n",
             crate::crockford::encode_key(&keys().device_public())
         ));
-        out.push_str(&format!("  \"shotDay\": {},\n", id().day.unwrap()));
-        out.push_str(&format!("  \"shotTime\": {},\n", id().time));
         out.push_str("  \"vectors\": [\n");
         for (index, total) in TOTALS.iter().enumerate() {
             let (body, declared) = upload(*total);
