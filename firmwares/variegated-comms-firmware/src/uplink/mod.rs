@@ -31,7 +31,7 @@
 //! static sections, and the 1 Hz stack and heap high-water lines in `debug/snapshot.rs` for
 //! what it actually costs once running.
 
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
@@ -183,6 +183,13 @@ impl AttemptEnd {
 pub async fn uplink_task(
     stack: Stack<'static>,
     mut routines: channels::ApplicationRoutineSubscriber,
+    mut configuration: channels::ApplicationConfigurationSubscriber,
+    commands: embassy_sync::channel::Sender<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::MachineCommand,
+        { channels::MACHINE_COMMAND_CAPACITY },
+    >,
 ) -> ! {
     let mut config_rx = channels::SHOT_UPLOAD_CONFIG
         .receiver()
@@ -209,7 +216,16 @@ pub async fn uplink_task(
             continue;
         };
 
-        match session(stack, current, &mut routines, &checkin).await {
+        match session(
+            stack,
+            current,
+            &mut routines,
+            &mut configuration,
+            &commands,
+            &checkin,
+        )
+        .await
+        {
             Ok(()) => unreachable!("a session ends by returning an error"),
             Err(AttemptEnd::BadEndpoint) => {
                 log_warn!("Uplink: the endpoint is not a usable http+noise:// URL");
@@ -248,6 +264,13 @@ async fn session(
     stack: Stack<'static>,
     config: &ShotUploadConfig,
     routines: &mut channels::ApplicationRoutineSubscriber,
+    configuration: &mut channels::ApplicationConfigurationSubscriber,
+    commands: &embassy_sync::channel::Sender<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::MachineCommand,
+        { channels::MACHINE_COMMAND_CAPACITY },
+    >,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
     let endpoint = config.endpoint.as_deref().ok_or(AttemptEnd::BadEndpoint)?;
@@ -307,7 +330,15 @@ async fn session(
     // including through the `?`s inside `run`. The uploader reads it to decide whether
     // offering a shot here is worth trying.
     channels::UPLINK_SESSION_UP.store(true, core::sync::atomic::Ordering::Relaxed);
-    let outcome = run(&mut socket, session, routines, checkin).await;
+    let outcome = run(
+        &mut socket,
+        session,
+        routines,
+        configuration,
+        commands,
+        checkin,
+    )
+    .await;
     channels::UPLINK_SESSION_UP.store(false, core::sync::atomic::Ordering::Relaxed);
     outcome
 }
@@ -340,6 +371,13 @@ async fn run(
     socket: &mut TcpSocket<'_>,
     mut session: UplinkSession,
     routines: &mut channels::ApplicationRoutineSubscriber,
+    configuration: &mut channels::ApplicationConfigurationSubscriber,
+    commands: &embassy_sync::channel::Sender<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::MachineCommand,
+        { channels::MACHINE_COMMAND_CAPACITY },
+    >,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
     // One scratch buffer for the life of the session rather than one per record, so the
@@ -381,13 +419,21 @@ async fn run(
     // while the machine is switched on, so there is no interval and no pubsub arm for it.
     send_machine_definition(socket, &mut session).await?;
 
+    // And every setting it holds. Unlike the definition this *does* change while the machine
+    // runs -- somebody turns a dial, or Plantlet sends a command -- so it also has an arm in
+    // the loop below.
+    send_configuration(socket, &mut session).await?;
+
     loop {
         checkin.good();
 
         match select4(
             Timer::at(next_status_at),
             with_timeout(KEEPALIVE_INTERVAL, http::read_record(socket, &mut scratch)),
-            routines.next_message(),
+            // The two "something the machine holds has changed" arms, paired into one rather
+            // than growing this to a `select5`. They are the same kind of event and neither
+            // is hot: the application processor compares before publishing either.
+            select(routines.next_message(), configuration.next_message()),
             channels::UPLINK_SHOT_OFFER.receive(),
         )
         .await
@@ -399,7 +445,15 @@ async fn run(
                 next_status_at = Instant::now() + STATUS_INTERVAL;
             }
             Either4::Second(Ok(Ok(len))) => {
-                handle(&mut session, &scratch[..len], socket, &mut next_status_at, checkin).await?;
+                handle(
+                    &mut session,
+                    &scratch[..len],
+                    socket,
+                    &mut next_status_at,
+                    commands,
+                    checkin,
+                )
+                .await?;
             }
             Either4::Second(Ok(Err(()))) => {
                 log_warn!("Uplink: reading a record failed, ending the session");
@@ -427,12 +481,24 @@ async fn run(
             // `Lagged` is answered rather than ignored. A missed publish means the list
             // changed and this task did not see how -- and the cache holds the current one
             // either way, so sending it is exactly the right recovery.
-            Either4::Third(WaitResult::Message(_) | WaitResult::Lagged(_)) => {
+            Either4::Third(Either::First(
+                WaitResult::Message(_) | WaitResult::Lagged(_),
+            )) => {
                 // Read back from the cache rather than from the message, so this shares one
                 // path with the send above. Safe against the publish: the application
                 // processor holds the cache lock across both the publish and the write, so
                 // there is no window where this observes the old list.
                 send_routine_list(socket, &mut session).await?;
+            }
+            // A setting changed -- at the machine's own panel, from the local frontend, from
+            // Home Assistant, or because Plantlet sent a command. **This arm is what
+            // acknowledges an `UplinkCommand`**: there is no per-command ack, and this is the
+            // reason there does not need to be. What arrives says what the machine now
+            // believes, which is a stronger statement than "your message was received".
+            Either4::Third(Either::Second(
+                WaitResult::Message(_) | WaitResult::Lagged(_),
+            )) => {
+                send_configuration(socket, &mut session).await?;
             }
             // The uploader has a shot small enough for this transport and is waiting to hear
             // whether it goes here or over a POST.
@@ -467,6 +533,33 @@ fn encode_machine_definition(
     definition: variegated_controller_types::MachineDefinition,
 ) -> Option<alloc::vec::Vec<u8>> {
     postcard::to_allocvec(&UplinkMessage::MachineDefinition(definition)).ok()
+}
+
+fn encode_configuration(
+    configuration: variegated_controller_types::Configuration,
+) -> Option<alloc::vec::Vec<u8>> {
+    postcard::to_allocvec(&UplinkMessage::Configuration(configuration)).ok()
+}
+
+/// Send every setting the machine holds, and its schedules.
+///
+/// Read from [`channels::CONFIG_CACHE`] rather than from the subscriber, for the reason
+/// `send_status` gives at length: the session loop also holds a subscriber, and a reader that
+/// consumed messages the loop needs -- or vice versa -- is how the status push stopped working
+/// once already. The subscriber's job here is to say *when*; the cache's is to say *what*.
+async fn send_configuration(
+    socket: &mut TcpSocket<'_>,
+    session: &mut UplinkSession,
+) -> Result<(), AttemptEnd> {
+    let Some(plaintext) = ({
+        let guard = channels::CONFIG_CACHE.lock().await;
+        guard.as_ref().cloned().and_then(encode_configuration)
+    }) else {
+        log_warn!("Uplink: no configuration cached yet, nothing to send");
+        return Ok(());
+    };
+
+    send_message(socket, session, plaintext).await
 }
 
 /// Send what the machine *is*, as opposed to what it is doing.
@@ -545,6 +638,14 @@ enum Downlink {
     RequestStatus,
     RequestRoutineList,
     RequestMachineDefinition,
+    RequestConfiguration,
+    /// One of the seven things Plantlet may tell the machine to do.
+    ///
+    /// Widened to a `MachineCommand` at the boundary rather than held as an `UplinkCommand`,
+    /// for the reason `Query` holds a `ClientQuery`: the channel this ends up on carries
+    /// `MachineCommand`, and converting here means the narrowing and the widening happen in
+    /// the same statement — which is also the statement that has no `.await` in it.
+    Command(variegated_controller_types::MachineCommand),
     /// A question with an answer, and its correlation id.
     ///
     /// Held as a `ClientQuery` rather than an `UplinkQuery` because that is what the firmware
@@ -569,12 +670,15 @@ impl Downlink {
             UplinkMessage::RequestStatus => Some(Self::RequestStatus),
             UplinkMessage::RequestRoutineList => Some(Self::RequestRoutineList),
             UplinkMessage::RequestMachineDefinition => Some(Self::RequestMachineDefinition),
+            UplinkMessage::RequestConfiguration => Some(Self::RequestConfiguration),
             UplinkMessage::Query { id, query } => Some(Self::Query(id, query.into())),
+            UplinkMessage::Command(command) => Some(Self::Command(command.into())),
             UplinkMessage::Status(_)
             | UplinkMessage::RoutineList(_)
             | UplinkMessage::ShotLog(_)
             | UplinkMessage::Reply { .. }
-            | UplinkMessage::MachineDefinition(_) => None,
+            | UplinkMessage::MachineDefinition(_)
+            | UplinkMessage::Configuration(_) => None,
         }
     }
 }
@@ -594,6 +698,12 @@ async fn handle(
     record: &[u8],
     socket: &mut TcpSocket<'_>,
     next_status_at: &mut Instant,
+    commands: &embassy_sync::channel::Sender<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::MachineCommand,
+        { channels::MACHINE_COMMAND_CAPACITY },
+    >,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
     // Scoped so the envelope is dropped before the match below awaits. See `Downlink`.
@@ -636,6 +746,18 @@ async fn handle(
         }
         Downlink::RequestRoutineList => send_routine_list(socket, session).await,
         Downlink::RequestMachineDefinition => send_machine_definition(socket, session).await,
+        Downlink::RequestConfiguration => send_configuration(socket, session).await,
+        Downlink::Command(command) => {
+            // `try_send`, not `send`. This runs on the session loop, and blocking here would
+            // stall reads, the status timer and the keepalive behind a full command queue --
+            // for a message whose whole point is that the *machine* decides what to do with
+            // it. A dropped command is visible: the configuration that would have followed
+            // does not arrive, and Plantlet is watching for exactly that.
+            if commands.try_send(command).is_err() {
+                log_warn!("Uplink: the machine command queue is full, dropping a command");
+            }
+            Ok(())
+        }
         Downlink::Query(id, query) => {
             let outcome = crate::queries::serve_query(query, checkin).await;
             // Encoded and sent in separate statements, like every other reply here: a

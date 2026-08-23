@@ -1177,9 +1177,17 @@ async fn main(spawner: Spawner) -> ! {
     let uplink_routine_subscriber = routine_channel
         .subscriber()
         .expect("APPLICATION_ROUTINE_RECEIVERS must count this subscriber");
+    // The fifth configuration subscriber. `APPLICATION_CONFIGURATION_RECEIVERS` was bumped to
+    // 5 with it -- an over-subscribed pubsub panics here, in `main`, before the watchdog is
+    // ever fed, which presents as a silent reset with no panic text at all.
+    let uplink_config_subscriber = config_channel
+        .subscriber()
+        .expect("APPLICATION_CONFIGURATION_RECEIVERS must count this subscriber");
     spawn_or_report!(spawner, "uplink", variegated_comms_firmware::uplink::uplink_task(
         net_stack,
         uplink_routine_subscriber,
+        uplink_config_subscriber,
+        command_channel.sender(),
     ));
     log_info!("Uplink task spawned");
 

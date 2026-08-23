@@ -49,10 +49,16 @@ pub type ApplicationStatusPublisher = Publisher<'static, CriticalSectionRawMutex
 pub static STATUS_CHANNEL: StaticCell<ApplicationStatusChannel> = StaticCell::new();
 
 // Application Configuration Channel
-/// **Four subscribers**, and the channel is exactly full: the HTTP server, the ESPHome server
-/// twice (state and commands), and the WebSocket server. A fifth needs this bumped, or it
-/// fails the way the status channel did -- see [`APPLICATION_STATUS_RECEIVERS`].
-pub const APPLICATION_CONFIGURATION_RECEIVERS: usize = 4;
+/// **Five subscribers**, and the channel is exactly full: the HTTP server, the ESPHome server
+/// twice (state and commands), the WebSocket server, and the Plantlet uplink. A sixth needs
+/// this bumped, or it fails the way the status channel did -- see
+/// [`APPLICATION_STATUS_RECEIVERS`].
+///
+/// The uplink is the fifth, added when Plantlet gained the settings and schedules ESPHome
+/// already exposed. It subscribes rather than reading [`CONFIG_CACHE`] because it needs to
+/// know *when* a setting changed, not only what it is: a configuration push is how a command
+/// sent from Plantlet is acknowledged.
+pub const APPLICATION_CONFIGURATION_RECEIVERS: usize = 5;
 pub type ApplicationConfigurationChannel = PubSubChannel<CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
 pub type ApplicationConfigurationSubscriber = Subscriber<'static, CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;
 pub type ApplicationConfigurationPublisher = Publisher<'static, CriticalSectionRawMutex, Configuration, 1, APPLICATION_CONFIGURATION_RECEIVERS, 1>;

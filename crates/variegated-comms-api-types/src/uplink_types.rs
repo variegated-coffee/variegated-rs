@@ -154,6 +154,34 @@ pub enum UplinkMessage {
     /// for it, or lost one, has no other way to fill it without waiting for the machine to
     /// reconnect -- which for a machine that is behaving itself could be weeks.
     RequestMachineDefinition,
+
+    /// Every setting the machine holds, and its schedules.
+    ///
+    /// Sent on connect and again whenever it changes, which is what makes it the answer to a
+    /// [`Self::Command`] as well as a thing in its own right: a setpoint that was accepted
+    /// shows up here within a second, and one that was not does not. There is deliberately no
+    /// per-command acknowledgement — see the note on `Command`.
+    ///
+    /// Schedules ride inside it. `Configuration.schedules` already carries them for the LAN
+    /// frontend, so scheduling needed no message of its own; only the three commands that
+    /// change them did.
+    Configuration(variegated_controller_types::Configuration),
+
+    /// Ask the machine to send a [`Self::Configuration`] now. A trigger, as above.
+    RequestConfiguration,
+
+    /// Tell the machine to do one of the seven things Plantlet may ask for.
+    ///
+    /// # Why no acknowledgement
+    ///
+    /// A delete gets a correlated reply and this does not, which is a real difference and not
+    /// an inconsistency. A routine delete is destructive, its failure modes are silent, and
+    /// nothing else reports them — so the query had to. A command here changes a setting whose
+    /// new value is republished as [`Self::Configuration`] within a second, on a channel the
+    /// server is already reading. The echo *is* the acknowledgement, and it is a better one
+    /// than an ack: an ack says the machine received it, and the configuration says what the
+    /// machine now believes.
+    Command(UplinkCommand),
 }
 
 /// What Plantlet may ask a machine for. Reached only through [`UplinkMessage::Query`], so its
@@ -232,6 +260,110 @@ pub fn shot_log_prefix(total: u32) -> ([u8; 8], usize) {
     (prefix, len)
 }
 
+/// What Plantlet may tell a machine to *do*. **Append only.**
+///
+/// # This is the boundary this module is about, so read the whole note
+///
+/// The module docs above say `MachineCommand` does not cross this link, because it is
+/// authority over what the machine physically does. That is still true and still the design:
+/// what crosses is this, which is a strict subset with a total conversion into it — the same
+/// shape [`UplinkQuery`] has against `ClientQuery`, and the same shape
+/// [`ScheduleAction`](variegated_controller_types::ScheduleAction) already had against
+/// `MachineCommand` before this existed. The guarantee is unchanged: a command that is not
+/// here cannot be expressed, so there is no filter to forget.
+///
+/// What *has* changed is where the line sits, and it moved deliberately. These seven are what
+/// the ESPHome integration already exposes on the local network — `command_mapper.rs` maps
+/// exactly four `MachineCommand`s and the rest of its hundred-odd entities are read-only —
+/// plus the three schedule operations, which have no local equivalent because the LAN
+/// frontend edits them through `Configuration`.
+///
+/// **The exposure is genuinely wider than ESPHome's**, and that is worth being clear about
+/// rather than eliding: ESPHome answers on the LAN, where being on the network is most of the
+/// authorization, and this answers to a server on the internet. What bounds it is that the set
+/// is small, enumerated, and every member of it is something the machine's own front panel can
+/// already do.
+///
+/// Note what is still absent, and not by oversight. There is no `RunRoutine` and no
+/// `CancelRoutine` — a remote server starting a shot on an unattended machine is a different
+/// kind of authority from adjusting a setpoint, and nothing asks for it. `ScheduleAction` may
+/// carry `RunRoutine`, and that is not a contradiction: a schedule runs on the machine's own
+/// clock and the person who set it is the person standing next to it.
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+pub enum UplinkCommand {
+    /// On, Off, or PowerSaveStandby.
+    SetMachineMode(variegated_controller_types::MachineMode),
+
+    /// A boiler's control mode, and optionally its targets in the same message.
+    ///
+    /// The optional values are why this and [`Self::SetBoilerControlTargetValues`] are both
+    /// here rather than one being expressible as the other: switching a boiler from
+    /// temperature to pressure control *and* setting the pressure is one atomic change, where
+    /// two messages would leave it briefly holding a pressure target it was given for the
+    /// previous mode.
+    SetBoilerControlTarget(
+        variegated_controller_types::BoilerIndex,
+        variegated_controller_types::BoilerControlMode,
+        Option<variegated_controller_types::BoilerControlTargetValuesUpdate>,
+    ),
+
+    /// A boiler's targets, leaving its control mode alone.
+    SetBoilerControlTargetValues(
+        variegated_controller_types::BoilerIndex,
+        variegated_controller_types::BoilerControlTargetValuesUpdate,
+    ),
+
+    /// PID gains and limits for one control loop.
+    ///
+    /// Whole rather than per-gain, which is what ESPHome's mapper has to reconstruct: it reads
+    /// the current configuration, edits one field and sends the lot. Sending the lot directly
+    /// removes the read-modify-write, and with it the race two clients editing kP and kI at
+    /// once would otherwise have.
+    SetPidParameters(
+        variegated_controller_types::PidParameterTarget,
+        variegated_controller_types::PidParameters,
+    ),
+
+    /// Add a schedule item. The machine assigns its index.
+    AddScheduleItem(variegated_controller_types::ScheduleItem),
+
+    /// Remove the schedule item at an index.
+    RemoveScheduleItem(u32),
+
+    /// Replace the schedule item at an index.
+    UpdateScheduleItem(u32, variegated_controller_types::ScheduleItem),
+}
+
+/// Widen an uplink command into the machine command it stands for.
+///
+/// Total and lossless, exactly as the query conversion below is, and that totality is what
+/// makes it safe: every arm is a `MachineCommand` this enum already named, so there is no arm
+/// where something is dropped and none where something is invented. Nothing converts the other
+/// way — `MachineCommand` has some sixty variants and all but seven of them have no
+/// `UplinkCommand` to become, which is the asymmetry the whole module is built around.
+impl From<UplinkCommand> for variegated_controller_types::MachineCommand {
+    fn from(command: UplinkCommand) -> Self {
+        match command {
+            UplinkCommand::SetMachineMode(mode) => Self::SetMachineMode(mode),
+            UplinkCommand::SetBoilerControlTarget(index, mode, values) => {
+                Self::SetBoilerControlTarget(index, mode, values)
+            }
+            UplinkCommand::SetBoilerControlTargetValues(index, values) => {
+                Self::SetBoilerControlTargetValues(index, values)
+            }
+            UplinkCommand::SetPidParameters(target, parameters) => {
+                Self::SetPidParameters(target, parameters)
+            }
+            UplinkCommand::AddScheduleItem(item) => Self::AddScheduleItem(item),
+            UplinkCommand::RemoveScheduleItem(index) => Self::RemoveScheduleItem(index),
+            UplinkCommand::UpdateScheduleItem(index, item) => {
+                Self::UpdateScheduleItem(index, item)
+            }
+        }
+    }
+}
+
 /// Widen an uplink query into the one the firmware already knows how to serve.
 ///
 /// The two enums are separate types on purpose — the note above is about what `UplinkQuery`
@@ -270,11 +402,14 @@ impl UplinkMessage {
             | Self::RoutineList(_)
             | Self::ShotLog(_)
             | Self::Reply { .. }
-            | Self::MachineDefinition(_) => Direction::Uplink,
+            | Self::MachineDefinition(_)
+            | Self::Configuration(_) => Direction::Uplink,
             Self::RequestStatus
             | Self::RequestRoutineList
             | Self::Query { .. }
-            | Self::RequestMachineDefinition => Direction::Downlink,
+            | Self::RequestMachineDefinition
+            | Self::RequestConfiguration
+            | Self::Command(_) => Direction::Downlink,
         }
     }
 
@@ -312,7 +447,7 @@ mod tests {
     /// transport uses.
     #[test]
     fn variant_discriminants_are_pinned() {
-        let cases: [(UplinkMessage, u8); 9] = [
+        let cases: [(UplinkMessage, u8); 12] = [
             (UplinkMessage::Status(Status::new()), 0),
             (
                 UplinkMessage::RoutineList(RoutineSummaryStorage {
@@ -346,6 +481,19 @@ mod tests {
                 7,
             ),
             (UplinkMessage::RequestMachineDefinition, 8),
+            (
+                UplinkMessage::Configuration(
+                    variegated_controller_types::Configuration::default(),
+                ),
+                9,
+            ),
+            (UplinkMessage::RequestConfiguration, 10),
+            (
+                UplinkMessage::Command(UplinkCommand::SetMachineMode(
+                    variegated_controller_types::MachineMode::Off,
+                )),
+                11,
+            ),
         ];
 
         for (message, expected) in cases {
@@ -353,6 +501,98 @@ mod tests {
             assert_eq!(
                 bytes[0], expected,
                 "a discriminant moved -- this is a contract with flashed firmware"
+            );
+        }
+    }
+
+    /// `UplinkCommand`'s discriminants are a contract too, and its widening must not cross.
+    ///
+    /// Reached through `Command`, so the envelope test does not see it — the same gap the
+    /// query enums had. It matters more here than there: these are the messages that change
+    /// what the machine physically does, and adjacent variants carry near-identical payloads.
+    /// `SetBoilerControlTarget` and `SetBoilerControlTargetValues` both start with a boiler
+    /// index, and `RemoveScheduleItem` and `UpdateScheduleItem` both start with a `u32`, so in
+    /// each pair only position tells the machine which one it was told to do.
+    #[test]
+    fn uplink_command_discriminants_are_pinned() {
+        use variegated_controller_types::{
+            BoilerControlMode, BoilerControlTargetValuesUpdate, MachineCommand, MachineMode,
+            ScheduleItem,
+        };
+
+        let values = BoilerControlTargetValuesUpdate {
+            temperature: Some(93.0),
+            pressure: None,
+        };
+
+        let cases: [(UplinkCommand, u8); 7] = [
+            (UplinkCommand::SetMachineMode(MachineMode::On), 0),
+            (
+                UplinkCommand::SetBoilerControlTarget(0, BoilerControlMode::Temperature, None),
+                1,
+            ),
+            (UplinkCommand::SetBoilerControlTargetValues(0, values), 2),
+            (
+                UplinkCommand::SetPidParameters(
+                    variegated_controller_types::PidParameterTarget::BoilerTemperature(0),
+                    Default::default(),
+                ),
+                3,
+            ),
+            (UplinkCommand::AddScheduleItem(ScheduleItem::default()), 4),
+            (UplinkCommand::RemoveScheduleItem(7), 5),
+            (
+                UplinkCommand::UpdateScheduleItem(7, ScheduleItem::default()),
+                6,
+            ),
+        ];
+
+        for (command, expected) in cases {
+            let bytes = postcard::to_allocvec(&command).expect("encodes");
+            assert_eq!(
+                bytes[0], expected,
+                "an UplinkCommand discriminant moved -- a machine in the field would act on a \
+                 different command than it was sent"
+            );
+        }
+
+        // Each widens into its own `MachineCommand` and not its neighbour. The compiler makes
+        // the conversion exhaustive; nothing but this makes it *correct*.
+        let widened: [(UplinkCommand, &str); 7] = [
+            (UplinkCommand::SetMachineMode(MachineMode::On), "SetMachineMode"),
+            (
+                UplinkCommand::SetBoilerControlTarget(0, BoilerControlMode::Temperature, None),
+                "SetBoilerControlTarget",
+            ),
+            (
+                UplinkCommand::SetBoilerControlTargetValues(0, values),
+                "SetBoilerControlTargetValues",
+            ),
+            (
+                UplinkCommand::SetPidParameters(
+                    variegated_controller_types::PidParameterTarget::BoilerTemperature(0),
+                    Default::default(),
+                ),
+                "SetPidParameters",
+            ),
+            (
+                UplinkCommand::AddScheduleItem(ScheduleItem::default()),
+                "AddScheduleItem",
+            ),
+            (UplinkCommand::RemoveScheduleItem(7), "RemoveScheduleItem"),
+            (
+                UplinkCommand::UpdateScheduleItem(7, ScheduleItem::default()),
+                "UpdateScheduleItem",
+            ),
+        ];
+
+        for (command, expected) in widened {
+            // `label()` rather than a match: it is the exhaustive naming `MachineCommand`
+            // already maintains, so this reads the machine command's own idea of what it is.
+            assert_eq!(
+                MachineCommand::from(command).label(),
+                expected,
+                "an uplink command widened into the wrong machine command"
             );
         }
     }
@@ -431,7 +671,7 @@ mod tests {
     /// that have to be kept in agreement.
     #[test]
     fn direction_partitions_the_enum() {
-        let uplink: [UplinkMessage; 5] = [
+        let uplink: [UplinkMessage; 6] = [
             UplinkMessage::Status(Status::new()),
             UplinkMessage::RoutineList(RoutineSummaryStorage {
                 internal: Default::default(),
@@ -446,8 +686,9 @@ mod tests {
             UplinkMessage::MachineDefinition(
                 variegated_controller_types::MachineDefinition::default(),
             ),
+            UplinkMessage::Configuration(variegated_controller_types::Configuration::default()),
         ];
-        let downlink: [UplinkMessage; 4] = [
+        let downlink: [UplinkMessage; 6] = [
             UplinkMessage::RequestStatus,
             UplinkMessage::RequestRoutineList,
             UplinkMessage::Query {
@@ -458,6 +699,8 @@ mod tests {
                 },
             },
             UplinkMessage::RequestMachineDefinition,
+            UplinkMessage::RequestConfiguration,
+            UplinkMessage::Command(UplinkCommand::RemoveScheduleItem(0)),
         ];
 
         for message in uplink {
