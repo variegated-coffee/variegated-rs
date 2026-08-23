@@ -593,9 +593,35 @@ Flags becoming default in that window that are worth checking beyond this design
   `nodejs_compat_populate_process_env` (2025-04-01) — all active in production today, none ever
   exercised locally.
 
-That divergence is a pre-existing defect this bump happens to close, not one it introduces. It
-is worth fixing on its own terms: a suite that verifies different runtime semantics than the
-deployment is a suite that can go green on a bug.
+That divergence is a pre-existing defect, not one this work introduces — and the bump **narrows it
+rather than closing it**. `@cloudflare/vitest-pool-workers@0.19.1` still declares its own
+`miniflare 4.20260730.0` (workerd `1.20260730.1`) and `wrangler 4.116.0`, resolved under the pool's
+own `node_modules`, while `apps/worker` declares miniflare `4.20260722.1` / wrangler `4.115.0`
+(workerd `1.20260722.1`) — which is what `serve.mjs` and `wrangler dev` run.
+
+Two different quantities are easy to conflate here, and both matter. The **binary** gap was workerd
+`1.20241230.0` against `1.20250718.0` — about six and a half months — and is now eight days. The
+**compatibility-date** jump the tests take in this bump is separate and larger: 2024-12-30 to
+2026-07-22, roughly nineteen months. Neither figure substitutes for the other.
+
+**No compatibility flag differs between the two binaries at any date** — their capnp flag tables
+are byte-identical — so nothing *semantic* diverges. The hazard is cruder than that, and it is
+real: **for dates from 2026-07-30 through 2026-08-06 inclusive, the test suite starts and passes
+while the deployment runtime refuses to boot at all.** The pool's workerd accepts up to 2026-08-06;
+`apps/worker`'s accepts up to 2026-07-29. Inside that eight-day window the suite is green on a
+configuration that `serve.mjs` and `wrangler dev` will not start.
+
+Two things this is *not*. It is not a semantic difference — the failure is a hard startup refusal
+naming the ceiling, not a behaviour change. And it is not established for `wrangler deploy`:
+wrangler does no client-side ceiling check, and Cloudflare's own fleet is far ahead of both
+binaries, so that path very likely succeeds. What verifiably breaks is the **self-hosted container
+and local development** — which is precisely the deployment mode `ARCHITECTURE.md` treats as
+non-negotiable.
+
+So the date is load-bearing in a second way: it must stay at or below what the *deployment*
+runtime accepts, and the suite will not tell you when it stops being. **No document here may claim
+the tests run the runtime production runs.** The mechanism that allowed nineteen months of drift is
+still present; only its magnitude changed.
 
 One thing the upgrade buys back for free: `run_worker_first` exists in wrangler 4, and
 `ARCHITECTURE.md` names it as the fix for the one Worker invocation currently spent on every
