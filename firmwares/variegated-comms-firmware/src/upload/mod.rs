@@ -42,7 +42,7 @@
 //! feature is worth. A shot recorded while the network is down does not reach the endpoint,
 //! and the browser's download is the recovery path.
 
-use alloc::{boxed::Box, vec};
+use alloc::{boxed::Box, vec, vec::Vec};
 
 use embassy_futures::select::{select, Either};
 use embassy_net::dns::DnsQueryType;
@@ -55,7 +55,8 @@ use variegated_controller_types::shot_log::{ShotLogEvent, ShotLogId, ShotLogList
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_log::{log_info, log_warn};
 use variegated_shot_upload::body::{self, Chunk, ChunkSealer, ChunkSource};
-use variegated_shot_upload::noise::{self, Ephemeral, Hello, Keys, NoiseSender};
+use variegated_comms_api_types::uplink_types::shot_log_prefix;
+use variegated_shot_upload::noise::{self, Ephemeral, Hello, Keys, NoiseSender, PLAINTEXT_CHUNK};
 use variegated_shot_upload::{
     classify_status, parse_url, retry_delay, temper, ResponseTrust, Scheme, UploadOutcome,
     MAX_ATTEMPTS, MAX_RETRY_AFTER_SECS,
@@ -168,6 +169,91 @@ impl ChunkSource for LinkChunkSource {
             }
             _ => None,
         }
+    }
+}
+
+/// The shot, wrapped in the `UplinkMessage::ShotLog` envelope the endpoint decodes.
+///
+/// # Why the raw shot is not the body
+///
+/// Version 2's body is a postcard `UplinkMessage`, because this endpoint carries statuses and
+/// replies as well as shots and has to be able to tell them apart. A body that is a bare shot
+/// log decrypts perfectly and then fails to decode — which is what it did: the endpoint
+/// answered 422, `temper` downgraded that to a retryable error, and three attempts later the
+/// shot was dropped with nothing in either log saying why.
+///
+/// # The re-chunking
+///
+/// The link and the frames both deal in [`PLAINTEXT_CHUNK`] pieces, so before this they lined
+/// up exactly and a link chunk *was* a frame. The envelope's few-byte prefix offsets one
+/// against the other, so from the first frame onwards every one straddles two link chunks and
+/// the leftovers have to be carried. `send_sealed` requires each frame but the last to be
+/// exactly full, so this is not a detail that can be left approximate.
+struct EnvelopeSource {
+    prefix: [u8; 8],
+    prefix_len: usize,
+    shot_total: u32,
+    /// Link bytes fetched and not yet handed on.
+    carry: Vec<u8>,
+    /// The next byte to ask the link for.
+    link_at: u32,
+}
+
+impl EnvelopeSource {
+    /// Start from the link's first chunk, so learning the shot's size costs no extra request.
+    fn new(first: Chunk) -> Self {
+        let (prefix, prefix_len) = shot_log_prefix(first.total);
+        Self {
+            prefix,
+            prefix_len,
+            shot_total: first.total,
+            link_at: first.bytes.len() as u32,
+            carry: first.bytes,
+        }
+    }
+
+    /// The length of the whole body: the envelope, not the shot.
+    fn total(&self) -> u32 {
+        self.prefix_len as u32 + self.shot_total
+    }
+}
+
+impl ChunkSource for EnvelopeSource {
+    async fn chunk(&mut self, id: ShotLogId, offset: u32) -> Option<Chunk> {
+        let total = self.total();
+        if offset > total {
+            return None;
+        }
+        let want = PLAINTEXT_CHUNK.min(total - offset) as usize;
+        let mut out = Vec::with_capacity(want);
+
+        // The prefix leads the first frame and appears nowhere else.
+        if (offset as usize) < self.prefix_len {
+            out.extend_from_slice(&self.prefix[offset as usize..self.prefix_len]);
+        }
+
+        while out.len() < want {
+            if self.carry.is_empty() {
+                if self.link_at >= self.shot_total {
+                    // The shot ended before the length it declared. Refusing rather than
+                    // padding: the `Content-Length` on the wire promised the whole envelope.
+                    return None;
+                }
+                let next = LinkChunkSource.chunk(id, self.link_at).await?;
+                if next.bytes.is_empty() {
+                    return None;
+                }
+                self.link_at += next.bytes.len() as u32;
+                self.carry = next.bytes;
+            }
+
+            let take = (want - out.len()).min(self.carry.len());
+            out.extend_from_slice(&self.carry[..take]);
+            self.carry.drain(..take);
+        }
+
+        let last = offset + out.len() as u32 == total;
+        Some(Chunk { id, offset, total, last, bytes: out })
     }
 }
 
@@ -400,6 +486,25 @@ async fn upload_shot(
             // here, and an injected `401` costs three bounded attempts instead of the shot.
             // A genuinely revoked key looks the same, which is the accepted price.
             AttemptError::Network | AttemptError::Http(_) => {
+                // Said rather than only counted. This arm used to log nothing at all, so a
+                // POST that failed every attempt produced one line -- "giving up on this
+                // shot" -- naming neither the layer that failed nor, for an HTTP answer, what
+                // the endpoint actually said. That is the log of a fault nobody can diagnose
+                // without a packet capture.
+                match error {
+                    AttemptError::Network => {
+                        log_warn!("Shot upload: attempt {} failed before an answer (DNS, connect, or the handshake)", attempt)
+                    }
+                    AttemptError::Http(UploadOutcome::ServerError) => {
+                        log_warn!("Shot upload: attempt {} got a 5xx or an unreadable status line", attempt)
+                    }
+                    AttemptError::Http(UploadOutcome::Permanent) => {
+                        // `temper` has already downgraded this to `ServerError` on the noise
+                        // transport, so reaching here at all is worth knowing about.
+                        log_warn!("Shot upload: attempt {} was refused permanently", attempt)
+                    }
+                    _ => log_warn!("Shot upload: attempt {} failed", attempt),
+                }
                 bus::emit_event(DebugEvent::ShotUploadFailed { reason: name("network") });
                 retry_delay(attempt)
             }
@@ -464,8 +569,10 @@ async fn attempt_upload(
     })?;
 
     // Chunk zero before anything is built, so "no such shot" costs no handshake and stays
-    // distinguishable from "the link died".
-    let mut source = LinkChunkSource;
+    // distinguishable from "the link died". Its bytes become the envelope source's first
+    // carry, so learning the shot's length costs no extra round trip over the link.
+    let probe = LinkChunkSource.chunk(id, 0).await.ok_or(AttemptError::Link)?;
+    let mut source = EnvelopeSource::new(probe);
     let first = source.chunk(id, 0).await.ok_or(AttemptError::Link)?;
 
     // **A fresh ephemeral per attempt, and this is load-bearing.** The sending cipher is
@@ -482,7 +589,10 @@ async fn attempt_upload(
     // No shot id: version 2's hello describes a *body*, and the body is a postcard
     // `UplinkMessage` of which a shot log is one variant. The id is still what addresses the
     // shot on the link below, which is why it is still a parameter of this function.
-    let hello = Hello::new(first.total);
+    // The *envelope's* length, which is what the body is. `first.total` is that too, because
+    // the envelope source reports it -- named through the source anyway, so the two places
+    // that must agree read from one.
+    let hello = Hello::new(source.total());
     let mut sender = NoiseSender::begin(&keys, Ephemeral::from_bytes(seed), &hello)
         .map_err(|e| {
             log_warn!("Shot upload: could not start a noise session: {:?}", e);
@@ -491,8 +601,8 @@ async fn attempt_upload(
 
     // The exact body length, handshake and per-frame tags included. Computed by the sealer
     // that will produce the bytes, so the promise and the body cannot disagree.
-    let content_length = sender.content_length(first.total).ok_or_else(|| {
-        log_warn!("Shot upload: {} bytes is not a framable shot", first.total);
+    let content_length = sender.content_length(source.total()).ok_or_else(|| {
+        log_warn!("Shot upload: {} bytes is not a framable body", source.total());
         AttemptError::Link
     })?;
 
