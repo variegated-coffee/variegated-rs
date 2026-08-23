@@ -21,23 +21,27 @@ use esphome_device::{ClientEvent, StateChange};
 pub type MachineCommandSender = Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>;
 
 // Application Status Channel
-/// **Five subscribers**, and they are named here because the count silently drifted once.
+/// **Four subscribers**, and they are named here because the count silently drifted once.
 ///
 /// 1. `status_listener_task`, which drains so the others do not lag
-/// 2. the HTTP server
+/// 2. the HTTP server -- specifically `cache_update_task`, which fills [`STATUS_CACHE`]
 /// 3. the ESPHome server
 /// 4. the WebSocket server
-/// 5. the Plantlet uplink
 ///
-/// This was 4 when the uplink was added, so `subscriber()` returned `None` at the fifth call
-/// and the `unwrap()` beside it panicked -- during `main`, before anything feeds the TIMG1
-/// watchdog, and with the panic message lost to the reset that followed. What reached the
-/// console was a bare `TG1_WDT_HPSYS` reboot loop naming nothing.
+/// The Plantlet uplink is deliberately **not** on this list. It sends the status from
+/// [`STATUS_CACHE`], because a subscriber it both drained and read raced with itself and
+/// almost never had a message left to send.
+///
+/// It briefly needed a fifth, when the uplink took one, and that is the failure worth
+/// remembering: `subscriber()` returned `None` at the fifth call and the `unwrap()` beside it
+/// panicked -- during `main`, before anything feeds the TIMG1 watchdog, and with the panic
+/// message lost to the reset that followed. What reached the console was a bare
+/// `TG1_WDT_HPSYS` reboot loop naming nothing.
 ///
 /// So: **this number is the number of `status_channel.subscriber()` calls that execute**, and
 /// adding one anywhere means adding one here. The list above is what makes that checkable
 /// without grepping, which is the whole reason it is written out.
-pub const APPLICATION_STATUS_RECEIVERS: usize = 5;
+pub const APPLICATION_STATUS_RECEIVERS: usize = 4;
 pub type ApplicationStatusChannel = PubSubChannel<CriticalSectionRawMutex, Status, 1, APPLICATION_STATUS_RECEIVERS, 1>;
 pub type ApplicationStatusSubscriber = Subscriber<'static, CriticalSectionRawMutex, Status, 1, APPLICATION_STATUS_RECEIVERS, 1>;
 pub type ApplicationStatusPublisher = Publisher<'static, CriticalSectionRawMutex, Status, 1, APPLICATION_STATUS_RECEIVERS, 1>;

@@ -31,7 +31,7 @@
 //! static sections, and the 1 Hz stack and heap high-water lines in `debug/snapshot.rs` for
 //! what it actually costs once running.
 
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select3, Either3};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
@@ -49,10 +49,20 @@ use variegated_shot_upload::uplink::{
 };
 use variegated_shot_upload::{parse_url, Scheme};
 
-use crate::channels::{self, ApplicationStatusSubscriber};
+// No status subscriber: the status goes out from `STATUS_CACHE`, which `cache_update_task`
+// keeps current. See `send_status` for why reading a subscriber here was wrong.
+use crate::channels;
 
 /// How often a status goes up unprompted.
-const STATUS_INTERVAL: Duration = Duration::from_secs(600);
+///
+/// A minute. The server's connected window is eleven minutes wide, so this is well inside it
+/// even if several in a row are lost -- and it is what makes the machines page tell the truth
+/// about a machine that was switched off a moment ago rather than ten minutes ago.
+///
+/// The cost is one record a minute per machine, and a record does wake the hibernating Durable
+/// Object where a keepalive ping does not. That is the trade being made deliberately: sixty
+/// wakeups an hour per machine, against a status that is up to ten minutes stale.
+const STATUS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How long the socket may be idle before a keepalive ping.
 ///
@@ -163,7 +173,6 @@ impl AttemptEnd {
 #[embassy_executor::task]
 pub async fn uplink_task(
     stack: Stack<'static>,
-    mut status: ApplicationStatusSubscriber,
     mut routines: channels::ApplicationRoutineSubscriber,
 ) -> ! {
     let mut config_rx = channels::SHOT_UPLOAD_CONFIG
@@ -191,7 +200,7 @@ pub async fn uplink_task(
             continue;
         };
 
-        match session(stack, current, &mut status, &mut routines, &checkin).await {
+        match session(stack, current, &mut routines, &checkin).await {
             Ok(()) => unreachable!("a session ends by returning an error"),
             Err(AttemptEnd::BadEndpoint) => {
                 log_warn!("Uplink: the endpoint is not a usable http+noise:// URL");
@@ -229,7 +238,6 @@ async fn wait(total: Duration, checkin: &variegated_checkin::CheckinHandle) {
 async fn session(
     stack: Stack<'static>,
     config: &ShotUploadConfig,
-    status: &mut ApplicationStatusSubscriber,
     routines: &mut channels::ApplicationRoutineSubscriber,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
@@ -285,7 +293,7 @@ async fn session(
     .map_err(|_| AttemptEnd::Network)?;
 
     log_info!("Uplink: connected to {}", url.host);
-    run(&mut socket, session, status, routines, checkin).await
+    run(&mut socket, session, routines, checkin).await
 }
 
 /// Open the socket, send the upgrade, read the 101, and finish the handshake.
@@ -315,7 +323,6 @@ async fn open(
 async fn run(
     socket: &mut TcpSocket<'_>,
     mut session: UplinkSession,
-    status: &mut ApplicationStatusSubscriber,
     routines: &mut channels::ApplicationRoutineSubscriber,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
@@ -323,11 +330,18 @@ async fn run(
     // task's high-water mark does not depend on how long a session lasts.
     let mut scratch = alloc::vec![0u8; MAX_UPLINK_CLIENT_RECORD_LEN];
 
-    // A status immediately, so the server's connected window is meaningful from the first
-    // second rather than inheriting a stale timestamp from a previous session.
-    let mut next_status = Duration::from_ticks(0);
-
     log_info!("Uplink: session running");
+
+    // A status first, before anything else goes out.
+    //
+    // The server's connected window is a subtraction against the time it last heard a status,
+    // so until one arrives a machine that is plainly connected still reads as offline. Sending
+    // one here rather than waiting for the first interval is what makes the machines page tell
+    // the truth from the moment the socket opens -- and it is *first* rather than merely early
+    // because the routine list below can be several kilobytes on a machine with many
+    // routines, and the connected indicator should not queue behind it.
+    let mut next_status = STATUS_INTERVAL;
+    send_status(socket, &mut session).await?;
 
     // And the routine list, once, at the top of the session.
     //
@@ -342,26 +356,25 @@ async fn run(
     loop {
         checkin.good();
 
-        match select4(
+        match select3(
             Timer::after(next_status),
             with_timeout(KEEPALIVE_INTERVAL, http::read_record(socket, &mut scratch)),
-            status.next_message(),
             routines.next_message(),
         )
         .await
         {
-            Either4::First(()) => {
-                send_status(socket, &mut session, status).await?;
+            Either3::First(()) => {
+                send_status(socket, &mut session).await?;
                 next_status = STATUS_INTERVAL;
             }
-            Either4::Second(Ok(Ok(len))) => {
+            Either3::Second(Ok(Ok(len))) => {
                 handle(&mut session, &scratch[..len], socket, &mut next_status, checkin).await?;
             }
-            Either4::Second(Ok(Err(()))) => {
+            Either3::Second(Ok(Err(()))) => {
                 log_warn!("Uplink: reading a record failed, ending the session");
                 return Err(AttemptEnd::SessionOver);
             }
-            Either4::Second(Err(_)) => {
+            Either3::Second(Err(_)) => {
                 // Idle for a keepalive interval. A protocol-level ping, which the server's
                 // runtime answers without waking the hibernating object.
                 http::ping(socket).await.map_err(|_| {
@@ -369,23 +382,21 @@ async fn run(
                     AttemptEnd::SessionOver
                 })?;
             }
-            Either4::Third(WaitResult::Message(_)) => {
-                // A status arrived on the pubsub. Not sent on: the interval above is what
-                // decides when one goes up, and forwarding every 1 Hz publish would be a
-                // record every second for a server that asked for one every ten minutes.
-            }
-            Either4::Third(WaitResult::Lagged(_)) => {}
             // The routine list changed -- somebody saved a routine, here or from the local
             // frontend. Pushed rather than waiting to be asked, which is what makes an edit
             // at the machine show up on Plantlet without anyone pressing refresh.
             //
             // Cheap for the same reason the publish is: the application processor compares
-            // before publishing, so at steady state this arm never fires at all.
+            // before publishing, so at steady state this arm never fires at all -- which
+            // matters more than it looks: every wake of this `select` cancels the in-flight
+            // `read_record`, and `read_exact` is not cancel-safe. An arm that fired once a
+            // second, as the status arm used to, was cancelling a partially-read record for
+            // a message it then discarded.
             //
-            // `Lagged` is answered rather than ignored, unlike the status arm above. A missed
-            // publish means the list changed and this task did not see how -- and the cache
-            // holds the current one either way, so sending it is exactly the right recovery.
-            Either4::Fourth(WaitResult::Message(_) | WaitResult::Lagged(_)) => {
+            // `Lagged` is answered rather than ignored. A missed publish means the list
+            // changed and this task did not see how -- and the cache holds the current one
+            // either way, so sending it is exactly the right recovery.
+            Either3::Third(WaitResult::Message(_) | WaitResult::Lagged(_)) => {
                 // Read back from the cache rather than from the message, so this shares one
                 // path with the send above. Safe against the publish: the application
                 // processor holds the cache lock across both the publish and the write, so
@@ -410,17 +421,34 @@ fn encode_status(status: variegated_controller_types::Status) -> Option<alloc::v
     postcard::to_allocvec(&UplinkMessage::Status(status)).ok()
 }
 
-/// Send the current status.
+/// Send the current status, read from the cache the HTTP server already keeps.
+///
+/// # Why the cache and not the pubsub
+///
+/// This used to read `try_next_message_pure()` off a status subscriber, and it sent almost
+/// nothing. The subscriber was *also* being drained once a second by an arm of the session
+/// loop's `select`, which took each message and discarded it -- so by the time the interval
+/// timer fired there was usually no unread message left and this returned early. Two readers
+/// of one subscriber, one of which threw the values away.
+///
+/// [`channels::STATUS_CACHE`] has no such problem: `cache_update_task` keeps it current from
+/// its own subscriber, every reader sees the newest status, and reading it consumes nothing.
+/// It is the same shape `send_routine_list` already uses for the routine list, and it is why
+/// this task no longer holds a status subscriber at all -- which also stops the loop being
+/// woken, and its in-flight read cancelled, once a second for a message it ignored.
 async fn send_status(
     socket: &mut TcpSocket<'_>,
     session: &mut UplinkSession,
-    status: &mut ApplicationStatusSubscriber,
 ) -> Result<(), AttemptEnd> {
-    // One statement, deliberately: the `Status` is a temporary of this expression, so it is
-    // dropped before the `await` below and never becomes part of this future.
-    let Some(plaintext) = status.try_next_message_pure().and_then(encode_status) else {
-        // Nothing published yet, or it would not serialise. Not an error: the machine may
-        // have only just booted, and the next interval will find one.
+    // Scoped so the guard is released and the `Status` clone dropped before the send: the
+    // clone is 2.4 kB and the lock is also taken by the task that keeps the cache current.
+    let Some(plaintext) = ({
+        let guard = channels::STATUS_CACHE.lock().await;
+        guard.as_ref().cloned().and_then(encode_status)
+    }) else {
+        // Nothing cached yet, or it would not serialise. Not an error: the machine may have
+        // only just booted, and the next interval will find one.
+        log_warn!("Uplink: no status cached yet, nothing to send");
         return Ok(());
     };
 

@@ -1166,22 +1166,19 @@ async fn main(spawner: Spawner) -> ! {
     // shot finishes and is otherwise absent, while this one holds a socket open for months.
     // One task doing both would have to keep a 90-second upload from stalling the socket's
     // keepalive, which is a coordination problem neither has on its own.
-    // The fifth. This is the one that was not counted when the uplink task was added, and
-    // `unwrap()` on the `None` it got panicked inside `main` -- before anything feeds TIMG1,
-    // so the message never reached the console and the board just rebooted.
-    let uplink_status_subscriber = status_channel
-        .subscriber()
-        .expect("APPLICATION_STATUS_RECEIVERS must count this subscriber");
-    // The second subscriber on this channel, after the websocket server's. The application
-    // processor publishes only when the summary list actually changes, so this costs nothing
-    // at steady state -- and it is what lets a routine saved at the machine reach Plantlet
-    // without anybody pressing refresh.
+    // No status subscriber here. The uplink sends the status from `STATUS_CACHE` instead --
+    // two readers of one subscriber, one of which discarded what it read, meant almost no
+    // status ever went up. See `uplink::send_status`.
+    //
+    // The routine subscriber is the second on that channel, after the websocket server's. The
+    // application processor publishes only when the summary list actually changes, so this
+    // costs nothing at steady state -- and it is what lets a routine saved at the machine
+    // reach Plantlet without anybody pressing refresh.
     let uplink_routine_subscriber = routine_channel
         .subscriber()
         .expect("APPLICATION_ROUTINE_RECEIVERS must count this subscriber");
     spawn_or_report!(spawner, "uplink", variegated_comms_firmware::uplink::uplink_task(
         net_stack,
-        uplink_status_subscriber,
         uplink_routine_subscriber,
     ));
     log_info!("Uplink task spawned");
