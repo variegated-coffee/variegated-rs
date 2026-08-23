@@ -162,6 +162,27 @@ pub enum UplinkQuery {
     },
 }
 
+/// Widen an uplink query into the one the firmware already knows how to serve.
+///
+/// The two enums are separate types on purpose — the note above is about what `UplinkQuery`
+/// deliberately cannot express — but *answering* one is the same work either way: a routine
+/// read is chunks off the inter-processor link, a write is a round trip with a five-way
+/// refusal, and neither has heard of a transport. So the firmware serves both through one
+/// implementation, and this is the only place that knows the two shapes coincide.
+///
+/// Total and lossless, which is what makes it safe: `UplinkQuery` is a strict subset, so this
+/// cannot fail and there is no arm where something is dropped. Note the direction — nothing
+/// converts the other way, because a `ShotLogPage` has no `UplinkQuery` to become, and that
+/// asymmetry is the omission this module is built around.
+impl From<UplinkQuery> for crate::ws_types::ClientQuery {
+    fn from(query: UplinkQuery) -> Self {
+        match query {
+            UplinkQuery::RoutineDefinition(index) => Self::RoutineDefinition(index),
+            UplinkQuery::WriteRoutine { index, routine } => Self::WriteRoutine { index, routine },
+        }
+    }
+}
+
 impl UplinkMessage {
     /// Which way this variant is allowed to travel.
     ///
@@ -336,6 +357,50 @@ mod tests {
                 !message.acceptable_by_server(),
                 "Plantlet must refuse what only it may send"
             );
+        }
+    }
+
+    /// An uplink query widens into the client query the firmware already serves.
+    ///
+    /// The firmware answers both transports through one implementation, so this conversion is
+    /// the join between them. What it has to preserve is the *whole* question: an index that
+    /// changed on the way through would fetch or overwrite the wrong routine slot, which is a
+    /// silent wrong answer rather than a failure.
+    #[test]
+    fn an_uplink_query_widens_without_losing_anything() {
+        let read: crate::ws_types::ClientQuery =
+            UplinkQuery::RoutineDefinition(RoutineIndex::Function(7)).into();
+        assert!(matches!(
+            read,
+            crate::ws_types::ClientQuery::RoutineDefinition(RoutineIndex::Function(7))
+        ));
+
+        // A create, where `None` is what makes the machine choose a slot -- and the one case
+        // where confusing `None` with `Some(..)` would write over a routine somebody has.
+        let create: crate::ws_types::ClientQuery = UplinkQuery::WriteRoutine {
+            index: None,
+            routine: vec![1, 2, 3],
+        }
+        .into();
+        match create {
+            crate::ws_types::ClientQuery::WriteRoutine { index, routine } => {
+                assert_eq!(index, None);
+                assert_eq!(routine, vec![1, 2, 3]);
+            }
+            _ => panic!("a write must stay a write"),
+        }
+
+        let update: crate::ws_types::ClientQuery = UplinkQuery::WriteRoutine {
+            index: Some(RoutineIndex::Custom(3)),
+            routine: vec![4],
+        }
+        .into();
+        match update {
+            crate::ws_types::ClientQuery::WriteRoutine { index, routine } => {
+                assert_eq!(index, Some(RoutineIndex::Custom(3)));
+                assert_eq!(routine, vec![4]);
+            }
+            _ => panic!("a write must stay a write"),
         }
     }
 

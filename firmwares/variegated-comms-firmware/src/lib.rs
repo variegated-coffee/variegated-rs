@@ -13,6 +13,7 @@ pub mod esphome;
 pub mod http;
 pub mod improv;
 pub mod instrumentation;
+pub mod queries;
 pub mod stack;
 pub mod time;
 pub mod utils;

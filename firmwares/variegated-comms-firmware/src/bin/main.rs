@@ -1145,9 +1145,15 @@ async fn main(spawner: Spawner) -> ! {
     // One task doing both would have to keep a 90-second upload from stalling the socket's
     // keepalive, which is a coordination problem neither has on its own.
     let uplink_status_subscriber = status_channel.subscriber().unwrap();
+    // The second subscriber on this channel, after the websocket server's. The application
+    // processor publishes only when the summary list actually changes, so this costs nothing
+    // at steady state -- and it is what lets a routine saved at the machine reach Plantlet
+    // without anybody pressing refresh.
+    let uplink_routine_subscriber = routine_channel.subscriber().unwrap();
     spawn_or_report!(spawner, "uplink", variegated_comms_firmware::uplink::uplink_task(
         net_stack,
         uplink_status_subscriber,
+        uplink_routine_subscriber,
     ));
     log_info!("Uplink task spawned");
 
