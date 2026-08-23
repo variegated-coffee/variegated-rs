@@ -6,6 +6,7 @@ pub mod application_processor;
 pub mod ble;
 pub mod channels;
 pub mod checkin;
+pub mod uplink;
 pub mod config;
 pub mod debug;
 pub mod esphome;

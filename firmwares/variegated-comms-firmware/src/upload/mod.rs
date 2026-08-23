@@ -445,7 +445,10 @@ async fn attempt_upload(
     // guess removes all confidentiality, since `es` follows from it and the public server key.
     let mut seed = [0u8; 32];
     rng.read(&mut seed);
-    let hello = Hello::new(id, first.total);
+    // No shot id: version 2's hello describes a *body*, and the body is a postcard
+    // `UplinkMessage` of which a shot log is one variant. The id is still what addresses the
+    // shot on the link below, which is why it is still a parameter of this function.
+    let hello = Hello::new(first.total);
     let mut sender = NoiseSender::begin(&keys, Ephemeral::from_bytes(seed), &hello)
         .map_err(|e| {
             log_warn!("Shot upload: could not start a noise session: {:?}", e);

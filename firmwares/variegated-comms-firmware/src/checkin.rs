@@ -98,6 +98,20 @@ variegated_checkin::define_checkins! {
         /// Uploads finished shots over TLS. `HEARTBEAT` timeout on the wait, so an idle
         /// uploader reports rather than a row that only ticks once a shot finishes.
         ShotUpload = 22 => 15_000,
+        /// The Plantlet uplink: a `Noise_IK` socket held open for months at a time.
+        ///
+        /// `HEARTBEAT` timeout on the wait, like `ShotUpload` and for a sharper version of the
+        /// same reason. This task's *normal* state is blocked on a socket read that produces
+        /// nothing for ten minutes at a stretch, so a row that only ticked on traffic would be
+        /// indistinguishable from a row for a task wedged in a TCP read that will never
+        /// return — which, on a link to a server across the internet, is the failure to expect
+        /// rather than an exotic one.
+        ///
+        /// A period rather than `_`, unlike the socket-holding BLE rows above: those sit
+        /// inside a `select` that legitimately completes only on an external event, while
+        /// this one has its own timer to fall back on. Nothing here cancels anything the
+        /// timeout fires on — the read is resumed, not restarted.
+        Uplink = 23 => 15_000,
     }
 }
 

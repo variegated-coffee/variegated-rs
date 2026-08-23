@@ -1139,6 +1139,18 @@ async fn main(spawner: Spawner) -> ! {
     ));
     log_info!("Shot upload task spawned");
 
+    // The Plantlet uplink, beside the uploader rather than folded into it. They share the
+    // provisioned keys and the endpoint setting and nothing else: the uploader wakes when a
+    // shot finishes and is otherwise absent, while this one holds a socket open for months.
+    // One task doing both would have to keep a 90-second upload from stalling the socket's
+    // keepalive, which is a coordination problem neither has on its own.
+    let uplink_status_subscriber = status_channel.subscriber().unwrap();
+    spawn_or_report!(spawner, "uplink", variegated_comms_firmware::uplink::uplink_task(
+        net_stack,
+        uplink_status_subscriber,
+    ));
+    log_info!("Uplink task spawned");
+
     // Main loop - periodic HTTP client requests
     loop {
         Timer::after(Duration::from_millis(5000)).await;
