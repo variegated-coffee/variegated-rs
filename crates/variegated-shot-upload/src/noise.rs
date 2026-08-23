@@ -246,6 +246,27 @@ impl Keys {
     pub fn device_public(&self) -> [u8; KEY_LEN] {
         X25519::pubkey(&self.device_secret)
     }
+
+    /// Build from raw bytes, for tests and vector generation.
+    ///
+    /// `from_crockford` is what a machine uses; this exists so a test can pin a transcript
+    /// against fixed keys without round-tripping them through base32 first.
+    pub fn from_parts(device_secret: [u8; KEY_LEN], server_public: [u8; KEY_LEN]) -> Self {
+        Self { device_secret: Sensitive::from_slice(&device_secret), server_public }
+    }
+
+    /// The device's secret, for a handshake builder in this crate.
+    ///
+    /// `pub(crate)` rather than `pub`: [`crate::uplink`] needs it to build an `IK` handshake,
+    /// and nothing outside this crate has any business holding it.
+    pub(crate) fn device_secret_bytes(&self) -> &Sensitive<[u8; KEY_LEN]> {
+        &self.device_secret
+    }
+
+    /// The server's public key, for a handshake builder in this crate.
+    pub(crate) fn server_public_bytes(&self) -> [u8; KEY_LEN] {
+        self.server_public
+    }
 }
 
 /// One handshake's ephemeral secret.
@@ -262,6 +283,15 @@ impl Ephemeral {
     /// up -- the plain `Rng` is not good enough here.
     pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
         Self(Sensitive::from_slice(&bytes))
+    }
+
+    /// Consume it, handing the secret to a handshake builder.
+    ///
+    /// By value, and the only way out, so the type's one job survives: an [`Ephemeral`] is
+    /// good for exactly one handshake. Two handshakes sharing one derive the same keys, which
+    /// round-trips perfectly and is a total break.
+    pub(crate) fn into_inner(self) -> Sensitive<[u8; KEY_LEN]> {
+        self.0
     }
 }
 
@@ -285,6 +315,21 @@ pub enum NoiseError {
     TooLarge,
     /// The handshake itself failed. Not expected for a one-way pattern with valid keys.
     Handshake,
+    /// A frame did not authenticate, was malformed, or did not fit the buffer offered.
+    ///
+    /// Deliberately one variant rather than three. The distinctions are useful to whoever is
+    /// debugging the sender and useful to nobody else — and on the receiving side, telling a
+    /// peer *why* its ciphertext was rejected is how a decryption oracle starts.
+    ///
+    /// Appended, like everything after `Handshake`: this enum is matched on in both firmwares.
+    Frame,
+    /// A record's counter did not strictly increase. See [`crate::uplink`]'s framing notes.
+    Replay,
+    /// The peer speaks a hello version this build does not.
+    ///
+    /// Distinguished from [`Self::Handshake`] because it is the one handshake failure an
+    /// operator can act on: it means "update something", not "the keys are wrong".
+    UnsupportedVersion,
 }
 
 /// Total body length for `total` plaintext bytes, handshake included.

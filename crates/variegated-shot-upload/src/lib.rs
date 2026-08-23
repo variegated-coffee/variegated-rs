@@ -23,6 +23,8 @@ pub mod body;
 pub mod crockford;
 #[cfg(feature = "noise")]
 pub mod noise;
+#[cfg(feature = "noise")]
+pub mod uplink;
 pub mod roots;
 #[cfg(feature = "tls")]
 pub mod session;
