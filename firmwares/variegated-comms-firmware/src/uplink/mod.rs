@@ -67,6 +67,19 @@ use crate::channels;
 /// wakeups an hour per machine, against a status that is up to ten minutes stale.
 const STATUS_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How long to let a command take effect before reporting a status about it.
+///
+/// A command leaves this task on a channel, crosses the inter-processor link, and is applied
+/// by the controller. A status read the instant it is queued would describe the state the
+/// command is about to change and read as though nothing happened.
+///
+/// Two seconds is generous for a link that carries a routine chunk in milliseconds, and being
+/// generous is the right way to be wrong here: too short reports the old state and looks
+/// broken, where too long merely delays a page update by a second. It does not need to bound
+/// anything -- if the command is somehow slower than this, the next scheduled status corrects
+/// it.
+const COMMAND_SETTLE: Duration = Duration::from_secs(2);
+
 /// How long the socket may be idle before a keepalive ping.
 ///
 /// For NAT and intermediary timeouts, not for liveness -- liveness is the status above.
@@ -422,7 +435,11 @@ async fn run(
     // And every setting it holds. Unlike the definition this *does* change while the machine
     // runs -- somebody turns a dial, or Plantlet sends a command -- so it also has an arm in
     // the loop below.
-    send_configuration(socket, &mut session).await?;
+    //
+    // The bytes are remembered so that arm can tell a real change from the ten-second
+    // reprint; see `send_configuration`.
+    let mut last_configuration: Option<alloc::vec::Vec<u8>> = None;
+    send_configuration(socket, &mut session, &mut last_configuration, true).await?;
 
     loop {
         checkin.good();
@@ -450,6 +467,7 @@ async fn run(
                     &scratch[..len],
                     socket,
                     &mut next_status_at,
+                    &mut last_configuration,
                     commands,
                     checkin,
                 )
@@ -498,7 +516,16 @@ async fn run(
             Either4::Third(Either::Second(
                 WaitResult::Message(_) | WaitResult::Lagged(_),
             )) => {
-                send_configuration(socket, &mut session).await?;
+                // Fires every ten seconds whether or not anything changed, so
+                // `send_configuration` compares and usually sends nothing.
+                if send_configuration(socket, &mut session, &mut last_configuration, false).await? {
+                    // Something really did change. A status follows, because half of what a
+                    // person changes from Plantlet does not appear in the configuration at
+                    // all -- the machine's mode is in `Status` -- and waiting out the status
+                    // interval to see whether the machine came on is a minute of looking at
+                    // a page that says nothing happened.
+                    next_status_at = Instant::now();
+                }
             }
             // The uploader has a shot small enough for this transport and is waiting to hear
             // whether it goes here or over a POST.
@@ -547,19 +574,49 @@ fn encode_configuration(
 /// `send_status` gives at length: the session loop also holds a subscriber, and a reader that
 /// consumed messages the loop needs -- or vice versa -- is how the status push stopped working
 /// once already. The subscriber's job here is to say *when*; the cache's is to say *what*.
+///
+/// # `last` is not an optimisation
+///
+/// **The application processor sends a `Configuration` every ten seconds whether or not
+/// anything changed** -- see the `Configuration` send in `variegated-comms`, whose own comment
+/// says as much -- and the comms processor republishes each one without comparing. So the
+/// pubsub arm this feeds fires six times a minute on a machine nobody is touching, and without
+/// this every one of those became a sealed record over somebody's internet connection and a
+/// row rewritten in D1.
+///
+/// The routine list has no such problem because its cache comparison already suppresses the
+/// unchanged case. This is that comparison, for the one consumer that pays per message.
+///
+/// Comparing the *encoded* bytes rather than the `Configuration` is what makes it exact:
+/// `Configuration` has no `PartialEq` and giving it one would mean giving one to every
+/// settings struct beneath it, and a hash would trade a real if rare missed update for a few
+/// bytes. postcard encodes only the occupied entries of those fixed-size maps, so the copy
+/// held here is a few hundred bytes rather than the struct's 4,496.
+///
+/// `force` for the sends that are answers rather than notifications -- on connect, and on
+/// `RequestConfiguration`. Those go out whatever the bytes say: the server asked, or has just
+/// arrived and has nothing at all.
 async fn send_configuration(
     socket: &mut TcpSocket<'_>,
     session: &mut UplinkSession,
-) -> Result<(), AttemptEnd> {
+    last: &mut Option<alloc::vec::Vec<u8>>,
+    force: bool,
+) -> Result<bool, AttemptEnd> {
     let Some(plaintext) = ({
         let guard = channels::CONFIG_CACHE.lock().await;
         guard.as_ref().cloned().and_then(encode_configuration)
     }) else {
         log_warn!("Uplink: no configuration cached yet, nothing to send");
-        return Ok(());
+        return Ok(false);
     };
 
-    send_message(socket, session, plaintext).await
+    if !force && last.as_deref() == Some(plaintext.as_slice()) {
+        return Ok(false);
+    }
+
+    *last = Some(plaintext.clone());
+    send_message(socket, session, plaintext).await?;
+    Ok(true)
 }
 
 /// Send what the machine *is*, as opposed to what it is doing.
@@ -698,6 +755,7 @@ async fn handle(
     record: &[u8],
     socket: &mut TcpSocket<'_>,
     next_status_at: &mut Instant,
+    last_configuration: &mut Option<alloc::vec::Vec<u8>>,
     commands: &embassy_sync::channel::Sender<
         'static,
         embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
@@ -746,7 +804,13 @@ async fn handle(
         }
         Downlink::RequestRoutineList => send_routine_list(socket, session).await,
         Downlink::RequestMachineDefinition => send_machine_definition(socket, session).await,
-        Downlink::RequestConfiguration => send_configuration(socket, session).await,
+        // Forced: the server asked, so it gets an answer whether or not the bytes have moved
+        // since the last one.
+        Downlink::RequestConfiguration => {
+            send_configuration(socket, session, last_configuration, true)
+                .await
+                .map(|_| ())
+        }
         Downlink::Command(command) => {
             // `try_send`, not `send`. This runs on the session loop, and blocking here would
             // stall reads, the status timer and the keepalive behind a full command queue --
@@ -756,6 +820,19 @@ async fn handle(
             if commands.try_send(command).is_err() {
                 log_warn!("Uplink: the machine command queue is full, dropping a command");
             }
+
+            // A status shortly after, and this is the arm that matters for it.
+            //
+            // **Not every command changes the configuration.** `SetMachineMode` changes
+            // `Status.mode` and touches no setting at all, so the configuration arm above
+            // would never fire for it and the only evidence the machine came on would be the
+            // next scheduled status -- a minute later, on a page somebody is watching.
+            //
+            // Delayed rather than immediate because the command has not been applied yet: it
+            // is on a channel bound for the application processor, and a status read now
+            // would report the state the command is about to change and look like it did
+            // nothing.
+            *next_status_at = Instant::now() + COMMAND_SETTLE;
             Ok(())
         }
         Downlink::Query(id, query) => {
