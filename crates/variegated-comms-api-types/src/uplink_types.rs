@@ -135,6 +135,25 @@ pub enum UplinkMessage {
         id: u32,
         query: UplinkQuery,
     },
+
+    /// What the machine *is*: its boilers, groups, taps, wands, tanks and function buttons.
+    ///
+    /// Sent on connect and in answer to [`Self::RequestMachineDefinition`], and almost never
+    /// otherwise -- a machine definition is a property of the hardware, so unlike [`Status`]
+    /// there is nothing to poll for.
+    ///
+    /// It is here for one concrete thing a server cannot otherwise know: `function_routines`
+    /// maps a slot number to the name of the panel button bound to it. Without it Plantlet
+    /// can only offer a bare number when asked to put a routine on a button, bounded by
+    /// `MAX_FUNCTION_ROUTINES` and meaning nothing to the person choosing.
+    MachineDefinition(variegated_controller_types::MachineDefinition),
+
+    /// Ask the machine to send a [`Self::MachineDefinition`] now. A trigger, as above.
+    ///
+    /// Worth having despite the definition arriving on connect: a server that added a column
+    /// for it, or lost one, has no other way to fill it without waiting for the machine to
+    /// reconnect -- which for a machine that is behaving itself could be weeks.
+    RequestMachineDefinition,
 }
 
 /// What Plantlet may ask a machine for. Reached only through [`UplinkMessage::Query`], so its
@@ -250,10 +269,12 @@ impl UplinkMessage {
             Self::Status(_)
             | Self::RoutineList(_)
             | Self::ShotLog(_)
-            | Self::Reply { .. } => Direction::Uplink,
-            Self::RequestStatus | Self::RequestRoutineList | Self::Query { .. } => {
-                Direction::Downlink
-            }
+            | Self::Reply { .. }
+            | Self::MachineDefinition(_) => Direction::Uplink,
+            Self::RequestStatus
+            | Self::RequestRoutineList
+            | Self::Query { .. }
+            | Self::RequestMachineDefinition => Direction::Downlink,
         }
     }
 
@@ -291,7 +312,7 @@ mod tests {
     /// transport uses.
     #[test]
     fn variant_discriminants_are_pinned() {
-        let cases: [(UplinkMessage, u8); 7] = [
+        let cases: [(UplinkMessage, u8); 9] = [
             (UplinkMessage::Status(Status::new()), 0),
             (
                 UplinkMessage::RoutineList(RoutineSummaryStorage {
@@ -318,6 +339,13 @@ mod tests {
                 },
                 6,
             ),
+            (
+                UplinkMessage::MachineDefinition(
+                    variegated_controller_types::MachineDefinition::default(),
+                ),
+                7,
+            ),
+            (UplinkMessage::RequestMachineDefinition, 8),
         ];
 
         for (message, expected) in cases {
@@ -327,6 +355,36 @@ mod tests {
                 "a discriminant moved -- this is a contract with flashed firmware"
             );
         }
+    }
+
+    /// `Status` is the largest variant, and nothing appended may take that from it.
+    ///
+    /// **This is a memory guard, not a wire guard.** `UplinkMessage` is sized by its largest
+    /// variant whatever a given message actually is, and the firmware materialises whole
+    /// envelopes by value -- `encode_status` builds one to serialise, and `handle` decodes one
+    /// before narrowing to `Downlink`. So the largest variant is what every trigger and every
+    /// status costs in stack, once per send and once per receive.
+    ///
+    /// `Status` is what the firmware is already sized for: it is cached in RAM as a static, so
+    /// its cost is paid whether or not this enum exists. A variant that grew past it would be
+    /// new cost, and would be invisible -- the enum would simply be bigger and nothing would
+    /// say so.
+    ///
+    /// The margin is genuinely thin. When `MachineDefinition` was added here it measured 4488
+    /// bytes against `Status`'s 4496, so it came within eight bytes of moving this number
+    /// without anyone noticing. That is the whole reason this test exists.
+    #[test]
+    fn status_is_the_largest_variant() {
+        let envelope = core::mem::size_of::<UplinkMessage>();
+        let status = core::mem::size_of::<Status>();
+
+        assert_eq!(
+            envelope, status,
+            "an appended variant is now larger than `Status`, so the envelope grew -- every \
+             send and every receive on the uplink pays the difference in stack. Either shrink \
+             it, box it (serde encodes a `Box<T>` as `T`, so the wire is unchanged), or decide \
+             deliberately that the envelope may grow and rewrite this test to say so."
+        );
     }
 
     /// The two triggers encode to a single byte each, which is what the firmware's inbound
@@ -373,7 +431,7 @@ mod tests {
     /// that have to be kept in agreement.
     #[test]
     fn direction_partitions_the_enum() {
-        let uplink: [UplinkMessage; 4] = [
+        let uplink: [UplinkMessage; 5] = [
             UplinkMessage::Status(Status::new()),
             UplinkMessage::RoutineList(RoutineSummaryStorage {
                 internal: Default::default(),
@@ -385,8 +443,11 @@ mod tests {
                 id: 0,
                 outcome: QueryOutcome::Ok(QueryOk::RoutineStored(RoutineIndex::Custom(1))),
             },
+            UplinkMessage::MachineDefinition(
+                variegated_controller_types::MachineDefinition::default(),
+            ),
         ];
-        let downlink: [UplinkMessage; 3] = [
+        let downlink: [UplinkMessage; 4] = [
             UplinkMessage::RequestStatus,
             UplinkMessage::RequestRoutineList,
             UplinkMessage::Query {
@@ -396,6 +457,7 @@ mod tests {
                     routine: vec![],
                 },
             },
+            UplinkMessage::RequestMachineDefinition,
         ];
 
         for message in uplink {

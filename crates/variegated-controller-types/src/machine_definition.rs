@@ -198,9 +198,15 @@ pub struct EnvironmentalSensorDefinition {
     pub measurement_range: Option<(f32, f32)>,
 }
 
+/// What a machine is made of, as opposed to what it is doing.
+///
+/// `Default` is an empty machine -- no boilers, no groups, nothing. Not a machine anybody
+/// owns, and useful precisely because of that: it is the starting point the `add_*` methods
+/// below build onto, and the fixture a wire-format test wants when the contents are beside
+/// the point.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct MachineDefinition {
     pub name: heapless::String<32>,
     pub boilers: FnvIndexMap<BoilerIndex, BoilerDefinition, MAX_BOILERS>,

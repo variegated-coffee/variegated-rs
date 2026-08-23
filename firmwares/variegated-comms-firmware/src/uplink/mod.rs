@@ -377,6 +377,10 @@ async fn run(
     // `send_routine_list`.
     send_routine_list(socket, &mut session).await?;
 
+    // And what the machine is. Once per session and never again: the hardware does not change
+    // while the machine is switched on, so there is no interval and no pubsub arm for it.
+    send_machine_definition(socket, &mut session).await?;
+
     loop {
         checkin.good();
 
@@ -459,6 +463,39 @@ fn encode_status(status: variegated_controller_types::Status) -> Option<alloc::v
     postcard::to_allocvec(&UplinkMessage::Status(status)).ok()
 }
 
+fn encode_machine_definition(
+    definition: variegated_controller_types::MachineDefinition,
+) -> Option<alloc::vec::Vec<u8>> {
+    postcard::to_allocvec(&UplinkMessage::MachineDefinition(definition)).ok()
+}
+
+/// Send what the machine *is*, as opposed to what it is doing.
+///
+/// Sent once per session and on request, and that is the whole cadence: a machine definition
+/// describes the hardware, so unlike a status there is nothing to poll for. It does not go on
+/// the status timer for the same reason.
+///
+/// A no-op until the application processor has answered `RequestMachineDefinition`, which the
+/// link asks for at boot. Not an error -- the definition arrives within a second or two of a
+/// cold start, and a session opened before it does gets one on its next connect.
+async fn send_machine_definition(
+    socket: &mut TcpSocket<'_>,
+    session: &mut UplinkSession,
+) -> Result<(), AttemptEnd> {
+    // Scoped and cloned out, like `send_status`: the guard is also taken by the receiver task
+    // that fills it, and holding it across a socket write would block that for as long as the
+    // network takes.
+    let Some(plaintext) = ({
+        let guard = channels::MACHINE_DEFINITION.lock().await;
+        guard.as_ref().cloned().and_then(encode_machine_definition)
+    }) else {
+        log_warn!("Uplink: no machine definition yet, nothing to send");
+        return Ok(());
+    };
+
+    send_message(socket, session, plaintext).await
+}
+
 /// Send the current status, read from the cache the HTTP server already keeps.
 ///
 /// # Why the cache and not the pubsub
@@ -497,7 +534,8 @@ async fn send_status(
 ///
 /// **This exists for the reason `ClientRequest` exists in `websocket.rs`, and it is the same
 /// reason as everything else in this module: memory.** `UplinkMessage` is sized by its largest
-/// variant, which is `Status` at about 2.4 kB. [`handle`] is `async`, so anything still alive
+/// variant, which is `Status` at 4,496 bytes — `status_is_the_largest_variant` in
+/// `uplink_types.rs` pins that, and measured it. [`handle`] is `async`, so anything still alive
 /// when it awaits is stored in its future for the life of the firmware — and answering a query
 /// awaits the application processor for up to ten seconds.
 ///
@@ -506,6 +544,7 @@ async fn send_status(
 enum Downlink {
     RequestStatus,
     RequestRoutineList,
+    RequestMachineDefinition,
     /// A question with an answer, and its correlation id.
     ///
     /// Held as a `ClientQuery` rather than an `UplinkQuery` because that is what the firmware
@@ -529,11 +568,13 @@ impl Downlink {
         match message {
             UplinkMessage::RequestStatus => Some(Self::RequestStatus),
             UplinkMessage::RequestRoutineList => Some(Self::RequestRoutineList),
+            UplinkMessage::RequestMachineDefinition => Some(Self::RequestMachineDefinition),
             UplinkMessage::Query { id, query } => Some(Self::Query(id, query.into())),
             UplinkMessage::Status(_)
             | UplinkMessage::RoutineList(_)
             | UplinkMessage::ShotLog(_)
-            | UplinkMessage::Reply { .. } => None,
+            | UplinkMessage::Reply { .. }
+            | UplinkMessage::MachineDefinition(_) => None,
         }
     }
 }
@@ -594,6 +635,7 @@ async fn handle(
             Ok(())
         }
         Downlink::RequestRoutineList => send_routine_list(socket, session).await,
+        Downlink::RequestMachineDefinition => send_machine_definition(socket, session).await,
         Downlink::Query(id, query) => {
             let outcome = crate::queries::serve_query(query, checkin).await;
             // Encoded and sent in separate statements, like every other reply here: a
