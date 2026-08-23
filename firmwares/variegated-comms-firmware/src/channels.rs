@@ -279,8 +279,20 @@ pub static SHOT_UPLOAD_CONFIG: Watch<
     SHOT_UPLOAD_CONFIG_RECEIVERS,
 > = Watch::new();
 
-/// Receiver slots on [`SHOT_UPLOAD_CONFIG`]. One, for the upload task.
-pub const SHOT_UPLOAD_CONFIG_RECEIVERS: usize = 1;
+/// Receiver slots on [`SHOT_UPLOAD_CONFIG`].
+///
+/// **Two**: the shot uploader and the Plantlet uplink. They share the endpoint and the
+/// provisioned keys -- one `http+noise://` setting configures both -- so both watch it, and
+/// both must move together when a machine is reconfigured mid-session.
+///
+/// This was 1 when the uplink was added, which cost a flash cycle: `Watch::receiver()` hands
+/// back `None` once the slots are gone, and the `expect` on it panicked inside the task. A
+/// panic in a task is as invisible as one in `main` here -- the message dies with the reset --
+/// so what came out was a bare `TG1_WDT_HPSYS` reboot after "Uplink task spawned".
+///
+/// Same rule as [`APPLICATION_STATUS_RECEIVERS`]: this number is the number of `receiver()`
+/// calls that execute, and the list above is what makes it checkable.
+pub const SHOT_UPLOAD_CONFIG_RECEIVERS: usize = 2;
 
 /// Whether the application processor has answered [`RequestShotUploadConfig`] at all.
 ///
