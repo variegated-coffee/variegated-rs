@@ -56,10 +56,17 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(600);
 
 /// How long the socket may be idle before a keepalive ping.
 ///
-/// For NAT and intermediary timeouts, not for liveness -- liveness is the status above. A
-/// protocol-level ping does not wake a hibernating Durable Object, so this costs the server
-/// nothing; an application-level one would cost a wakeup every two minutes per machine.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
+/// For NAT and intermediary timeouts, not for liveness -- liveness is the status above.
+///
+/// **Twenty seconds, because these are genuinely free.** A protocol-level ping is answered by
+/// Cloudflare's runtime without waking the hibernating Durable Object, so the server spends no
+/// wall-clock time on one however often it arrives -- which is the whole reason the keepalive
+/// is a WebSocket ping rather than an application message. What it costs is a handful of bytes
+/// on a link that is otherwise silent for ten minutes at a time.
+///
+/// Frequent pings also make [`SOCKET_TIMEOUT`] a sharper instrument: several missed ones are
+/// what tells a machine its link has been black-holed rather than merely quiet.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Ceiling on one connection attempt: DNS, connect, upgrade, handshake.
 ///
@@ -69,7 +76,32 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a stalled read or write may take before the socket gives up.
-const SOCKET_TIMEOUT: Duration = Duration::from_secs(30);
+///
+/// **This is a failsafe and must never fire on a working link, which means it has to be
+/// longer than [`KEEPALIVE_INTERVAL`].** `set_timeout` is an *idle* timeout: smoltcp aborts a
+/// connection that has seen no traffic for this long, and an uplink is deliberately silent
+/// between a status every ten minutes and a ping every two.
+///
+/// It was 30 s, copied from the upload path where a socket is open for one request and
+/// silence really is a stall. Here it meant every session died at exactly thirty seconds --
+/// before the keepalive that exists to stop precisely that could run even once. From the
+/// server the machine simply vanished, with no close frame, because smoltcp had reset the
+/// connection underneath.
+///
+/// Six keepalives. Long enough that a working link can never reach it, short enough that a
+/// black-holed one is noticed in two minutes rather than five.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(120);
+
+// The relationship above, enforced rather than described. A keepalive that cannot outrun the
+// idle timeout is not a keepalive, and the failure it produces -- a session that dies on a
+// clean network, at a suspiciously round interval -- costs a hardware cycle to read.
+//
+// Four rather than merely greater: one ping inside the window would make the timeout a
+// coin-toss on a single dropped packet.
+const _: () = assert!(
+    SOCKET_TIMEOUT.as_secs() >= KEEPALIVE_INTERVAL.as_secs() * 4,
+    "SOCKET_TIMEOUT must survive several missed keepalives, or the socket dies while idle"
+);
 
 /// Wait between connection attempts.
 ///
@@ -295,6 +327,8 @@ async fn run(
     // second rather than inheriting a stale timestamp from a previous session.
     let mut next_status = Duration::from_ticks(0);
 
+    log_info!("Uplink: session running");
+
     // And the routine list, once, at the top of the session.
     //
     // **Without this the server would never learn what a machine holds.** The list changes
@@ -323,11 +357,17 @@ async fn run(
             Either4::Second(Ok(Ok(len))) => {
                 handle(&mut session, &scratch[..len], socket, &mut next_status, checkin).await?;
             }
-            Either4::Second(Ok(Err(()))) => return Err(AttemptEnd::SessionOver),
+            Either4::Second(Ok(Err(()))) => {
+                log_warn!("Uplink: reading a record failed, ending the session");
+                return Err(AttemptEnd::SessionOver);
+            }
             Either4::Second(Err(_)) => {
                 // Idle for a keepalive interval. A protocol-level ping, which the server's
                 // runtime answers without waking the hibernating object.
-                http::ping(socket).await.map_err(|_| AttemptEnd::SessionOver)?;
+                http::ping(socket).await.map_err(|_| {
+                    log_warn!("Uplink: writing a keepalive ping failed");
+                    AttemptEnd::SessionOver
+                })?;
             }
             Either4::Third(WaitResult::Message(_)) => {
                 // A status arrived on the pubsub. Not sent on: the interval above is what
@@ -452,12 +492,15 @@ async fn handle(
     // Scoped so the envelope is dropped before the match below awaits. See `Downlink`.
     let request = {
         let mut plain = alloc::vec![0u8; record.len()];
-        let len = session
-            .open_record(record, &mut plain)
-            .map_err(|_| AttemptEnd::SessionOver)?;
+        let len = session.open_record(record, &mut plain).map_err(|_| {
+            log_warn!("Uplink: a {}-byte record would not open", record.len());
+            AttemptEnd::SessionOver
+        })?;
 
-        let message: UplinkMessage =
-            postcard::from_bytes(&plain[..len]).map_err(|_| AttemptEnd::SessionOver)?;
+        let message: UplinkMessage = postcard::from_bytes(&plain[..len]).map_err(|_| {
+            log_warn!("Uplink: {} plaintext bytes would not decode", len);
+            AttemptEnd::SessionOver
+        })?;
 
         // The direction check, and it is a `match` with no `_` arm on purpose -- see
         // `UplinkMessage::direction`. A variant appended later fails to compile there until
@@ -465,10 +508,14 @@ async fn handle(
         if !message.acceptable_by_machine() {
             // A server sending us something only we may send is either confused or hostile,
             // and there is nothing sensible to do with it either way.
+            log_warn!("Uplink: the server sent a message only a machine may send");
             return Err(AttemptEnd::SessionOver);
         }
 
-        Downlink::narrow(message).ok_or(AttemptEnd::SessionOver)?
+        Downlink::narrow(message).ok_or_else(|| {
+            log_warn!("Uplink: the server sent a variant this build cannot narrow");
+            AttemptEnd::SessionOver
+        })?
     };
 
     match request {
@@ -569,6 +616,7 @@ async fn send_message(
     session: &mut UplinkSession,
     plaintext: alloc::vec::Vec<u8>,
 ) -> Result<(), AttemptEnd> {
+    log_info!("Uplink: sending a {}-byte message", plaintext.len());
     let mut sealed = alloc::vec![0u8; UplinkSession::sealed_len(plaintext.len())];
     let len = match session.seal_record(&plaintext, &mut sealed) {
         Ok(len) => len,
@@ -582,9 +630,13 @@ async fn send_message(
     };
     drop(plaintext);
 
-    http::write_record(socket, &sealed[..len])
-        .await
-        .map_err(|_| AttemptEnd::SessionOver)
+    http::write_record(socket, &sealed[..len]).await.map_err(|_| {
+        // The likeliest way a session dies, and the one that says least from the far end:
+        // the server sees the connection vanish with no close frame, because there is no
+        // socket left to send one on.
+        log_warn!("Uplink: writing a {}-byte record failed", len);
+        AttemptEnd::SessionOver
+    })
 }
 
 pub mod http;
