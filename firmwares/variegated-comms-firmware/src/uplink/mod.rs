@@ -36,7 +36,7 @@ use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::pubsub::WaitResult;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
 use variegated_comms_api_types::uplink_types::{
     shot_log_prefix, UplinkMessage, MAX_UPLINK_CLIENT_RECORD_LEN,
@@ -356,7 +356,15 @@ async fn run(
     // the truth from the moment the socket opens -- and it is *first* rather than merely early
     // because the routine list below can be several kilobytes on a machine with many
     // routines, and the connected indicator should not queue behind it.
-    let mut next_status = STATUS_INTERVAL;
+    // **A deadline, not a delay.** `select` drops the arms that did not win, so a `Timer::after`
+    // built inside the loop restarts its countdown every time *any* other arm fires -- and the
+    // keepalive read times out every `KEEPALIVE_INTERVAL`, which is shorter than
+    // `STATUS_INTERVAL`. The status timer could therefore never reach its interval: one went
+    // up on connect and then never again, on a link that was working perfectly.
+    //
+    // An `Instant` does not move when the loop restarts, so the deadline survives being
+    // rebuilt however often the loop goes round.
+    let mut next_status_at = Instant::now() + STATUS_INTERVAL;
     send_status(socket, &mut session).await?;
 
     // And the routine list, once, at the top of the session.
@@ -373,7 +381,7 @@ async fn run(
         checkin.good();
 
         match select4(
-            Timer::after(next_status),
+            Timer::at(next_status_at),
             with_timeout(KEEPALIVE_INTERVAL, http::read_record(socket, &mut scratch)),
             routines.next_message(),
             channels::UPLINK_SHOT_OFFER.receive(),
@@ -382,10 +390,12 @@ async fn run(
         {
             Either4::First(()) => {
                 send_status(socket, &mut session).await?;
-                next_status = STATUS_INTERVAL;
+                // From now, not from the deadline that just passed: a status delayed by a
+                // query does not make the next one early to compensate.
+                next_status_at = Instant::now() + STATUS_INTERVAL;
             }
             Either4::Second(Ok(Ok(len))) => {
-                handle(&mut session, &scratch[..len], socket, &mut next_status, checkin).await?;
+                handle(&mut session, &scratch[..len], socket, &mut next_status_at, checkin).await?;
             }
             Either4::Second(Ok(Err(()))) => {
                 log_warn!("Uplink: reading a record failed, ending the session");
@@ -542,7 +552,7 @@ async fn handle(
     session: &mut UplinkSession,
     record: &[u8],
     socket: &mut TcpSocket<'_>,
-    next_status: &mut Duration,
+    next_status_at: &mut Instant,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), AttemptEnd> {
     // Scoped so the envelope is dropped before the match below awaits. See `Downlink`.
@@ -578,7 +588,9 @@ async fn handle(
         Downlink::RequestStatus => {
             // A trigger, not a query: it provokes the ordinary push, so a requested status
             // reaches the server by exactly the same path as a scheduled one.
-            *next_status = Duration::from_ticks(0);
+            // Now, so the next turn of the loop sends one. The deadline is what the loop
+            // waits on, so moving it into the past is how "send a status" is expressed.
+            *next_status_at = Instant::now();
             Ok(())
         }
         Downlink::RequestRoutineList => send_routine_list(socket, session).await,
