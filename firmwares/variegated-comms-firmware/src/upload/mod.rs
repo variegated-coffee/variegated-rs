@@ -80,6 +80,25 @@ const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(90);
 /// Anything larger is refused by the endpoint, so do not spend link time pulling it.
 const MAX_UPLOAD_BYTES: u32 = 4 * 1024 * 1024;
 
+/// Shots up to this size take the uplink socket; larger ones take a POST.
+///
+/// The socket is already open and authenticated, so a small shot costs no DNS, no connect and
+/// no second handshake -- which is most of what uploading a small shot used to cost.
+///
+/// The ceiling is about the *receiver*, not this side: a record is reassembled whole at the
+/// far end before it is decrypted, so a large shot would be a large allocation in somebody
+/// else's memory. A POST is a stream at both ends and has no such shape, which is why it keeps
+/// the big ones. This side streams either way.
+const UPLINK_SHOT_MAX: u32 = 20 * 1024;
+
+/// How long to wait for the uplink to say whether it took a shot.
+///
+/// Generous, because the uplink may be part-way through a routine query when the offer
+/// arrives, and those are allowed ten seconds. On expiry the shot is posted instead -- the
+/// cost of being wrong is a duplicate, which the far end dedupes on content, against losing a
+/// shot outright.
+const UPLINK_OFFER_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How long a connect or a stalled read/write may take before the socket gives up.
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -225,6 +244,21 @@ pub async fn shot_upload_task(
                 };
 
                 if let Some(config) = config.as_deref() {
+                    // Small shots go over the uplink's socket, which is already open and
+                    // authenticated -- no DNS, no connect, no second handshake. Large ones
+                    // take a POST: a record is reassembled whole at the far end, so a
+                    // hundred-kilobyte shot would be a hundred kilobytes of somebody's
+                    // memory, where a POST is a stream.
+                    //
+                    // The uplink answers rather than this task guessing, so exactly one of
+                    // the two transports carries any given shot -- see `offer_shot_to_uplink`.
+                    if entry.size_bytes <= UPLINK_SHOT_MAX
+                        && channels::offer_shot_to_uplink(&entry, UPLINK_OFFER_TIMEOUT).await
+                    {
+                        log_info!("Shot upload: a {}-byte shot went via the uplink", entry.size_bytes);
+                        continue;
+                    }
+
                     upload_shot(&mut rng, stack, config, &entry).await;
                 }
             }

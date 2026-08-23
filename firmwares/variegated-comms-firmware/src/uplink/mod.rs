@@ -31,21 +31,24 @@
 //! static sections, and the 1 Hz stack and heap high-water lines in `debug/snapshot.rs` for
 //! what it actually costs once running.
 
-use embassy_futures::select::{select3, Either3};
+use embassy_futures::select::{select4, Either4};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::pubsub::WaitResult;
 use embassy_time::{with_timeout, Duration, Timer};
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
-use variegated_comms_api_types::uplink_types::{UplinkMessage, MAX_UPLINK_CLIENT_RECORD_LEN};
+use variegated_comms_api_types::uplink_types::{
+    shot_log_prefix, UplinkMessage, MAX_UPLINK_CLIENT_RECORD_LEN,
+};
 use variegated_comms_api_types::ws_types::{ClientQuery, QueryOutcome};
 use variegated_controller_types::RoutineSummaryList;
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_log::{log_info, log_warn};
 use variegated_shot_upload::noise::{Ephemeral, Keys};
 use variegated_shot_upload::uplink::{
-    UplinkHandshake, UplinkHello, UplinkSession, IK_MSG1_LEN, IK_MSG2_LEN,
+    UplinkHandshake, UplinkHello, UplinkSession, IK_MSG1_LEN, IK_MSG2_LEN, UPLINK_CHUNK,
+    UPLINK_TAG,
 };
 use variegated_shot_upload::{parse_url, Scheme};
 
@@ -84,6 +87,12 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 /// fire on a working link. Dropping the future mid-handshake is safe: the socket goes with it
 /// and the next attempt starts from a fresh one.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long one chunk of a shot may take to come back over the inter-processor link.
+///
+/// The same figure the upload path uses, and deliberately the same: it bounds the application
+/// processor's turnaround, which does not change with who is asking.
+const SHOT_LOG_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a stalled read or write may take before the socket gives up.
 ///
@@ -293,7 +302,14 @@ async fn session(
     .map_err(|_| AttemptEnd::Network)?;
 
     log_info!("Uplink: connected to {}", url.host);
-    run(&mut socket, session, routines, checkin).await
+
+    // Advertised only while a session is actually up, and cleared however this returns --
+    // including through the `?`s inside `run`. The uploader reads it to decide whether
+    // offering a shot here is worth trying.
+    channels::UPLINK_SESSION_UP.store(true, core::sync::atomic::Ordering::Relaxed);
+    let outcome = run(&mut socket, session, routines, checkin).await;
+    channels::UPLINK_SESSION_UP.store(false, core::sync::atomic::Ordering::Relaxed);
+    outcome
 }
 
 /// Open the socket, send the upgrade, read the 101, and finish the handshake.
@@ -356,25 +372,26 @@ async fn run(
     loop {
         checkin.good();
 
-        match select3(
+        match select4(
             Timer::after(next_status),
             with_timeout(KEEPALIVE_INTERVAL, http::read_record(socket, &mut scratch)),
             routines.next_message(),
+            channels::UPLINK_SHOT_OFFER.receive(),
         )
         .await
         {
-            Either3::First(()) => {
+            Either4::First(()) => {
                 send_status(socket, &mut session).await?;
                 next_status = STATUS_INTERVAL;
             }
-            Either3::Second(Ok(Ok(len))) => {
+            Either4::Second(Ok(Ok(len))) => {
                 handle(&mut session, &scratch[..len], socket, &mut next_status, checkin).await?;
             }
-            Either3::Second(Ok(Err(()))) => {
+            Either4::Second(Ok(Err(()))) => {
                 log_warn!("Uplink: reading a record failed, ending the session");
                 return Err(AttemptEnd::SessionOver);
             }
-            Either3::Second(Err(_)) => {
+            Either4::Second(Err(_)) => {
                 // Idle for a keepalive interval. A protocol-level ping, which the server's
                 // runtime answers without waking the hibernating object.
                 http::ping(socket).await.map_err(|_| {
@@ -396,12 +413,23 @@ async fn run(
             // `Lagged` is answered rather than ignored. A missed publish means the list
             // changed and this task did not see how -- and the cache holds the current one
             // either way, so sending it is exactly the right recovery.
-            Either3::Third(WaitResult::Message(_) | WaitResult::Lagged(_)) => {
+            Either4::Third(WaitResult::Message(_) | WaitResult::Lagged(_)) => {
                 // Read back from the cache rather than from the message, so this shares one
                 // path with the send above. Safe against the publish: the application
                 // processor holds the cache lock across both the publish and the write, so
                 // there is no window where this observes the old list.
                 send_routine_list(socket, &mut session).await?;
+            }
+            // The uploader has a shot small enough for this transport and is waiting to hear
+            // whether it goes here or over a POST.
+            //
+            // Answered on every path, including the failures: the uploader blocks on this
+            // signal, and a shot nobody answers for is a shot that waits out its timeout and
+            // then gets posted anyway -- slower, and for no reason.
+            Either4::Fourth(entry) => {
+                let sent = send_shot(socket, &mut session, entry.id, entry.size_bytes).await;
+                channels::UPLINK_SHOT_ANSWER.signal(matches!(sent, Ok(true)));
+                sent?;
             }
         }
     }
@@ -613,6 +641,131 @@ async fn send_routine_list(
     };
 
     send_message(socket, session, plaintext).await
+}
+
+/// Stream one shot onto the socket as a single sealed record.
+///
+/// # Why this is not `send_message`
+///
+/// Everything else this task sends is a couple of kilobytes and is built in memory. A shot is
+/// up to [`UPLINK_SHOT_MAX`] and is not in memory at all -- it lives on the application
+/// processor's card and arrives a kilobyte at a time. Buffering it would need the shot plus
+/// its sealed copy, which is more heap than this chip has.
+///
+/// So the length is computed first, the frame header goes out with that length, and then the
+/// shot flows: a chunk off the link, into a staging buffer, sealed, onto the socket. Peak cost
+/// is one chunk of each, not one shot of each.
+///
+/// The re-chunking is the fiddly part and it is not avoidable: the link and the record both
+/// deal in 1024-byte pieces, but the prefix above offsets one against the other, so a link
+/// chunk never lines up with a record chunk after the first.
+async fn send_shot(
+    socket: &mut TcpSocket<'_>,
+    session: &mut UplinkSession,
+    id: variegated_controller_types::shot_log::ShotLogId,
+    total: u32,
+) -> Result<bool, AttemptEnd> {
+    let (prefix, prefix_len) = shot_log_prefix(total);
+    let prefix = &prefix[..prefix_len];
+    let plaintext_len = prefix_len + total as usize;
+
+    let mut sealer = match session.begin_record(plaintext_len) {
+        Ok(sealer) => sealer,
+        Err(_) => {
+            // Larger than the server said it accepts. Not fatal and not retryable here: the
+            // caller falls back to the POST transport, which has its own, larger ceiling.
+            log_warn!("Uplink: a {}-byte shot will not fit one record", total);
+            return Ok(false);
+        }
+    };
+
+    let mut frame = http::begin_frame(socket, UplinkSession::sealed_len(plaintext_len))
+        .await
+        .map_err(|_| AttemptEnd::SessionOver)?;
+    frame
+        .write(socket, &sealer.counter_bytes())
+        .await
+        .map_err(|_| AttemptEnd::SessionOver)?;
+
+    // One record chunk of plaintext, and one of ciphertext. The only two buffers this path
+    // needs however large the shot is.
+    let mut staged = alloc::vec![0u8; UPLINK_CHUNK];
+    let mut sealed = alloc::vec![0u8; UPLINK_CHUNK + UPLINK_TAG];
+    let mut remaining = plaintext_len;
+
+    // The prefix is the first thing in the record's plaintext, so the staging buffer starts
+    // holding it and the shot's own bytes land after it.
+    staged[..prefix_len].copy_from_slice(prefix);
+    let mut staged_len = prefix_len;
+
+    // Seal and write whatever is in the staging buffer, if it is a whole chunk or the tail.
+    macro_rules! flush {
+        ($force:expr) => {
+            while staged_len == UPLINK_CHUNK || ($force && staged_len > 0) {
+                let take = staged_len.min(UPLINK_CHUNK).min(remaining);
+                let n = session
+                    .seal_chunk(&mut sealer, &staged[..take], &mut sealed)
+                    .map_err(|_| AttemptEnd::SessionOver)?;
+                frame
+                    .write(socket, &sealed[..n])
+                    .await
+                    .map_err(|_| AttemptEnd::SessionOver)?;
+
+                staged.copy_within(take..staged_len, 0);
+                staged_len -= take;
+                remaining -= take;
+            }
+        };
+    }
+
+    let mut offset = 0u32;
+    while offset < total {
+        let chunk = match channels::shot_log_request(
+            channels::ShotLogRequest::Chunk { id, offset },
+            SHOT_LOG_TIMEOUT,
+        )
+        .await
+        {
+            Ok(channels::ShotLogReply::Chunk { offset: at, bytes, .. }) if at == offset => bytes,
+            _ => {
+                // The link failed midway, and the frame header already promised a length that
+                // will now not arrive. There is no way to un-promise it, so the session ends
+                // and the machine reconnects -- which is why this is checked before the header
+                // wherever it can be.
+                log_warn!("Uplink: the link failed {} bytes into a shot", offset);
+                return Err(AttemptEnd::SessionOver);
+            }
+        };
+
+        if chunk.is_empty() {
+            log_warn!("Uplink: the link ran dry {} bytes into a shot", offset);
+            return Err(AttemptEnd::SessionOver);
+        }
+
+        let mut at = 0;
+        while at < chunk.len() {
+            let room = UPLINK_CHUNK - staged_len;
+            let take = room.min(chunk.len() - at);
+            staged[staged_len..staged_len + take].copy_from_slice(&chunk[at..at + take]);
+            staged_len += take;
+            at += take;
+            flush!(false);
+        }
+
+        offset += chunk.len() as u32;
+    }
+
+    flush!(true);
+
+    if !sealer.is_complete() || !frame.is_complete() {
+        // The shot was shorter than its own declared length. The frame is already short on
+        // the wire, so there is nothing to do but end the session.
+        log_warn!("Uplink: a shot ended early against its declared length");
+        return Err(AttemptEnd::SessionOver);
+    }
+
+    log_info!("Uplink: sent a {}-byte shot", total);
+    Ok(true)
 }
 
 /// Seal one message and write it.

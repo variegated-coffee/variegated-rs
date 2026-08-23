@@ -167,6 +167,73 @@ pub async fn write_record(socket: &mut TcpSocket<'_>, record: &[u8]) -> Result<(
     Ok(())
 }
 
+/// One binary frame being written a piece at a time.
+///
+/// [`write_record`] needs the whole record in memory. A shot does not fit that way -- see
+/// `UplinkSession::begin_record` -- so this writes the header first, from a length computed
+/// before a byte is sealed, and then takes the payload in whatever pieces the caller has.
+///
+/// The mask and its running offset are the whole state. RFC 6455 masks a frame's payload as
+/// one stream from its start, not per write, so the offset has to survive across calls --
+/// which is exactly the thing that would be silently wrong if each write masked from zero.
+pub struct FrameWriter {
+    mask: u32,
+    offset: usize,
+    remaining: usize,
+}
+
+impl FrameWriter {
+    /// Write another piece of the payload.
+    ///
+    /// Refuses to write past the length already promised in the header: a frame that
+    /// overruns its own length desynchronises the connection for good, and the peer's next
+    /// read is garbage rather than an error.
+    pub async fn write(&mut self, socket: &mut TcpSocket<'_>, bytes: &[u8]) -> Result<(), ()> {
+        if bytes.len() > self.remaining {
+            return Err(());
+        }
+
+        // Masked in chunks so a large piece does not need a second buffer its own size.
+        let mut chunk = [0u8; 256];
+        let mut at = 0;
+        while at < bytes.len() {
+            let take = chunk.len().min(bytes.len() - at);
+            chunk[..take].copy_from_slice(&bytes[at..at + take]);
+            FrameHeader::mask_with(&mut chunk[..take], Some(self.mask), self.offset);
+            socket.write_all(&chunk[..take]).await.map_err(|_| ())?;
+            self.offset += take;
+            at += take;
+        }
+
+        self.remaining -= bytes.len();
+        Ok(())
+    }
+
+    /// Whether every promised byte has been written.
+    pub fn is_complete(&self) -> bool {
+        self.remaining == 0
+    }
+}
+
+/// Write a binary frame header for a payload of known length, to be filled in by writes.
+pub async fn begin_frame(
+    socket: &mut TcpSocket<'_>,
+    payload_len: usize,
+) -> Result<FrameWriter, ()> {
+    let mask = Rng::new().random();
+    let header = FrameHeader {
+        frame_type: FrameType::Binary(false),
+        payload_len: payload_len as u64,
+        mask_key: Some(mask),
+    };
+
+    let mut bytes = [0u8; MAX_FRAME_HEADER];
+    let len = header.serialize(&mut bytes).map_err(|_| ())?;
+    socket.write_all(&bytes[..len]).await.map_err(|_| ())?;
+
+    Ok(FrameWriter { mask, offset: 0, remaining: payload_len })
+}
+
 /// Send a protocol-level ping with an empty payload.
 ///
 /// Protocol-level rather than an application message, and that is the whole point: Cloudflare's

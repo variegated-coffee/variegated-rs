@@ -11,7 +11,7 @@ use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
 use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
-    ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogList, ShotLogListRequest,
+    ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogList, ShotLogListEntry, ShotLogListRequest,
     ShotLogStorageError,
 };
 use variegated_controller_types::debug_command::DebugCommand;
@@ -109,6 +109,57 @@ pub static ROUTINE_CHANNEL: StaticCell<ApplicationRoutineChannel> = StaticCell::
 
 // Status Cache - cached status for HTTP server
 pub static STATUS_CACHE: Mutex<CriticalSectionRawMutex, Option<Status>> = Mutex::new(None);
+
+/// Whether the uplink currently holds a live session.
+///
+/// Read by the shot uploader to decide whether offering it a small shot is worth trying at
+/// all. Advisory rather than authoritative: it can go stale between the read and the offer,
+/// which is why the offer itself can still come back refused.
+pub static UPLINK_SESSION_UP: AtomicBool = AtomicBool::new(false);
+
+/// A small shot offered to the uplink, and the answer.
+///
+/// # Why a handoff rather than two subscribers
+///
+/// Both tasks could watch the shot-log events and each take the shots it wanted, but then two
+/// independent readings of "is the uplink up" decide whether a shot is sent twice or not at
+/// all. One owner is simpler: the uploader hears about every shot, and *offers* the small ones
+/// here. A refusal -- no session, a record too large, a link failure -- means it posts it
+/// instead.
+///
+/// Depth one, because the uploader waits for each answer before offering another. A second
+/// shot cannot be recorded while the first is still being handed over: shots arrive minutes
+/// apart and the handoff takes as long as one socket write.
+///
+/// The backstop, if this ever does go wrong in a way that sends a shot twice, is the server's
+/// content dedupe: identical bytes are one shot however many times they arrive.
+pub static UPLINK_SHOT_OFFER: Channel<CriticalSectionRawMutex, ShotLogListEntry, 1> =
+    Channel::new();
+pub static UPLINK_SHOT_ANSWER: Signal<CriticalSectionRawMutex, bool> = Signal::new();
+
+/// Offer a shot to the uplink, and say whether it took it.
+///
+/// `false` for "post it yourself", including when the uplink never answers: a shot is worth
+/// more than the tidiness of waiting, and a duplicate is deduped at the far end while a
+/// dropped shot is gone for good.
+pub async fn offer_shot_to_uplink(
+    entry: &ShotLogListEntry,
+    timeout: embassy_time::Duration,
+) -> bool {
+    if !UPLINK_SESSION_UP.load(Ordering::Relaxed) {
+        return false;
+    }
+
+    // Stale answers from an abandoned offer must not be read as this one's.
+    UPLINK_SHOT_ANSWER.reset();
+    if UPLINK_SHOT_OFFER.try_send(entry.clone()).is_err() {
+        return false;
+    }
+
+    embassy_time::with_timeout(timeout, UPLINK_SHOT_ANSWER.wait())
+        .await
+        .unwrap_or(false)
+}
 
 // Configuration Cache - cached configuration for HTTP server
 pub static CONFIG_CACHE: Mutex<CriticalSectionRawMutex, Option<Configuration>> = Mutex::new(None);

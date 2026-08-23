@@ -162,6 +162,42 @@ pub enum UplinkQuery {
     },
 }
 
+/// The postcard prefix of [`UplinkMessage::ShotLog`], for a payload of `total` bytes.
+///
+/// # Why this exists rather than just encoding the message
+///
+/// Encoding `ShotLog(bytes)` means building the `Vec<u8>` it wraps, and a shot is exactly the
+/// thing the firmware cannot hold in memory — it arrives a kilobyte at a time and is sealed as
+/// it flows. So the prefix is written by hand and the shot follows it straight off the link.
+///
+/// Here rather than in the firmware because it is wire knowledge, and because the firmware
+/// crate sets `harness = false` and so runs no tests: written there, nothing would check it
+/// against the encoder it has to agree with. A prefix that disagreed would not be a corrupt
+/// shot — it would decode as a *different message*.
+/// A buffer and its length, rather than a `Vec`: this runs on the constrained side, and a
+/// heap allocation for at most five bytes would be the only one on the whole shot path.
+pub fn shot_log_prefix(total: u32) -> ([u8; 8], usize) {
+    let mut prefix = [0u8; 8];
+    // `ShotLog` is discriminant 2, and a `Vec<u8>` is a varint length then the bytes.
+    prefix[0] = 2;
+    let mut len = 1;
+
+    let mut remaining = total;
+    loop {
+        let mut byte = (remaining & 0x7f) as u8;
+        remaining >>= 7;
+        if remaining > 0 {
+            byte |= 0x80;
+        }
+        prefix[len] = byte;
+        len += 1;
+        if remaining == 0 {
+            break;
+        }
+    }
+    (prefix, len)
+}
+
 /// Widen an uplink query into the one the firmware already knows how to serve.
 ///
 /// The two enums are separate types on purpose — the note above is about what `UplinkQuery`
@@ -357,6 +393,30 @@ mod tests {
                 !message.acceptable_by_server(),
                 "Plantlet must refuse what only it may send"
             );
+        }
+    }
+
+    /// The hand-written shot prefix is what `to_allocvec` would have produced.
+    ///
+    /// The firmware writes this by hand and then streams the shot after it, so nothing
+    /// downstream ever compares the two. If they diverged the record would still decrypt and
+    /// still decode -- as a different message, or as a shot of the wrong length -- which is
+    /// the kind of disagreement that is only ever found on hardware.
+    ///
+    /// The sizes cross both varint boundaries a real shot can sit on: 127/128 is one byte to
+    /// two, and 16,383/16,384 is two to three. A twenty-kilobyte shot is a three-byte length,
+    /// so the boundary at 16,384 is one that ordinary use crosses.
+    #[test]
+    fn the_shot_log_prefix_matches_postcard() {
+        for total in [1usize, 127, 128, 1024, 16_383, 16_384, 20 * 1024] {
+            let whole = postcard::to_allocvec(&UplinkMessage::ShotLog(vec![0u8; total]))
+                .expect("encode");
+            let (prefix, len) = shot_log_prefix(total as u32);
+
+            assert_eq!(&whole[..len], &prefix[..len], "prefix disagrees at {total} bytes");
+            // And the prefix is the *whole* header: what follows it is the payload itself,
+            // which is what lets the firmware stream the shot straight after it.
+            assert_eq!(whole.len(), len + total, "at {total} bytes");
         }
     }
 
