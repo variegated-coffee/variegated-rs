@@ -3324,7 +3324,11 @@ impl<
             return;
         }
         let mut repo = self.routine_repository.lock().await;
-        let routine = repo.get_routine(routine_index).await;
+        // Cloned rather than borrowed so the CRC lookup below can take `repo` again; see the
+        // twin in `single_boiler_single_group` for why that costs nothing net.
+        let routine = repo.get_routine(routine_index).await.cloned();
+        // Zero means the repository had no CRC -- see the twin for when that can happen.
+        let routine_crc = repo.get_routine_crc(routine_index).await.unwrap_or(0);
 
         if let Some(routine) = routine {
             // The backstop, not the gate. Every surface that can start a routine greys out
@@ -3406,6 +3410,7 @@ impl<
                     routine_name: routine.name.clone(),
                     routine_type: routine.routine_type,
                     resolved_parameters: routine_execution_context.parameters.clone(),
+                    routine_crc,
                 }),
                 start_time_millis: embassy_time::Instant::now().as_millis(),
                 end_time_millis: None,

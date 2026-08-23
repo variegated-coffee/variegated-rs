@@ -827,6 +827,17 @@ pub trait RoutineRepository {
     /// Get a routine by its index. Returns None if the routine doesn't exist.
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine>;
 
+    /// The CRC-32C of the routine at this index, for stamping onto a shot log.
+    ///
+    /// A separate accessor rather than a second return value from [`Self::get_routine`],
+    /// which has fourteen callers that want only the routine — menus, displays and the
+    /// button handlers. One of them wants this, and that caller can afford a second lookup.
+    ///
+    /// Repositories compute this when a routine enters their cache, so this is a map lookup
+    /// and not an encode. `None` for an index that holds nothing, and also for a routine too
+    /// large to encode — which is the same condition that makes it unstorable.
+    async fn get_routine_crc(&mut self, index: RoutineIndex) -> Option<u32>;
+
     /// Add a new routine. Always assigns a Custom variant index, using the first available slot.
     ///
     /// Returns the index it was given. That index is chosen here and nowhere else, so
@@ -874,6 +885,16 @@ pub struct SequentialStorageRoutineRepository<'a, M: RawMutex, T: MultiwriteNorF
     range: Range<u32>,
     deserialization_buffer: [u8; 2048],
     cache: BTreeMap<u16, Routine>,
+    /// Each cached routine's CRC-32C, computed as it enters the cache.
+    ///
+    /// Kept beside `cache` rather than folded into it so the dozen readers of `cache` stay
+    /// unchanged; `cache_routine` and `uncache_routine` are the only things that touch
+    /// either map, which is what keeps the two in agreement.
+    ///
+    /// Computed here rather than at shot start deliberately. The value is wanted once per
+    /// shot and a routine changes far less often than that, so this pays the encode when a
+    /// routine is loaded or written and never on the path that starts a brew.
+    crc_cache: BTreeMap<u16, u32>,
     cache_initialized: bool
 }
 
@@ -884,8 +905,29 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
             range,
             deserialization_buffer: [0u8; 2048],
             cache: BTreeMap::new(),
+            crc_cache: BTreeMap::new(),
             cache_initialized: false
         }
+    }
+
+    /// Put a routine in the cache and record its CRC-32C.
+    ///
+    /// The only way a routine enters `cache`, so `crc_cache` cannot fall behind it. A routine
+    /// too large to encode gets no CRC entry rather than a wrong one — it is also too large
+    /// to have been stored, so the case is unreachable from flash and only arises for a
+    /// routine handed in directly.
+    fn cache_routine(&mut self, key: u16, routine: Routine) {
+        match routine.stored_crc32c() {
+            Some(crc) => { self.crc_cache.insert(key, crc); }
+            None => { self.crc_cache.remove(&key); }
+        }
+        self.cache.insert(key, routine);
+    }
+
+    /// Drop a routine and its CRC together.
+    fn uncache_routine(&mut self, key: &u16) -> Option<Routine> {
+        self.crc_cache.remove(key);
+        self.cache.remove(key)
     }
 
     async fn load_from_flash(&mut self) -> Result<(), &'static str> {
@@ -948,9 +990,9 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> SequentialStorageRoutineRepository
 
             log_info!("Loaded routine at index {}: {:?}", key, value);
             if let Some(routine) = value {
-                self.cache.insert(key, routine);
+                self.cache_routine(key, routine);
             } else {
-                self.cache.remove(&key);
+                self.uncache_routine(&key);
             }
         }
 
@@ -1008,6 +1050,11 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         self.cache.get(&storage_index)
     }
 
+    async fn get_routine_crc(&mut self, index: RoutineIndex) -> Option<u32> {
+        self.load_from_flash().await.ok()?;
+        self.crc_cache.get(&index.to_storage_index()).copied()
+    }
+
     async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
         // Validated here rather than only at the chunked write path, because that is not the
         // only way in: `MachineCommand::AddRoutine` carries a whole `Routine` and reaches
@@ -1036,7 +1083,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         // ordering matters as much as the fallibility: caching a routine the flash
         // refused would leave the machine serving something a reboot loses.
         self.store_in_flash(storage_index, &opt).await?;
-        self.cache.insert(storage_index, opt.unwrap());
+        self.cache_routine(storage_index, opt.unwrap());
         notify_routines_changed();
         Ok(routine_index)
     }
@@ -1050,7 +1097,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         let storage_index = index.to_storage_index();
 
         // Add to cache only, never write to flash
-        self.cache.insert(storage_index, routine);
+        self.cache_routine(storage_index, routine);
 
         log_info!("Added internal routine at index {:?} (not persisted to flash)", index);
         notify_routines_changed();
@@ -1076,7 +1123,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         // a deletion that had not happened.
         let opt: Option<Routine> = None;
         self.store_in_flash(storage_index, &opt).await?;
-        let routine = self.cache.remove(&storage_index);
+        let routine = self.uncache_routine(&storage_index);
 
         // Still inside the "there was something there" path, so an index that held nothing
         // raises nothing -- and now also past the write, so a failed erase no longer announces
@@ -1102,7 +1149,7 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
         // For update, we allow creating new routines (not just updating existing ones)
         let opt = Some(routine);
         self.store_in_flash(storage_index, &opt).await?;
-        self.cache.insert(storage_index, opt.unwrap());
+        self.cache_routine(storage_index, opt.unwrap());
         notify_routines_changed();
         Ok(())
     }
@@ -1189,13 +1236,32 @@ impl <'a, M: RawMutex, T: MultiwriteNorFlash> RoutineRepository for SequentialSt
 
 pub struct InMemoryRoutineRepository {
     routines: BTreeMap<u16, Routine>,
+    /// Each routine's CRC-32C, computed as it is inserted. See the flash repository's
+    /// `crc_cache` for why it is computed here rather than at shot start.
+    crcs: BTreeMap<u16, u32>,
 }
 
 impl InMemoryRoutineRepository {
     pub fn new() -> Self {
         Self {
             routines: BTreeMap::new(),
+            crcs: BTreeMap::new(),
         }
+    }
+
+    /// Insert a routine and record its CRC-32C, the only way one enters this repository.
+    fn insert_routine(&mut self, key: u16, routine: Routine) {
+        match routine.stored_crc32c() {
+            Some(crc) => { self.crcs.insert(key, crc); }
+            None => { self.crcs.remove(&key); }
+        }
+        self.routines.insert(key, routine);
+    }
+
+    /// Drop a routine and its CRC together.
+    fn take_routine(&mut self, key: &u16) -> Option<Routine> {
+        self.crcs.remove(key);
+        self.routines.remove(key)
     }
 }
 
@@ -1203,6 +1269,10 @@ impl RoutineRepository for InMemoryRoutineRepository {
     async fn get_routine(&mut self, index: RoutineIndex) -> Option<&Routine> {
         let storage_index = index.to_storage_index();
         self.routines.get(&storage_index)
+    }
+
+    async fn get_routine_crc(&mut self, index: RoutineIndex) -> Option<u32> {
+        self.crcs.get(&index.to_storage_index()).copied()
     }
 
     async fn add_routine(&mut self, routine: Routine) -> Result<RoutineIndex, &'static str> {
@@ -1222,7 +1292,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
 
         let routine_index = RoutineIndex::Custom(inner_index);
         let storage_index = routine_index.to_storage_index();
-        self.routines.insert(storage_index, routine);
+        self.insert_routine(storage_index, routine);
         notify_routines_changed();
         Ok(routine_index)
     }
@@ -1234,7 +1304,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
         }
 
         let storage_index = index.to_storage_index();
-        self.routines.insert(storage_index, routine);
+        self.insert_routine(storage_index, routine);
         notify_routines_changed();
         Ok(())
     }
@@ -1246,7 +1316,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
         }
 
         let storage_index = index.to_storage_index();
-        let routine = self.routines.remove(&storage_index);
+        let routine = self.take_routine(&storage_index);
         // Only when something was actually removed -- see the note in the flash-backed
         // repository's `remove_routine`.
         if routine.is_some() {
@@ -1271,7 +1341,7 @@ impl RoutineRepository for InMemoryRoutineRepository {
 
         let storage_index = index.to_storage_index();
         // For update, we allow creating new routines (not just updating existing ones)
-        self.routines.insert(storage_index, routine);
+        self.insert_routine(storage_index, routine);
         notify_routines_changed();
         Ok(())
     }

@@ -560,6 +560,35 @@ use postcard::{to_slice_crc32, from_bytes_crc32};
 use crc::{Crc, CRC_32_ISCSI};
 
 #[cfg(feature = "sequential-storage")]
+impl Routine {
+    /// The CRC-32C that a stored copy of this routine carries in its trailer.
+    ///
+    /// Used to stamp [`RoutineExecutionMetadata::routine_crc`] onto a shot log, so a log can
+    /// be matched to the exact revision of the routine that produced it.
+    ///
+    /// **Computed, not read.** The trailer exists on the stored bytes, but a repository hands
+    /// out a decoded [`Routine`] and neither one retains the four bytes it was validated
+    /// against. So this re-encodes and re-checksums, and callers do it *once when a routine
+    /// enters the cache* rather than per shot — a `ROUTINE_MAX_ENCODED_LEN` scratch buffer on
+    /// the shot-start path is not a trade worth making silently.
+    ///
+    /// One consequence worth knowing: postcard permits more than one encoding of some values,
+    /// so for a routine written by a different encoder this can in principle differ from the
+    /// trailer actually on flash. `a_recomputed_crc_matches_the_stored_trailer` pins the case
+    /// that matters — that our own encoder agrees with itself.
+    ///
+    /// `None` if the routine does not fit [`ROUTINE_MAX_ENCODED_LEN`], which is the same
+    /// condition that makes it unstorable.
+    ///
+    /// [`RoutineExecutionMetadata::routine_crc`]: crate::shot_log::RoutineExecutionMetadata::routine_crc
+    pub fn stored_crc32c(&self) -> Option<u32> {
+        let mut buffer = [0u8; ROUTINE_MAX_ENCODED_LEN];
+        let body = postcard::to_slice(self, &mut buffer).ok()?;
+        Some(Crc::<u32>::new(&CRC_32_ISCSI).checksum(body))
+    }
+}
+
+#[cfg(feature = "sequential-storage")]
 impl<'a> Value<'a> for Routine {
     fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
         let crc = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -664,6 +693,41 @@ mod version_tests {
         let mut buffer = [0u8; ROUTINE_MAX_ENCODED_LEN];
         let len = routine.serialize_into(&mut buffer).expect("encodes");
         (buffer, len)
+    }
+
+    /// A recomputed CRC matches the trailer a stored routine actually carries.
+    ///
+    /// This is the assertion `stored_crc32c` rests on. It recomputes rather than reading the
+    /// four bytes off the stored copy, which is only sound while our encoder agrees with
+    /// itself — so `to_slice_crc32`'s own trailer is the thing to compare against, not a
+    /// constant. If postcard's encoding of a `Routine` ever becomes non-deterministic, this
+    /// fails here rather than silently mismatching every shot log against its routine.
+    #[test]
+    fn a_recomputed_crc_matches_the_stored_trailer() {
+        let routine = v4("Espresso");
+        let (buffer, len) = encode(&routine);
+
+        let trailer = u32::from_le_bytes(buffer[len - 4..len].try_into().expect("four bytes"));
+        assert_eq!(
+            routine.stored_crc32c().expect("a routine this size encodes"),
+            trailer,
+            "the recomputed CRC must equal the one to_slice_crc32 appended"
+        );
+    }
+
+    /// The CRC distinguishes two routines that differ only in a parameter's value — which is
+    /// the whole job, since a revision of a routine is otherwise identical to its predecessor.
+    #[test]
+    fn editing_a_parameter_changes_the_crc() {
+        let before = v4("Espresso");
+        let mut after = v4("Espresso");
+        after.parameters[0].default = 18.5;
+
+        assert_ne!(
+            before.stored_crc32c().expect("encodes"),
+            after.stored_crc32c().expect("encodes"),
+            "a changed parameter must change the routine's identity"
+        );
     }
 
     #[test]

@@ -878,6 +878,11 @@ pub fn canonical_shot() -> ShotLog {
                 routine_name: "6 bar, 85 mL".into(),
                 routine_type: RoutineType::UserDefined,
                 resolved_parameters,
+                // Version 9's field. A fixed, recognisable value rather than a real
+                // checksum: this fixture exists to give the TypeScript decoder bytes Rust
+                // actually produced, so what matters is that the number survives the round
+                // trip intact and is distinctive enough to spot if it does not.
+                routine_crc: 0x9B2E_47D1,
             }),
             start_time_millis: 1_800_000,
             // A duration, not a timestamp, despite sitting beside one that is. See the

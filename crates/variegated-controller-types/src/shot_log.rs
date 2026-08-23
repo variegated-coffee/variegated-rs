@@ -781,7 +781,18 @@ pub enum ShotLogEvent {
 ///   belong to the *limited* quantity rather than the one `brew_control_target` names, so a
 ///   reader without this field attributes a flow loop's output to a pressure setpoint and
 ///   gets a plausible, wrong answer.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 8;
+/// - **9** — `RoutineExecutionMetadata` gained `routine_crc`, so a log names not just which
+///   routine ran but which *revision* of it. Two shots either side of an edit were previously
+///   indistinguishable — same index, same name, same type — which is the one comparison
+///   someone tuning a routine actually wants.
+///
+///   Positionally this is the mildest bump so far: `routine_metadata` is an `Option` inside
+///   `metadata`, and a version 8 file read as 9 runs out of bytes inside it rather than
+///   silently mis-parsing the rest — but only for a *routine* shot. A manual shot carries
+///   `None` there, so its bytes are identical under 8 and 9 and nothing but the version
+///   varint distinguishes them. That is the reason the version check matters here as much as
+///   it did for 6, 7 and 8, not less.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 9;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -926,6 +937,25 @@ pub struct RoutineExecutionMetadata {
     pub routine_type: RoutineType,
     /// Resolved parameter values
     pub resolved_parameters: FnvIndexMap<u8, f32, 8>,
+    /// CRC-32C of the routine as stored, so a log can be matched to the exact revision that
+    /// produced it.
+    ///
+    /// The fields above identify *which* routine ran; this one identifies *which version of
+    /// it*. Without it, a shot taken before an edit and one taken after are indistinguishable
+    /// — same index, same name, same type — which is exactly the comparison someone tuning a
+    /// routine wants to make.
+    ///
+    /// **A matching hint, and nothing more.** CRC-32 is linear: four chosen bytes give a
+    /// routine any CRC you like. Never gate on this, never dedup on it, and do not treat a
+    /// match as proof of provenance. Thirty-two bits is ample for what it does — the other
+    /// fields already narrow the candidates to revisions of one named routine at one index,
+    /// so the chance a lookup is ambiguous is about n/2^32 for an n in the low tens.
+    ///
+    /// Recomputed by [`Routine::stored_crc32c`] when a routine enters a repository's cache,
+    /// not read off the stored trailer — see that method for what that costs.
+    ///
+    /// [`Routine::stored_crc32c`]: crate::Routine::stored_crc32c
+    pub routine_crc: u32,
 }
 
 /// A timestamped snapshot of all sensor readings and control outputs
@@ -1654,6 +1684,134 @@ mod shot_log_sample_tests {
         0x01, 0x02, 0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
     ];
 
+    /// The same shot under version 9.
+    ///
+    /// **Byte-identical to [`GOLDEN_V8`] apart from the leading version varint, and that is
+    /// correct** — the same relationship [`GOLDEN_V7`] has to [`GOLDEN_V6`]. Version 9 added
+    /// `routine_crc` to `RoutineExecutionMetadata`, and `canonical_shot` is a *manual* shot
+    /// whose `routine_metadata` is `None`, so none of the new field's bytes appear here.
+    ///
+    /// That is exactly why this array is not sufficient on its own, and why
+    /// [`GOLDEN_V9_ROUTINE`] exists beside it. A manual shot's bytes are the same under 8 and
+    /// 9, so nothing but the version varint tells them apart — which makes the version check
+    /// load-bearing here rather than redundant.
+    const GOLDEN_V9: &[u8] = &[
+        0x09, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
+        0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
+        0x20, 0x6c, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x6f, 0x63, 0x6f, 0x61, 0x20,
+        0x66, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01,
+        0x9c, 0xc7, 0x01, 0x01, 0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x02,
+        0xdc, 0x0b, 0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5, 0xee,
+        0x01, 0x01, 0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40, 0x01,
+        0x00, 0x00, 0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00, 0x00,
+        0x11, 0x42, 0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb, 0x42,
+        0x01, 0x00, 0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00,
+        0x00, 0x90, 0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40,
+        0x01, 0x00, 0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x03,
+        0x00, 0x00, 0x14, 0x41, 0x01, 0x02, 0x00, 0x00, 0x30, 0x40, 0x01,
+        0x01, 0x02, 0x01, 0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// A minimal *routine* shot, existing to pin the bytes version 9 added.
+    ///
+    /// `canonical_shot` is a manual shot, so its `routine_metadata` is `None` and none of
+    /// `RoutineExecutionMetadata`'s bytes appear in [`GOLDEN_V9`] at all. Without this, the
+    /// field the version bump exists for would be entirely unpinned — a later change to it
+    /// would move the format and no golden would notice.
+    ///
+    /// Deliberately small: the sample vector is empty and there is one resolved parameter.
+    /// The big golden covers everything reachable from a sample; this one covers exactly the
+    /// metadata block, so a diff here is legible.
+    fn canonical_routine_shot() -> ShotLog {
+        let mut resolved_parameters = FnvIndexMap::<u8, f32, 8>::new();
+        resolved_parameters.insert(0, 18.0).expect("one parameter fits");
+
+        ShotLog::new(ShotLogMetadata {
+            annotations: ShotAnnotations::default(),
+            shot_type: ShotType::Routine,
+            group_index: 1,
+            routine_metadata: Some(RoutineExecutionMetadata {
+                routine_index: crate::RoutineIndex::Custom(3),
+                routine_name: alloc::string::String::from("Espresso"),
+                routine_type: crate::RoutineType::UserDefined,
+                resolved_parameters,
+                // A recognisable constant rather than a real routine's checksum: this test
+                // pins the *encoding* of the field, and `routines::core`'s own tests pin
+                // that the value is computed correctly.
+                routine_crc: 0xDEAD_BEEF,
+            }),
+            start_time_millis: 1_234,
+            end_time_millis: Some(31_234),
+            final_status: ShotStatus::Completed,
+            recorded_at_unix_millis: Some(1_786_429_751_930),
+        })
+    }
+
+    /// [`canonical_routine_shot`] frozen, so version 9's new field has a golden of its own.
+    ///
+    /// The bytes worth being able to point at are `0xef 0xfd 0xb6 0xf5 0x0d` near the end of
+    /// the metadata block: that is `0xDEAD_BEEF` as a postcard varint, and it is
+    /// `routine_crc`. It sits *after* `resolved_parameters` and immediately before
+    /// `start_time_millis`, so a version 8 file read as version 9 would take the start time's
+    /// first bytes as a CRC and desynchronise from there — the same positional hazard every
+    /// bump since 6 has had.
+    const GOLDEN_V9_ROUTINE: &[u8] = &[
+        0x09, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x08, 0x45, 0x73, 0x70,
+        0x72, 0x65, 0x73, 0x73, 0x6f, 0x01, 0x01, 0x00, 0x00, 0x00, 0x90, 0x41,
+        0xef, 0xfd, 0xb6, 0xf5, 0x0d, 0xd2, 0x09, 0x01, 0x82, 0xf4, 0x01, 0x01,
+        0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x00, 0x00,
+    ];
+
+    /// The routine metadata block has not moved under version 9.
+    ///
+    /// The companion to `the_encoding_has_not_moved_under_this_version`, covering the half of
+    /// the format that test cannot reach: `canonical_shot` is a manual shot, so
+    /// `routine_metadata` is `None` there and every byte of `RoutineExecutionMetadata` is
+    /// absent from [`GOLDEN_V9`].
+    ///
+    /// If this fails, read the doc comment on that test first — the response is the same, and
+    /// it is almost never to paste in new bytes.
+    #[test]
+    fn the_routine_metadata_encoding_has_not_moved() {
+        let encoded = postcard::to_allocvec(&canonical_routine_shot()).unwrap();
+        assert_eq!(
+            encoded.as_slice(),
+            GOLDEN_V9_ROUTINE,
+            "the encoding of RoutineExecutionMetadata changed without \
+             SHOT_LOG_FORMAT_VERSION changing"
+        );
+
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V9_ROUTINE).unwrap();
+        let routine = decoded
+            .metadata
+            .routine_metadata
+            .expect("a routine shot has metadata");
+        assert_eq!(routine.routine_crc, 0xDEAD_BEEF);
+        assert_eq!(routine.routine_name, "Espresso");
+        assert_eq!(routine.resolved_parameters.get(&0), Some(&18.0));
+    }
+
+    /// A version 8 file is refused on its version.
+    ///
+    /// This one matters more than its siblings rather than less. A version 8 *manual* shot is
+    /// byte-identical to a version 9 one except for the leading varint — `routine_metadata` is
+    /// `None` in both — so the version check is the only thing that can tell them apart. For a
+    /// *routine* shot the bytes do differ, and a version 8 file read as 9 would take
+    /// `start_time_millis` as `routine_crc`.
+    #[test]
+    fn a_version_8_file_is_refused_by_its_version() {
+        let (version, _rest) = postcard::take_from_bytes::<u32>(GOLDEN_V8).unwrap();
+        assert_eq!(version, 8, "GOLDEN_V8 must stay the version 8 file it was");
+        assert_ne!(
+            version, SHOT_LOG_FORMAT_VERSION,
+            "an old file must be distinguishable from a current one by its first byte"
+        );
+
+        if let Ok(decoded) = postcard::from_bytes::<ShotLog>(GOLDEN_V8) {
+            assert!(!decoded.version_supported());
+        }
+    }
+
     /// A version 3 file is rejected on its version, not decoded into nonsense.
     ///
     /// The whole point of a leading version. `recorded_at_unix_millis` was *appended* to
@@ -1788,7 +1946,7 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V8,
+            GOLDEN_V9,
             "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
              see this test's doc comment before touching the golden array"
         );
@@ -1796,7 +1954,7 @@ mod shot_log_sample_tests {
         // Decoding the frozen bytes as well as comparing them: the assertion above proves
         // the writer has not moved, this proves the reader still understands what an
         // earlier build wrote.
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V8).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V9).unwrap();
         assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
         assert_eq!(decoded.metadata.recorded_at_unix_millis, Some(1_786_429_751_930));
         assert_eq!(

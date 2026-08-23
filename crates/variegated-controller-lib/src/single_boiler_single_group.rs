@@ -2333,7 +2333,14 @@ impl<
             return;
         }
         let mut repo = self.routine_repository.lock().await;
-        let routine = repo.get_routine(routine_index).await;
+        // Cloned rather than borrowed so the CRC lookup below can take `repo` again. The
+        // routine is cloned into the execution context a few lines down regardless, so this
+        // moves an allocation rather than adding one.
+        let routine = repo.get_routine(routine_index).await.cloned();
+        // Zero means the repository had no CRC for this index, which can only happen for a
+        // routine it could not encode -- the same condition that makes one unstorable. A
+        // reader matching zero against a library finds nothing, which is the right answer.
+        let routine_crc = repo.get_routine_crc(routine_index).await.unwrap_or(0);
 
         if let Some(routine) = routine {
             // The backstop; see the equivalent block in `dual_boiler_single_group`.
@@ -2400,6 +2407,7 @@ impl<
                     routine_name: routine.name.clone(),
                     routine_type: routine.routine_type,
                     resolved_parameters: routine_execution_context.parameters.clone(),
+                    routine_crc,
                 }),
                 start_time_millis: embassy_time::Instant::now().as_millis(),
                 end_time_millis: None,
