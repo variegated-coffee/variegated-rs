@@ -12,13 +12,14 @@ use std::process::ExitCode;
 
 use variegated_schema_export as export;
 
-const USAGE: &str =
-    "usage: variegated-schema-export [--check] [--shot-log <out-dir> [--force]] [<repo-root>]";
+const USAGE: &str = "usage: variegated-schema-export [--check] \
+     [--shot-log <out-dir> [--force]] [--uplink <out-dir> [--force]] [<repo-root>]";
 
 fn main() -> ExitCode {
     let mut check = false;
     let mut root: Option<PathBuf> = None;
     let mut shot_log_out: Option<PathBuf> = None;
+    let mut uplink_out: Option<PathBuf> = None;
     let mut force = false;
 
     let mut args = std::env::args().skip(1);
@@ -30,6 +31,13 @@ fn main() -> ExitCode {
                 Some(dir) => shot_log_out = Some(PathBuf::from(dir)),
                 None => {
                     eprintln!("--shot-log needs an output directory\n{USAGE}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--uplink" => match args.next() {
+                Some(dir) => uplink_out = Some(PathBuf::from(dir)),
+                None => {
+                    eprintln!("--uplink needs an output directory\n{USAGE}");
                     return ExitCode::FAILURE;
                 }
             },
@@ -61,6 +69,30 @@ fn main() -> ExitCode {
                 eprintln!(
                     "This file is now frozen. Add {version} to the VERSIONS table in \
                      packages/shot-log/src/gates.ts and write its adapter."
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    // Handled here for the same reason as `--shot-log` above: it writes into a different
+    // repository and never touches `frontend/`.
+    if let Some(out) = uplink_out {
+        let version = variegated_comms_api_types::uplink_types::UPLINK_SCHEMA_VERSION;
+        return match export::uplink_export::write(&out, version, force) {
+            Ok(()) => {
+                eprintln!(
+                    "wrote schemas/v{version}.ts and fixtures/generated/uplink-v{version}-*.\
+                     {{bin,json}} under {}",
+                    out.display()
+                );
+                eprintln!(
+                    "This file is now frozen. A protocol change means bumping \
+                     UPLINK_SCHEMA_VERSION and exporting beside it, not regenerating."
                 );
                 ExitCode::SUCCESS
             }

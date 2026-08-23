@@ -31,6 +31,19 @@ use variegated_controller_types::{RoutineIndex, Status};
 use crate::api_types::RoutineSummaryStorage;
 use crate::ws_types::{EncodedPayload, QueryOutcome};
 
+/// The revision of this protocol that the generated TypeScript describes.
+///
+/// Bumped when [`UplinkMessage`] or anything reachable from it changes shape — which, since
+/// both enums are append-only, means whenever a variant or field is added. Each version gets
+/// its own frozen schema file on the Plantlet side, for the reason the shot log does: postcard
+/// is positional, so a schema that followed the Rust types forward would mis-decode every
+/// message from a machine that had not been reflashed rather than failing on one.
+///
+/// Unlike `SHOT_LOG_FORMAT_VERSION` this is *not* on the wire. A stored shot outlives the
+/// firmware that wrote it and has to be self-describing; a live session does not, because both
+/// ends are reachable and a mismatch shows up immediately as a refused handshake.
+pub const UPLINK_SCHEMA_VERSION: u32 = 1;
+
 /// Plaintext bytes per sealed frame within a record.
 ///
 /// Matches `SHOT_LOG_CHUNK_LEN` and the Noise upload's `PLAINTEXT_CHUNK`, because the frames

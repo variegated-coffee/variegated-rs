@@ -78,3 +78,27 @@ pub fn shot_log_registry() -> Registry {
     reg.root::<ShotLog>();
     reg
 }
+
+/// The single root behind `packages/uplink/schemas/v<N>.ts` in variegated-plantlet-ts.
+///
+/// Frozen per [`UPLINK_SCHEMA_VERSION`] for the same reason the shot log's is frozen per
+/// format version: postcard is positional, so a schema that followed the Rust types forward
+/// would mis-decode every message from a machine that had not been reflashed, rather than
+/// failing on one.
+///
+/// [`UplinkMessage`] is deliberately the only root. Everything the protocol carries is
+/// reachable from it — `Status`, `RoutineSummaryStorage`, `QueryOutcome`, `UplinkQuery` — and
+/// adding a second root would freeze types into this file that the envelope does not
+/// actually reference.
+///
+/// Note what this does *not* register: `WsMessage` and `MachineCommand`. They are the LAN
+/// socket's, and the whole point of a separate envelope is that they cannot arrive here. If
+/// either ever shows up in the generated output, the enum has grown a reference it should not
+/// have.
+///
+/// [`UPLINK_SCHEMA_VERSION`]: variegated_comms_api_types::uplink_types::UPLINK_SCHEMA_VERSION
+pub fn uplink_registry() -> Registry {
+    let mut reg = Registry::new();
+    reg.root::<variegated_comms_api_types::uplink_types::UplinkMessage>();
+    reg
+}

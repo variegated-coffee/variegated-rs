@@ -43,6 +43,7 @@ use std::collections::BTreeMap;
 use heapless::index_map::FnvIndexMap;
 use serde::Serialize;
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
+use variegated_comms_api_types::uplink_types::{UplinkMessage, UplinkQuery};
 use variegated_comms_api_types::ws_types::{
     ClientQuery, QueryError, QueryOk, QueryOutcome, WsMessage,
 };
@@ -907,6 +908,61 @@ pub fn canonical_shot() -> ShotLog {
             step_description: Some("Ramp to 6 bar".into()),
         }],
     }
+}
+
+/// Canonical uplink messages, one per shape the TypeScript side has to decode.
+///
+/// A set rather than a single value, because unlike a shot log the uplink is an enum whose
+/// variants are structurally unrelated: bytes for a `Status` say nothing about whether a
+/// `Reply` decodes. Each name becomes a filename.
+///
+/// Both directions are here. The machine→Plantlet ones are what the Worker decodes; the
+/// downlink one is what the *firmware* decodes, and having Rust-produced bytes for it means
+/// the TypeScript encoder can be tested against what the machine will actually accept rather
+/// than against what TypeScript believes it will.
+pub fn canonical_uplink_messages() -> Vec<(&'static str, UplinkMessage)> {
+    let routine_bytes =
+        postcard::to_allocvec(&routine()).expect("the canonical routine must serialize");
+
+    vec![
+        // The message that actually flows: every ten minutes, and the most deeply nested
+        // thing on the link by a wide margin.
+        ("status", UplinkMessage::Status(status_maximal())),
+        ("routine-list", UplinkMessage::RoutineList(routine_summaries())),
+        // Exercises the nested QueryOutcome/QueryOk pair and an EncodedPayload, which is a
+        // postcard byte sequence inside a postcard message -- the shape most likely to be
+        // mis-decoded as a length-prefixed something-else.
+        (
+            "reply-routine-definition",
+            UplinkMessage::Reply {
+                id: 0x0102_0304,
+                outcome: QueryOutcome::Ok(QueryOk::RoutineDefinition(routine_bytes.clone())),
+            },
+        ),
+        // A failure carried whole rather than flattened, which is the reason QueryOutcome is
+        // reused from the LAN socket at all.
+        (
+            "reply-write-refused",
+            UplinkMessage::Reply {
+                id: 0x0506_0708,
+                outcome: QueryOutcome::Failed(QueryError::RoutineWrite(
+                    RoutineWriteError::Immutable,
+                )),
+            },
+        ),
+        // Downlink: the largest thing Plantlet may say.
+        (
+            "query-write-routine",
+            UplinkMessage::Query {
+                id: 0x090a_0b0c,
+                query: UplinkQuery::WriteRoutine {
+                    index: Some(RoutineIndex::Custom(3)),
+                    routine: routine_bytes,
+                },
+            },
+        ),
+        ("request-status", UplinkMessage::RequestStatus),
+    ]
 }
 
 pub fn all() -> Vec<Fixture> {
