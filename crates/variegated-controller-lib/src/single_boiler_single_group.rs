@@ -3,7 +3,7 @@ extern crate alloc;
 use crc::{Crc, CRC_32_ISCSI};
 use variegated_log::{log_debug, log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, CheckinDetail, CheckinStatus, DebugEvent};
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
@@ -15,8 +15,8 @@ use postcard::{from_bytes_crc32, to_slice_crc32};
 use sequential_storage::map::{SerializationError, Value};
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType};
-use crate::routine::{RoutineExecutionContext, InMemoryRoutineRepository, RoutineRepository};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidLimits, PidParameterTarget, PidParameters, PidTerm, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, KalmanParameters, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType, StorageCommand};
+use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
@@ -230,7 +230,9 @@ pub struct SingleBoilerSingleGroupController<
     'a,
     ChannelM: RawMutex,
     M: RawMutex,
+    StorageM: RawMutex + 'static,
     SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
+    RoutineRepoT: RoutineRepository + 'static,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     UploadStoreT: SettingsStorage<ShotUploadConfig>,
@@ -272,7 +274,12 @@ pub struct SingleBoilerSingleGroupController<
     // parameter is gone too -- the Silvia firmware passed `GroupConfiguration::default()`,
     // so nothing observable changes.
     boiler_config: BoilerConfiguration,
-    routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
+    routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
+    /// Where an optimization request goes, rather than being run here.
+    ///
+    /// See the `OptimizeRoutineStorage` arm: on a flash-backed repository that call erases
+    /// and rewrites the whole range, and this loop is the one holding the boiler.
+    storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
     current_routine: Option<RoutineExecutionContext<SingleBoilerSingleGroupControllerState, SingleBoilerSingleGroupConfiguration>>,
     shot_logger: crate::shot_log::ShotLogger,
     previous_routine_step: Option<usize>,
@@ -385,7 +392,9 @@ impl<
     'a,
     ChannelM: RawMutex,
     M: RawMutex,
+    StorageM: RawMutex + 'static,
     SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
+    RoutineRepoT: RoutineRepository + 'static,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     UploadStoreT: SettingsStorage<ShotUploadConfig>,
@@ -394,7 +403,7 @@ impl<
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> SingleBoilerSingleGroupController<'a, ChannelM, M, SettingsStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> SingleBoilerSingleGroupController<'a, ChannelM, M, StorageM, SettingsStoreT, RoutineRepoT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> SingleBoilerSingleGroupConfiguration {
         SingleBoilerSingleGroupConfiguration {
             persistent: self.persistent_configuration.clone(),
@@ -412,7 +421,8 @@ impl<
         machine_config: MachineConfiguration,
         tank_config: TankConfiguration,
         boiler_config: BoilerConfiguration,
-        routine_repository: &'static Mutex<NoopRawMutex, InMemoryRoutineRepository>,
+        routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
+        storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         machine_definition: &'a MachineDefinition,
         bluetooth_store: BluetoothStoreT,
@@ -480,6 +490,7 @@ impl<
             tank_config,
             boiler_config,
             routine_repository,
+            storage_command_sender,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
             previous_routine_step: None,
@@ -1795,18 +1806,24 @@ impl<
                     Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
                 }
             }
-            // The repository here is in-memory, so this is a no-op that reports success
-            // rather than an unsupported command. The warning it used to print said "no
-            // routine repository", which was never true -- the field is right there, and
-            // `RunRoutine` reads it.
+            // Handed off rather than run here, which it used to be. On a flash-backed
+            // repository `optimize_storage` erases the whole range and rewrites every
+            // routine, sleeping a millisecond between each so it does not trip the
+            // watchdog -- hundreds of milliseconds to seconds, and every one of them spent
+            // inside this loop, which is the loop that runs the PID and the interlocks. The
+            // element would hold whatever it was last commanded to for the duration.
+            //
+            // It was safe inline for exactly as long as the only implementation was the
+            // in-memory one, whose `optimize_storage` returns `Ok(())` without doing
+            // anything. That stopped being true when this controller became generic.
+            //
+            // `try_send` on a depth-4 channel: an optimization already queued is the same
+            // request, so dropping the second is right, and a full channel must not park
+            // the control loop.
             MachineCommand::OptimizeRoutineStorage => {
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => {
-                        if let Err(e) = repo.optimize_storage().await {
-                            log_warn!("Failed to optimize routine storage: {}", e);
-                        }
-                    }
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
+                log_info!("Queueing routine storage optimization");
+                if self.storage_command_sender.try_send(StorageCommand::OptimizeRoutines).is_err() {
+                    log_warn!("Storage command channel full, dropping OptimizeRoutines");
                 }
             }
             MachineCommand::OptimizeScheduleStorage => {

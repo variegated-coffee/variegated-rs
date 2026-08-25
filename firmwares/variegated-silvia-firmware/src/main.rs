@@ -50,10 +50,12 @@ use embassy_rp::pio_programs::rotary_encoder::{PioEncoder, PioEncoderProgram};
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use futures::future::join_all;
 use w25q32jv::W25q32jv;
-use variegated_controller_lib::routine::{create_heatup_routine, create_shot_routine, create_water_dispersal_routine, InMemoryRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
+// The trait is aliased because `RoutineRepository` is taken here by the mutex alias below,
+// which is what the rest of this firmware passes around. `storage_task` needs the trait in
+// scope to call `optimize_storage`.
+use variegated_controller_lib::routine::{SequentialStorageRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::settings::SettingsStorage;
-use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineConfiguration, MachineDefinition, PressureType, RPMType, Status, TankConfiguration, TemperatureType, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
-use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::BrewBoiler;
+use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineConfiguration, MachineDefinition, PressureType, RPMType, Status, StorageCommand, TankConfiguration, TemperatureType, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_gravity_driver::{Gravity, Channel as GravityChannel};
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
@@ -315,10 +317,23 @@ struct UsbDebugPeripherals {
 
 type InternalBus = Mutex<NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, spi::Async>>;
 type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>;
-type RoutineRepository = Mutex<NoopRawMutex, InMemoryRoutineRepository>;
+/// The repository, and the mutex the rest of the firmware knows it by.
+///
+/// The alias deliberately shadows `variegated_controller_lib::routine::RoutineRepository`,
+/// the trait, which is why every module here imports that as `RoutineRepositoryTrait`.
+/// Keeping the name is what lets the rotary UI, the display, the list menu and the
+/// transceiver task follow a change of implementation without being touched.
+type RoutineRepositoryType = SequentialStorageRoutineRepository<'static, NoopRawMutex, SettingsFlashType>;
+type RoutineRepository = Mutex<NoopRawMutex, RoutineRepositoryType>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 type GravityMutex = Mutex<NoopRawMutex, Gravity<I2cDevice<'static, NoopRawMutex, I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>>>;
-type SettingsFlashMutex = Mutex<NoopRawMutex, W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>>;
+/// The external SPI NOR chip, named once because three things now sit on it: the settings
+/// stores, the routine repository, and the flash mutex itself.
+type SettingsFlashType = W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>;
+type SettingsFlashMutex = Mutex<NoopRawMutex, SettingsFlashType>;
+/// Where `OptimizeRoutineStorage` goes, so the erase-and-rewrite does not run in the
+/// control loop. See `storage_task`.
+type StorageCommandChannel = Channel<NoopRawMutex, StorageCommand, 4>;
 
 // Five consumers exist: the brew button, the rotary UI, the display, the ESP
 // transceiver, and the debug snapshot task. `subscriber()` is `.unwrap()`ed at every
@@ -414,6 +429,11 @@ variegated_checkin::define_checkins! {
         /// same number in both builds -- a monitor whose width depended on a feature would
         /// make two firmwares' debug output disagree about which row is which.
         ShotLogStorage = 16 => 15_000,
+        /// Routine storage optimization. Silent for weeks at a time, so it reports on a
+        /// `HEARTBEAT` timeout rather than only when a command arrives -- a row that ticks
+        /// only on work could not tell an idle machine from one wedged on the flash mutex
+        /// partway through an erase, which is the single thing that would hang this task.
+        Storage = 17 => 15_000,
     }
 }
 
@@ -436,6 +456,7 @@ static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static GRAVITY: StaticCell<GravityMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
+static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 /// The machine definition, for the rotary menu.
 ///
 /// `list_menu` needs it to decide whether a routine's prerequisites can be met, and it is
@@ -843,26 +864,25 @@ async fn main_task(spawner: Spawner) -> ! {
     let command_channel: &'static Channel<_, _, 10> = COMMAND_CHANNEL.init(Channel::new());
     let status_channel: &'static StatusChannel = STATUS_CHANNEL.init(PubSubChannel::new());
     let configuration_channel: &'static ConfigurationChannel = CONFIGURATION_CHANNEL.init(PubSubChannel::new());
+    let storage_command_channel = STORAGE_COMMAND_CHANNEL.init(Channel::new());
 
-    let mut routine_repository = InMemoryRoutineRepository::new();
-    // `.await` on every one of these, which they did not have. `add_routine` is `async`,
-    // so the calls used to build eleven futures and drop them unpolled -- this machine
-    // seeded *zero* routines and the list came back empty. The compiler said nothing
-    // because an unawaited future is only a lint, and nothing else here reads the
-    // repository at boot to notice.
-    let _ = routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index())).await;
-    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index())).await;
-    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_heatup_routine(BrewBoiler.as_index())).await;
-    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_shot_routine(SingleGroup.as_index())).await;
-    let _ = routine_repository.add_routine(create_water_dispersal_routine(SingleGroup.as_index())).await;
-
-    let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(routine_repository));
+    // Backed by the same flash chip the settings are on, over `ROUTINES_RANGE`. The
+    // repository this replaced was in-memory, and eleven routines -- three distinct ones,
+    // repeated -- were seeded into it here on every boot, which is the only reason a
+    // machine that could not remember a routine appeared to have any.
+    //
+    // Nothing is seeded now. A machine's routines are what its user put there, and a seed
+    // that runs at boot cannot tell a first boot from a user who has deleted everything.
+    //
+    // Straight into the cell rather than through a local: the repository carries a
+    // `[u8; 2048]` deserialization buffer, and a local would put a copy of it in
+    // `main_task`'s future for the rest of the program's life.
+    let routine_repository_ref = ROUTINE_REPOSITORY.init(Mutex::new(
+        SequentialStorageRoutineRepository::new(
+            flash,
+            variegated_controller_lib::settings::ROUTINES_RANGE,
+        ),
+    ));
 
     // Create the MachineDefinition for a single boiler single group machine
     let mut machine_definition = MachineDefinition {
@@ -1062,6 +1082,7 @@ async fn main_task(spawner: Spawner) -> ! {
         TankConfiguration::default(),     // Tank configuration
         BoilerConfiguration::default(),   // Boiler configuration
         routine_repository_ref,
+        storage_command_channel.sender(),
         &peripheral_registry,
         machine_definition,
         bluetooth_store,
@@ -1165,6 +1186,12 @@ async fn main_task(spawner: Spawner) -> ! {
         routine_repository_ref,
         identify_watch.receiver().expect("the identify watch has a receiver slot for the display"),
         MONITOR.claim(CheckinId::Display),
+    ).unwrap());
+
+    info!("Creating storage task");
+    spawner.spawn(storage_task(
+        storage_command_channel.receiver(),
+        routine_repository_ref,
     ).unwrap());
 
     info!("Creating esp transceiver task");
@@ -1479,6 +1506,61 @@ async fn debug_command_task(
             }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
+        }
+    }
+}
+
+/// Runs the long flash maintenance the control loop must not.
+///
+/// `optimize_storage` on a flash-backed repository erases the routine range and rewrites
+/// every routine in it, a millisecond apart so it does not trip the watchdog. That is
+/// hundreds of milliseconds at least, and the controller's loop is the one holding the
+/// boiler -- so the controller queues the request here and goes back to its interlocks.
+///
+/// Only `OptimizeRoutines` can arrive. The controller answers `OptimizeScheduleStorage`
+/// itself (this machine has no schedule store) and runs `OptimizeConfigurationStorage`
+/// inline, because it owns the configuration store by value and that one rewrites a single
+/// key rather than a whole range. The other two arms are still answered rather than
+/// ignored: if one ever does arrive, silence would be the worst way to find out.
+#[embassy_executor::task]
+async fn storage_task(
+    storage_command_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, StorageCommand, 4>,
+    routine_repository: &'static RoutineRepository,
+) {
+    info!("Storage task started");
+
+    let checkin = MONITOR.claim(CheckinId::Storage);
+
+    loop {
+        checkin.good();
+
+        // Timed out rather than parked, so the row above turns over on a machine nobody is
+        // configuring. Without it this task reports only when a command arrives, and an
+        // idle machine would be indistinguishable from one stuck on the flash mutex partway
+        // through an erase -- the one failure that would actually wedge this loop.
+        let Ok(cmd) = embassy_time::with_timeout(
+            variegated_checkin::HEARTBEAT,
+            storage_command_receiver.receive(),
+        )
+        .await
+        else {
+            continue;
+        };
+
+        match cmd {
+            StorageCommand::OptimizeRoutines => {
+                info!("Starting routine storage optimization");
+                match routine_repository.lock().await.optimize_storage().await {
+                    Ok(_) => info!("Routine storage optimization complete"),
+                    Err(e) => warn!("Routine storage optimization failed: {}", e),
+                }
+            }
+            StorageCommand::OptimizeSchedules => {
+                warn!("Schedule storage optimization requested, but this machine has no schedule store");
+            }
+            StorageCommand::OptimizeConfiguration => {
+                warn!("Configuration storage optimization requested, but the controller runs that itself");
+            }
         }
     }
 }

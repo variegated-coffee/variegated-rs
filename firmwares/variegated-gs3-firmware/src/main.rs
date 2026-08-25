@@ -2581,7 +2581,7 @@ async fn main_task(
 
     let mut routine_repository: RoutineRepositoryType = SequentialStorageRoutineRepository::new(
         flash,
-        0x0008_0000..0x0010_0000
+        variegated_controller_lib::settings::ROUTINES_RANGE
     );
     // Add internal routines (never persisted to flash)
     routine_repository.add_internal_routine(

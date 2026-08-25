@@ -53,6 +53,18 @@ pub mod key {
 /// The stores that share it are distinguished by [`key`], not by address.
 pub const SETTINGS_RANGE: Range<u32> = 0x0000_0000..0x0008_0000;
 
+/// The flash range the routine repository lives in, on every board that has one.
+///
+/// Here rather than beside [`crate::routine::SequentialStorageRoutineRepository`] for the
+/// same reason [`SETTINGS_RANGE`] is here: this module is where the external flash's map is
+/// written down, including the range abandoned by the Bluetooth associations below. A range
+/// recorded next to the code that reads it is a range the next allocation cannot see.
+///
+/// Unlike the settings, this one is a whole range rather than a key, because a routine
+/// repository is a keyed collection of its own -- `u16` storage indices carrying a
+/// [`variegated_controller_types::RoutineIndex`] -- and not one value under one key.
+pub const ROUTINES_RANGE: Range<u32> = 0x0008_0000..0x0010_0000;
+
 /// The five stores every machine keeps, over one flash range.
 ///
 /// Returned rather than boxed into a struct because each has a different `SettingsT` and
