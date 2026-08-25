@@ -47,6 +47,14 @@ pin_dt = "embassy_rp::peripherals::PIN_22"
 pin_sw = "embassy_rp::peripherals::PIN_1"
 pio = "embassy_rp::peripherals::PIO0"
 
+[sd_card_peripherals]
+pin_clk = "embassy_rp::peripherals::PIN_41"
+pin_cmd = "embassy_rp::peripherals::PIN_42"
+pin_d0 = "embassy_rp::peripherals::PIN_43"
+pin_d1 = "embassy_rp::peripherals::PIN_44"
+pin_d2 = "embassy_rp::peripherals::PIN_45"
+pin_d3 = "embassy_rp::peripherals::PIN_46"
+
 [button_peripherals]
 pin_brew = "embassy_rp::peripherals::PIN_15"
 pin_water = "embassy_rp::peripherals::PIN_14"

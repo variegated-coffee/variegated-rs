@@ -79,7 +79,11 @@
 //! * `DAT0`..`DAT3` must be **four consecutive GPIOs in ascending order**. `CLK` and
 //!   `CMD` may be anywhere.
 //! * On RP2350 all six pins must fall in one `GPIOBASE` window -- all below 32, or all at
-//!   16 and above.
+//!   16 and above. The high window is supported and is not a second-class path: pin
+//!   numbers reaching the PIO block are translated into its own numbering throughout, and
+//!   [`window`] carries the arithmetic and its tests. Note that embassy's own
+//!   `Pin::set_input_sync_bypass` cannot be used above GPIO 31 -- it shifts by the
+//!   absolute pin number into a `u32` -- which is why this crate builds that mask itself.
 //! * An entire PIO block is not required, but two state machines and 31 of the block's 32
 //!   instruction slots are.
 //! * External pull-ups on `CMD` and `DAT0`..`DAT3` are required. The internal ones this
@@ -123,6 +127,7 @@ pub mod clock;
 pub mod crc;
 pub mod frame;
 pub mod programs;
+pub mod window;
 
 #[cfg(feature = "_chip")]
 mod bus;

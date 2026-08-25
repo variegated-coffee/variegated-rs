@@ -4,6 +4,8 @@ use embassy_rp::Peri;
 use embassy_rp::gpio::{Drive, Pull, SlewRate};
 use embassy_rp::pio::{Common, Instance, Pin, PioPin};
 
+use crate::window;
+
 /// CLK, CMD and DAT0..DAT3, after `make_pio_pin` and the pad setup they need.
 pub(crate) struct PioPins<'d, P: Instance> {
     pub clk: Pin<'d, P>,
@@ -54,17 +56,12 @@ impl<'d, P: Instance> PioPins<'d, P> {
         // RP2350 gives each PIO block a 32-GPIO window at either 0 or 16, and
         // `set_config` picks it per config from that config's own pins. This driver
         // applies six different configs across two state machines over its life; if they
-        // did not all agree, they would fight over one register. Compute it once here,
-        // with embassy's own arithmetic and tie-break, and reject anything that cannot
-        // work rather than letting the fifth config panic mid-transfer.
+        // did not all agree, they would fight over one register. Compute it once here and
+        // reject anything that cannot work, rather than letting the fifth config panic
+        // mid-transfer. See `crate::window` for the arithmetic and its tests.
         let pins = [clk.pin(), cmd.pin(), dat[0].pin(), dat[1].pin(), dat[2].pin(), dat[3].pin()];
-        let all_low = pins.iter().all(|&p| p < 32);
-        let all_high = pins.iter().all(|&p| p >= 16);
-        assert!(
-            all_low || all_high,
-            "SD pins must all be below GPIO 32 or all at GPIO 16 and above"
-        );
-        let gpio_base = if all_low { 0 } else { 16 };
+        let gpio_base = window::gpio_base(&pins)
+            .expect("SD pins must all be below GPIO 32 or all at GPIO 16 and above");
 
         // CLK is the only pin driven hard and fast: it is the one whose edges every other
         // signal is timed against, and the only one that ever runs at the full bus rate
@@ -92,11 +89,13 @@ impl<'d, P: Instance> PioPins<'d, P> {
         // seven system cycles, so two cycles of skew is a third of the eye. Reads then
         // fail as data CRC errors, only at the top of the frequency range, which looks
         // exactly like a signal-integrity problem in the wiring.
-        clk.set_input_sync_bypass(true);
-        cmd.set_input_sync_bypass(true);
-        for p in dat.iter_mut() {
-            p.set_input_sync_bypass(true);
-        }
+        //
+        // Done through `Common` with a mask we build ourselves rather than through
+        // `Pin::set_input_sync_bypass`, which is unusable above GPIO 31: it computes
+        // `1 << pin` from the *absolute* number into a `u32`. See
+        // `window::sync_bypass_mask` for what that does on a card wired to the high bank.
+        let mask = window::sync_bypass_mask(&pins, gpio_base);
+        common.set_input_sync_bypass(mask, mask);
 
         Self { clk, cmd, dat, gpio_base }
     }
@@ -105,9 +104,10 @@ impl<'d, P: Instance> PioPins<'d, P> {
     ///
     /// Every other pin reference in a PIO program is relative to a base in `PINCTRL`, but
     /// `wait gpio` names a GPIO directly -- which on RP2350 means "directly within the
-    /// window", hence the subtraction.
+    /// window", hence the subtraction. The instruction's index field is five bits, so on
+    /// a 48-GPIO part the absolute number does not even fit; see [`crate::window`].
     pub fn clk_wait_index(&self) -> u8 {
-        self.clk.pin() - self.gpio_base
+        window::relative(self.clk.pin(), self.gpio_base)
     }
 
     /// DAT0..DAT3 as `set_pin_dirs` and the pin-list config setters want them.
