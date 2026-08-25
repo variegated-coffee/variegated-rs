@@ -71,22 +71,12 @@ run gs3_optional_peripherals -p variegated-gs3-firmware --features=character-dis
 # `--no-default-features` plus the whole set spelled out by hand -- the same shape of hole
 # as `gravity` below. Three lines, but they are the ones that run on a machine built
 # without the LEDs.
-# The Silvia without its card, which `sd-card-pio` joining the default set would otherwise
-# leave uncovered -- exactly the shape of hole as `pwm-leds` above. It is the build that
-# reaches every `#[cfg(not(feature = "sd-card-pio"))]` twin: the three `None`s the
+# The Silvia without its card, which `sd-card-pio-spi` joining the default set would
+# otherwise leave uncovered -- exactly the shape of hole as `pwm-leds` above. It is the build
+# that reaches every `#[cfg(not(feature = "sd-card-pio-spi"))]` twin: the three `None`s the
 # controller gets, the transceiver's three parked arms, and the debug ops that answer "this
 # build has no SD storage". It caught a real dead-code warning on the first pass.
 run silvia_no_sd -p variegated-silvia-firmware --no-default-features --features=rp235xb,gravity
-# The 4-bit native SD transport, which **no firmware builds any more**: the Silvia moved to
-# SPI mode on a PIO SPI master, and nothing else ever used it. Without this line it is
-# compiled by no configuration at all, which is the "an optional feature nothing builds is
-# one that rots" case in this file's own header -- and it is 3000 lines with 45 host tests
-# that are still worth keeping green. `cargo check` rather than `run`, because it is a
-# library and there is no binary to produce.
-echo "=== variegated-pio-mmc-bus (4-bit transport, unwired)"
-( cd "$REPO" && cargo check -p variegated-pio-mmc-bus --target "$TARGET" --features rp235xb ) \
-    >"${1:-.}/variegated-pio-mmc-bus.log" 2>&1 || RC=1
-
 # Not covered here: the GS3's `gravity` feature. It is mutually exclusive with the default
 # `bluetooth-group-1-scale`, so it needs `--no-default-features` and the rest of the set
 # spelled out by hand rather than riding along with the line above. That is a hole in the

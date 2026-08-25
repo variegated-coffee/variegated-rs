@@ -98,11 +98,10 @@ block-device-driver = { workspace = true, optional = true }
 # The native 4-bit transport, as an alternative to `sdio`'s SPI one. Optional and
 # additive: a board that has the card on SPI does not pay for it, and a board that has it
 # on a PIO block gets four data lines instead of one.
-variegated-pio-mmc-bus = { version = "0.1.0", path = "../variegated-pio-mmc-bus", optional = true, features = ["defmt"] }
-# The SPI-mode transport, which is a different crate rather than a module of the one above:
-# the two share no protocol and neither depends on the other. What they do share -- the
-# `GPIOBASE` window arithmetic and the clock divider -- is `variegated-rp-pio`, a leaf both
-# sit on.
+# The SPI-mode PIO transport, for a board whose SPI peripherals are all spoken for. A native
+# 4-bit transport exists on the `pio-mmc-4bit` branch and is a separate crate: the two share
+# no protocol and neither depends on the other. What they do share -- the `GPIOBASE` window
+# arithmetic and the clock divider -- is `variegated-rp-pio`, a leaf both sit on.
 variegated-pio-spi-sd-card = { version = "0.1.0", path = "../variegated-pio-spi-sd-card", optional = true, features = ["defmt"] }
 
 [features]
@@ -142,42 +141,27 @@ serde = ["variegated-controller-types/serde"]
 
 # The chip features imply `hardware`: naming a chip is asking for the peripheral half.
 #
-# `variegated-pio-mmc-bus?/...` uses the weak form deliberately. That crate needs a chip
-# named or it will not compile at all, but it is only in the graph when `sd-card-pio` is
-# on -- and the strong form (`variegated-pio-mmc-bus/rp2040`) would drag it in for every
-# board, including the ones whose card is on SPI.
-rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040", "variegated-pio-mmc-bus?/rp2040", "variegated-pio-spi-sd-card?/rp2040"]
-rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa", "variegated-pio-mmc-bus?/rp235xa", "variegated-pio-spi-sd-card?/rp235xa"]
-rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb", "variegated-pio-mmc-bus?/rp235xb", "variegated-pio-spi-sd-card?/rp235xb"]
+# `variegated-pio-spi-sd-card?/...` uses the weak form deliberately. That crate needs a chip
+# named or it will not compile at all, but it is only in the graph when `sd-card-pio-spi` is
+# on -- and the strong form (`variegated-pio-spi-sd-card/rp2040`) would drag it in for every
+# board, including the ones whose card is on a hardware SPI peripheral.
+rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040", "variegated-pio-spi-sd-card?/rp2040"]
+rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa", "variegated-pio-spi-sd-card?/rp235xa"]
+rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb", "variegated-pio-spi-sd-card?/rp235xb"]
 rp235x = []
 pwm-steam-valve = []
 # Implies `hardware`: the card hangs off a `Spi` and the storage layer names one.
 sd-card-storage = ["hardware", "dep:sdio", "dep:exfat-slim", "dep:aligned", "dep:block-device-driver", "dep:variegated-exfat-format"]
 
-# The same card stack over a PIO-driven 4-bit bus instead of SPI. Additive rather than
-# exclusive: it builds on `sd-card-storage` because everything above the transport --
-# the partition offset, the shot-log storage, the formatter -- is unchanged, and only the
-# bus underneath differs. A board still picks one at the call site by which constructor
-# it names.
-sd-card-pio = ["sd-card-storage", "dep:variegated-pio-mmc-bus"]
-
-# The same card in SPI mode, on a PIO SPI master rather than a native 4-bit bus. Builds on
-# `sd-card-storage` for the same reason `sd-card-pio` does -- everything above the transport
-# is shared -- but pulls a *different* crate: the two transports have no protocol in common
-# and neither depends on the other.
+# The same card stack in SPI mode, on a PIO SPI master instead of a hardware SPI
+# peripheral. Additive rather than exclusive: it builds on `sd-card-storage` because
+# everything above the transport -- the partition offset, the shot-log storage, the
+# formatter -- is unchanged, and only the bus underneath differs. A board picks a transport
+# at the call site by which constructor it names.
 #
-# Exclusive with `sd-card-pio` in practice rather than by construction: both want the same
-# PIO block and the same pins, and a board picks one at the call site by which constructor
-# it names.
+# The native 4-bit transport and its `sd-card-pio` feature live on the `pio-mmc-4bit`
+# branch. It has never brought a card up on hardware.
 sd-card-pio-spi = ["sd-card-storage", "dep:variegated-pio-spi-sd-card"]
-
-# Wire-level tracing of the PIO card's bring-up: the window arithmetic, every command
-# frame and every response. The counterpart of `sdio/trace` above, and the same advice
-# applies -- turn it on when a card will not come up and take it out again afterwards.
-#
-# It is what makes the difference between "identification timed out" and a line naming
-# which command went unanswered, which is not a distinction the layer above can make.
-sd-card-pio-trace = ["sd-card-pio", "variegated-pio-mmc-bus?/trace"]
 
 # Bring-up tracing for the SPI-mode path. Pulls `sdio/trace` as well as the PIO crate's,
 # and here `sdio`'s is the one that matters: it logs every command frame, every R1 with its

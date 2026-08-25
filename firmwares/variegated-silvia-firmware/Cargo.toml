@@ -95,7 +95,7 @@ gravity = ["dep:variegated-gravity-driver"]
 # are taken -- SPI0 the display, SPI1 the internal ADC bus -- which is why the card cannot
 # use `sd-card-storage` the way the GS3's does, and why the master is PIO.
 #
-# Nothing here names `sdio`, `exfat-slim` or `variegated-pio-mmc-bus`:
+# Nothing here names `sdio`, `exfat-slim` or `variegated-pio-spi-sd-card`:
 # `variegated-controller-lib`'s `sd_card_pio_spi` module is the whole interface, and it takes
 # raw pins for exactly that reason. In `default` because the board has the slot.
 sd-card-pio-spi = ["variegated-controller-lib/sd-card-pio-spi"]
@@ -108,12 +108,8 @@ sd-card-pio-spi-trace = [
     "variegated-controller-lib/sd-card-pio-spi-trace",
 ]
 
-# The 4-bit native transport, kept buildable but no longer wired to this board.
-#
-# It never brought a card up here and its bring-up is unfinished; SPI mode is the supported
-# path. Retained rather than deleted because it is the only route to the card's full 4-bit
-# bandwidth if it is ever made to work, and because its 45 host tests still run. Selecting it
-# requires editing `board-cfg.toml` back to the six-pin native pinout -- the two transports
-# want the same slot and the same PIO block.
-sd-card-pio = ["variegated-controller-lib/sd-card-pio"]
-sd-card-pio-trace = ["sd-card-pio", "variegated-controller-lib/sd-card-pio-trace"]
+# The 4-bit native transport is not here. It never brought a card up on this board and its
+# bring-up is unfinished, so it lives on the `pio-mmc-4bit` branch along with its crate and
+# a writeup of where it stands. Reviving it means that branch plus a `board-cfg.toml` back
+# on the six-pin native pinout: the two transports want the same slot and the same PIO
+# block, so a board can only have one.

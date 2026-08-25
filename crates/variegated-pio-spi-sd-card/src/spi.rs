@@ -2,10 +2,11 @@
 //!
 //! # How this differs from a native 4-bit host
 //!
-//! `variegated-pio-mmc-bus`, which builds on this crate, is one: it implements
+//! `variegated-pio-mmc-bus`, on the `pio-mmc-4bit` branch, is one: it implements
 //! `sdio::MmcBus` itself, drives CMD and DAT0..DAT3 directly, and is two and a half thousand
 //! lines of PIO programs, command framing and CRCs. This module is the opposite in every
-//! way -- it implements no protocol at all.
+//! way -- it implements no protocol at all. Neither crate depends on the other; they meet
+//! only at `variegated-rp-pio`.
 //!
 //! An SD card also speaks plain SPI, over **the same physical pins**: CLK becomes SCK, CMD
 //! becomes MOSI, DAT0 becomes MISO and DAT3 becomes CS. `sdio` already ships a complete SPI

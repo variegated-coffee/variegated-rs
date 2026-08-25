@@ -230,10 +230,10 @@ struct RotaryEncoderPeripherals {
 
 /// The SD card's own PIO block, six GPIOs and two DMA channels.
 ///
-/// Declared unconditionally rather than behind `sd-card-pio`, for the same reason the
+/// Declared unconditionally rather than behind `sd-card-pio-spi`, for the same reason the
 /// interrupts are: naming the fields is what takes these pins out of `Peripherals`, and a
-/// build without the card must not hand GPIO 41-46 to something else and then differ from
-/// the build with it.
+/// build without the card must not hand them to something else and then differ from the
+/// build with it.
 #[variegated_board_cfg::board_cfg("sd_card_peripherals")]
 // Narrowly, and only in the build that has no card: the struct is deliberately declared in
 // both, so silencing this unconditionally would stop the compiler reporting it if the
@@ -1075,7 +1075,7 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(watchdog),
         // Where a completed shot goes, whether a card is seated, and where
         // `SetShotAnnotations` is sent. All three are `None` in a build without
-        // `sd-card-pio`, and that `None` is load-bearing on the second one: it makes
+        // `sd-card-pio-spi`, and that `None` is load-bearing on the second one: it makes
         // `Status::sd_card_present` report "this build has no SD storage" rather than "no
         // card inserted", and the second would tell a user to go find a card for a slot
         // this machine does not have.

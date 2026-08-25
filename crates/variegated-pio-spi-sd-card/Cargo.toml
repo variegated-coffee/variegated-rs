@@ -21,8 +21,8 @@ bench = false
 sdio.workspace = true
 
 # The `GPIOBASE` window arithmetic and the clock divider. A leaf crate with no `embassy-rp`
-# dependency at all, shared with `variegated-pio-mmc-bus`. The two transports share nothing
-# else, and neither should depend on the other.
+# dependency at all, shared with the native 4-bit transport on the `pio-mmc-4bit` branch.
+# The two transports share nothing else, and neither depends on the other.
 variegated-rp-pio = { version = "0.1.0", path = "../variegated-rp-pio" }
 
 # The `SpiBus<u8>` impl and its `ErrorType` supertrait -- the whole interface

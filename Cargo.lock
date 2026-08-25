@@ -5218,7 +5218,6 @@ dependencies = [
  "variegated-exfat-format",
  "variegated-hal",
  "variegated-log",
- "variegated-pio-mmc-bus",
  "variegated-pio-spi-sd-card",
  "variegated-timekeeping",
 ]
@@ -5544,21 +5543,6 @@ dependencies = [
  "heapless 0.9.3",
  "panic-probe",
  "variegated-instrumentation",
-]
-
-[[package]]
-name = "variegated-pio-mmc-bus"
-version = "0.1.0"
-dependencies = [
- "aligned",
- "defmt 1.1.1",
- "embassy-futures",
- "embassy-rp",
- "embassy-time",
- "fixed",
- "pio",
- "sdio",
- "variegated-rp-pio",
 ]
 
 [[package]]

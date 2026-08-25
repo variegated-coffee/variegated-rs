@@ -10,12 +10,12 @@
 //! # Why this is a crate rather than a module
 //!
 //! Because two transports need it and neither should depend on the other.
-//! `variegated-pio-spi-sd-card` drives a card in SPI mode; `variegated-pio-mmc-bus` drives
-//! one over a native 4-bit bus. They share no protocol, no programs and no types -- only
-//! this. A leaf crate is the only arrangement in which the dependency arrows point
-//! somewhere sensible, and duplicating [`window`] between them is not an option: it is
-//! exactly the arithmetic that has already produced silent, hard-to-find faults, and two
-//! copies would diverge.
+//! `variegated-pio-spi-sd-card` drives a card in SPI mode; `variegated-pio-mmc-bus`, on the
+//! `pio-mmc-4bit` branch, drives one over a native 4-bit bus. They share no protocol, no
+//! programs and no types -- only this. A leaf crate is the only arrangement in which the
+//! dependency arrows point somewhere sensible, and duplicating [`window`] between them is
+//! not an option: it is exactly the arithmetic that has already produced silent,
+//! hard-to-find faults, and two copies would diverge.
 //!
 //! # No `embassy-rp` dependency, deliberately
 //!
