@@ -4,6 +4,25 @@ The machine's own web UI. Served by the ESP32-C6: `build.rs` runs `npm run build
 `http.rs` embeds `dist/` with `include_bytes!`, so this is on the firmware's critical path
 and its gzipped size is flash the firmware does not get back.
 
+## ⚠️ `@variegated-coffee/ui` is not published yet
+
+`package.json` depends on `@variegated-coffee/ui@^0.1.0`, and **that package is not on
+npm**. It lives at `variegated-ui/` in the umbrella checkout and is resolved here by a
+symlink:
+
+```
+ln -s ../../../../../../variegated-ui node_modules/@variegated-coffee/ui
+```
+
+Consequences, until it is published:
+
+- `npm ci` in a bare `variegated-rs` clone fails to resolve it, so `npm run build` fails,
+  so **`build.rs` fails and the firmware does not build**. Recreate the symlink, or set
+  `VARIEGATED_FRONTEND_SKIP` and provide a `dist/` yourself.
+- **This branch should not merge to `main` in this state.** Publishing `0.1.0` from
+  `variegated-ui/` is the one step that clears it; `npm publish` there runs the tests and
+  the build first via `prepublishOnly`.
+
 ## Styling comes from `@variegated-coffee/ui`
 
 There is no CSS pipeline here, deliberately — every value is an inline style object, and
