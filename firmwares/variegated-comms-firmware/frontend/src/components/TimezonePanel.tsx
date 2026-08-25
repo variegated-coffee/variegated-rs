@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import { Alert, Button, Field, Readout, TextInput, tokens } from '@variegated-coffee/ui';
 import { TimezoneSetting } from '../schemas/schemas';
 import { setTimezone } from '../api/timezone';
 import { ConfigurationSection } from './ConfigurationSection';
@@ -10,15 +11,6 @@ interface TimezonePanelProps {
 
 /** Longest name the firmware will store — `TIMEZONE_NAME_LEN`. */
 const NAME_MAX = 64;
-
-const inputStyle = {
-  width: '100%',
-  padding: '0.4rem',
-  border: '1px solid #ccc',
-  borderRadius: '4px',
-  fontSize: '0.9rem',
-  boxSizing: 'border-box' as const,
-};
 
 /**
  * The zones to offer as suggestions.
@@ -96,56 +88,40 @@ export const TimezonePanel = memo(({ timezone }: TimezonePanelProps) => {
 
   return (
     <ConfigurationSection title="Timezone">
-      <div style={{ padding: '0.75rem' }}>
-        <label style={{ display: 'block', marginBottom: '0.35rem', fontSize: '0.85rem', fontWeight: 500 }}>
-          IANA zone name
-        </label>
-        <input
-          type="text"
-          list="timezone-suggestions"
-          value={name}
-          maxLength={NAME_MAX}
-          placeholder="UTC"
-          onInput={(e) => setName((e.target as HTMLInputElement).value)}
-          style={inputStyle}
-        />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm, padding: tokens.space.sm }}>
+        {/* The two paragraphs of explanation move into the field's `help`, which is where a
+            field's guidance belongs -- below the control, not between the label and it. */}
+        <Field
+          label="IANA zone name"
+          help="Schedules fire on this zone, and it is what the machine's own clock shows. Shot logs are always recorded in UTC and are unaffected. Blank means UTC. This firmware carries only a few zones — one it does not have is refused, and the field snaps back to what it kept."
+        >
+          {(control) => (
+            <TextInput
+              {...control}
+              value={name}
+              placeholder="UTC"
+              list="timezone-suggestions"
+              maxLength={NAME_MAX}
+              onInput={setName}
+            />
+          )}
+        </Field>
+
         <datalist id="timezone-suggestions">
           {suggestedZones().map((zone) => (
             <option key={zone} value={zone} />
           ))}
         </datalist>
 
-        <p style={{ margin: '0.5rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-          Schedules fire on this zone, and it is what the machine's own clock shows.
-          Shot logs are always recorded in UTC and are unaffected.
-          Blank means UTC. This firmware carries only a few zones — one it does not have is
-          refused, and the field below will snap back to what it kept.
-        </p>
+        <Readout label="Currently" value={stored === '' ? 'UTC' : stored} />
 
-        <p style={{ margin: '0.35rem 0 0', fontSize: '0.75rem', color: '#666' }}>
-          Currently: <strong>{stored === '' ? 'UTC' : stored}</strong>
-        </p>
+        {error && <Alert role="danger">{error}</Alert>}
 
-        {error && (
-          <p style={{ margin: '0.5rem 0 0', fontSize: '0.8rem', color: '#c00' }}>{error}</p>
-        )}
-
-        <button
-          onClick={handleSave}
-          disabled={saving || !dirty}
-          style={{
-            marginTop: '0.75rem',
-            padding: '0.4rem 0.9rem',
-            border: 'none',
-            borderRadius: '4px',
-            backgroundColor: saving || !dirty ? '#ccc' : '#0066cc',
-            color: 'white',
-            cursor: saving || !dirty ? 'not-allowed' : 'pointer',
-            fontSize: '0.9rem',
-          }}
-        >
-          {saving ? 'Saving…' : 'Save timezone'}
-        </button>
+        <div>
+          <Button variant="primary" size="sm" onClick={() => void handleSave()} disabled={saving || !dirty}>
+            {saving ? 'Saving…' : 'Save timezone'}
+          </Button>
+        </div>
       </div>
     </ConfigurationSection>
   );

@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Alert, Button, Field, Select, TextInput, tokens } from '@variegated-coffee/ui';
 import { BluetoothDriverKind, BluetoothPeripheralAssociation, PeripheralEntry } from '../schemas/schemas';
 import { formatAddress, BluetoothAddress } from '../api/bluetooth';
 
@@ -26,17 +27,8 @@ interface BluetoothPeripheralEditorProps {
   onCancel: () => void;
 }
 
-const labelStyle = { display: 'block', marginBottom: '0.35rem', fontSize: '0.9rem', fontWeight: 500 };
-const fieldStyle = {
-  width: '100%',
-  padding: '0.5rem',
-  border: '1px solid #ccc',
-  borderRadius: '4px',
-  fontSize: '0.95rem',
-  boxSizing: 'border-box' as const
-};
-const hintStyle = { fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' };
-const blockStyle = { marginBottom: '1.25rem' };
+/** A note under a field that is not the field's own help text -- a live warning. */
+const hintStyle = { fontSize: '0.75rem', color: tokens.color.inkMuted, marginTop: tokens.space.xs };
 
 const BluetoothPeripheralEditorComponent = ({
   address,
@@ -100,98 +92,101 @@ const BluetoothPeripheralEditorComponent = ({
   return (
     <div
       style={{
-        padding: '1.5rem',
-        backgroundColor: '#f8f9fa',
-        borderRadius: '8px',
-        border: '1px solid #ddd'
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.lg,
+        padding: tokens.space.lg,
+        backgroundColor: tokens.color.surfaceSunken,
+        borderRadius: tokens.radius.md,
+        border: `1px solid ${tokens.color.border}`,
       }}
     >
-      <h3 style={{ marginTop: 0, marginBottom: '0.35rem', fontSize: '1.2rem' }}>
-        {existing ? 'Edit peripheral' : 'Associate peripheral'}
-      </h3>
-      <div style={{ ...hintStyle, marginTop: 0, marginBottom: '1.5rem', fontFamily: 'monospace' }}>
-        {formatAddress(address)}
-        {addressRandom ? ' (random address)' : ' (public address)'}
+      <div>
+        <h3 style={{ marginTop: 0, marginBottom: tokens.space.xs, fontSize: '1.2rem' }}>
+          {existing ? 'Edit peripheral' : 'Associate peripheral'}
+        </h3>
+        <div style={{ ...hintStyle, marginTop: 0, fontFamily: tokens.font.mono }}>
+          {formatAddress(address)}
+          {addressRandom ? ' (random address)' : ' (public address)'}
+        </div>
       </div>
 
-      {error && (
-        <div
+      {error && <Alert role="danger">{error}</Alert>}
+
+      <div>
+        <Field
+          label="Peripheral"
+          help="Which role this device fills. Readings arrive at the machine under this peripheral, whichever device is associated with it."
+        >
+          {(control) => (
+            <Select
+              {...control}
+              value={peripheralId}
+              onChange={setPeripheralId}
+              options={
+                peripheralOptions.length === 0
+                  ? [{ value: '', label: 'No peripherals defined' }]
+                  : peripheralOptions.map(([id, definition]) => ({
+                      value: String(id),
+                      label: `${definition.location} — ${definition.peripheral_type.type} (0x${id
+                        .toString(16)
+                        .toUpperCase()
+                        .padStart(4, '0')})`,
+                    }))
+              }
+            />
+          )}
+        </Field>
+        {/* A live consequence of the current selection rather than static guidance, so it
+            is a warning below the field rather than part of its help. */}
+        {replacing && (
+          <div style={{ marginTop: tokens.space.sm }}>
+            <Alert role="warn">
+              This peripheral already has a device associated. Saving will replace it.
+            </Alert>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <Field label="Driver" help={DRIVERS.find((d) => d.kind === driver)?.hint}>
+          {(control) => (
+            <Select
+              {...control}
+              value={driver}
+              onChange={(value) => setDriver(value as BluetoothDriverKind['type'])}
+              options={DRIVERS.map((d) => ({ value: d.kind, label: d.label }))}
+            />
+          )}
+        </Field>
+        {suggestedDriver && (
+          <div style={{ marginTop: tokens.space.sm }}>
+            <Alert role={suggestedDriver === driver ? 'ok' : 'warn'}>
+              {suggestedDriver === driver
+                ? 'This device advertised a service this driver supports.'
+                : 'This device advertised a service the other driver supports — check before saving.'}
+            </Alert>
+          </div>
+        )}
+      </div>
+
+      <Field label="Name" help="A label for you. Changing it does not disturb the connection.">
+        {(control) => (
+          <TextInput {...control} value={name} onInput={setName} placeholder="Group 1 scale" />
+        )}
+      </Field>
+
+      <div>
+        <label
           style={{
-            padding: '0.75rem',
-            marginBottom: '1rem',
-            backgroundColor: '#f8d7da',
-            color: '#721c24',
-            borderRadius: '4px',
-            fontSize: '0.9rem'
+            display: 'flex',
+            alignItems: 'center',
+            gap: tokens.space.sm,
+            fontSize: '0.9rem',
+            fontWeight: 500,
+            cursor: 'pointer',
           }}
         >
-          {error}
-        </div>
-      )}
-
-      <div style={blockStyle}>
-        <label style={labelStyle}>Peripheral</label>
-        <select
-          value={peripheralId}
-          onChange={(e) => setPeripheralId((e.target as HTMLSelectElement).value)}
-          style={fieldStyle}
-        >
-          {peripheralOptions.length === 0 && <option value="">No peripherals defined</option>}
-          {peripheralOptions.map(([id, definition]) => (
-            <option key={id} value={String(id)}>
-              {definition.location} — {definition.peripheral_type.type} (0x
-              {id.toString(16).toUpperCase().padStart(4, '0')})
-            </option>
-          ))}
-        </select>
-        <div style={hintStyle}>
-          Which role this device fills. Readings arrive at the machine under this
-          peripheral, whichever device is associated with it.
-        </div>
-        {replacing && (
-          <div style={{ ...hintStyle, color: '#856404' }}>
-            This peripheral already has a device associated. Saving will replace it.
-          </div>
-        )}
-      </div>
-
-      <div style={blockStyle}>
-        <label style={labelStyle}>Driver</label>
-        <select
-          value={driver}
-          onChange={(e) => setDriver((e.target as HTMLSelectElement).value as BluetoothDriverKind['type'])}
-          style={fieldStyle}
-        >
-          {DRIVERS.map((d) => (
-            <option key={d.kind} value={d.kind}>
-              {d.label}
-            </option>
-          ))}
-        </select>
-        <div style={hintStyle}>{DRIVERS.find((d) => d.kind === driver)?.hint}</div>
-        {suggestedDriver && (
-          <div style={{ ...hintStyle, color: suggestedDriver === driver ? '#28a745' : '#856404' }}>
-            {suggestedDriver === driver
-              ? 'This device advertised a service this driver supports.'
-              : 'This device advertised a service the other driver supports — check before saving.'}
-          </div>
-        )}
-      </div>
-
-      <div style={blockStyle}>
-        <label style={labelStyle}>Name</label>
-        <input
-          type="text"
-          value={name}
-          onInput={(e) => setName((e.target as HTMLInputElement).value)}
-          style={fieldStyle}
-          placeholder="Group 1 scale"
-        />
-        <div style={hintStyle}>A label for you. Changing it does not disturb the connection.</div>
-      </div>
-
-      <div style={blockStyle}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem', fontWeight: 500 }}>
           <input
             type="checkbox"
             checked={enabled}
@@ -205,37 +200,16 @@ const BluetoothPeripheralEditorComponent = ({
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: '0.75rem' }}>
-        <button
-          onClick={handleSave}
-          style={{
-            flex: 1,
-            padding: '0.75rem',
-            backgroundColor: '#28a745',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '1rem',
-            cursor: 'pointer'
-          }}
-        >
-          Save
-        </button>
-        <button
-          onClick={onCancel}
-          style={{
-            flex: 1,
-            padding: '0.75rem',
-            backgroundColor: '#6c757d',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '1rem',
-            cursor: 'pointer'
-          }}
-        >
+      {/* Cancel first, primary last, and neither stretched to half the form. Two
+          equally-wide filled buttons -- one green, one grey -- gave a destructive-free
+          form two competing primaries. */}
+      <div style={{ display: 'flex', gap: tokens.space.sm, justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
+        <Button variant="primary" onClick={handleSave}>
+          Save
+        </Button>
       </div>
     </div>
   );

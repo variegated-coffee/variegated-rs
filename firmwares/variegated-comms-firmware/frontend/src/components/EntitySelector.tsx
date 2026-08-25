@@ -1,3 +1,4 @@
+import { Field, Select, tokens } from '@variegated-coffee/ui';
 import { useMachine } from '../contexts/MachineContext';
 
 export type EntityType = 'boiler' | 'group' | 'water_tap' | 'steam_wand';
@@ -45,59 +46,55 @@ export function EntitySelector({ entityType, index, onChange, label }: EntitySel
       case 'group':
         return 'Group';
       case 'water_tap':
-        return 'Water Tap';
+        return 'Water tap';
       case 'steam_wand':
-        return 'Steam Wand';
+        return 'Steam wand';
     }
   };
 
   const count = getEntityCount();
   const displayLabel = label || getDefaultLabel();
 
-  // Single entity: show read-only display
+  // One entity: there is nothing to choose, so it is stated rather than offered. A select
+  // with a single option is a control that looks like a decision and is not one.
   if (count === 1) {
     return (
-      <div style={{ marginBottom: '1.5rem' }}>
-        <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-          {displayLabel}
-        </label>
-        <div style={{
-          padding: '0.5rem',
-          border: '1px solid #e0e0e0',
-          borderRadius: '4px',
-          backgroundColor: '#f5f5f5',
-          fontSize: '1rem',
-          color: '#666'
-        }}>
-          {getEntityName(0)}
-        </div>
-      </div>
+      <Field label={displayLabel}>
+        {(control) => (
+          <div
+            {...control}
+            style={{
+              width: '100%',
+              padding: `0.4rem ${tokens.space.sm}`,
+              border: `1px solid ${tokens.color.border}`,
+              borderRadius: tokens.radius.sm,
+              backgroundColor: tokens.color.surface,
+              font: `0.9rem ${tokens.font.sans}`,
+              color: tokens.color.inkMuted,
+            }}
+          >
+            {getEntityName(0)}
+          </div>
+        )}
+      </Field>
     );
   }
 
-  // Multiple entities: show dropdown
   return (
-    <div style={{ marginBottom: '1.5rem' }}>
-      <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-        {displayLabel}
-      </label>
-      <select
-        value={index}
-        onChange={(e) => onChange(parseInt(e.currentTarget.value))}
-        style={{
-          width: '100%',
-          padding: '0.5rem',
-          border: '1px solid #ccc',
-          borderRadius: '4px',
-          fontSize: '1rem'
-        }}
-      >
-        {Array.from({ length: count }, (_, i) => (
-          <option key={i} value={i}>
-            {i}: {getEntityName(i)}
-          </option>
-        ))}
-      </select>
-    </div>
+    <Field label={displayLabel}>
+      {(control) => (
+        <Select
+          {...control}
+          value={String(index)}
+          onChange={(value) => onChange(Number.parseInt(value, 10))}
+          // The bare index is dropped from the label. It was "0: Brew boiler", which put
+          // an array position in front of a name the machine definition already gives.
+          options={Array.from({ length: count }, (_, i) => ({
+            value: String(i),
+            label: getEntityName(i),
+          }))}
+        />
+      )}
+    </Field>
   );
 }

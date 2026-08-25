@@ -1,4 +1,5 @@
 import { memo } from 'preact/compat';
+import { Button, Dialog, tokens } from '@variegated-coffee/ui';
 
 interface JsonModalProps {
   title: string;
@@ -31,80 +32,34 @@ const JsonModalComponent = ({ title, data, isOpen, onClose }: JsonModalProps) =>
   };
 
   return (
-    <div
-      style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        backgroundColor: 'rgba(0, 0, 0, 0.5)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        zIndex: 1000,
-        padding: '2rem'
-      }}
-      onClick={onClose}
+    // This was the design system's only shared modal shell -- and every other modal in the
+    // app rebuilt its backdrop rather than reusing it, because it is not a shell, it is a
+    // JSON viewer. Now it is one use of the real shell, and gets the focus trap, the
+    // Escape handler and the dialog semantics none of the hand-built ones had.
+    <Dialog
+      title={title}
+      onClose={onClose}
+      width="900px"
+      footer={
+        <Button variant="secondary" onClick={onClose}>
+          Close
+        </Button>
+      }
     >
-      <div
+      <pre
         style={{
-          backgroundColor: 'white',
-          borderRadius: '8px',
-          maxWidth: '900px',
-          maxHeight: '80vh',
-          width: '100%',
-          display: 'flex',
-          flexDirection: 'column',
-          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div style={{
-          padding: '1.5rem',
-          borderBottom: '1px solid #ddd',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center'
-        }}>
-          <h2 style={{ margin: 0, fontSize: '1.5rem' }}>{title}</h2>
-          <button
-            onClick={onClose}
-            style={{
-              background: 'none',
-              border: 'none',
-              fontSize: '1.5rem',
-              cursor: 'pointer',
-              padding: '0.5rem',
-              color: '#666',
-              lineHeight: 1
-            }}
-            title="Close"
-          >
-            ×
-          </button>
-        </div>
-
-        {/* Content */}
-        <div style={{
-          padding: '1.5rem',
+          font: `0.875rem ${tokens.font.mono}`,
+          background: tokens.color.surfaceSunken,
+          border: `1px solid ${tokens.color.border}`,
+          padding: tokens.space.md,
+          borderRadius: tokens.radius.sm,
+          margin: 0,
           overflow: 'auto',
-          flex: 1
-        }}>
-          <pre style={{
-            fontSize: '0.875rem',
-            background: '#f5f5f5',
-            padding: '1rem',
-            borderRadius: '4px',
-            margin: 0,
-            overflow: 'auto'
-          }}>
-            {JSON.stringify(data, bigIntReplacer, 2)}
-          </pre>
-        </div>
-      </div>
-    </div>
+        }}
+      >
+        {JSON.stringify(data, bigIntReplacer, 2)}
+      </pre>
+    </Dialog>
   );
 };
 

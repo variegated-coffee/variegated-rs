@@ -1,35 +1,42 @@
 import { ComponentChildren } from 'preact';
+import { tokens } from '@variegated-coffee/ui';
 
 interface ConfigurationSectionProps {
   title: string;
   children: ComponentChildren;
 }
 
+/**
+ * A titled card that does not collapse.
+ *
+ * Deliberately not `Section` from the design system, which is the collapsible one. These
+ * hold a handful of fields each and are already inside a collapsible parent; making them
+ * collapse too would give the configuration screen two nested levels of disclosure and a
+ * reader no way to tell which one hid what they were looking for.
+ */
 export const ConfigurationSection = ({ title, children }: ConfigurationSectionProps) => {
   return (
     <div
       style={{
-        marginBottom: '1rem',
-        backgroundColor: 'white',
-        border: '1px solid #ddd',
-        borderRadius: '8px',
-        overflow: 'hidden'
+        marginBottom: tokens.space.md,
+        backgroundColor: tokens.color.surfaceRaised,
+        border: `1px solid ${tokens.color.border}`,
+        borderRadius: tokens.radius.md,
+        overflow: 'hidden',
       }}
     >
       <div
         style={{
-          padding: '0.75rem 1rem',
-          backgroundColor: '#f8f9fa',
-          borderBottom: '1px solid #ddd',
-          fontWeight: '600',
-          fontSize: '0.95rem'
+          padding: `${tokens.space.sm} ${tokens.space.md}`,
+          backgroundColor: tokens.color.surfaceSunken,
+          borderBottom: `1px solid ${tokens.color.border}`,
+          fontWeight: 600,
+          fontSize: '0.95rem',
         }}
       >
         {title}
       </div>
-      <div style={{ padding: '1rem' }}>
-        {children}
-      </div>
+      <div style={{ padding: tokens.space.md }}>{children}</div>
     </div>
   );
 };

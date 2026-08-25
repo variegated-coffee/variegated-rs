@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import { Alert, Button, Field, TextInput, tokens } from '@variegated-coffee/ui';
 import { ShotUploadView } from '../schemas/schemas';
 import { saveShotUploadSettings } from '../api/shotUpload';
 import { ConfigurationSection } from './ConfigurationSection';
@@ -32,14 +33,27 @@ const KEY_MAX = 53;
  */
 const SHOW_UPLOAD_TOKEN = false;
 
-const inputStyle = {
-  width: '100%',
-  padding: '0.4rem',
-  border: '1px solid #ccc',
-  borderRadius: '4px',
-  fontSize: '0.9rem',
-  boxSizing: 'border-box' as const,
-};
+/** A checkbox with its label, which this form needs four of. */
+function CheckboxRow({
+  checked,
+  onChange,
+  children,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  children: string;
+}) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'center', gap: tokens.space.xs, cursor: 'pointer' }}>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange((e.target as HTMLInputElement).checked)}
+      />
+      <span style={{ fontSize: '0.85rem' }}>{children}</span>
+    </label>
+  );
+}
 
 /**
  * Where finished shots are uploaded, and whether to upload them.
@@ -145,157 +159,127 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
 
   return (
     <ConfigurationSection title="Shot upload">
-      <label style={{ display: 'block', marginBottom: '0.75rem' }}>
-        <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Endpoint</div>
-        <input
-          type="url"
-          value={endpoint}
-          maxLength={ENDPOINT_MAX}
-          placeholder={
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+        <Field
+          label="Endpoint"
+          help={
             SHOW_UPLOAD_TOKEN
-              ? 'https://plantlet.example/api/shots'
-              : 'http+noise://plantlet.example/api/shots'
+              ? 'https:// with a token, or http+noise:// with the two keys below. Leave blank to stop uploading.'
+              : 'http+noise:// with the two keys below. Leave blank to stop uploading.'
           }
-          onInput={(e) => setEndpoint((e.target as HTMLInputElement).value)}
-          style={inputStyle}
-        />
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          {SHOW_UPLOAD_TOKEN ? (
-            <>
-              <code>https://</code> with a token, or <code>http+noise://</code> with the two
-              keys below. Leave blank to stop uploading.
-            </>
-          ) : (
-            <>
-              <code>http+noise://</code> with the two keys below. Leave blank to stop
-              uploading.
-            </>
+        >
+          {(control) => (
+            <TextInput
+              {...control}
+              kind="url"
+              value={endpoint}
+              maxLength={ENDPOINT_MAX}
+              placeholder={
+                SHOW_UPLOAD_TOKEN
+                  ? 'https://plantlet.example/api/shots'
+                  : 'http+noise://plantlet.example/api/shots'
+              }
+              onInput={setEndpoint}
+            />
           )}
-        </div>
-      </label>
+        </Field>
 
-      {SHOW_UPLOAD_TOKEN && (
-        <label style={{ display: 'block', marginBottom: '0.75rem' }}>
-          <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Token</div>
-          <input
-            type="password"
-            value={token}
-            maxLength={TOKEN_MAX}
-            disabled={clearToken}
-            autoComplete="off"
-            placeholder={tokenStored ? 'Stored — leave blank to keep' : 'Not set'}
-            onInput={(e) => setToken((e.target as HTMLInputElement).value)}
-            style={{ ...inputStyle, backgroundColor: clearToken ? '#f0f0f0' : 'white' }}
-          />
-          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-            The machine never sends its token back, so this cannot show the current one.
-          </div>
-        </label>
-      )}
+        {SHOW_UPLOAD_TOKEN && (
+          <Field
+            label="Token"
+            help="The machine never sends its token back, so this cannot show the current one."
+          >
+            {(control) => (
+              <TextInput
+                {...control}
+                kind="password"
+                value={token}
+                maxLength={TOKEN_MAX}
+                disabled={clearToken}
+                autoComplete="off"
+                placeholder={tokenStored ? 'Stored — leave blank to keep' : 'Not set'}
+                onInput={setToken}
+              />
+            )}
+          </Field>
+        )}
 
-      {SHOW_UPLOAD_TOKEN && tokenStored && (
-        <label
-          style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}
+        {SHOW_UPLOAD_TOKEN && tokenStored && (
+          <CheckboxRow checked={clearToken} onChange={setClearToken}>
+            Clear the stored token
+          </CheckboxRow>
+        )}
+
+        <Field
+          label="Server key"
+          help="The upload server's public key. Not a secret — it is shown here so you can check which server this machine trusts."
         >
-          <input
-            type="checkbox"
-            checked={clearToken}
-            onChange={(e) => setClearToken((e.target as HTMLInputElement).checked)}
-          />
-          <span style={{ fontSize: '0.85rem' }}>Clear the stored token</span>
-        </label>
-      )}
+          {(control) => (
+            <TextInput
+              {...control}
+              // Monospace, not `numeric`: a base64 key is read character by character when
+              // it is being compared against another one, but a decimal keypad cannot type
+              // one.
+              mono
+              value={serverKey}
+              maxLength={KEY_MAX}
+              autoComplete="off"
+              spellcheck={false}
+              placeholder="Only for http+noise:// endpoints"
+              onInput={setServerKey}
+            />
+          )}
+        </Field>
 
-      <label style={{ display: 'block', marginBottom: '0.75rem' }}>
-        <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Server key</div>
-        <input
-          type="text"
-          value={serverKey}
-          maxLength={KEY_MAX}
-          autoComplete="off"
-          spellcheck={false}
-          placeholder="Only for http+noise:// endpoints"
-          onInput={(e) => setServerKey((e.target as HTMLInputElement).value)}
-          style={{ ...inputStyle, fontFamily: 'monospace' }}
-        />
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          The upload server's public key. Not a secret — it is shown here so you can check
-          which server this machine trusts.
-        </div>
-      </label>
-
-      <label style={{ display: 'block', marginBottom: '0.75rem' }}>
-        <div style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>Device key</div>
-        <input
-          type="password"
-          value={deviceKey}
-          maxLength={KEY_MAX}
-          disabled={clearDeviceKey}
-          autoComplete="off"
-          spellcheck={false}
-          placeholder={deviceKeyStored ? 'Stored — leave blank to keep' : 'Not set'}
-          onInput={(e) => setDeviceKey((e.target as HTMLInputElement).value)}
-          style={{
-            ...inputStyle,
-            fontFamily: 'monospace',
-            backgroundColor: clearDeviceKey ? '#f0f0f0' : 'white',
-          }}
-        />
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.2rem' }}>
-          This machine's secret key, shown once when you generated it.{' '}
-          {SHOW_UPLOAD_TOKEN ? 'Like the token, the machine' : 'The machine'} never sends it
-          back.
-        </div>
-      </label>
-
-      {deviceKeyStored && (
-        <label
-          style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}
+        <Field
+          label="Device key"
+          help={`This machine's secret key, shown once when you generated it. ${
+            SHOW_UPLOAD_TOKEN ? 'Like the token, the machine' : 'The machine'
+          } never sends it back.`}
         >
-          <input
-            type="checkbox"
-            checked={clearDeviceKey}
-            onChange={(e) => setClearDeviceKey((e.target as HTMLInputElement).checked)}
-          />
-          <span style={{ fontSize: '0.85rem' }}>Clear the stored device key</span>
-        </label>
-      )}
+          {(control) => (
+            <TextInput
+              {...control}
+              kind="password"
+              mono
+              value={deviceKey}
+              maxLength={KEY_MAX}
+              disabled={clearDeviceKey}
+              autoComplete="off"
+              spellcheck={false}
+              placeholder={deviceKeyStored ? 'Stored — leave blank to keep' : 'Not set'}
+              onInput={setDeviceKey}
+            />
+          )}
+        </Field>
 
-      <label
-        style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.75rem' }}
-      >
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={(e) => setEnabled((e.target as HTMLInputElement).checked)}
-        />
-        <span style={{ fontSize: '0.85rem' }}>Upload shots automatically</span>
-      </label>
+        {deviceKeyStored && (
+          <CheckboxRow checked={clearDeviceKey} onChange={setClearDeviceKey}>
+            Clear the stored device key
+          </CheckboxRow>
+        )}
 
-      {error && (
-        <div style={{ color: '#c00', fontSize: '0.85rem', marginBottom: '0.5rem' }}>{error}</div>
-      )}
-      {saved && !error && (
-        <div style={{ color: '#080', fontSize: '0.85rem', marginBottom: '0.5rem' }}>Saved.</div>
-      )}
+        <CheckboxRow checked={enabled} onChange={setEnabled}>
+          Upload shots automatically
+        </CheckboxRow>
 
-      <button
-        // `void` rather than passing the async function directly: an unhandled rejection
-        // from an event handler is invisible, and every failure path here already ends in
-        // `setError`.
-        onClick={() => void handleSave()}
-        disabled={saving}
-        style={{
-          padding: '0.4rem 0.9rem',
-          borderRadius: '4px',
-          border: '1px solid #ccc',
-          backgroundColor: saving ? '#eee' : '#fff',
-          cursor: saving ? 'default' : 'pointer',
-          fontSize: '0.9rem',
-        }}
-      >
-        {saving ? 'Saving…' : 'Save'}
-      </button>
+        {error && <Alert role="danger">{error}</Alert>}
+        {saved && !error && <Alert role="ok">Saved.</Alert>}
+
+        <div>
+          <Button
+            variant="primary"
+            size="sm"
+            // `void` rather than passing the async function directly: an unhandled rejection
+            // from an event handler is invisible, and every failure path here already ends in
+            // `setError`.
+            onClick={() => void handleSave()}
+            disabled={saving}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </div>
     </ConfigurationSection>
   );
 });

@@ -1,5 +1,6 @@
 import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
+import { Alert, Badge, Button, EmptyState, tokens, useDialogs } from '@variegated-coffee/ui';
 import {
   BluetoothPeripheralAssociation,
   BluetoothScanStatus,
@@ -24,24 +25,28 @@ type EditorTarget =
   | { mode: 'new'; device: DiscoveredBluetoothPeripheral }
   | { mode: 'edit'; association: BluetoothPeripheralAssociation };
 
-const pillStyle = {
-  padding: '0.25rem 0.75rem',
-  borderRadius: '12px',
-  fontSize: '0.75rem',
-  color: 'white'
+/** One row in either list, so the two agree on their padding and border. */
+const rowStyle = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: tokens.space.sm,
+  padding: tokens.space.sm,
+  marginBottom: tokens.space.sm,
+  border: `1px solid ${tokens.color.border}`,
+  borderRadius: tokens.radius.sm,
+  flexWrap: 'wrap' as const,
 };
 
-const buttonStyle = {
-  padding: '0.4rem 0.75rem',
-  border: 'none',
-  borderRadius: '4px',
-  fontSize: '0.85rem',
-  cursor: 'pointer',
-  color: 'white'
+/** The MAC, which is read character by character when two devices share a name. */
+const addressStyle = {
+  fontSize: '0.75rem',
+  color: tokens.color.inkMuted,
+  fontFamily: tokens.font.mono,
 };
 
 const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPanelProps) => {
   const { getCommsPeripheralEntries } = useMachine();
+  const { confirm } = useDialogs();
   const [editing, setEditing] = useState<EditorTarget | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
@@ -84,7 +89,7 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
   if (editing) {
     return (
       <div>
-        <h2 style={{ marginTop: 0, marginBottom: '1rem' }}>Bluetooth</h2>
+        <h2 style={{ marginTop: 0, marginBottom: tokens.space.md }}>Bluetooth</h2>
         <BluetoothPeripheralEditor
           address={editing.mode === 'new' ? editing.device.address : editing.association.address}
           addressRandom={
@@ -112,132 +117,103 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
       <h2 style={{ marginTop: 0, marginBottom: '1rem' }}>Bluetooth</h2>
 
       {error && (
-        <div
-          style={{
-            padding: '0.75rem',
-            marginBottom: '1rem',
-            backgroundColor: '#f8d7da',
-            color: '#721c24',
-            borderRadius: '4px',
-            fontSize: '0.9rem',
-            display: 'flex',
-            justifyContent: 'space-between'
-          }}
-        >
-          <span>{error}</span>
-          <span style={{ cursor: 'pointer' }} onClick={() => setError(null)}>
-            ×
-          </span>
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Alert role="danger" onDismiss={() => setError(null)}>
+            {error}
+          </Alert>
         </div>
       )}
 
-      <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>Associated peripherals</h3>
+      <h3 style={{ fontSize: '1rem', marginBottom: tokens.space.sm }}>Associated peripherals</h3>
 
       {associations.length === 0 ? (
-        <div
-          style={{
-            padding: '1.5rem',
-            border: '1px dashed #ccc',
-            borderRadius: '8px',
-            textAlign: 'center',
-            color: '#666',
-            fontSize: '0.9rem',
-            marginBottom: '2rem'
-          }}
-        >
-          No Bluetooth peripherals associated. Scan below to find one.
+        <div style={{ marginBottom: tokens.space.xl }}>
+          <EmptyState
+            title="No Bluetooth peripherals associated"
+            detail="Scan below to find a scale or another supported device."
+          />
         </div>
       ) : (
-        <div style={{ marginBottom: '2rem' }}>
+        <div style={{ marginBottom: tokens.space.xl }}>
           {associations.map((association) => {
             const isConnected = connected.get(association.id) === true;
             return (
               <div
                 key={association.id}
                 style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.75rem',
-                  padding: '0.75rem',
-                  marginBottom: '0.5rem',
-                  border: '1px solid #eee',
-                  borderRadius: '6px',
+                  ...rowStyle,
                   // Dimmed rather than hidden: a disabled peripheral is still configured,
                   // and the point of disabling is that you can find it again.
-                  opacity: association.enabled ? 1 : 0.6
+                  opacity: association.enabled ? 1 : 0.6,
                 }}
               >
-                <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ flex: 1, minWidth: '12rem' }}>
                   <div style={{ fontWeight: 500 }}>{association.name || '(unnamed)'}</div>
-                  <div style={{ fontSize: '0.8rem', color: '#666' }}>
+                  <div style={{ fontSize: '0.8rem', color: tokens.color.inkMuted }}>
                     {peripheralLabel(association.id)} · {association.driver.type}
                   </div>
-                  <div style={{ fontSize: '0.75rem', color: '#999', fontFamily: 'monospace' }}>
-                    {formatAddress(association.address)}
-                  </div>
+                  <div style={addressStyle}>{formatAddress(association.address)}</div>
                 </div>
 
-                {association.enabled && (
-                  <span style={{ ...pillStyle, backgroundColor: isConnected ? '#28a745' : '#6c757d' }}>
-                    {isConnected ? 'CONNECTED' : 'OFFLINE'}
-                  </span>
-                )}
-                {!association.enabled && (
-                  <span style={{ ...pillStyle, backgroundColor: '#6c757d' }}>DISABLED</span>
+                {association.enabled ? (
+                  <Badge role={isConnected ? 'ok' : undefined}>
+                    {isConnected ? 'Connected' : 'Offline'}
+                  </Badge>
+                ) : (
+                  <Badge>Disabled</Badge>
                 )}
 
-                <button
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() =>
                     run(() =>
                       bluetoothApi.setPeripheralEnabled(association.id, !association.enabled)
                     )
                   }
-                  style={{ ...buttonStyle, backgroundColor: '#007bff' }}
-                  title={association.enabled ? 'Stop connecting' : 'Start connecting'}
                 >
                   {association.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button
-                  onClick={() => setEditing({ mode: 'edit', association })}
-                  style={{ ...buttonStyle, backgroundColor: '#6c757d' }}
-                >
+                </Button>
+                <Button variant="secondary" size="sm" onClick={() => setEditing({ mode: 'edit', association })}>
                   Edit
-                </button>
-                <button
+                </Button>
+                {/* "Forget", not "Delete" -- the peripheral is not going anywhere, the
+                    machine just stops trying to connect to it. Naming it is what lets
+                    someone notice they picked the wrong row. */}
+                <Button
+                  variant="destructive"
+                  size="sm"
                   onClick={() => {
-                    if (!confirm(`Forget ${association.name || formatAddress(association.address)}?`)) {
-                      return;
-                    }
-                    run(() => bluetoothApi.removePeripheral(association.id));
+                    void confirm({
+                      title: `Forget ${association.name || formatAddress(association.address)}?`,
+                      body: 'The machine stops connecting to it. You can associate it again by scanning.',
+                      confirmLabel: 'Forget',
+                      destructive: true,
+                    }).then((ok) => {
+                      if (ok) run(() => bluetoothApi.removePeripheral(association.id));
+                    });
                   }}
-                  style={{ ...buttonStyle, backgroundColor: '#dc3545' }}
                 >
-                  Delete
-                </button>
+                  Forget
+                </Button>
               </div>
             );
           })}
         </div>
       )}
 
-      <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>Nearby devices</h3>
+      <h3 style={{ fontSize: '1rem', marginBottom: tokens.space.sm }}>Nearby devices</h3>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
-        <button
+      <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm, marginBottom: tokens.space.md, flexWrap: 'wrap' }}>
+        <Button
+          variant="primary"
           onClick={() => run(() => bluetoothApi.scanForPeripherals())}
           disabled={scan.scanning}
-          style={{
-            ...buttonStyle,
-            padding: '0.6rem 1rem',
-            fontSize: '0.95rem',
-            backgroundColor: scan.scanning ? '#6c757d' : '#007bff',
-            cursor: scan.scanning ? 'default' : 'pointer'
-          }}
         >
           {scan.scanning ? 'Scanning…' : 'Scan for devices'}
-        </button>
+        </Button>
         {scan.reports_dropped > 0 && (
-          <span style={{ fontSize: '0.8rem', color: '#856404' }}>
+          <span style={{ fontSize: '0.8rem', color: tokens.color.warnInk }}>
             {scan.reports_dropped} result{scan.reports_dropped === 1 ? '' : 's'} dropped — too many
             devices nearby
           </span>
@@ -249,18 +225,11 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
         gets, because the command is fire-and-forget like everything else in this UI.
       */}
       {scan.blocked && !scan.scanning && (
-        <div
-          style={{
-            padding: '0.75rem',
-            marginBottom: '1rem',
-            backgroundColor: '#fff3cd',
-            color: '#856404',
-            borderRadius: '4px',
-            fontSize: '0.9rem'
-          }}
-        >
-          The machine is busy. Scanning interrupts the radio, which can drop a connected
-          scale mid-shot — try again once brewing has finished.
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Alert role="warn">
+            The machine is busy. Scanning interrupts the radio, which can drop a connected
+            scale mid-shot — try again once brewing has finished.
+          </Alert>
         </div>
       )}
 
@@ -269,10 +238,11 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
           style={{
             display: 'flex',
             alignItems: 'center',
-            gap: '0.5rem',
-            marginBottom: '0.75rem',
+            gap: tokens.space.sm,
+            marginBottom: tokens.space.sm,
             fontSize: '0.85rem',
-            color: '#666'
+            color: tokens.color.inkMuted,
+            cursor: 'pointer',
           }}
         >
           <input
@@ -286,61 +256,48 @@ const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPan
       )}
 
       {visible.length === 0 ? (
-        <div
-          style={{
-            padding: '1.5rem',
-            border: '1px dashed #ccc',
-            borderRadius: '8px',
-            textAlign: 'center',
-            color: '#666',
-            fontSize: '0.9rem'
-          }}
-        >
-          {scan.scanning
-            ? 'Looking for devices…'
-            : unrecognised.length > 0
-              ? 'No recognised devices found. Some scales do not advertise their service — tick the box above to see the rest.'
-              : 'No devices found yet.'}
-        </div>
+        <EmptyState
+          title={
+            scan.scanning
+              ? 'Looking for devices…'
+              : unrecognised.length > 0
+                ? 'No recognised devices found'
+                : 'No devices found yet'
+          }
+          detail={
+            !scan.scanning && unrecognised.length > 0
+              ? 'Some scales do not advertise their service — tick the box above to see the rest.'
+              : undefined
+          }
+        />
       ) : (
         <div>
           {visible.map((device) => {
             const address = formatAddress(device.address);
             const already = associatedAddresses.has(address);
             return (
-              <div
-                key={address}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.75rem',
-                  padding: '0.75rem',
-                  marginBottom: '0.5rem',
-                  border: '1px solid #eee',
-                  borderRadius: '6px'
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
+              <div key={address} style={rowStyle}>
+                <div style={{ flex: 1, minWidth: '12rem' }}>
                   <div style={{ fontWeight: 500 }}>{device.name || '(no name advertised)'}</div>
-                  <div style={{ fontSize: '0.75rem', color: '#999', fontFamily: 'monospace' }}>
-                    {address}
-                  </div>
+                  <div style={addressStyle}>{address}</div>
                 </div>
-                {device.suggested_driver && (
-                  <span style={{ ...pillStyle, backgroundColor: '#007bff' }}>
-                    {device.suggested_driver.type}
-                  </span>
-                )}
-                <span style={{ fontSize: '0.8rem', color: '#666' }}>{device.rssi} dBm</span>
+                {device.suggested_driver && <Badge role="info">{device.suggested_driver.type}</Badge>}
+                <span
+                  style={{
+                    fontSize: '0.8rem',
+                    color: tokens.color.inkMuted,
+                    fontFamily: tokens.font.mono,
+                    fontVariantNumeric: 'tabular-nums',
+                  }}
+                >
+                  {device.rssi} dBm
+                </span>
                 {already ? (
-                  <span style={{ ...pillStyle, backgroundColor: '#28a745' }}>ASSOCIATED</span>
+                  <Badge role="ok">Associated</Badge>
                 ) : (
-                  <button
-                    onClick={() => setEditing({ mode: 'new', device })}
-                    style={{ ...buttonStyle, backgroundColor: '#28a745' }}
-                  >
-                    Associate →
-                  </button>
+                  <Button variant="primary" size="sm" onClick={() => setEditing({ mode: 'new', device })}>
+                    Associate
+                  </Button>
                 )}
               </div>
             );

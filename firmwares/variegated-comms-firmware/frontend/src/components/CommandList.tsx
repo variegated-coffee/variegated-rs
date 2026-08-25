@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Badge, Button, EmptyState, tokens } from '@variegated-coffee/ui';
 import { ScheduleAction } from '../schemas/schemas';
 import { getCommandSummary } from './CommandSummary';
 import { CommandBuilder } from './CommandBuilder';
@@ -48,116 +49,101 @@ export function CommandList({ commands, onChange }: CommandListProps) {
   };
 
   return (
-    <div style={{ padding: '1rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-        <h3 style={{ fontSize: '1.25rem' }}>Commands ({commands.length}/{MAX_COMMANDS})</h3>
-        <button
+    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md, padding: tokens.space.md }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
+          <h3 style={{ margin: 0, fontSize: '1.25rem' }}>Commands</h3>
+          <Badge numeric>{commands.length}/{MAX_COMMANDS}</Badge>
+        </div>
+        <Button
+          variant="primary"
+          size="sm"
           onClick={() => setIsAdding(true)}
           disabled={commands.length >= MAX_COMMANDS}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: commands.length >= MAX_COMMANDS ? '#ccc' : '#0066cc',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: commands.length >= MAX_COMMANDS ? 'not-allowed' : 'pointer',
-            fontSize: '0.9rem'
-          }}
         >
-          + Add Command
-        </button>
+          Add command
+        </Button>
       </div>
 
       {commands.length === 0 ? (
-        <div style={{
-          padding: '2rem',
-          textAlign: 'center',
-          color: '#666',
-          border: '2px dashed #ccc',
-          borderRadius: '4px'
-        }}>
-          No commands added. Click "Add Command" to get started.
-        </div>
+        <EmptyState
+          title="No commands yet"
+          detail="A schedule needs at least one command — what the machine should do when it fires."
+          action={{ label: 'Add command', onClick: () => setIsAdding(true) }}
+        />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
           {commands.map((command, index) => (
             <div
               key={index}
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.75rem',
-                backgroundColor: '#f5f5f5',
-                borderRadius: '4px',
-                border: '1px solid #ddd'
+                gap: tokens.space.sm,
+                padding: tokens.space.sm,
+                backgroundColor: tokens.color.surfaceSunken,
+                borderRadius: tokens.radius.sm,
+                border: `1px solid ${tokens.color.border}`,
+                flexWrap: 'wrap',
               }}
             >
-              <div style={{ flex: 1, fontSize: '0.9rem' }}>
-                <span style={{ fontWeight: '500', marginRight: '0.5rem' }}>#{index + 1}</span>
+              <div style={{ flex: 1, minWidth: '12rem', fontSize: '0.9rem' }}>
+                <span
+                  style={{
+                    fontWeight: 500,
+                    marginRight: tokens.space.sm,
+                    fontFamily: tokens.font.mono,
+                    fontVariantNumeric: 'tabular-nums',
+                    color: tokens.color.inkMuted,
+                  }}
+                >
+                  #{index + 1}
+                </span>
                 {getCommandSummary(command, machine.getBoilerName)}
               </div>
 
-              <div style={{ display: 'flex', gap: '0.25rem' }}>
-                <button
+              {/* The arrows keep their glyphs -- they are compact and the direction is the
+                  whole meaning -- but the name is now on the button rather than in a
+                  `title` a touchscreen cannot surface. */}
+              <div style={{ display: 'flex', gap: tokens.space.xs }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => handleMoveUp(index)}
                   disabled={index === 0}
-                  title="Move up"
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: index === 0 ? '#eee' : 'white',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: index === 0 ? 'not-allowed' : 'pointer',
-                    fontSize: '0.8rem'
-                  }}
+                  ariaLabel={`Move command ${index + 1} up`}
                 >
-                  ↑
-                </button>
-                <button
+                  <span aria-hidden="true">↑</span>
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => handleMoveDown(index)}
                   disabled={index === commands.length - 1}
-                  title="Move down"
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: index === commands.length - 1 ? '#eee' : 'white',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: index === commands.length - 1 ? 'not-allowed' : 'pointer',
-                    fontSize: '0.8rem'
-                  }}
+                  ariaLabel={`Move command ${index + 1} down`}
                 >
-                  ↓
-                </button>
-                <button
+                  <span aria-hidden="true">↓</span>
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => setEditingIndex(index)}
-                  title="Edit"
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: 'white',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem'
-                  }}
+                  ariaLabel={`Edit command ${index + 1}`}
                 >
                   Edit
-                </button>
-                <button
+                </Button>
+                {/* Was a filled red `✕` with no label. Removing one command from a list
+                    being edited is not irreversible -- nothing is saved until the schedule
+                    is -- so it does not need a confirmation, but it does need to stop
+                    being the loudest thing in the row. */}
+                <Button
+                  variant="destructive"
+                  size="sm"
                   onClick={() => handleDelete(index)}
-                  title="Delete"
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: '#dc3545',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem'
-                  }}
+                  ariaLabel={`Remove command ${index + 1}`}
                 >
-                  ✕
-                </button>
+                  Remove
+                </Button>
               </div>
             </div>
           ))}

@@ -1,6 +1,26 @@
 import { useState } from 'preact/hooks';
+import { Button, Dialog, Field, Select, TextInput, tokens } from '@variegated-coffee/ui';
 import { ScheduleAction, BoilerControlMode, MachineMode, RoutineIndex } from '../schemas/schemas';
 import { EntitySelector } from './EntitySelector';
+
+/**
+ * Parse an optional decimal the user typed.
+ *
+ * `parseFloat(x)` alone returns `NaN` for anything unparseable, and `NaN` reaching the
+ * firmware as a boiler target is worse than the field being ignored. An empty box means
+ * "no value", which is a real state here -- both target fields are optional.
+ */
+function parseOptional(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** What is in the box, so a half-typed "9." is not reformatted out from under the cursor. */
+function show(value: number | null): string {
+  return value === null ? '' : String(value);
+}
 
 interface CommandBuilderProps {
   command: ScheduleAction | null;
@@ -101,268 +121,138 @@ export function CommandBuilder({ command, onSave, onCancel }: CommandBuilderProp
   ].includes(commandType);
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1000
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '2rem',
-        maxWidth: '500px',
-        width: '90%',
-        maxHeight: '80vh',
-        overflow: 'auto'
-      }}>
-        <h2 style={{ marginBottom: '1.5rem' }}>
-          {command ? 'Edit Command' : 'Add Command'}
-        </h2>
+    <Dialog
+      title={command ? 'Edit command' : 'Add command'}
+      onClose={onCancel}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          {/* Cancel first, primary last -- the order the footer of every other dialog in
+              the app uses. This one had Save on the left and Cancel on the right, both
+              filled and equally wide. */}
+          <Button variant="primary" onClick={handleSave}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.lg }}>
+        <Field label="Command type">
+          {(control) => (
+            <Select
+              {...control}
+              value={commandType}
+              onChange={(value) => setCommandType(value as CommandType)}
+              options={[
+                { value: 'RunRoutine', label: 'Run routine', group: 'Routine' },
+                { value: 'CancelRoutine', label: 'Cancel routine', group: 'Routine' },
+                { value: 'SetBoilerControlTarget', label: 'Set control target', group: 'Boiler' },
+                { value: 'SetBoilerControlTargetValues', label: 'Set control values', group: 'Boiler' },
+                { value: 'SetMachineMode', label: 'Set machine mode', group: 'Machine' },
+              ]}
+            />
+          )}
+        </Field>
 
-        {/* Command Type Selector */}
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Command Type</label>
-          <select
-            value={commandType}
-            onChange={(e) => setCommandType(e.currentTarget.value as CommandType)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <optgroup label="Routine">
-              <option value="RunRoutine">Run Routine</option>
-              <option value="CancelRoutine">Cancel Routine</option>
-            </optgroup>
-            <optgroup label="Boiler">
-              <option value="SetBoilerControlTarget">Set Boiler Control Target</option>
-              <option value="SetBoilerControlTargetValues">Set Boiler Control Values</option>
-            </optgroup>
-            <optgroup label="Machine">
-              <option value="SetMachineMode">Set Machine Mode</option>
-            </optgroup>
-          </select>
-        </div>
-
-        {/* Entity selector for commands that need it */}
         {needsBoilerIndex && (
-          <EntitySelector
-            entityType="boiler"
-            index={boilerIndex}
-            onChange={setBoilerIndex}
-          />
+          <EntitySelector entityType="boiler" index={boilerIndex} onChange={setBoilerIndex} />
         )}
 
-        {/* Boiler Control Target */}
         {commandType === 'SetBoilerControlTarget' && (
-          <>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Control Mode</label>
-              <select
+          <Field label="Control mode">
+            {(control) => (
+              <Select
+                {...control}
                 value={boilerMode}
-                onChange={(e) => setBoilerMode(e.currentTarget.value)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              >
-                <option value="Temperature">Temperature</option>
-                <option value="Pressure">Pressure</option>
-                <option value="Off">Off</option>
-              </select>
-            </div>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Target Temperature (°C, optional)
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                value={boilerTemp ?? ''}
-                onChange={(e) => setBoilerTemp(e.currentTarget.value ? parseFloat(e.currentTarget.value) : null)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
+                onChange={setBoilerMode}
+                options={[
+                  { value: 'Temperature', label: 'Temperature' },
+                  { value: 'Pressure', label: 'Pressure' },
+                  { value: 'Off', label: 'Off' },
+                ]}
               />
-            </div>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Target Pressure (bar, optional)
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                value={boilerPressure ?? ''}
-                onChange={(e) => setBoilerPressure(e.currentTarget.value ? parseFloat(e.currentTarget.value) : null)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              />
-            </div>
-          </>
+            )}
+          </Field>
         )}
 
-        {/* Boiler Control Values */}
-        {commandType === 'SetBoilerControlTargetValues' && (
+        {/* The two target fields are identical in both branches, so they are written once.
+            The unit is on the field rather than inside the label -- "(°C, optional)" put
+            two different kinds of information into the label and wrapped it onto a second
+            line, which pushed the label away from its own input. */}
+        {(commandType === 'SetBoilerControlTarget' ||
+          commandType === 'SetBoilerControlTargetValues') && (
           <>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Temperature (°C, optional)
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                value={boilerTemp ?? ''}
-                onChange={(e) => setBoilerTemp(e.currentTarget.value ? parseFloat(e.currentTarget.value) : null)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              />
-            </div>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Pressure (bar, optional)
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                value={boilerPressure ?? ''}
-                onChange={(e) => setBoilerPressure(e.currentTarget.value ? parseFloat(e.currentTarget.value) : null)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              />
-            </div>
+            <Field label="Target temperature" unit="°C" help="Leave empty to not set one.">
+              {(control) => (
+                <TextInput
+                  {...control}
+                  numeric
+                  value={show(boilerTemp)}
+                  onInput={(value) => setBoilerTemp(parseOptional(value))}
+                />
+              )}
+            </Field>
+            <Field label="Target pressure" unit="bar" help="Leave empty to not set one.">
+              {(control) => (
+                <TextInput
+                  {...control}
+                  numeric
+                  value={show(boilerPressure)}
+                  onInput={(value) => setBoilerPressure(parseOptional(value))}
+                />
+              )}
+            </Field>
           </>
         )}
 
-        {/* Run Routine */}
         {commandType === 'RunRoutine' && (
           <>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Routine Type</label>
-              <select
-                value={routineType}
-                onChange={(e) => setRoutineType(e.currentTarget.value as 'internal' | 'function' | 'custom')}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              >
-                <option value="internal">Internal</option>
-                <option value="function">Function</option>
-                <option value="custom">Custom</option>
-              </select>
-            </div>
-            <div style={{ marginBottom: '1.5rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Routine Index</label>
-              <input
-                type="number"
-                min="0"
-                value={routineIndex}
-                onChange={(e) => setRoutineIndex(parseInt(e.currentTarget.value) || 0)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              />
-            </div>
+            <Field label="Routine type">
+              {(control) => (
+                <Select
+                  {...control}
+                  value={routineType}
+                  onChange={(value) => setRoutineType(value as 'internal' | 'function' | 'custom')}
+                  options={[
+                    { value: 'internal', label: 'Internal' },
+                    { value: 'function', label: 'Function' },
+                    { value: 'custom', label: 'Custom' },
+                  ]}
+                />
+              )}
+            </Field>
+            <Field label="Routine index" help="The slot the routine is stored in.">
+              {(control) => (
+                <TextInput
+                  {...control}
+                  numeric
+                  value={String(routineIndex)}
+                  onInput={(value) => setRoutineIndex(Math.max(0, parseOptional(value) ?? 0))}
+                />
+              )}
+            </Field>
           </>
         )}
 
-        {/* Set Machine Mode */}
         {commandType === 'SetMachineMode' && (
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-              Machine Mode
-            </label>
-            <select
-              value={machineMode}
-              onChange={(e) => setMachineMode(e.currentTarget.value)}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '1rem'
-              }}
-            >
-              <option value="On">On</option>
-              <option value="Off">Off</option>
-              <option value="PowerSaveStandby">Power Save Standby</option>
-            </select>
-          </div>
+          <Field label="Machine mode">
+            {(control) => (
+              <Select
+                {...control}
+                value={machineMode}
+                onChange={setMachineMode}
+                options={[
+                  { value: 'On', label: 'On' },
+                  { value: 'Off', label: 'Off' },
+                  { value: 'PowerSaveStandby', label: 'Power save standby' },
+                ]}
+              />
+            )}
+          </Field>
         )}
-
-        {/* Action Buttons */}
-        <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Save
-          </button>
-          <button
-            onClick={onCancel}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-        </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
