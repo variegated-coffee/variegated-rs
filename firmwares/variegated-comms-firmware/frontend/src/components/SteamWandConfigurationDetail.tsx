@@ -1,5 +1,11 @@
+import { Alert, Badge, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
-import { ConfigurationSection } from './ConfigurationSection';
+import {
+  ConfigurationSection,
+  EntityDetailHeader,
+  optionalUnit,
+  optionalValue,
+} from './ConfigurationSection';
 import { useMachine } from '../contexts/MachineContext';
 
 interface SteamWandConfigurationDetailProps {
@@ -17,73 +23,52 @@ export const SteamWandConfigurationDetail = ({
   const steamWandConfig = configuration.steam_wand_configurations.get(entityKey);
 
   if (!steamWandConfig) {
-    return <div>Steam wand configuration not found</div>;
+    return <Alert role="warn">No configuration for this steam wand.</Alert>;
   }
+
+  const { temperature_target, purge_time_seconds, max_steam_time_seconds } = steamWandConfig;
 
   return (
     <div>
-      <div style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ margin: 0, fontSize: '1.3rem' }}>{name}</h2>
-        <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-          Steam Wand ID: {entityKey}
-        </div>
-      </div>
+      <EntityDetailHeader name={name} index={entityKey} />
 
-      {/* Basic Settings */}
-      <ConfigurationSection title="Basic Settings">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.9rem', color: '#666' }}>Auto-Purge:</span>
-            <span
-              style={{
-                padding: '0.25rem 0.75rem',
-                backgroundColor: steamWandConfig.auto_purge_enabled ? '#28a745' : '#6c757d',
-                color: 'white',
-                borderRadius: '12px',
-                fontSize: '0.8rem',
-                fontWeight: '500'
-              }}
-            >
+      <ConfigurationSection title="Basic settings">
+        <ReadoutGroup>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
+            <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Auto-purge</span>
+            <Badge role={steamWandConfig.auto_purge_enabled ? 'ok' : undefined}>
               {steamWandConfig.auto_purge_enabled ? 'Enabled' : 'Disabled'}
-            </span>
+            </Badge>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Supply Tank:</span>
-            <span style={{ fontWeight: '500' }}>
-              {steamWandConfig.supply_tank_index !== null && steamWandConfig.supply_tank_index !== undefined
+          <Readout
+            label="Supply tank"
+            value={
+              steamWandConfig.supply_tank_index !== null &&
+              steamWandConfig.supply_tank_index !== undefined
                 ? getTankName(steamWandConfig.supply_tank_index)
-                : 'Not configured'}
-            </span>
-          </div>
+                : '—'
+            }
+          />
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Temperature Target:</span>
-            <span style={{ fontWeight: '500' }}>
-              {steamWandConfig.temperature_target !== null && steamWandConfig.temperature_target !== undefined
-                ? `${steamWandConfig.temperature_target.toFixed(1)}°C`
-                : 'Not set'}
-            </span>
-          </div>
+          <Readout
+            label="Temperature target"
+            value={optionalValue(temperature_target, 1)}
+            unit={optionalUnit(temperature_target, '°C')}
+          />
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Purge Time:</span>
-            <span style={{ fontWeight: '500' }}>
-              {steamWandConfig.purge_time_seconds !== null && steamWandConfig.purge_time_seconds !== undefined
-                ? `${steamWandConfig.purge_time_seconds.toFixed(1)}s`
-                : 'Not set'}
-            </span>
-          </div>
+          <Readout
+            label="Purge time"
+            value={optionalValue(purge_time_seconds, 1)}
+            unit={optionalUnit(purge_time_seconds, 's')}
+          />
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Max Steam Time:</span>
-            <span style={{ fontWeight: '500' }}>
-              {steamWandConfig.max_steam_time_seconds !== null && steamWandConfig.max_steam_time_seconds !== undefined
-                ? `${steamWandConfig.max_steam_time_seconds}s`
-                : 'Not set'}
-            </span>
-          </div>
-        </div>
+          <Readout
+            label="Max steam time"
+            value={optionalValue(max_steam_time_seconds, 0)}
+            unit={optionalUnit(max_steam_time_seconds, 's')}
+          />
+        </ReadoutGroup>
       </ConfigurationSection>
     </div>
   );

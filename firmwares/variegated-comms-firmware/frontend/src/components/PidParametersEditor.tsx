@@ -1,6 +1,7 @@
 import { useState } from 'preact/hooks';
 import { Alert, Button, Field, TextInput, tokens } from '@variegated-coffee/ui';
 import { PidParameters, Limits } from '../schemas/schemas';
+import { NumberField } from './NumberField';
 
 interface PidParametersEditorProps {
   title: string;
@@ -105,25 +106,6 @@ const toParameters = (editable: EditablePidParameters): PidParameters => ({
   }
 });
 
-/**
- * Parse a gain the user typed.
- *
- * Returns `null` for anything unparseable rather than falling back to a number. The old
- * `parseFloat(value) || 0` turned a typo into a **zero gain** and saved it: an integral
- * term silently switched off, on a boiler, with the field showing `0` as though that had
- * been the intent. `null` here becomes a validation error at the field instead.
- *
- * Note this also catches the `|| 0` operator's other victim: `parseFloat("0")` is `0`,
- * which is falsy, so the old code took the fallback branch for a legitimately-typed zero
- * too. Same result by luck rather than by design.
- */
-function parseNumber(raw: string): number | null {
-  const trimmed = raw.trim();
-  if (trimmed === '') return null;
-  const parsed = Number.parseFloat(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 export const PidParametersEditor = ({
   title,
   parameters,
@@ -136,17 +118,15 @@ export const PidParametersEditor = ({
   const [localParams, setLocalParams] = useState<EditablePidParameters>(
     fromParameters(parameters)
   );
+  const [invalidFields, setInvalidFields] = useState<Record<string, true>>({});
   /*
-   * What is in each box, keyed by field.
-   *
-   * Held as text rather than as numbers for the whole time the field is focused, because a
-   * half-typed `0.` or `-` is not a number and reformatting it into one moves the caret.
-   * The committed value in `localParams` is only updated when the text parses.
+   * Limit fields keep their own draft text, because they are the one case `NumberField`
+   * does not cover: empty is a legitimate value here (it means unbounded), where every
+   * other numeric field in this frontend treats an empty box as an error.
    */
-  const [editingValues, setEditingValues] = useState<Record<string, string>>({});
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [limitDrafts, setLimitDrafts] = useState<Record<string, string>>({});
 
-  const invalid = Object.keys(errors).length > 0;
+  const invalid = Object.keys(invalidFields).length > 0;
 
   const handleSave = () => {
     if (invalid) return;
@@ -168,105 +148,71 @@ export const PidParametersEditor = ({
     }));
   };
 
-  const setError = (key: string, message: string | null) => {
-    setErrors((prev) => {
-      if (message === null) {
+  const validity = (key: string) => (valid: boolean) =>
+    setInvalidFields((prev) => {
+      if (valid) {
         const { [key]: _unused, ...rest } = prev;
         return rest;
       }
-      return { ...prev, [key]: message };
+      return { ...prev, [key]: true };
     });
-  };
 
   const renderTermEditor = (
     termKey: 'kp' | 'ki' | 'kd',
     termName: string,
     term: EditablePidTerm
   ) => {
-    /**
-     * A gain field. Required, so an empty box is an error rather than a zero.
-     *
-     * `numeric` on `TextInput` is what fixes finding 04: it renders `type="text"` with
-     * `inputMode="decimal"` and monospace tabular figures. The old `type="number"` was
-     * formatted and parsed by the *browser's* locale, so `1.4` displayed as `1,4` beside a
-     * limit reading `100` — the same firmware value shown two ways on two machines in the
-     * same kitchen.
-     */
-    const gainField = (field: 'positive_scale' | 'negative_scale', label: string, help: string) => {
-      const key = `${termKey}_${field}`;
-      return (
-        <Field
-          label={label}
-          help={errors[key] ? undefined : help}
-          error={errors[key]}
-          unit={errorUnit && outputUnit ? `${outputUnit}/${errorUnit}` : undefined}
-          required
-        >
-          {(control) => (
-            <TextInput
-              {...control}
-              numeric
-              value={editingValues[key] ?? String(term[field])}
-              onInput={(value) => {
-                setEditingValues((prev) => ({ ...prev, [key]: value }));
-                const parsed = parseNumber(value);
-                if (parsed === null) {
-                  setError(key, 'Enter a number, using a full stop for the decimal point.');
-                } else {
-                  setError(key, null);
-                  updateTerm(termKey, field, parsed);
-                }
-              }}
-              onBlur={() => {
-                // Give the box back to the committed value, so a valid but oddly-typed
-                // entry (`.5`, `1.`) settles into its canonical form once focus leaves.
-                setEditingValues((prev) => {
-                  const { [key]: _unused, ...rest } = prev;
-                  return rest;
-                });
-              }}
-            />
-          )}
-        </Field>
-      );
-    };
+    /** A gain. Required, so an empty box is an error rather than a zero. */
+    const gainField = (field: 'positive_scale' | 'negative_scale', label: string, help: string) => (
+      <NumberField
+        label={label}
+        value={term[field]}
+        onChange={(value) => updateTerm(termKey, field, value)}
+        onValidityChange={validity(`${termKey}_${field}`)}
+        help={help}
+        unit={errorUnit && outputUnit ? `${outputUnit}/${errorUnit}` : undefined}
+      />
+    );
 
-    /** A limit field. Optional, and empty genuinely means unbounded. */
+    /** A limit. Optional, and an empty box genuinely means unbounded. */
     const limitField = (subfield: 'upper' | 'lower', label: string) => {
       const key = `${termKey}_limits_${subfield}`;
       const committed = term.limits[subfield];
+      const invalidHere = invalidFields[key] === true;
+
       return (
         <Field
           label={label}
           // The help moves below the control. "Upper Limit (empty = no limit)" put it
           // inside the label, where it wrapped onto a second line and pushed the label
           // away from its own input.
-          help={errors[key] ? undefined : 'Empty means no limit.'}
-          error={errors[key]}
+          help={invalidHere ? undefined : 'Empty means no limit.'}
+          error={invalidHere ? 'Enter a number, or leave empty for no limit.' : undefined}
           unit={outputUnit}
         >
           {(control) => (
             <TextInput
               {...control}
               numeric
-              value={editingValues[key] ?? (committed === null ? '' : String(committed))}
+              value={limitDrafts[key] ?? (committed === null ? '' : String(committed))}
               onInput={(value) => {
-                setEditingValues((prev) => ({ ...prev, [key]: value }));
+                setLimitDrafts((prev) => ({ ...prev, [key]: value }));
                 if (value.trim() === '') {
-                  setError(key, null);
+                  validity(key)(true);
                   updateLimit(termKey, subfield, null);
                   return;
                 }
-                const parsed = parseNumber(value);
-                if (parsed === null) {
-                  setError(key, 'Enter a number, or leave empty for no limit.');
+                const parsed = Number.parseFloat(value.trim());
+                if (!Number.isFinite(parsed)) {
+                  validity(key)(false);
                 } else {
-                  setError(key, null);
+                  validity(key)(true);
                   updateLimit(termKey, subfield, parsed);
                 }
               }}
               onBlur={() => {
-                setEditingValues((prev) => {
+                if (invalidHere) return;
+                setLimitDrafts((prev) => {
                   const { [key]: _unused, ...rest } = prev;
                   return rest;
                 });

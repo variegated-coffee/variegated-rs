@@ -1,5 +1,7 @@
 import { useState } from 'preact/hooks';
+import { Alert, Button, Field, Select, tokens } from '@variegated-coffee/ui';
 import { BoilerControlMode } from '../schemas/schemas';
+import { NumberField } from './NumberField';
 
 interface BoilerControlEditorProps {
   name: string;
@@ -10,6 +12,16 @@ interface BoilerControlEditorProps {
   onCancel: () => void;
 }
 
+/*
+ * The ranges the firmware will accept.
+ *
+ * Named rather than repeated in the validator and the input attributes, which is how the
+ * two came to be stated twice in the old version -- `min`/`max` on the input for the
+ * spinner, and the same numbers again inside `handleSave`.
+ */
+const TEMPERATURE_MAX = 200;
+const PRESSURE_MAX = 20;
+
 export const BoilerControlEditor = ({
   name,
   currentMode,
@@ -19,201 +31,106 @@ export const BoilerControlEditor = ({
   onCancel
 }: BoilerControlEditorProps) => {
   const [mode, setMode] = useState<BoilerControlMode>(currentMode);
-  const [targetTemperature, setTargetTemperature] = useState<string>(currentTargetTemperature.toFixed(1));
-  const [targetPressure, setTargetPressure] = useState<string>(currentTargetPressure.toFixed(2));
-  const [error, setError] = useState<string | null>(null);
+  const [targetTemperature, setTargetTemperature] = useState(currentTargetTemperature);
+  const [targetPressure, setTargetPressure] = useState(currentTargetPressure);
+  const [invalidFields, setInvalidFields] = useState<Record<string, true>>({});
+
+  const invalid = Object.keys(invalidFields).length > 0;
+
+  const validity = (key: string) => (valid: boolean) =>
+    setInvalidFields((prev) => {
+      if (valid) {
+        const { [key]: _unused, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: true };
+    });
 
   const handleSave = () => {
-    setError(null);
-
-    // Validate inputs
-    const temp = parseFloat(targetTemperature);
-    const pressure = parseFloat(targetPressure);
-
-    if (isNaN(temp) || temp < 0 || temp > 200) {
-      setError('Target temperature must be between 0 and 200°C');
-      return;
-    }
-
-    if (isNaN(pressure) || pressure < 0 || pressure > 20) {
-      setError('Target pressure must be between 0 and 20 bar');
-      return;
-    }
-
-    // Call onSave with the new values
+    // Validation now lives on the fields, so by the time Save is reachable both values are
+    // in range. It used to run here, which meant a bad entry was only reported after the
+    // button was pressed -- and reported at the top of the form rather than at the field.
+    if (invalid) return;
     onSave({
       mode,
-      target_temperature: temp,
-      target_pressure: pressure
+      target_temperature: targetTemperature,
+      target_pressure: targetPressure
     });
   };
 
   return (
     <div
       style={{
-        padding: '1.5rem',
-        backgroundColor: '#f8f9fa',
-        borderRadius: '8px',
-        border: '1px solid #ddd'
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.lg,
+        padding: tokens.space.lg,
+        backgroundColor: tokens.color.surfaceSunken,
+        borderRadius: tokens.radius.md,
+        border: `1px solid ${tokens.color.border}`,
       }}
     >
-      <h3 style={{ marginTop: 0, marginBottom: '1.5rem', fontSize: '1.2rem' }}>
-        Edit Boiler Control - {name}
+      <h3 style={{ marginTop: 0, marginBottom: 0, fontSize: '1.2rem' }}>
+        Boiler control — {name}
       </h3>
 
-      {error && (
-        <div
-          style={{
-            padding: '0.75rem',
-            marginBottom: '1rem',
-            backgroundColor: '#f8d7da',
-            color: '#721c24',
-            border: '1px solid #f5c6cb',
-            borderRadius: '4px',
-            fontSize: '0.9rem'
-          }}
-        >
-          {error}
-        </div>
-      )}
+      <Field label="Control mode" help="What this boiler holds steady.">
+        {(control) => (
+          <Select
+            {...control}
+            value={mode.type}
+            onChange={(value) => setMode({ type: value } as BoilerControlMode)}
+            options={[
+              { value: 'Temperature', label: 'Temperature control' },
+              { value: 'Pressure', label: 'Pressure control' },
+              { value: 'Off', label: 'Off' },
+            ]}
+          />
+        )}
+      </Field>
 
-      {/* Control Mode */}
-      <div style={{ marginBottom: '1.5rem' }}>
-        <label
-          style={{
-            display: 'block',
-            marginBottom: '0.5rem',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            color: '#333'
-          }}
-        >
-          Control Mode
-        </label>
-        <select
-          value={mode.type}
-          onChange={(e) => {
-            const modeType = (e.target as HTMLSelectElement).value;
-            setMode({ type: modeType } as BoilerControlMode);
-          }}
-          style={{
-            width: '100%',
-            padding: '0.5rem',
-            fontSize: '0.9rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            backgroundColor: 'white'
-          }}
-        >
-          <option value="Temperature">Temperature Control</option>
-          <option value="Pressure">Pressure Control</option>
-          <option value="Off">Off</option>
-        </select>
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-          Select the control mode for this boiler
-        </div>
-      </div>
+      {/* Both targets stay visible whichever mode is selected, because switching modes is
+          how you use them and hiding one would lose an edit in progress. Which one is in
+          use is said in the help text rather than by disabling the other. */}
+      <NumberField
+        label="Target temperature"
+        unit="°C"
+        value={targetTemperature}
+        onChange={setTargetTemperature}
+        onValidityChange={validity('temperature')}
+        min={0}
+        max={TEMPERATURE_MAX}
+        help={
+          mode.type === 'Temperature'
+            ? 'In use — this is what the boiler holds.'
+            : 'Kept for when the mode is set back to Temperature.'
+        }
+      />
 
-      {/* Target Temperature */}
-      <div style={{ marginBottom: '1.5rem' }}>
-        <label
-          style={{
-            display: 'block',
-            marginBottom: '0.5rem',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            color: '#333'
-          }}
-        >
-          Target Temperature (°C)
-        </label>
-        <input
-          type="number"
-          step="0.1"
-          min="0"
-          max="200"
-          value={targetTemperature}
-          onChange={(e) => setTargetTemperature((e.target as HTMLInputElement).value)}
-          style={{
-            width: '100%',
-            padding: '0.5rem',
-            fontSize: '0.9rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px'
-          }}
-        />
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-          Used when control mode is set to Temperature
-        </div>
-      </div>
+      <NumberField
+        label="Target pressure"
+        unit="bar"
+        value={targetPressure}
+        onChange={setTargetPressure}
+        onValidityChange={validity('pressure')}
+        min={0}
+        max={PRESSURE_MAX}
+        help={
+          mode.type === 'Pressure'
+            ? 'In use — this is what the boiler holds.'
+            : 'Kept for when the mode is set back to Pressure.'
+        }
+      />
 
-      {/* Target Pressure */}
-      <div style={{ marginBottom: '1.5rem' }}>
-        <label
-          style={{
-            display: 'block',
-            marginBottom: '0.5rem',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            color: '#333'
-          }}
-        >
-          Target Pressure (bar)
-        </label>
-        <input
-          type="number"
-          step="0.01"
-          min="0"
-          max="20"
-          value={targetPressure}
-          onChange={(e) => setTargetPressure((e.target as HTMLInputElement).value)}
-          style={{
-            width: '100%',
-            padding: '0.5rem',
-            fontSize: '0.9rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px'
-          }}
-        />
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-          Used when control mode is set to Pressure
-        </div>
-      </div>
+      {invalid && <Alert role="danger">Fix the fields marked above before saving.</Alert>}
 
-      {/* Buttons */}
-      <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
-        <button
-          onClick={handleSave}
-          style={{
-            flex: 1,
-            padding: '0.75rem',
-            backgroundColor: '#28a745',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            cursor: 'pointer'
-          }}
-        >
-          Save Changes
-        </button>
-        <button
-          onClick={onCancel}
-          style={{
-            flex: 1,
-            padding: '0.75rem',
-            backgroundColor: '#6c757d',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            cursor: 'pointer'
-          }}
-        >
+      <div style={{ display: 'flex', gap: tokens.space.sm, justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
+        <Button variant="primary" onClick={handleSave} disabled={invalid}>
+          Save changes
+        </Button>
       </div>
     </div>
   );

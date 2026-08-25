@@ -1,5 +1,7 @@
 import { useState } from 'preact/hooks';
+import { Alert, Button, Field, Select, tokens } from '@variegated-coffee/ui';
 import { GroupBrewControlMode, GroupBrewControlTargetValues, ControlCurve } from '../schemas/schemas';
+import { NumberField } from './NumberField';
 
 interface GroupControlEditorProps {
   name: string;
@@ -19,6 +21,27 @@ interface GroupControlEditorProps {
   onCancel: () => void;
 }
 
+/*
+ * The ten modes, with what each one means beside it.
+ *
+ * A flat list of ten options named after their enum variants -- "GroupFlowRateCurve" next
+ * to "OutputFlowRate" -- makes the reader work out which pairs differ by "which side of
+ * the puck" and which by "fixed or curve". Grouping by what is being controlled puts the
+ * pairs next to each other, and `Select` renders the groups as optgroups.
+ */
+const MODES = [
+  { value: 'GroupFlowRate', label: 'Fixed target', group: 'Flow into the puck' },
+  { value: 'GroupFlowRateCurve', label: 'Follow a curve', group: 'Flow into the puck' },
+  { value: 'OutputFlowRate', label: 'Fixed target', group: 'Flow out of the puck' },
+  { value: 'OutputFlowRateCurve', label: 'Follow a curve', group: 'Flow out of the puck' },
+  { value: 'Pressure', label: 'Fixed target', group: 'Pressure' },
+  { value: 'PressureCurve', label: 'Follow a curve', group: 'Pressure' },
+  { value: 'FixedDutyCycle', label: 'Fixed duty cycle', group: 'Pump directly' },
+  { value: 'FixedDutyCycleCurve', label: 'Follow a curve', group: 'Pump directly' },
+  { value: 'FullOn', label: 'Full on', group: 'Pump directly' },
+  { value: 'Off', label: 'Off', group: 'Pump directly' },
+];
+
 export const GroupControlEditor = ({
   name,
   currentMode,
@@ -27,11 +50,11 @@ export const GroupControlEditor = ({
   onCancel
 }: GroupControlEditorProps) => {
   const [mode, setMode] = useState<GroupBrewControlMode>(currentMode);
-  const [flowRate, setFlowRate] = useState<string>(currentValues.flow_rate.toFixed(1));
-  const [pressure, setPressure] = useState<string>(currentValues.pressure.toFixed(2));
-  const [outputFlowRate, setOutputFlowRate] = useState<string>(currentValues.output_flow_rate.toFixed(1));
-  const [dutyCycle, setDutyCycle] = useState<string>(currentValues.duty_cycle.toString());
-  const [error, setError] = useState<string | null>(null);
+  const [flowRate, setFlowRate] = useState(currentValues.flow_rate);
+  const [pressure, setPressure] = useState(currentValues.pressure);
+  const [outputFlowRate, setOutputFlowRate] = useState(currentValues.output_flow_rate);
+  const [dutyCycle, setDutyCycle] = useState(currentValues.duty_cycle);
+  const [invalidFields, setInvalidFields] = useState<Record<string, true>>({});
 
   // Determine which input to show based on mode
   const showFlowRate = mode.type === 'GroupFlowRate';
@@ -41,10 +64,20 @@ export const GroupControlEditor = ({
   const isCurveMode = mode.type.includes('Curve');
   const isFullOnOrOff = mode.type === 'FullOn' || mode.type === 'Off';
 
-  const handleSave = () => {
-    setError(null);
+  const invalid = Object.keys(invalidFields).length > 0;
 
-    // Validate inputs based on mode
+  const validity = (key: string) => (valid: boolean) =>
+    setInvalidFields((prev) => {
+      if (valid) {
+        const { [key]: _unused, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: true };
+    });
+
+  const handleSave = () => {
+    if (invalid) return;
+
     // Initialize ALL optional fields to null for postcard serialization
     // (postcard requires null for Option<T>, not undefined)
     const data: {
@@ -69,41 +102,13 @@ export const GroupControlEditor = ({
       output_flow_rate_curve: null
     };
 
-    if (showFlowRate) {
-      const val = parseFloat(flowRate);
-      if (isNaN(val) || val < 0 || val > 20) {
-        setError('Flow rate must be between 0 and 20 mL/s');
-        return;
-      }
-      data.flow_rate = val;
-    }
-
-    if (showPressure) {
-      const val = parseFloat(pressure);
-      if (isNaN(val) || val < 0 || val > 20) {
-        setError('Pressure must be between 0 and 20 bar');
-        return;
-      }
-      data.pressure = val;
-    }
-
-    if (showOutputFlowRate) {
-      const val = parseFloat(outputFlowRate);
-      if (isNaN(val) || val < 0 || val > 20) {
-        setError('Output flow rate must be between 0 and 20 mL/s');
-        return;
-      }
-      data.output_flow_rate = val;
-    }
-
-    if (showDutyCycle) {
-      const val = parseInt(dutyCycle);
-      if (isNaN(val) || val < 0 || val > 100) {
-        setError('Duty cycle must be between 0 and 100%');
-        return;
-      }
-      data.duty_cycle = val;
-    }
+    // Only the value the selected mode actually uses is sent. The ranges that used to be
+    // checked here are on the fields now, so a bad entry is reported where it was typed
+    // rather than at the top of the form after Save was pressed.
+    if (showFlowRate) data.flow_rate = flowRate;
+    if (showPressure) data.pressure = pressure;
+    if (showOutputFlowRate) data.output_flow_rate = outputFlowRate;
+    if (showDutyCycle) data.duty_cycle = dutyCycle;
 
     onSave(data);
   };
@@ -111,282 +116,106 @@ export const GroupControlEditor = ({
   return (
     <div
       style={{
-        padding: '1.5rem',
-        backgroundColor: '#f8f9fa',
-        borderRadius: '8px',
-        border: '1px solid #ddd'
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.lg,
+        padding: tokens.space.lg,
+        backgroundColor: tokens.color.surfaceSunken,
+        borderRadius: tokens.radius.md,
+        border: `1px solid ${tokens.color.border}`,
       }}
     >
-      <h3 style={{ marginTop: 0, marginBottom: '1.5rem', fontSize: '1.2rem' }}>
-        Edit Group Brew Control - {name}
+      <h3 style={{ marginTop: 0, marginBottom: 0, fontSize: '1.2rem' }}>
+        Brew control — {name}
       </h3>
 
-      {error && (
-        <div
-          style={{
-            padding: '0.75rem',
-            marginBottom: '1rem',
-            backgroundColor: '#f8d7da',
-            color: '#721c24',
-            border: '1px solid #f5c6cb',
-            borderRadius: '4px',
-            fontSize: '0.9rem'
-          }}
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Control Mode */}
-      <div style={{ marginBottom: '1.5rem' }}>
-        <label
-          style={{
-            display: 'block',
-            marginBottom: '0.5rem',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            color: '#333'
-          }}
-        >
-          Control Mode
-        </label>
-        <select
-          value={mode.type}
-          onChange={(e) => {
-            const modeType = (e.target as HTMLSelectElement).value;
-            setMode({ type: modeType } as GroupBrewControlMode);
-          }}
-          style={{
-            width: '100%',
-            padding: '0.5rem',
-            fontSize: '0.9rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            backgroundColor: 'white'
-          }}
-        >
-          <option value="GroupFlowRate">Group Flow Rate</option>
-          <option value="GroupFlowRateCurve">Group Flow Rate Curve</option>
-          <option value="Pressure">Pressure</option>
-          <option value="PressureCurve">Pressure Curve</option>
-          <option value="OutputFlowRate">Output Flow Rate</option>
-          <option value="OutputFlowRateCurve">Output Flow Rate Curve</option>
-          <option value="FixedDutyCycle">Fixed Duty Cycle</option>
-          <option value="FixedDutyCycleCurve">Fixed Duty Cycle Curve</option>
-          <option value="FullOn">Full On</option>
-          <option value="Off">Off</option>
-        </select>
-        <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-          Select the brew control mode for this group
-        </div>
-      </div>
-
-      {/* Curve mode info */}
-      {isCurveMode && (
-        <div
-          style={{
-            padding: '0.75rem',
-            marginBottom: '1.5rem',
-            backgroundColor: '#d1ecf1',
-            color: '#0c5460',
-            border: '1px solid #bee5eb',
-            borderRadius: '4px',
-            fontSize: '0.85rem'
-          }}
-        >
-          <strong>Note:</strong> Curve modes use the configured curve. To edit the curve, use the
-          corresponding curve editor from the main configuration screen.
-        </div>
-      )}
-
-      {/* Full On / Off info */}
-      {isFullOnOrOff && (
-        <div
-          style={{
-            padding: '0.75rem',
-            marginBottom: '1.5rem',
-            backgroundColor: '#d1ecf1',
-            color: '#0c5460',
-            border: '1px solid #bee5eb',
-            borderRadius: '4px',
-            fontSize: '0.85rem'
-          }}
-        >
-          <strong>Note:</strong> {mode.type === 'FullOn' ? 'Pump will run at 100% duty cycle' : 'Pump will be off'}
-        </div>
-      )}
-
-      {/* Conditional target value inputs */}
-      {showFlowRate && (
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label
-            style={{
-              display: 'block',
-              marginBottom: '0.5rem',
-              fontSize: '0.9rem',
-              fontWeight: '500',
-              color: '#333'
-            }}
-          >
-            Target Flow Rate (mL/s)
-          </label>
-          <input
-            type="number"
-            step="0.1"
-            min="0"
-            max="20"
-            value={flowRate}
-            onChange={(e) => setFlowRate((e.target as HTMLInputElement).value)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              fontSize: '0.9rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px'
-            }}
+      <Field label="Control mode" help="What the pump is driven by during a shot.">
+        {(control) => (
+          <Select
+            {...control}
+            value={mode.type}
+            onChange={(value) => setMode({ type: value } as GroupBrewControlMode)}
+            options={MODES}
           />
-          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-            Target flow rate at the group (input side)
-          </div>
-        </div>
+        )}
+      </Field>
+
+      {isCurveMode && (
+        <Alert role="info">
+          This mode follows the configured curve. Edit it from the group's Control curves
+          section.
+        </Alert>
+      )}
+
+      {isFullOnOrOff && (
+        <Alert role="info">
+          {mode.type === 'FullOn'
+            ? 'The pump runs at full duty for the whole shot, with nothing regulating it.'
+            : 'The pump stays off.'}
+        </Alert>
+      )}
+
+      {showFlowRate && (
+        <NumberField
+          label="Target flow rate"
+          unit="mL/s"
+          value={flowRate}
+          onChange={setFlowRate}
+          onValidityChange={validity('flow_rate')}
+          min={0}
+          max={20}
+          help="Measured on the input side, before the puck."
+        />
       )}
 
       {showPressure && (
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label
-            style={{
-              display: 'block',
-              marginBottom: '0.5rem',
-              fontSize: '0.9rem',
-              fontWeight: '500',
-              color: '#333'
-            }}
-          >
-            Target Pressure (bar)
-          </label>
-          <input
-            type="number"
-            step="0.01"
-            min="0"
-            max="20"
-            value={pressure}
-            onChange={(e) => setPressure((e.target as HTMLInputElement).value)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              fontSize: '0.9rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px'
-            }}
-          />
-          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-            Target brewing pressure
-          </div>
-        </div>
+        <NumberField
+          label="Target pressure"
+          unit="bar"
+          value={pressure}
+          onChange={setPressure}
+          onValidityChange={validity('pressure')}
+          min={0}
+          max={20}
+          help="Brewing pressure at the group."
+        />
       )}
 
       {showOutputFlowRate && (
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label
-            style={{
-              display: 'block',
-              marginBottom: '0.5rem',
-              fontSize: '0.9rem',
-              fontWeight: '500',
-              color: '#333'
-            }}
-          >
-            Target Output Flow Rate (mL/s)
-          </label>
-          <input
-            type="number"
-            step="0.1"
-            min="0"
-            max="20"
-            value={outputFlowRate}
-            onChange={(e) => setOutputFlowRate((e.target as HTMLInputElement).value)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              fontSize: '0.9rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px'
-            }}
-          />
-          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-            Target flow rate at the output (scale)
-          </div>
-        </div>
+        <NumberField
+          label="Target output flow rate"
+          unit="mL/s"
+          value={outputFlowRate}
+          onChange={setOutputFlowRate}
+          onValidityChange={validity('output_flow_rate')}
+          min={0}
+          max={20}
+          help="Measured at the scale, after the puck."
+        />
       )}
 
       {showDutyCycle && (
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label
-            style={{
-              display: 'block',
-              marginBottom: '0.5rem',
-              fontSize: '0.9rem',
-              fontWeight: '500',
-              color: '#333'
-            }}
-          >
-            Duty Cycle (%)
-          </label>
-          <input
-            type="number"
-            step="1"
-            min="0"
-            max="100"
-            value={dutyCycle}
-            onChange={(e) => setDutyCycle((e.target as HTMLInputElement).value)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              fontSize: '0.9rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px'
-            }}
-          />
-          <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.25rem' }}>
-            Fixed pump duty cycle (0-100%)
-          </div>
-        </div>
+        <NumberField
+          label="Duty cycle"
+          unit="%"
+          value={dutyCycle}
+          onChange={setDutyCycle}
+          onValidityChange={validity('duty_cycle')}
+          min={0}
+          max={100}
+          help="The pump runs at this duty regardless of what the sensors read."
+        />
       )}
 
-      {/* Buttons */}
-      <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
-        <button
-          onClick={handleSave}
-          style={{
-            flex: 1,
-            padding: '0.75rem',
-            backgroundColor: '#28a745',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            cursor: 'pointer'
-          }}
-        >
-          Save Changes
-        </button>
-        <button
-          onClick={onCancel}
-          style={{
-            flex: 1,
-            padding: '0.75rem',
-            backgroundColor: '#6c757d',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            fontSize: '0.9rem',
-            fontWeight: '500',
-            cursor: 'pointer'
-          }}
-        >
+      {invalid && <Alert role="danger">Fix the field marked above before saving.</Alert>}
+
+      <div style={{ display: 'flex', gap: tokens.space.sm, justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
+        <Button variant="primary" onClick={handleSave} disabled={invalid}>
+          Save changes
+        </Button>
       </div>
     </div>
   );

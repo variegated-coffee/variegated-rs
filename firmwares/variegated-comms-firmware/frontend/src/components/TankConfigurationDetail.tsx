@@ -1,5 +1,12 @@
+import { Alert, Readout, ReadoutGroup } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
-import { ConfigurationSection } from './ConfigurationSection';
+import {
+  ConfigurationSection,
+  EntityDetailHeader,
+  SettingRow,
+  optionalUnit,
+  optionalValue,
+} from './ConfigurationSection';
 
 interface TankConfigurationDetailProps {
   entityKey: number;
@@ -17,57 +24,35 @@ export const TankConfigurationDetail = ({
   const tankConfig = configuration.tank_configurations.get(entityKey);
 
   if (!tankConfig) {
-    return <div>Tank configuration not found</div>;
+    return <Alert role="warn">No configuration for this tank.</Alert>;
   }
+
+  const threshold = tankConfig.low_level_warning_threshold;
 
   return (
     <div>
-      <div style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ margin: 0, fontSize: '1.3rem' }}>{name}</h2>
-        <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-          Tank ID: {entityKey}
-        </div>
-      </div>
+      <EntityDetailHeader name={name} index={entityKey} />
 
-      {/* Basic Settings */}
-      <ConfigurationSection title="Basic Settings">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Low Level Warning Threshold:</span>
-            <span style={{ fontWeight: '500' }}>
-              {tankConfig.low_level_warning_threshold !== null && tankConfig.low_level_warning_threshold !== undefined
-                ? `${tankConfig.low_level_warning_threshold.toFixed(1)}%`
-                : 'Not set'}
-            </span>
-          </div>
-        </div>
+      <ConfigurationSection title="Basic settings">
+        <ReadoutGroup>
+          <Readout
+            label="Low level warning threshold"
+            value={optionalValue(threshold, 1)}
+            unit={optionalUnit(threshold, '%')}
+          />
+        </ReadoutGroup>
       </ConfigurationSection>
 
-      {/* Sensor Filtering */}
-      <ConfigurationSection title="Sensor Filtering">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <div style={{ fontSize: '0.9rem' }}>Water Level Kalman Filter</div>
-            <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.1rem' }}>
-              {tankConfig.water_level_sensor_kalman_parameters ? 'Enabled' : 'Disabled'}
-            </div>
-          </div>
-          <button
-            onClick={() => onNavigateToParameter('water_level_kalman')}
-            style={{
-              padding: '0.4rem 1rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '0.85rem',
-              fontWeight: '500'
-            }}
-          >
-            Edit →
-          </button>
-        </div>
+      <ConfigurationSection title="Sensor filtering">
+        <SettingRow
+          title="Water level Kalman filter"
+          description="Smooths the level reading, which is noisy while water is moving"
+          configured={
+            tankConfig.water_level_sensor_kalman_parameters !== null &&
+            tankConfig.water_level_sensor_kalman_parameters !== undefined
+          }
+          onEdit={() => onNavigateToParameter('water_level_kalman')}
+        />
       </ConfigurationSection>
     </div>
   );

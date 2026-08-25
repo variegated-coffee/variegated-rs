@@ -114,7 +114,9 @@ export const ShotUploadPanel = memo(({ shotUpload }: ShotUploadPanelProps) => {
   if (!shotUpload) {
     return (
       <ConfigurationSection title="Shot upload">
-        <div style={{ color: '#666', fontSize: '0.9rem' }}>Waiting for configuration…</div>
+        <div style={{ color: tokens.color.inkMuted, fontSize: '0.9rem' }}>
+          Waiting for configuration…
+        </div>
       </ConfigurationSection>
     );
   }

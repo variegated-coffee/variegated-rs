@@ -1,5 +1,7 @@
 import { useState } from 'preact/hooks';
+import { Alert, Button, tokens } from '@variegated-coffee/ui';
 import { ControlCurve } from '../schemas/schemas';
+import { NumberField } from './NumberField';
 
 interface ControlCurveEditorProps {
   title: string;
@@ -9,11 +11,30 @@ interface ControlCurveEditorProps {
   onCancel: () => void;
 }
 
+/** How far into a shot the preview looks, in seconds. */
+const PREVIEW_SECONDS = 50;
+const PREVIEW_STEP = 5;
+
 export const ControlCurveEditor = ({ title, curve, unit, onSave, onCancel }: ControlCurveEditorProps) => {
   const [localCurve, setLocalCurve] = useState<ControlCurve>(JSON.parse(JSON.stringify(curve)) as ControlCurve);
-  const [editingValues, setEditingValues] = useState<Record<string, string>>({});
+  const [invalidFields, setInvalidFields] = useState<Record<string, true>>({});
+
+  const invalid = Object.keys(invalidFields).length > 0;
+  // A clamp band the wrong way round leaves the curve with nowhere to be, and neither
+  // field is individually wrong -- so it is checked across the pair.
+  const bandInverted = localCurve.min > localCurve.max;
+
+  const validity = (key: string) => (valid: boolean) =>
+    setInvalidFields((prev) => {
+      if (valid) {
+        const { [key]: _unused, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: true };
+    });
 
   const handleSave = () => {
+    if (invalid || bandInverted) return;
     onSave(localCurve);
   };
 
@@ -21,307 +42,188 @@ export const ControlCurveEditor = ({ title, curve, unit, onSave, onCancel }: Con
     setLocalCurve(prev => ({ ...prev, [field]: value }));
   };
 
-  // Simple curve preview - evaluate at t=0, 10, 20, 30, 40, 50 seconds
-  const generatePreviewPoints = () => {
+  const previewPoints = (() => {
     const points = [];
-    for (let t = 0; t <= 50; t += 5) {
+    for (let t = 0; t <= PREVIEW_SECONDS; t += PREVIEW_STEP) {
       const y = localCurve.a + localCurve.b * t + localCurve.c * t * t;
       const clamped = Math.max(localCurve.min, Math.min(localCurve.max, y));
       points.push({ t, y: clamped });
     }
     return points;
-  };
+  })();
 
-  const previewPoints = generatePreviewPoints();
   const maxY = Math.max(...previewPoints.map(p => p.y));
   const minY = Math.min(...previewPoints.map(p => p.y));
   const rangeY = maxY - minY || 1;
 
+  const position = (point: { t: number; y: number }) => ({
+    x: (point.t / PREVIEW_SECONDS) * 100,
+    y: 100 - ((point.y - minY) / rangeY) * 80,
+  });
+
   return (
     <div>
-      <div style={{ marginBottom: '1rem' }}>
-        <h3 style={{ margin: 0 }}>{title}</h3>
+      <h3 style={{ marginTop: 0, marginBottom: tokens.space.md }}>{title}</h3>
+
+      <div
+        style={{
+          padding: tokens.space.md,
+          backgroundColor: tokens.color.surfaceSunken,
+          borderRadius: tokens.radius.md,
+          border: `1px solid ${tokens.color.border}`,
+          marginBottom: tokens.space.md,
+        }}
+      >
+        <div style={{ fontSize: '0.9rem', color: tokens.color.inkMuted, marginBottom: tokens.space.md }}>
+          <span style={{ fontFamily: tokens.font.mono }}>y = a + b·t + c·t²</span>
+          <div style={{ fontSize: '0.8rem', marginTop: tokens.space.xs }}>
+            where <em>t</em> is seconds from the start of the shot, and <em>y</em> is in {unit}
+          </div>
+        </div>
+
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(11rem, 1fr))',
+            gap: tokens.space.md,
+          }}
+        >
+          <NumberField
+            label="Coefficient a"
+            unit={unit}
+            value={localCurve.a}
+            onChange={(v) => updateField('a', v)}
+            onValidityChange={validity('a')}
+            help="Where the curve starts."
+          />
+          <NumberField
+            label="Coefficient b"
+            unit={`${unit}/s`}
+            value={localCurve.b}
+            onChange={(v) => updateField('b', v)}
+            onValidityChange={validity('b')}
+            help="Linear rate of change."
+          />
+          <NumberField
+            label="Coefficient c"
+            unit={`${unit}/s²`}
+            value={localCurve.c}
+            onChange={(v) => updateField('c', v)}
+            onValidityChange={validity('c')}
+            help="Curvature. Negative bends the curve down."
+          />
+          <NumberField
+            label="Minimum value"
+            unit={unit}
+            value={localCurve.min}
+            onChange={(v) => updateField('min', v)}
+            onValidityChange={validity('min')}
+            help="The curve is clamped up to this."
+          />
+          <NumberField
+            label="Maximum value"
+            unit={unit}
+            value={localCurve.max}
+            onChange={(v) => updateField('max', v)}
+            onValidityChange={validity('max')}
+            help="The curve is clamped down to this."
+          />
+        </div>
+
+        {bandInverted && (
+          <div style={{ marginTop: tokens.space.md }}>
+            <Alert role="danger">
+              The minimum is above the maximum, so the curve is clamped to nothing.
+            </Alert>
+          </div>
+        )}
       </div>
 
       <div
         style={{
-          padding: '1rem',
-          backgroundColor: '#f8f9fa',
-          borderRadius: '6px',
-          border: '1px solid #e0e0e0',
-          marginBottom: '1rem'
+          padding: tokens.space.md,
+          backgroundColor: tokens.color.surfaceRaised,
+          border: `1px solid ${tokens.color.border}`,
+          borderRadius: tokens.radius.md,
+          marginBottom: tokens.space.md,
         }}
       >
-        <div style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
-          Curve formula: <strong>y = a + b·t + c·t²</strong>
-          <div style={{ fontSize: '0.8rem', marginTop: '0.25rem' }}>
-            where <em>t</em> is time in seconds from brew start
-          </div>
+        <div style={{ fontSize: '0.9rem', fontWeight: 500, marginBottom: tokens.space.sm }}>
+          Preview
         </div>
+        <div
+          style={{
+            position: 'relative',
+            height: '200px',
+            backgroundColor: tokens.color.surfaceSunken,
+            borderRadius: tokens.radius.sm,
+            padding: tokens.space.md,
+          }}
+        >
+          {/* Labelled as an image with its shape described, because the numbers behind it
+              are not otherwise readable: an SVG of bare lines announces as nothing at all. */}
+          <svg
+            width="100%"
+            height="100%"
+            style={{ display: 'block' }}
+            role="img"
+            aria-label={`Curve from ${previewPoints[0]?.y.toFixed(1)} ${unit} at 0 seconds to ${previewPoints[previewPoints.length - 1]?.y.toFixed(1)} ${unit} at ${PREVIEW_SECONDS} seconds, clamped between ${localCurve.min} and ${localCurve.max} ${unit}`}
+          >
+            <text x="5" y="15" fontSize="10" fill={tokens.color.inkMuted}>
+              {maxY.toFixed(1)} {unit}
+            </text>
+            <text x="5" y="185" fontSize="10" fill={tokens.color.inkMuted}>
+              {minY.toFixed(1)} {unit}
+            </text>
+            <text x="5" y="195" fontSize="10" fill={tokens.color.inkMuted}>
+              0s
+            </text>
+            <text x="95%" y="195" fontSize="10" fill={tokens.color.inkMuted} textAnchor="end">
+              {PREVIEW_SECONDS}s
+            </text>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.75rem' }}>
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Coefficient a
-            </label>
-            <input
-              type="number"
-              step="0.1"
-              value={editingValues['a'] ?? localCurve.a.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, a: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('a', parsed);
-                setEditingValues(prev => {
-                  const { a: _a, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-            <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.25rem' }}>
-              Constant term
-            </div>
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Coefficient b
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              value={editingValues['b'] ?? localCurve.b.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, b: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('b', parsed);
-                setEditingValues(prev => {
-                  const { b: _b, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-            <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.25rem' }}>
-              Linear term
-            </div>
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Coefficient c
-            </label>
-            <input
-              type="number"
-              step="0.001"
-              value={editingValues['c'] ?? localCurve.c.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, c: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('c', parsed);
-                setEditingValues(prev => {
-                  const { c: _c, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-            <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.25rem' }}>
-              Quadratic term
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.75rem' }}>
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Minimum Value ({unit})
-            </label>
-            <input
-              type="number"
-              step="0.1"
-              value={editingValues['min'] ?? localCurve.min.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, min: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('min', parsed);
-                setEditingValues(prev => {
-                  const { min: _min, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-            <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.25rem' }}>
-              Lower clamp
-            </div>
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Maximum Value ({unit})
-            </label>
-            <input
-              type="number"
-              step="0.1"
-              value={editingValues['max'] ?? localCurve.max.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, max: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('max', parsed);
-                setEditingValues(prev => {
-                  const { max: _max, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-            <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.25rem' }}>
-              Upper clamp
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Simple Preview */}
-      <div
-        style={{
-          padding: '1rem',
-          backgroundColor: 'white',
-          border: '1px solid #ddd',
-          borderRadius: '6px',
-          marginBottom: '1rem'
-        }}
-      >
-        <div style={{ fontSize: '0.9rem', fontWeight: '500', marginBottom: '0.75rem' }}>Curve Preview</div>
-        <div style={{ position: 'relative', height: '200px', backgroundColor: '#f8f9fa', borderRadius: '4px', padding: '1rem' }}>
-          <svg width="100%" height="100%" style={{ display: 'block' }}>
-            {/* Y axis labels */}
-            <text x="5" y="15" fontSize="10" fill="#666">{maxY.toFixed(1)} {unit}</text>
-            <text x="5" y="185" fontSize="10" fill="#666">{minY.toFixed(1)} {unit}</text>
-
-            {/* X axis labels */}
-            <text x="5" y="195" fontSize="10" fill="#666">0s</text>
-            <text x="95%" y="195" fontSize="10" fill="#666" textAnchor="end">50s</text>
-
-            {/* Plot points */}
             {previewPoints.map((point, idx) => {
-              const x = (point.t / 50) * 100;
-              const y = 100 - ((point.y - minY) / rangeY) * 80;
-
               if (idx === 0) return null;
-
-              const prevPoint = previewPoints[idx - 1];
-              const prevX = (prevPoint.t / 50) * 100;
-              const prevY = 100 - ((prevPoint.y - minY) / rangeY) * 80;
-
+              const here = position(point);
+              const before = position(previewPoints[idx - 1]!);
               return (
                 <line
                   key={idx}
-                  x1={`${prevX}%`}
-                  y1={`${prevY}%`}
-                  x2={`${x}%`}
-                  y2={`${y}%`}
-                  stroke="#0066cc"
+                  x1={`${before.x}%`}
+                  y1={`${before.y}%`}
+                  x2={`${here.x}%`}
+                  y2={`${here.y}%`}
+                  // The pen the shot charts draw pressure with, so a pressure curve here
+                  // and the trace it produces are the same colour.
+                  stroke={tokens.pen.pressure}
                   strokeWidth="2"
                 />
               );
             })}
 
-            {/* Plot points as circles */}
             {previewPoints.map((point, idx) => {
-              const x = (point.t / 50) * 100;
-              const y = 100 - ((point.y - minY) / rangeY) * 80;
-
+              const here = position(point);
               return (
-                <circle
-                  key={idx}
-                  cx={`${x}%`}
-                  cy={`${y}%`}
-                  r="3"
-                  fill="#0066cc"
-                />
+                <circle key={idx} cx={`${here.x}%`} cy={`${here.y}%`} r="3" fill={tokens.pen.pressure} />
               );
             })}
           </svg>
         </div>
       </div>
 
-      <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
-        <button
-          onClick={onCancel}
-          style={{
-            padding: '0.5rem 1.5rem',
-            backgroundColor: 'white',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem'
-          }}
-        >
+      {invalid && (
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Alert role="danger">Fix the fields marked above before saving.</Alert>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: tokens.space.sm, justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
-        <button
-          onClick={handleSave}
-          style={{
-            padding: '0.5rem 1.5rem',
-            backgroundColor: '#0066cc',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-            fontWeight: '500'
-          }}
-        >
-          Save Changes
-        </button>
+        </Button>
+        <Button variant="primary" onClick={handleSave} disabled={invalid || bandInverted}>
+          Save changes
+        </Button>
       </div>
     </div>
   );

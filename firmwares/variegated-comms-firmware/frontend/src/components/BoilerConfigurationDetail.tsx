@@ -1,5 +1,12 @@
+import { Alert, Badge, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
-import { ConfigurationSection } from './ConfigurationSection';
+import {
+  ConfigurationSection,
+  EntityDetailHeader,
+  SettingRow,
+  optionalUnit,
+  optionalValue,
+} from './ConfigurationSection';
 import { useMachine } from '../contexts/MachineContext';
 
 interface BoilerConfigurationDetailProps {
@@ -19,267 +26,140 @@ export const BoilerConfigurationDetail = ({
   const boilerConfig = configuration.boiler_configurations.get(entityKey);
 
   if (!boilerConfig) {
-    return <div>Boiler configuration not found</div>;
+    return <Alert role="warn">No configuration for this boiler.</Alert>;
   }
 
   const formatControlMode = (modeType: string) => {
     const modes: Record<string, string> = {
-      Temperature: 'Temperature Control',
-      Pressure: 'Pressure Control',
+      Temperature: 'Temperature control',
+      Pressure: 'Pressure control',
       Off: 'Off'
     };
     return modes[modeType] || modeType;
   };
 
+  const { minimum_safe_level, max_temperature, max_pressure } = boilerConfig;
+  const fill = boilerConfig.fill_config;
+
   return (
     <div>
-      <div style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ margin: 0, fontSize: '1.3rem' }}>{name}</h2>
-        <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-          Boiler ID: {entityKey}
-        </div>
-      </div>
+      <EntityDetailHeader name={name} index={entityKey} />
 
-      {/* Control State */}
-      <ConfigurationSection title="Control State">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.9rem', color: '#666' }}>Control Mode:</span>
-            <span
-              style={{
-                padding: '0.25rem 0.75rem',
-                backgroundColor: boilerConfig.control_state.mode.type === 'Off' ? '#6c757d' : '#28a745',
-                color: 'white',
-                borderRadius: '12px',
-                fontSize: '0.8rem',
-                fontWeight: '500'
-              }}
-            >
-              {formatControlMode(boilerConfig.control_state.mode.type)}
-            </span>
-          </div>
+      <ConfigurationSection title="Control state">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
+          <ReadoutGroup>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
+              <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Control mode</span>
+              <Badge role={boilerConfig.control_state.mode.type === 'Off' ? undefined : 'ok'}>
+                {formatControlMode(boilerConfig.control_state.mode.type)}
+              </Badge>
+            </div>
+            <Readout
+              label="Target temperature"
+              value={boilerConfig.control_state.values.target_temperature.toFixed(1)}
+              unit="°C"
+            />
+            <Readout
+              label="Target pressure"
+              value={boilerConfig.control_state.values.target_pressure.toFixed(2)}
+              unit="bar"
+            />
+          </ReadoutGroup>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Target Temperature:</span>
-            <span style={{ fontWeight: '500' }}>
-              {boilerConfig.control_state.values.target_temperature.toFixed(1)}°C
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Target Pressure:</span>
-            <span style={{ fontWeight: '500' }}>
-              {boilerConfig.control_state.values.target_pressure.toFixed(2)} bar
-            </span>
-          </div>
-
-          <div style={{ marginTop: '0.5rem' }}>
-            <button
-              onClick={() => onNavigateToParameter('boiler_control')}
-              style={{
-                width: '100%',
-                padding: '0.5rem 1rem',
-                backgroundColor: '#0066cc',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Edit Control Settings →
-            </button>
-          </div>
+          <SettingRow
+            title="Control settings"
+            description="Mode and the targets it holds"
+            onEdit={() => onNavigateToParameter('boiler_control')}
+          />
         </div>
       </ConfigurationSection>
 
-      {/* Safety Limits */}
-      <ConfigurationSection title="Safety Limits">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Supply Tank:</span>
-            <span style={{ fontWeight: '500' }}>
-              {boilerConfig.supply_tank_index !== null && boilerConfig.supply_tank_index !== undefined
+      {/* These are the limits that stop a boiler doing damage, so they read as a group of
+          their own rather than as four more rows of settings. */}
+      <ConfigurationSection title="Safety limits">
+        <ReadoutGroup>
+          <Readout
+            label="Supply tank"
+            value={
+              boilerConfig.supply_tank_index !== null && boilerConfig.supply_tank_index !== undefined
                 ? getTankName(boilerConfig.supply_tank_index)
-                : 'Not configured'}
-            </span>
-          </div>
+                : '—'
+            }
+          />
+          <Readout
+            label="Minimum safe level"
+            value={optionalValue(minimum_safe_level, 1)}
+            unit={optionalUnit(minimum_safe_level, '%')}
+          />
+          <Readout
+            label="Max temperature"
+            value={optionalValue(max_temperature, 1)}
+            unit={optionalUnit(max_temperature, '°C')}
+          />
+          <Readout
+            label="Max pressure"
+            value={optionalValue(max_pressure, 2)}
+            unit={optionalUnit(max_pressure, 'bar')}
+          />
+        </ReadoutGroup>
+      </ConfigurationSection>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Minimum Safe Level:</span>
-            <span style={{ fontWeight: '500' }}>
-              {boilerConfig.minimum_safe_level !== null && boilerConfig.minimum_safe_level !== undefined
-                ? `${boilerConfig.minimum_safe_level.toFixed(1)}%`
-                : 'Not set'}
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Max Temperature:</span>
-            <span style={{ fontWeight: '500' }}>
-              {boilerConfig.max_temperature !== null && boilerConfig.max_temperature !== undefined
-                ? `${boilerConfig.max_temperature.toFixed(1)}°C`
-                : 'Not set'}
-            </span>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Max Pressure:</span>
-            <span style={{ fontWeight: '500' }}>
-              {boilerConfig.max_pressure !== null && boilerConfig.max_pressure !== undefined
-                ? `${boilerConfig.max_pressure.toFixed(2)} bar`
-                : 'Not set'}
-            </span>
-          </div>
+      <ConfigurationSection title="PID controllers">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
+          <SettingRow
+            title="Temperature PID"
+            description="Gains and limits for the temperature loop"
+            onEdit={() => onNavigateToParameter('temperature_pid')}
+          />
+          <SettingRow
+            title="Pressure PID"
+            description="Gains and limits for the pressure loop"
+            onEdit={() => onNavigateToParameter('pressure_pid')}
+          />
         </div>
       </ConfigurationSection>
 
-      {/* PID Controllers */}
-      <ConfigurationSection title="PID Controllers">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.9rem' }}>Temperature PID</span>
-            <button
-              onClick={() => onNavigateToParameter('temperature_pid')}
-              style={{
-                padding: '0.4rem 1rem',
-                backgroundColor: '#0066cc',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Edit Parameters →
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '0.9rem' }}>Pressure PID</span>
-            <button
-              onClick={() => onNavigateToParameter('pressure_pid')}
-              style={{
-                padding: '0.4rem 1rem',
-                backgroundColor: '#0066cc',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Edit Parameters →
-            </button>
-          </div>
+      <ConfigurationSection title="Sensor filtering">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
+          <SettingRow
+            title="Temperature Kalman filter"
+            description="Smooths the temperature reading before the loop sees it"
+            configured={
+              boilerConfig.temperature_sensor_kalman_parameters !== null &&
+              boilerConfig.temperature_sensor_kalman_parameters !== undefined
+            }
+            onEdit={() => onNavigateToParameter('temperature_kalman')}
+          />
+          <SettingRow
+            title="Pressure Kalman filter"
+            description="Smooths the pressure reading before the loop sees it"
+            configured={
+              boilerConfig.pressure_sensor_kalman_parameters !== null &&
+              boilerConfig.pressure_sensor_kalman_parameters !== undefined
+            }
+            onEdit={() => onNavigateToParameter('pressure_kalman')}
+          />
         </div>
       </ConfigurationSection>
 
-      {/* Sensor Filtering */}
-      <ConfigurationSection title="Sensor Filtering">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <div style={{ fontSize: '0.9rem' }}>Temperature Kalman Filter</div>
-              <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.1rem' }}>
-                {boilerConfig.temperature_sensor_kalman_parameters ? 'Enabled' : 'Disabled'}
-              </div>
-            </div>
-            <button
-              onClick={() => onNavigateToParameter('temperature_kalman')}
-              style={{
-                padding: '0.4rem 1rem',
-                backgroundColor: '#0066cc',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Edit →
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-              <div style={{ fontSize: '0.9rem' }}>Pressure Kalman Filter</div>
-              <div style={{ fontSize: '0.75rem', color: '#999', marginTop: '0.1rem' }}>
-                {boilerConfig.pressure_sensor_kalman_parameters ? 'Enabled' : 'Disabled'}
-              </div>
-            </div>
-            <button
-              onClick={() => onNavigateToParameter('pressure_kalman')}
-              style={{
-                padding: '0.4rem 1rem',
-                backgroundColor: '#0066cc',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Edit →
-            </button>
-          </div>
-        </div>
-      </ConfigurationSection>
-
-      {/* Fill Configuration */}
-      {boilerConfig.fill_config && (
-        <ConfigurationSection title="Fill Configuration">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-              <span style={{ color: '#666' }}>Fill Threshold:</span>
-              <span style={{ fontWeight: '500' }}>
-                {boilerConfig.fill_config.fill_threshold !== null && boilerConfig.fill_config.fill_threshold !== undefined
-                  ? `${boilerConfig.fill_config.fill_threshold.toFixed(1)}%`
-                  : 'Not set'}
-              </span>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.9rem' }}>Pump Configuration</span>
-              {boilerConfig.fill_config.pump_configuration ? (
-                <button
-                  onClick={() => onNavigateToParameter('fill_pump_config')}
-                  style={{
-                    padding: '0.4rem 1rem',
-                    backgroundColor: '#0066cc',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.85rem',
-                    fontWeight: '500'
-                  }}
-                >
-                  Edit →
-                </button>
-              ) : (
-                <button
-                  onClick={() => onNavigateToParameter('fill_pump_config')}
-                  style={{
-                    padding: '0.4rem 1rem',
-                    backgroundColor: '#28a745',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.85rem',
-                    fontWeight: '500'
-                  }}
-                >
-                  Configure
-                </button>
-              )}
-            </div>
+      {fill && (
+        <ConfigurationSection title="Fill">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
+            <ReadoutGroup>
+              <Readout
+                label="Fill threshold"
+                value={optionalValue(fill.fill_threshold, 1)}
+                unit={optionalUnit(fill.fill_threshold, '%')}
+              />
+            </ReadoutGroup>
+            <SettingRow
+              title="Fill pump"
+              description="Duty cycle, ramp times, flow sensor"
+              configured={
+                fill.pump_configuration !== null && fill.pump_configuration !== undefined
+              }
+              onEdit={() => onNavigateToParameter('fill_pump_config')}
+            />
           </div>
         </ConfigurationSection>
       )}
