@@ -121,11 +121,18 @@ run "variegated-exfat-format" -p variegated-exfat-format "$@"
 # in this fixture crate. It is an ordinary std crate and is not a workspace default member.
 run "variegated-board-cfg-tests" -p variegated-board-cfg-tests "$@"
 
+# The `GPIOBASE` window arithmetic and the PIO clock divider. No feature flags and no
+# `--no-default-features` needed: this crate has no `embassy-rp` dependency at all, which is
+# the whole reason it exists as a leaf both SD transports sit on. It is also the code that
+# has produced the most silent faults on this hardware -- a five-bit field counted from the
+# wrong base makes the block watch a pin nobody chose, and nothing says so.
+run "variegated-rp-pio" -p variegated-rp-pio "$@"
+
 # `--no-default-features` is what makes `variegated-pio-mmc-bus` runnable at all: its chip
 # features are what pull in embassy-rp, and embassy-rp cannot build for a host. With none
-# of them on, the crate is its pure modules -- the CRCs, the command framing, the clock
-# divider and the assembled PIO programs -- which is precisely the code that a logic
-# analyser on a live SD bus cannot check.
+# of them on, the crate is its pure modules -- the CRCs, the command framing, the phase
+# table and the assembled PIO programs -- which is precisely the code that a logic analyser
+# on a live SD bus cannot check.
 run "variegated-pio-mmc-bus" -p variegated-pio-mmc-bus --no-default-features "$@"
 
 exit $RC

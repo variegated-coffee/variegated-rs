@@ -37,6 +37,8 @@ members = [
     "crates/variegated-debug",
     "crates/variegated-postcard-schema",
     "crates/variegated-postcard-schema-derive",
+    "crates/variegated-rp-pio",
+    "crates/variegated-pio-spi-sd-card",
     "crates/variegated-pio-mmc-bus",
 
     # The `#[board_cfg(...)]` / `aliased_bind_interrupts!` macro. It is published to
@@ -111,6 +113,8 @@ default-members = [
     # invocation, so once a firmware in this list asks for `sd-card-pio` the same build
     # enables `rp235xb` on it and the hardware half is compiled too. Being absent would
     # instead leave its warnings uncounted by a bare `cargo build`.
+    "crates/variegated-rp-pio",
+    "crates/variegated-pio-spi-sd-card",
     "crates/variegated-pio-mmc-bus",
     # Neither `variegated-board-cfg` nor its fixture crate is here, for two different
     # reasons.

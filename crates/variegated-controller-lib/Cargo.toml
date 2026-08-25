@@ -99,6 +99,11 @@ block-device-driver = { workspace = true, optional = true }
 # additive: a board that has the card on SPI does not pay for it, and a board that has it
 # on a PIO block gets four data lines instead of one.
 variegated-pio-mmc-bus = { version = "0.1.0", path = "../variegated-pio-mmc-bus", optional = true, features = ["defmt"] }
+# The SPI-mode transport, which is a different crate rather than a module of the one above:
+# the two share no protocol and neither depends on the other. What they do share -- the
+# `GPIOBASE` window arithmetic and the clock divider -- is `variegated-rp-pio`, a leaf both
+# sit on.
+variegated-pio-spi-sd-card = { version = "0.1.0", path = "../variegated-pio-spi-sd-card", optional = true, features = ["defmt"] }
 
 [features]
 # `hardware` and `defmt` on, matching what every firmware build already asked for. A host
@@ -141,9 +146,9 @@ serde = ["variegated-controller-types/serde"]
 # named or it will not compile at all, but it is only in the graph when `sd-card-pio` is
 # on -- and the strong form (`variegated-pio-mmc-bus/rp2040`) would drag it in for every
 # board, including the ones whose card is on SPI.
-rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040", "variegated-pio-mmc-bus?/rp2040"]
-rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa", "variegated-pio-mmc-bus?/rp235xa"]
-rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb", "variegated-pio-mmc-bus?/rp235xb"]
+rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040", "variegated-pio-mmc-bus?/rp2040", "variegated-pio-spi-sd-card?/rp2040"]
+rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa", "variegated-pio-mmc-bus?/rp235xa", "variegated-pio-spi-sd-card?/rp235xa"]
+rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb", "variegated-pio-mmc-bus?/rp235xb", "variegated-pio-spi-sd-card?/rp235xb"]
 rp235x = []
 pwm-steam-valve = []
 # Implies `hardware`: the card hangs off a `Spi` and the storage layer names one.
@@ -158,12 +163,13 @@ sd-card-pio = ["sd-card-storage", "dep:variegated-pio-mmc-bus"]
 
 # The same card in SPI mode, on a PIO SPI master rather than a native 4-bit bus. Builds on
 # `sd-card-storage` for the same reason `sd-card-pio` does -- everything above the transport
-# is shared -- and pulls the same crate, since the SPI master lives beside the 4-bit one.
+# is shared -- but pulls a *different* crate: the two transports have no protocol in common
+# and neither depends on the other.
 #
 # Exclusive with `sd-card-pio` in practice rather than by construction: both want the same
-# PIO block and the same six pins, and a board picks one at the call site by which
-# constructor it names.
-sd-card-pio-spi = ["sd-card-storage", "dep:variegated-pio-mmc-bus"]
+# PIO block and the same pins, and a board picks one at the call site by which constructor
+# it names.
+sd-card-pio-spi = ["sd-card-storage", "dep:variegated-pio-spi-sd-card"]
 
 # Wire-level tracing of the PIO card's bring-up: the window arithmetic, every command
 # frame and every response. The counterpart of `sdio/trace` above, and the same advice
@@ -177,7 +183,7 @@ sd-card-pio-trace = ["sd-card-pio", "variegated-pio-mmc-bus?/trace"]
 # and here `sdio`'s is the one that matters: it logs every command frame, every R1 with its
 # idle-byte count, every data token, and prints a marker naming the patched fork -- which is
 # how you tell "the firmware is not running the fork" apart from "the card is not answering".
-sd-card-pio-spi-trace = ["sd-card-pio-spi", "variegated-pio-mmc-bus?/trace", "sdio?/trace"]
+sd-card-pio-spi-trace = ["sd-card-pio-spi", "variegated-pio-spi-sd-card?/trace", "sdio?/trace"]
 
 # Forwarded to `variegated-controller-types`, which needs one of them to know which
 # machine's boiler and group enumerations exist.

@@ -1,10 +1,11 @@
 //! An SD card on a PIO-driven SPI master.
 //!
-//! # How this differs from the rest of the crate
+//! # How this differs from a native 4-bit host
 //!
-//! [`crate::PioMmcBus`] is a native 4-bit host: it implements `sdio::MmcBus` itself, drives
-//! CMD and DAT0..DAT3 directly, and is three thousand lines of PIO programs, command framing
-//! and CRCs. This module is the opposite in every way -- it implements no protocol at all.
+//! `variegated-pio-mmc-bus`, which builds on this crate, is one: it implements
+//! `sdio::MmcBus` itself, drives CMD and DAT0..DAT3 directly, and is two and a half thousand
+//! lines of PIO programs, command framing and CRCs. This module is the opposite in every
+//! way -- it implements no protocol at all.
 //!
 //! An SD card also speaks plain SPI, over **the same physical pins**: CLK becomes SCK, CMD
 //! becomes MOSI, DAT0 becomes MISO and DAT3 becomes CS. `sdio` already ships a complete SPI
@@ -43,7 +44,7 @@ use embassy_rp::{dma, interrupt, Peri};
 use embedded_hal::spi::ErrorType;
 use embedded_hal_async::spi::SpiBus;
 
-use crate::{clock, window};
+use variegated_rp_pio::{clock, window};
 
 /// A PIO state machine driving SCK, MOSI and MISO as an SPI master.
 ///
@@ -179,8 +180,8 @@ impl<'d, P: Instance, const SM: usize> sdio::spi::SetHz for PioSpiBus<'d, P, SM>
     /// against a future system clock, not a live defect.
     fn set_hz(&mut self, hz: u32) {
         let clk_sys = clk_sys_freq();
-        let safe = clock::divider(clk_sys, hz);
-        let actual = clock::phase_hz(clk_sys, safe, clock::cycles::FASTEST);
+        let safe = clock::divider(clk_sys, hz, clock::SPI_CYCLES_PER_BIT);
+        let actual = clock::phase_hz(clk_sys, safe, clock::SPI_CYCLES_PER_BIT);
 
         if actual < hz {
             // `safe` had to round up to stay at or below `hz`, which means embassy's

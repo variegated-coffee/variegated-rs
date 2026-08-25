@@ -1,0 +1,63 @@
+[package]
+name = "variegated-pio-spi-sd-card"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "An SD card in SPI mode on a PIO-driven SPI master, for RP2040/RP2350"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT"
+keywords = ["embedded", "async", "sdio", "sd-card", "pio"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lib]
+# `test = true` (the default), unlike most crates in this workspace, which set it false
+# because they cannot link on the host. Here the module split exists precisely so that
+# `clock` and `window` are free of `embassy-rp` and *do* build for the host -- and they are
+# the arithmetic that is correct on every board but one. See `scripts/test-host.sh`.
+bench = false
+
+[dependencies]
+# The `SetHz` trait and the SPI transport this bus is built to feed.
+sdio.workspace = true
+
+# The `GPIOBASE` window arithmetic and the clock divider. A leaf crate with no `embassy-rp`
+# dependency at all, shared with `variegated-pio-mmc-bus`. The two transports share nothing
+# else, and neither should depend on the other.
+variegated-rp-pio = { version = "0.1.0", path = "../variegated-rp-pio" }
+
+# The `SpiBus<u8>` impl and its `ErrorType` supertrait -- the whole interface
+# `sdio::spi::SpiMmcBus` consumes.
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+
+# Gated behind `_chip` rather than listed unconditionally. Everything that touches hardware
+# lives in `spi`, and without a chip feature none of it is compiled -- which is what lets
+# `clock` and `window` be tested on an aarch64 host.
+embassy-rp = { workspace = true, optional = true }
+
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+
+# One feature per chip, forwarding to embassy-rp, per the convention in
+# `variegated-hal/Cargo.toml`. Source gates on the `rp235x` umbrella, never on a/b.
+rp2040 = ["_chip", "embassy-rp/rp2040"]
+rp235xa = ["_chip", "rp235x", "embassy-rp/rp235xa"]
+rp235xb = ["_chip", "rp235x", "embassy-rp/rp235xb"]
+rp235x = []
+
+# Internal. Named with a leading underscore because selecting it alone is meaningless --
+# embassy-rp needs a chip, and picking one is the caller's job.
+_chip = ["dep:embassy-rp"]
+
+# Opt-in, never a hard dependency. defmt declares `links = "defmt"` and emits `extern "Rust"`
+# references to `_defmt_acquire` and friends with no provider, so a host test binary that
+# monomorphizes any `Format` impl fails to link -- and fails as "Too many sections!" rather
+# than as anything mentioning defmt.
+defmt = ["dep:defmt", "sdio/defmt"]
+
+# Tracing of the window arithmetic and the clock. Off by default and not implied by `defmt`.
+# The wire-level firehose -- every command, response and data token -- is `sdio`'s `trace`,
+# which is the one to reach for when a card will not come up.
+trace = ["defmt"]

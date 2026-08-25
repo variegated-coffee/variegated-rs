@@ -31,7 +31,7 @@ use embassy_rp::gpio::Output;
 use embassy_rp::pio::Instance;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use variegated_log::log_info;
-use variegated_pio_mmc_bus::PioSpiBus;
+use variegated_pio_spi_sd_card::PioSpiBus;
 
 use crate::sd_card::PartitionOffset;
 use crate::shot_log_storage::SdShotLogStorage;
@@ -40,7 +40,7 @@ use crate::shot_log_storage::SdShotLogStorage;
 ///
 /// The counterpart of [`crate::sd_card::SdCardBlockDevice`] and
 /// [`crate::sd_card_pio::SdCardPioBlockDevice`]. Spelled out here for the same reason as
-/// both: it keeps `sdio` and `variegated-pio-mmc-bus` out of the firmwares' dependency
+/// both: it keeps `sdio` and `variegated-pio-spi-sd-card` out of the firmwares' dependency
 /// lists, so a firmware names only its own PIO instance and state-machine index.
 ///
 /// Note what is *absent* compared with the SPI alias next door -- there is no bus-lease type
@@ -70,7 +70,7 @@ pub fn new_pio_spi_sd_card_device<'d, P: Instance, const SM: usize>(
 /// As [`new_pio_spi_sd_card_device`], but claims the state machine and pins too.
 ///
 /// This is the one a board uses. It exists so a firmware names only its own PIO instance and
-/// state-machine index -- `sdio` and `variegated-pio-mmc-bus` stay out of its dependency
+/// state-machine index -- `sdio` and `variegated-pio-spi-sd-card` stay out of its dependency
 /// list, exactly as [`crate::sd_card_pio::new_pio_sd_card_device_with_dma`] arranges for the
 /// 4-bit path.
 ///

@@ -127,7 +127,14 @@ pub mod clock;
 pub mod crc;
 pub mod frame;
 pub mod programs;
-pub mod window;
+
+/// The `GPIOBASE` window arithmetic, re-exported from `variegated-rp-pio`.
+///
+/// It lives in a leaf crate because the SPI-mode transport needs it too, and neither
+/// transport should depend on the other. Re-exported rather than referenced through its own
+/// path so this crate's modules can keep saying `crate::window`, and so a reader of
+/// `pins.rs` finds it where the five-bit-field comments say it is.
+pub use variegated_rp_pio::window;
 
 #[cfg(feature = "_chip")]
 mod bus;
@@ -135,14 +142,9 @@ mod bus;
 mod install;
 #[cfg(feature = "_chip")]
 mod pins;
-/// The same card over plain SPI, on a PIO SPI master rather than a native 4-bit bus.
-#[cfg(feature = "_chip")]
-pub mod spi;
 
 #[cfg(feature = "_chip")]
 pub use bus::PioMmcBus;
-#[cfg(feature = "_chip")]
-pub use spi::PioSpiBus;
 
 // Silence `unused_macros` in the pure-host build, where nothing that uses them is
 // compiled. Deliberately not `#[allow]` on the macros themselves: they *should* warn if
