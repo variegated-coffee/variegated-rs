@@ -9,6 +9,18 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 export default defineConfig({
+  // `@variegated-coffee/ui` is installed as a symlink to the sibling `variegated-ui`
+  // checkout, and preact is a *devDependency* there (it has to be, for that package's own
+  // tests). Vite resolves through the symlink to the real path, so the components it
+  // exports were importing `variegated-ui/node_modules/preact/hooks` while the app
+  // imported its own copy -- two hooks modules, each with its own `currentComponent`.
+  // The app's renderer then rendered a ui component whose `useState` looked up the *other*
+  // module's current component, which is undefined: "Cannot read properties of undefined
+  // (reading '__H')". Deduping pins every entry point to the one copy here, which the
+  // package's `^10.24.0` peer range accepts.
+  resolve: {
+    dedupe: ['preact', 'preact/hooks', 'preact/jsx-runtime', 'preact/compat']
+  },
   plugins: [
     preact(),
     viteCompression({
