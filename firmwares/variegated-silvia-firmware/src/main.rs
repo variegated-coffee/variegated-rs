@@ -82,6 +82,23 @@ pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 // trait it implements.
 use variegated_controller_lib::external_sensor_dispatcher::NoopDispatcher;
 
+// The shot-log request path. Ungated, unlike the SD types below: `esp_transceiver_task`
+// names these in its signature and that signature exists in every build -- the arms are
+// `None` when there is no card, which is what makes the transceiver answer a request with
+// `CardNotPresent` rather than drop it.
+use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
+#[cfg(feature = "sd-card-pio")]
+use variegated_controller_lib::sd_card::probe_volume_start;
+#[cfg(feature = "sd-card-pio")]
+use variegated_controller_lib::sd_card_pio::{
+    mount_pio_sd_card, new_pio_sd_card_device_with_dma, reacquire_pio_sd_card,
+    SdCardPioBlockDevice, SdCardPioShotLogStorage,
+};
+#[cfg(feature = "sd-card-pio")]
+use variegated_controller_lib::shot_log_storage::{
+    handle_shot_log_query, ShotLogStorage, ShotLogStorageError,
+};
+
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
     RotaryEncoderPioIrq => pio::InterruptHandler<RotaryEncoderPeripheralsPio>;
@@ -93,19 +110,26 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     // single type covering both the UART and its DMA interrupts.
     //
     // Channels track the `dma_tx`/`dma_rx` entries in board-cfg.toml:
-    //   CH0/CH1 internal_spi_bus, CH2/CH3 display, CH4/CH5 esp32 uart.
+    //   CH0/CH1 internal_spi_bus, CH2/CH3 display, CH4/CH5 esp32 uart,
+    //   CH6/CH7 sd_card (PIO data path).
     DmaIrq => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH3>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>,
-              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>;
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>,
+              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH7>;
     UsbIrq => usb::InterruptHandler<embassy_rp::peripherals::USB>;
+    // Bound unconditionally, like the DMA channels above: the board has a card slot and a
+    // free PIO block whether or not this build uses them, and `bind_interrupts!` is not
+    // somewhere a `cfg` can be threaded cleanly.
+    SdCardPioIrq => pio::InterruptHandler<SdCardPeripheralsPio>;
 });
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>, shot_upload_config_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, ShotUploadConfig, 2>) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>, shot_upload_config_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, ShotUploadConfig, 2>, shot_log_query_sender: Option<embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogQuery, 1>>, shot_log_reply_receiver: Option<embassy_sync::channel::Receiver<'static, NoopRawMutex, ShotLogReply, 1>>, shot_log_event_receiver: Option<embassy_sync::channel::Receiver<'static, NoopRawMutex, variegated_controller_types::ShotLogEvent, 2>>) {
     // One binding for both the UART and the debug relay's byte budget, so the two cannot
     // drift apart.
     //
@@ -148,9 +172,10 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // channel is a different matter: this machine has a comms processor like any other,
     // so it can carry a Belka Portal or a scale associated later, and `SM` is now fixed
     // by that receiver rather than being a free choice.
-    // The two trailing `None`s are the shot-log query and reply halves: this board has no
-    // card reader, so the transceiver refuses shot-log requests outright rather than
-    // forwarding them to a storage task that does not exist.
+    // The three shot-log arms -- query, reply and unsolicited events -- come in as
+    // `Option`s from the caller. They are `Some` when this build has the PIO card and
+    // `None` otherwise, in which case the transceiver refuses shot-log requests outright
+    // rather than forwarding them to a storage task that does not exist.
     // One slot for nine futures: `esp_transceiver_main` is a `join5` with a nested `join4`
     // inside this single task, and `watch` here can only see the outermost one being
     // polled. Splitting them needs handles threaded into `variegated-comms`, which is a
@@ -158,7 +183,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), None, None, None, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)),
+        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)),
     ).await;
 }
 
@@ -201,6 +226,30 @@ struct RotaryEncoderPeripherals {
     pin_dt: Peri<'static, ()>,
     pin_sw: Peri<'static, ()>,
     pio: Peri<'static, ()>,
+}
+
+/// The SD card's own PIO block, six GPIOs and two DMA channels.
+///
+/// Declared unconditionally rather than behind `sd-card-pio`, for the same reason the
+/// interrupts are: naming the fields is what takes these pins out of `Peripherals`, and a
+/// build without the card must not hand GPIO 41-46 to something else and then differ from
+/// the build with it.
+#[variegated_board_cfg::board_cfg("sd_card_peripherals")]
+// Narrowly, and only in the build that has no card: the struct is deliberately declared in
+// both, so silencing this unconditionally would stop the compiler reporting it if the
+// build that *does* have a card ever stopped constructing it.
+#[cfg_attr(not(feature = "sd-card-pio"), allow(dead_code))]
+struct SdCardPeripherals {
+    pio: Peri<'static, ()>,
+    pin_clk: Peri<'static, ()>,
+    pin_cmd: Peri<'static, ()>,
+    pin_d0: Peri<'static, ()>,
+    pin_d1: Peri<'static, ()>,
+    pin_d2: Peri<'static, ()>,
+    pin_d3: Peri<'static, ()>,
+    pin_det: Peri<'static, ()>,
+    dma_rx: Peri<'static, ()>,
+    dma_tx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("ads124s08_peripherals")]
@@ -358,6 +407,15 @@ variegated_checkin::define_checkins! {
         /// Drains injected debug commands, with a `HEARTBEAT` timeout so it turns over on a
         /// machine no host is attached to.
         DebugCommand = 15 => 15_000,
+        /// SD shot-log storage. A fifth `HEARTBEAT` arm on its `select` lets it report
+        /// while idle -- without one it parks indefinitely on a machine nobody has pulled a
+        /// shot on, and this row could not tell that from a task wedged mid-transfer.
+        ///
+        /// Claimed even in a build without the card. The row then reads `NotStarted`
+        /// forever, which is what that variant is for, and `CheckinId::COUNT` stays the
+        /// same number in both builds -- a monitor whose width depended on a feature would
+        /// make two firmwares' debug output disagree about which row is which.
+        ShotLogStorage = 16 => 15_000,
     }
 }
 
@@ -427,6 +485,38 @@ static IDENTIFY_WATCH: StaticCell<Watch<NoopRawMutex, embassy_time::Instant, 2>>
 /// task cannot do this work itself -- the credentials are the controller's, and clearing them
 /// has to publish the cleared value down the link as well as write it to flash.
 static CLEAR_WIFI_CREDENTIALS_REQUEST: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Completed shots on their way to the card, and the query path back.
+///
+/// `StaticCell`s on `NoopRawMutex` -- not by preference but because the controller takes
+/// all its channels on one mutex type and `esp_transceiver_main` takes the shot-log pair
+/// on its `SM`, both already fixed by `COMMAND_CHANNEL` above. That is sound here in a way
+/// it is not on the dual-boiler board: everything on this machine is on one executor, so
+/// there is no cross-core send to make `NoopRawMutex` wrong. And `NoopRawMutex` is not
+/// `Sync`, so these cannot be plain `static`s at all.
+///
+/// Depth 1 on the query and reply pair: the protocol carries no correlation id, so a
+/// second outstanding request would be answerable only by guessing. Depth 2 on the events,
+/// which is one `Stored` and one `Deleted`.
+#[cfg(feature = "sd-card-pio")]
+static SHOT_LOG_CHANNEL: StaticCell<Channel<NoopRawMutex, variegated_controller_types::ShotLog, 2>> =
+    StaticCell::new();
+#[cfg(feature = "sd-card-pio")]
+static SHOT_LOG_QUERY_CHANNEL: StaticCell<Channel<NoopRawMutex, ShotLogQuery, 1>> =
+    StaticCell::new();
+#[cfg(feature = "sd-card-pio")]
+static SHOT_LOG_REPLY_CHANNEL: StaticCell<Channel<NoopRawMutex, ShotLogReply, 1>> =
+    StaticCell::new();
+#[cfg(feature = "sd-card-pio")]
+static SHOT_LOG_EVENT_CHANNEL: StaticCell<
+    Channel<NoopRawMutex, variegated_controller_types::ShotLogEvent, 2>,
+> = StaticCell::new();
+/// Whether a card is currently seated, for `Status::sd_card_present`.
+///
+/// A plain `static` because `AtomicBool::new` is `const` and the controller holds a
+/// `&'static` to it. Written only by the storage task.
+#[cfg(feature = "sd-card-pio")]
+static SD_CARD_PRESENT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
@@ -862,6 +952,70 @@ async fn main_task(spawner: Spawner) -> ! {
     // runs before the controller's task exists to feed this, and a window that has to
     // cover all of it would have to be longer than the one that guards steady state.
     // Starting it last means the timeout is sized for the loop it actually protects.
+    // The card's channels and its block device, built before the controller so the three
+    // `Option`s below can be handed to it.
+    //
+    // Construction performs no I/O and cannot fail -- see `new_pio_sd_card_device_with_dma`
+    // -- so this is not a bring-up. The pins are consumed exactly once here and every
+    // actual identification happens later, on demand, which is what lets a card seated a
+    // second late still come up.
+    #[cfg(feature = "sd-card-pio")]
+    let (shot_log_channel, shot_log_query_channel, shot_log_reply_channel, shot_log_event_channel) = (
+        SHOT_LOG_CHANNEL.init(Channel::new()),
+        SHOT_LOG_QUERY_CHANNEL.init(Channel::new()),
+        SHOT_LOG_REPLY_CHANNEL.init(Channel::new()),
+        SHOT_LOG_EVENT_CHANNEL.init(Channel::new()),
+    );
+
+    #[cfg(feature = "sd-card-pio")]
+    let (sd_device, sd_det) = {
+        let sd_card_p = sd_card_peripherals!(p);
+        // `sm0`/`sm1`, so `SM_DAT = 0` and `SM_CLK = 1`. `PioMmcBus` asserts
+        // `SM_CLK > SM_DAT` at compile time; the clock machine has to be the higher index
+        // because the two are started together and the data machine must be armed first.
+        let Pio {
+            mut common,
+            sm0,
+            sm1,
+            ..
+        } = Pio::new(sd_card_p.pio, Irqs);
+        (
+            new_pio_sd_card_device_with_dma(
+                &mut common,
+                sm0,
+                sm1,
+                sd_card_p.pin_clk,
+                sd_card_p.pin_cmd,
+                sd_card_p.pin_d0,
+                sd_card_p.pin_d1,
+                sd_card_p.pin_d2,
+                sd_card_p.pin_d3,
+                dma::Channel::new(sd_card_p.dma_rx, Irqs),
+                dma::Channel::new(sd_card_p.dma_tx, Irqs),
+            ),
+            // Active low: the switch closes to ground when a card is seated.
+            Input::new(sd_card_p.pin_det, Pull::Up),
+        )
+    };
+
+    #[cfg(feature = "sd-card-pio")]
+    let (shot_log_sender, sd_card_present, shot_log_query_sender) = (
+        Some(shot_log_channel.sender()),
+        Some(&SD_CARD_PRESENT),
+        Some(shot_log_query_channel.sender()),
+    );
+    #[cfg(not(feature = "sd-card-pio"))]
+    let (shot_log_sender, sd_card_present, shot_log_query_sender): (
+        Option<embassy_sync::channel::Sender<'static, NoopRawMutex, variegated_controller_types::ShotLog, 2>>,
+        Option<&'static core::sync::atomic::AtomicBool>,
+        Option<embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogQuery, 1>>,
+    ) = (None, None, None);
+
+    // Started here rather than next to `embassy_rp::init`, deliberately: everything
+    // between the two -- the settings flash load, the ADC bring-up, the display reset --
+    // runs before the controller's task exists to feed this, and a window that has to
+    // cover all of it would have to be longer than the one that guards steady state.
+    // Starting it last means the timeout is sized for the loop it actually protects.
     let watchdog_p = watchdog_peripherals!(p);
     let mut watchdog = watchdog::Watchdog::new(watchdog_p.watchdog);
     watchdog.start(variegated_controller_lib::WATCHDOG_TIMEOUT);
@@ -893,18 +1047,15 @@ async fn main_task(spawner: Spawner) -> ! {
         timezone_store,
         Some(shot_upload_config_watch.sender()),
         Some(watchdog),
-        // shot_log_sender: this board has no SD card -- this crate has no
-        // `sd-card-storage` feature at all, so there is no storage task to send
-        // completed logs to.
-        None,
-        // sd_card_present: `None`, for the same reason. This is what makes
-        // `Status::sd_card_present` report "this build has no SD storage" rather than
-        // "no card inserted" -- the second would tell a user to go find a card for a
-        // slot this machine does not have.
-        None,
-        // shot_log_query_sender: `None`. With nowhere to store a shot there is nothing
-        // to re-annotate, so `SetShotAnnotations` is refused rather than queued.
-        None,
+        // Where a completed shot goes, whether a card is seated, and where
+        // `SetShotAnnotations` is sent. All three are `None` in a build without
+        // `sd-card-pio`, and that `None` is load-bearing on the second one: it makes
+        // `Status::sd_card_present` report "this build has no SD storage" rather than "no
+        // card inserted", and the second would tell a user to go find a card for a slot
+        // this machine does not have.
+        shot_log_sender,
+        sd_card_present,
+        shot_log_query_sender,
         Some(identify_watch.sender()),
         &CLEAR_WIFI_CREDENTIALS_REQUEST,
     )
@@ -1003,7 +1154,35 @@ async fn main_task(spawner: Spawner) -> ! {
     let debug_command_sender = debug_commands_channel.sender();
     let debug_command_receiver = debug_commands_channel.receiver();
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition.clone(), debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")).unwrap());
+    // The transceiver's three shot-log arms. `None` on a build with no card, where each
+    // arm parks forever and a request from the comms processor is answered with
+    // `ShotLogError(CardNotPresent)` rather than being silently dropped -- a request that
+    // gets no answer at all is indistinguishable from a dead link.
+    #[cfg(feature = "sd-card-pio")]
+    let (sd_query_sender, sd_reply_receiver, sd_event_receiver) = (
+        Some(shot_log_query_channel.sender()),
+        Some(shot_log_reply_channel.receiver()),
+        Some(shot_log_event_channel.receiver()),
+    );
+    #[cfg(not(feature = "sd-card-pio"))]
+    let (sd_query_sender, sd_reply_receiver, sd_event_receiver) = (None, None, None);
+
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition.clone(), debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver"), sd_query_sender, sd_reply_receiver, sd_event_receiver).unwrap());
+
+    #[cfg(feature = "sd-card-pio")]
+    spawner.spawn(
+        shot_log_storage_task(
+            shot_log_channel.receiver(),
+            shot_log_query_channel.receiver(),
+            shot_log_reply_channel.sender(),
+            shot_log_reply_channel.receiver(),
+            shot_log_event_channel.sender(),
+            sd_device,
+            sd_det,
+            MONITOR.claim(CheckinId::ShotLogStorage),
+        )
+        .unwrap(),
+    );
 
     // Wire up the structured debug bus: USB CDC transport, periodic sampler,
     // periodic state snapshot, and injected-command handling. The channel itself is
@@ -1220,6 +1399,288 @@ async fn debug_command_task(
             }
             // Comms ops arrive only via the ESP32-C6, which handles them itself.
             DebugCommand::Comms(_) => {}
+        }
+    }
+}
+
+/// The clock to run the card at once it has been identified.
+///
+/// 25 MHz is the SD default-speed ceiling, and four data lines at that rate is what the PIO
+/// bus exists for. `sdio` drives CMD0/CMD8/ACMD41 at its own 400 kHz `INIT_FREQ` regardless
+/// and only moves up afterwards, and `PioMmcBus` clamps whatever is asked for to what the
+/// current system clock can actually divide down to -- so this is a request, not a promise.
+#[cfg(feature = "sd-card-pio")]
+const SD_OPERATING_HZ: u32 = 25_000_000;
+
+/// How long one identification attempt may take before it is abandoned.
+///
+/// A failsafe, not an operational bound: a healthy card completes CMD0 through the CSD read
+/// in a few milliseconds, and an empty slot reads all-ones forever. Two seconds is far
+/// beyond anything a working card needs and short enough that a request against an empty
+/// slot is answered rather than hung.
+#[cfg(feature = "sd-card-pio")]
+const SD_INIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Settling time after a card-detect edge.
+///
+/// Mechanical switch: one swap produces a burst of edges, and without this each would be
+/// classified separately -- so a single insertion could report "inserted, removed,
+/// inserted" and tear down a mount that was about to be built.
+#[cfg(feature = "sd-card-pio")]
+const SD_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// The card, and the card with a filesystem on it.
+///
+/// `0` and `1` are `SM_DAT` and `SM_CLK`, matching the `sm0`/`sm1` handed to the
+/// constructor in `main_task`.
+#[cfg(feature = "sd-card-pio")]
+type SdDevice = SdCardPioBlockDevice<'static, SdCardPeripheralsPio, 0, 1>;
+#[cfg(feature = "sd-card-pio")]
+type SdStorage = SdCardPioShotLogStorage<'static, SdCardPeripheralsPio, 0, 1>;
+
+/// Take the mount apart and get the bare card back.
+///
+/// Two layers come off: the filesystem, whose cached boot sector and allocation bitmap
+/// cannot outlive a card swap, and the partition offset, which was read from *this* card's
+/// MBR and would address a different one at the wrong LBA.
+#[cfg(feature = "sd-card-pio")]
+fn storage_take(storage: &mut Option<SdStorage>) -> Option<SdDevice> {
+    storage.take().map(|s| s.into_device().into_inner())
+}
+
+/// Bring the card up if it is not already, and say whether there is a mount to use.
+///
+/// Demand-driven rather than at startup: identification is retried on every request, so a
+/// card seated late, or one that was not ready when the machine powered on, comes up on the
+/// next thing that needs it. There is exactly one retry path rather than two.
+#[cfg(feature = "sd-card-pio")]
+async fn ensure_card_ready(
+    storage: &mut Option<SdStorage>,
+    parked: &mut Option<SdDevice>,
+    det: &mut Input<'static>,
+) -> bool {
+    if storage.is_some() {
+        return true;
+    }
+
+    let Some(mut device) = parked.take() else {
+        warn!("SD: no card device to bring up");
+        return false;
+    };
+
+    // DET informs rather than gates -- but a request against a slot that is demonstrably
+    // empty is worth refusing immediately, since identification there reads all-ones until
+    // the timeout.
+    if det.is_high() {
+        warn!("SD: card-detect reads high, not attempting identification");
+        *parked = Some(device);
+        return false;
+    }
+
+    if let Err(e) = reacquire_pio_sd_card(&mut device, SD_OPERATING_HZ, SD_INIT_TIMEOUT).await {
+        warn!("SD: could not identify the card: {:?}", e);
+        *parked = Some(device);
+        return false;
+    }
+
+    // Set true on success only, never false on failure: identification also fails for a
+    // card that is present but unhappy, and reporting that as "no card" would send a user
+    // looking for a slot that already has one in it.
+    SD_CARD_PRESENT.store(true, core::sync::atomic::Ordering::Relaxed);
+
+    // Re-probed on every bring-up rather than cached. A swapped card need not be
+    // partitioned like the one before it, and a stale offset reads a good card at the
+    // wrong place instead of failing.
+    let first_lba = match probe_volume_start(&mut device).await {
+        Ok(lba) => lba,
+        Err(e) => {
+            warn!("SD: could not read the partition table: {:?}", e);
+            *parked = Some(device);
+            return false;
+        }
+    };
+
+    *storage = Some(mount_pio_sd_card(device, first_lba));
+    true
+}
+
+/// The card's task: store completed shots, answer queries, follow the slot.
+///
+/// On this board's single executor rather than a second core, unlike the GS3's. There is no
+/// `SharedSpiBus` and no lease anywhere in here: a PIO card owns its block, its two state
+/// machines and its six GPIOs outright, so there is nothing to arbitrate against the
+/// display. That is the whole difference between this task and the other board's.
+#[cfg(feature = "sd-card-pio")]
+#[allow(clippy::too_many_arguments)]
+#[embassy_executor::task]
+async fn shot_log_storage_task(
+    shot_log_receiver: embassy_sync::channel::Receiver<
+        'static,
+        NoopRawMutex,
+        variegated_controller_types::ShotLog,
+        2,
+    >,
+    query_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, ShotLogQuery, 1>,
+    reply_sender: embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogReply, 1>,
+    reply_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, ShotLogReply, 1>,
+    event_sender: embassy_sync::channel::Sender<
+        'static,
+        NoopRawMutex,
+        variegated_controller_types::ShotLogEvent,
+        2,
+    >,
+    device: SdDevice,
+    mut det: Input<'static>,
+    checkin: variegated_checkin::CheckinHandle,
+) {
+    use embassy_futures::select::{select, select3, Either, Either3};
+    use variegated_controller_types::{ShotLogEvent, ShotLogListEntry};
+
+    info!("Shot log storage task started");
+
+    info!(
+        "SD: card-detect reads {} at startup",
+        if det.is_low() {
+            "low (card present)"
+        } else {
+            "high (no card)"
+        }
+    );
+    // Published before waiting on anything. Without this, `Status` would report "no card"
+    // until the first DET edge -- which on a machine switched on with a card already in it
+    // never comes.
+    SD_CARD_PRESENT.store(det.is_low(), core::sync::atomic::Ordering::Relaxed);
+
+    // The pins were consumed once, at construction, and that construction performed no I/O
+    // -- so every bring-up below is a retry rather than a one-shot.
+    let mut storage: Option<SdStorage> = None;
+    let mut parked: Option<SdDevice> = Some(device);
+
+    loop {
+        checkin.good();
+
+        // Store first, deliberately. `select4` polls in declaration order, so a completed
+        // shot beats a query whenever both are ready -- which is what keeps a bulk download
+        // from delaying the one operation that cannot be retried.
+        //
+        // The `HEARTBEAT` arm exists so this task's check-in row turns over on a machine
+        // nobody has pulled a shot on. Without it the row could not tell an idle task from
+        // a wedged one.
+        match select(
+            select3(
+                shot_log_receiver.receive(),
+                query_receiver.receive(),
+                det.wait_for_any_edge(),
+            ),
+            Timer::after(variegated_checkin::HEARTBEAT),
+        )
+        .await
+        {
+            Either::Second(_) => continue,
+            Either::First(event) => match event {
+                Either3::First(shot_log) => {
+                    if !ensure_card_ready(&mut storage, &mut parked, &mut det).await {
+                        warn!("SD: card unavailable, dropping a completed shot log");
+                        continue;
+                    }
+                    let card = storage.as_mut().expect("ensured above");
+                    match card.store_shot(&shot_log).await {
+                        Ok(stored) => {
+                            info!(
+                                "SD: stored shot {}/{} ({} bytes)",
+                                stored.id.dir_name().as_str(),
+                                stored.id.file_name().as_str(),
+                                stored.size_bytes
+                            );
+                            // Announced from what the store already returned rather than by
+                            // re-listing: the id and size come back from it, and the
+                            // annotations are the ones that went onto the card a moment ago.
+                            let entry = ShotLogListEntry {
+                                id: stored.id,
+                                size_bytes: stored.size_bytes,
+                                annotations: shot_log.metadata.annotations.clone(),
+                            };
+                            // `try_send`, never `await`: this is the one operation that
+                            // cannot be retried, and it must not park behind a comms
+                            // processor that has stopped draining. A dropped notice costs a
+                            // stale browser until its next refresh; a parked store loses the
+                            // shot.
+                            if event_sender.try_send(ShotLogEvent::Stored(entry)).is_err() {
+                                warn!("SD: dropped a stored-shot notice; the event channel was full");
+                            }
+                        }
+                        Err(e) => {
+                            warn!("SD: failed to store shot: {:?}", e);
+                            // A failed store means the mount is suspect -- most likely the
+                            // card was pulled. Park the device so the next request
+                            // re-identifies rather than retrying through stale geometry.
+                            parked = storage_take(&mut storage);
+                        }
+                    }
+                }
+                Either3::Second(query) => {
+                    // Captured before `query` is moved into the handler below. A delete is
+                    // the one query with no waiter, so it is also the one that must not
+                    // leave an answer on a channel a list request could collect.
+                    let is_delete = matches!(query, ShotLogQuery::Delete { .. });
+
+                    // Drop any answer nobody collected before producing a new one. This
+                    // protocol has no correlation id: a request that timed out on the far
+                    // side leaves its reply in the depth-1 channel, and the next requester
+                    // would read it as its own answer.
+                    let _ = reply_receiver.try_receive();
+
+                    let reply = if ensure_card_ready(&mut storage, &mut parked, &mut det).await {
+                        let card = storage.as_mut().expect("ensured above");
+                        let reply =
+                            handle_shot_log_query(card, query, Some(event_sender)).await;
+                        // Any failure makes the mount suspect, exactly as a failed store
+                        // does. `NotFound` is excluded: it means the filesystem answered
+                        // correctly about a shot that is not there, which is a fact about
+                        // the request rather than about the card.
+                        if matches!(reply, Some(ShotLogReply::Error(e)) if e != ShotLogStorageError::NotFound)
+                        {
+                            parked = storage_take(&mut storage);
+                        }
+                        reply
+                    } else if is_delete {
+                        // Nothing to answer, and nothing to delete either.
+                        None
+                    } else {
+                        // Answered immediately rather than after a timeout: the card is
+                        // known to be absent, and making the caller wait to learn that turns
+                        // "no card" into "the machine is not responding".
+                        Some(ShotLogReply::Error(ShotLogStorageError::CardNotPresent))
+                    };
+
+                    if let Some(reply) = reply
+                        && reply_sender.try_send(reply).is_err()
+                    {
+                        warn!("SD: dropped a shot-log reply; the reply channel was full");
+                    }
+                }
+                Either3::Third(()) => {
+                    // Settle before reading, so one swap is classified once rather than once
+                    // per contact bounce.
+                    Timer::after(SD_DEBOUNCE).await;
+                    let present = det.is_low();
+                    SD_CARD_PRESENT.store(present, core::sync::atomic::Ordering::Relaxed);
+
+                    if present {
+                        // Nothing is brought up here. The next request does it, which keeps
+                        // one retry path rather than two and avoids identifying a card that
+                        // may be about to be pulled straight back out.
+                        info!("SD: card inserted");
+                    } else {
+                        info!("SD: card removed");
+                        // Acted on at once, because this is the one event that says the
+                        // mount is stale *before* an operation fails against it.
+                        if let Some(device) = storage_take(&mut storage) {
+                            parked = Some(device);
+                        }
+                    }
+                }
+            },
         }
     }
 }

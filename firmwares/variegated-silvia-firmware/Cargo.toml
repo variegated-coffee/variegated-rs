@@ -82,8 +82,14 @@ futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 [features]
 # One crate, one machine: `default` *is* this machine's configuration, so a plain
 # `cargo build` produces the firmware. There is no umbrella feature selecting the machine.
-default = ["rp235xb", "gravity"]
+default = ["rp235xb", "gravity", "sd-card-pio"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
 gravity = ["dep:variegated-gravity-driver"]
+# The SD shot log, on a PIO-driven 4-bit bus rather than SPI -- both of this board's SPI
+# instances are taken (SPI0 the display, SPI1 the internal ADC bus), which is why it is not
+# `sd-card-storage` the way the GS3's is. Nothing here names `sdio`, `exfat-slim` or
+# `variegated-pio-mmc-bus`; `variegated-controller-lib`'s `sd_card_pio` module is the whole
+# interface. In `default` because the board has the slot.
+sd-card-pio = ["variegated-controller-lib/sd-card-pio"]

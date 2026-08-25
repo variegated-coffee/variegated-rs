@@ -33,13 +33,14 @@ use exfat_slim::asynchronous::file_system::FileSystem;
 use exfat_slim::asynchronous::BlockDevice;
 use variegated_controller_types::shot_log::{ShotLogId, SHOTS_DIR};
 use variegated_controller_types::{
-    ShotAnnotations, ShotLog, ShotLogDayFilter, ShotLogList, ShotLogListEntry,
+    ShotAnnotations, ShotLog, ShotLogDayFilter, ShotLogEvent, ShotLogList, ShotLogListEntry,
     ShotLogListRequest, SHOT_LOG_FORMAT_VERSION, SHOT_LOG_LIST_BUDGET,
 };
-use variegated_log::{log_debug, log_error, log_warn};
+use variegated_log::{log_debug, log_error, log_info, log_warn};
 
 use crate::exfat_format;
 use crate::sd_card::SharedSpiBus;
+use crate::shot_log_query::{ShotLogQuery, ShotLogReply};
 
 /// Bytes per block. exFAT calls these sectors; the card calls them blocks.
 pub const BLOCK_SIZE: usize = 512;
@@ -1496,4 +1497,143 @@ fn current_shot_id(shot: &ShotLog) -> ShotLogId {
             time: (shot.metadata.start_time_millis % 100_000_000) as u32,
         },
     }
+}
+
+/// Answer one [`ShotLogQuery`] against a card that is already up.
+///
+/// Here rather than in a firmware because it is entirely generic over
+/// [`ShotLogStorage`] and knows nothing about the transport underneath -- the SPI board
+/// and the PIO board run the identical code. CLAUDE.md is explicit that copying it into
+/// the second firmware is how the two forked before.
+///
+/// Split out of the caller's task loop so the borrow of the storage ends before the
+/// caller decides whether to park the device -- and because that loop is already long
+/// enough that a fourth arm of inline matching would bury the store path it exists to
+/// protect.
+///
+/// Every arm that answers returns a `ShotLogReply` rather than propagating: the requester
+/// is on the other side of a channel and has no way to observe a `Result`, so an error has
+/// to travel as an answer or not at all.
+///
+/// `None` is `Delete`, which is the one query with no waiter. It arrived as a
+/// fire-and-forget `MachineCommand`, and putting an answer for it on a channel that has no
+/// correlation id would give a concurrent listing something to mistake for its own.
+///
+/// `events` is where a successful delete announces itself, and is separate from the reply
+/// for exactly that reason. It is an `Option` and carries its own mutex type because the
+/// two boards reach it differently: the GS3's storage task is on core 1 and its channel is
+/// a `SyncSendRawMutex` `static`, while a single-core board's is a `NoopRawMutex` living in
+/// a `StaticCell`. A board with no event channel passes `None` and the delete is silent.
+pub async fn handle_shot_log_query<S, EM>(
+    card: &mut S,
+    query: ShotLogQuery,
+    events: Option<embassy_sync::channel::Sender<'static, EM, ShotLogEvent, 2>>,
+) -> Option<ShotLogReply>
+where
+    S: ShotLogStorage,
+    EM: embassy_sync::blocking_mutex::raw::RawMutex,
+{
+    Some(match query {
+        ShotLogQuery::List(request) => match card.list_shots(request).await {
+            Ok(list) => {
+                // Logged here rather than at the requester, because the two requesters
+                // want the same thing and only one of them can take the reply off the
+                // channel. `AppDebugOp::SdListShots` *is* this log line -- it has no
+                // other output -- and a list driven from HTTP is rare enough (the comms
+                // processor holds no cache and a UI asks on an explicit refresh) that
+                // logging it too costs nothing and is worth having when a download
+                // misbehaves.
+                log_info!(
+                    "SD: {} shot(s), truncated: {}",
+                    list.entries.len(),
+                    list.truncated
+                );
+                for entry in list.entries.iter() {
+                    log_info!(
+                        "SD:   {}/{}  {} bytes  {} annotation(s)",
+                        entry.id.dir_name().as_str(),
+                        entry.id.file_name().as_str(),
+                        entry.size_bytes,
+                        entry.annotations.len()
+                    );
+                    // The annotations themselves, one line each. This is the only place
+                    // the prefix decode is observable without a host tool, and "eight
+                    // annotations" is not evidence that they decoded to anything sensible.
+                    for annotation in entry.annotations.iter() {
+                        log_info!(
+                            "SD:     {:?} = {:?}",
+                            annotation.key,
+                            annotation.value
+                        );
+                    }
+                }
+                ShotLogReply::List(list)
+            }
+            Err(e) => ShotLogReply::Error(e),
+        },
+        ShotLogQuery::Chunk { id, offset } => {
+            // One chunk's worth, sized by the wire bound both processors share. The
+            // buffer is a stack array rather than a heap allocation because it is
+            // 1 kB and lives for one iteration; `heapless::Vec::from_slice` then
+            // copies only the bytes actually read.
+            let mut buf = [0u8; SHOT_LOG_CHUNK_LEN];
+            match card.read_chunk(id, offset, &mut buf).await {
+                Ok(chunk) => match heapless::Vec::from_slice(&buf[..chunk.len]) {
+                    Ok(bytes) => ShotLogReply::Chunk {
+                        id,
+                        offset,
+                        total: chunk.total,
+                        last: chunk.last,
+                        bytes,
+                    },
+                    // Unreachable: `read_chunk` cannot return more than `buf.len()`,
+                    // which is the vector's capacity. Reported rather than
+                    // `unwrap`ped, because a panic here takes the machine down over a
+                    // download.
+                    Err(_) => ShotLogReply::Error(ShotLogStorageError::ReadError),
+                },
+                Err(e) => ShotLogReply::Error(e),
+            }
+        }
+        ShotLogQuery::SetAnnotations { id, annotations } => {
+            match card.set_annotations(id, annotations).await {
+                // Read back rather than echoing what was sent. The two differ if the
+                // rewrite dropped anything, and the version on the card is the one the
+                // client needs to see.
+                Ok(()) => match card.read_annotations(id).await {
+                    Ok(annotations) => ShotLogReply::Annotations { id, annotations },
+                    Err(e) => ShotLogReply::Error(e),
+                },
+                Err(e) => ShotLogReply::Error(e),
+            }
+        }
+        ShotLogQuery::Delete { id } => {
+            match card.delete_shot(id).await {
+                Ok(()) => {
+                    log_info!(
+                        "SD: deleted {}/{}",
+                        id.dir_name().as_str(),
+                        id.file_name().as_str()
+                    );
+                    // The only confirmation a delete produces. It arrived as a
+                    // fire-and-forget command, so the HTTP 200 said nothing about
+                    // whether the file went away; this is what does.
+                    if let Some(events) = events
+                        && events.try_send(ShotLogEvent::Deleted(id)).is_err()
+                    {
+                        log_warn!("SD: dropped a deleted-shot notice; the event channel was full");
+                    }
+                }
+                // Logged and dropped. There is nothing to answer: this arrived as a
+                // fire-and-forget command and the requester is not waiting.
+                Err(e) => log_warn!(
+                    "SD: could not delete {}/{}: {:?}",
+                    id.dir_name().as_str(),
+                    id.file_name().as_str(),
+                    e
+                ),
+            }
+            return None;
+        }
+    })
 }

@@ -47,13 +47,28 @@ pin_dt = "embassy_rp::peripherals::PIN_22"
 pin_sw = "embassy_rp::peripherals::PIN_1"
 pio = "embassy_rp::peripherals::PIO0"
 
+# The card is on a native 4-bit bus driven by PIO, not on SPI -- see
+# `variegated-pio-mmc-bus`. DAT0..DAT3 must be four consecutive ascending GPIOs, and on
+# RP2350B all six must share one GPIOBASE window; 41-46 are all in the upper one (16-47).
+#
+# PIO1 because PIO0 is the rotary encoder. The card needs two state machines and 31 of
+# the block's 32 instruction slots, so it cannot share with anything.
+#
+# DMA_CH6/CH7 are the first free pair: CH0/CH1 are the internal SPI bus, CH2/CH3 the
+# display and CH4/CH5 the ESP32 UART. They are optional -- `PioMmcBus::new` takes none --
+# but a polled 512-byte block holds the executor for ~50 us and this board has channels
+# to spare.
 [sd_card_peripherals]
+pio = "embassy_rp::peripherals::PIO1"
 pin_clk = "embassy_rp::peripherals::PIN_41"
 pin_cmd = "embassy_rp::peripherals::PIN_42"
 pin_d0 = "embassy_rp::peripherals::PIN_43"
 pin_d1 = "embassy_rp::peripherals::PIN_44"
 pin_d2 = "embassy_rp::peripherals::PIN_45"
 pin_d3 = "embassy_rp::peripherals::PIN_46"
+pin_det = "embassy_rp::peripherals::PIN_26"
+dma_rx = "embassy_rp::peripherals::DMA_CH6"
+dma_tx = "embassy_rp::peripherals::DMA_CH7"
 
 [button_peripherals]
 pin_brew = "embassy_rp::peripherals::PIN_15"
@@ -81,6 +96,7 @@ usb = "embassy_rp::peripherals::USB"
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 RotaryEncoderPioIrq = "PIO0_IRQ_0"
+SdCardPioIrq = "PIO1_IRQ_0"
 QwiicI2cIrq = "I2C0_IRQ"
 DmaIrq = "DMA_IRQ_0"
 UsbIrq = "USBCTRL_IRQ"

@@ -71,6 +71,12 @@ run gs3_optional_peripherals -p variegated-gs3-firmware --features=character-dis
 # `--no-default-features` plus the whole set spelled out by hand -- the same shape of hole
 # as `gravity` below. Three lines, but they are the ones that run on a machine built
 # without the LEDs.
+# The Silvia without its card, which `sd-card-pio` joining the default set would otherwise
+# leave uncovered -- exactly the shape of hole as `pwm-leds` above. It is the build that
+# reaches every `#[cfg(not(feature = "sd-card-pio"))]` twin: the three `None`s the
+# controller gets, the transceiver's three parked arms, and the debug ops that answer "this
+# build has no SD storage". It caught a real dead-code warning on the first pass.
+run silvia_no_sd -p variegated-silvia-firmware --no-default-features --features=rp235xb,gravity
 # Not covered here: the GS3's `gravity` feature. It is mutually exclusive with the default
 # `bluetooth-group-1-scale`, so it needs `--no-default-features` and the rest of the set
 # spelled out by hand rather than riding along with the line above. That is a hole in the

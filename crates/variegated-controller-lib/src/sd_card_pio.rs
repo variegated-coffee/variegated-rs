@@ -22,8 +22,12 @@
 use embassy_rp::Peri;
 use embassy_rp::dma;
 use embassy_rp::pio::{Common, Instance, PioPin, StateMachine};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use variegated_log::log_info;
 use variegated_pio_mmc_bus::PioMmcBus;
+
+use crate::sd_card::PartitionOffset;
+use crate::shot_log_storage::SdShotLogStorage;
 
 /// The whole PIO card stack, named once -- the native-bus counterpart of
 /// [`crate::sd_card::SdCardBlockDevice`].
@@ -118,6 +122,37 @@ pub async fn reacquire_pio_sd_card<'d, P: Instance, const SM_DAT: usize, const S
         Ok(inner) => inner,
         Err(_) => Err(sdio::MmcError::Timeout),
     }
+}
+
+/// The card as the filesystem sees it: shifted to the start of its partition.
+pub type SdCardPioVolume<'d, P, const SM_DAT: usize, const SM_CLK: usize> =
+    PartitionOffset<SdCardPioBlockDevice<'d, P, SM_DAT, SM_CLK>>;
+
+/// Shot-log storage on a PIO card.
+///
+/// [`SdShotLogStorage`] is generic over an *optional* shared SPI bus, because the SPI
+/// transport has to lease the display's bus around every filesystem operation. A PIO card
+/// owns its pins outright and has nothing to arbitrate, so the bus is always `None` and
+/// the lease is a no-op.
+///
+/// That still leaves the two bus type parameters to name. They are pinned here to
+/// `NoopRawMutex` and `()` -- a pair that satisfies the bounds and is never instantiated,
+/// since `Option::None` carries no value. Pinning them here rather than at each call site
+/// is what keeps a PIO board from having to name SPI types for a bus it does not have.
+pub type SdCardPioShotLogStorage<'d, P, const SM_DAT: usize, const SM_CLK: usize> =
+    SdShotLogStorage<'static, SdCardPioVolume<'d, P, SM_DAT, SM_CLK>, NoopRawMutex, ()>;
+
+/// Mount an identified card at the start of its partition.
+///
+/// `first_lba` comes from [`crate::sd_card::probe_volume_start`], which is generic over
+/// the block device and works unchanged here. Re-probe it on every bring-up rather than
+/// caching: a swapped card need not be partitioned like the one before it, and reusing a
+/// stale offset reads a perfectly good card at the wrong place instead of failing.
+pub fn mount_pio_sd_card<'d, P: Instance, const SM_DAT: usize, const SM_CLK: usize>(
+    device: SdCardPioBlockDevice<'d, P, SM_DAT, SM_CLK>,
+    first_lba: u32,
+) -> SdCardPioShotLogStorage<'d, P, SM_DAT, SM_CLK> {
+    SdShotLogStorage::new(PartitionOffset::new(device, first_lba), None)
 }
 
 /// Compile-time proof that the PIO card plugs into `exfat-slim` with no adapter.
