@@ -1,0 +1,20 @@
+[package]
+name = "variegated-rp-pio"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "GPIOBASE window and clock-divider arithmetic for the RP2040/RP2350 PIO"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT"
+keywords = ["embedded", "rp2040", "rp2350", "pio", "no-std"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lib]
+# `test = true` (the default), unlike most crates in this workspace. This one has no
+# `embassy-rp` dependency at all -- that is the point of it -- so every line here builds and
+# runs on a host. See `scripts/test-host.sh`.
+bench = false
+
+[dependencies]
+# The 24.8 fixed-point type `Config::clock_divider` takes. The only dependency.
+fixed.workspace = true

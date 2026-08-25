@@ -56,6 +56,16 @@ pub use shot_state::{ShotStateInputs, ShotStateTracker};
 
 #[cfg(feature = "sd-card-storage")]
 pub mod sd_card;
+// The same card, on a PIO block instead of the display's SPI bus. Everything above the
+// transport is shared with `sd_card`; only the bus underneath differs.
+// The same card in SPI mode on a PIO SPI master, for a board whose SPI peripherals are all
+// spoken for. `sdio::spi` supplies the whole protocol, so this adds no framing of its own --
+// only the type aliases that keep `sdio` out of a firmware's dependency list.
+//
+// A native 4-bit transport and its `sd_card_pio` assembly live on the `pio-mmc-4bit` branch.
+// It has never brought a card up on hardware; see `docs/sd-4bit-pio.md` there.
+#[cfg(feature = "sd-card-pio-spi")]
+pub mod sd_card_pio_spi;
 #[cfg(feature = "sd-card-storage")]
 pub mod shot_log_storage;
 // The exFAT formatter lives in `variegated-exfat-format`, not here. It is pure logic over

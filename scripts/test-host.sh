@@ -121,4 +121,12 @@ run "variegated-exfat-format" -p variegated-exfat-format "$@"
 # in this fixture crate. It is an ordinary std crate and is not a workspace default member.
 run "variegated-board-cfg-tests" -p variegated-board-cfg-tests "$@"
 
+# The `GPIOBASE` window arithmetic and the PIO clock divider. No feature flags and no
+# `--no-default-features` needed: this crate has no `embassy-rp` dependency at all, which is
+# the whole reason it exists as a leaf both SD transports sit on. It is also the code that
+# has produced the most silent faults on this hardware -- a five-bit field counted from the
+# wrong base makes the block watch a pin nobody chose, and nothing says so.
+run "variegated-rp-pio" -p variegated-rp-pio "$@"
+
+
 exit $RC

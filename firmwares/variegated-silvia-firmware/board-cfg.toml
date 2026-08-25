@@ -47,6 +47,38 @@ pin_dt = "embassy_rp::peripherals::PIN_22"
 pin_sw = "embassy_rp::peripherals::PIN_1"
 pio = "embassy_rp::peripherals::PIO0"
 
+# The card is driven in **SPI mode** from a PIO SPI master, because both of this board's
+# SPI peripherals are taken -- SPI0 is the display and SPI1 the internal ADC bus.
+#
+# The pin names look like a remap and are not: an SD card in SPI mode uses the same physical
+# contacts it uses in native 4-bit mode, so the slot is wired once and the names differ only
+# by which mode is talking to it.
+#
+#   SCK  = CLK  = GPIO 41      MISO = DAT0 = GPIO 43
+#   MOSI = CMD  = GPIO 42      CS   = DAT3 = GPIO 46
+#
+# DAT1 (44) and DAT2 (45) are unused in SPI mode. They are deliberately *not* declared here:
+# leaving them out of `SdCardPeripherals` leaves them in `Peripherals`, unclaimed and
+# floating with the card's own pull-ups on them, which is what the SD specification asks
+# for. Do not hand them to anything else -- they are the card's.
+#
+# CS is a plain GPIO rather than a PIO pin. `sdio::spi::SpiMmcBus` owns it and holds it low
+# across a whole command, header and data phase together, which is not something a PIO
+# side-set or a per-transaction `SpiDevice` can express.
+#
+# PIO1 because PIO0 is the rotary encoder. One state machine now, not the two the 4-bit
+# transport needed. DMA_CH6/CH7 are the first free pair: CH0/CH1 are the internal SPI bus,
+# CH2/CH3 the display and CH4/CH5 the ESP32 UART.
+[sd_card_peripherals]
+pio = "embassy_rp::peripherals::PIO1"
+pin_sck = "embassy_rp::peripherals::PIN_41"
+pin_mosi = "embassy_rp::peripherals::PIN_42"
+pin_miso = "embassy_rp::peripherals::PIN_43"
+pin_cs = "embassy_rp::peripherals::PIN_46"
+pin_det = "embassy_rp::peripherals::PIN_26"
+dma_rx = "embassy_rp::peripherals::DMA_CH6"
+dma_tx = "embassy_rp::peripherals::DMA_CH7"
+
 [button_peripherals]
 pin_brew = "embassy_rp::peripherals::PIN_15"
 pin_water = "embassy_rp::peripherals::PIN_14"
@@ -73,6 +105,7 @@ usb = "embassy_rp::peripherals::USB"
 [irq_aliases]
 EspIrq = "UART1_IRQ"
 RotaryEncoderPioIrq = "PIO0_IRQ_0"
+SdCardPioIrq = "PIO1_IRQ_0"
 QwiicI2cIrq = "I2C0_IRQ"
 DmaIrq = "DMA_IRQ_0"
 UsbIrq = "USBCTRL_IRQ"

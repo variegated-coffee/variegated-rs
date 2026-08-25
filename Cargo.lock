@@ -5218,6 +5218,7 @@ dependencies = [
  "variegated-exfat-format",
  "variegated-hal",
  "variegated-log",
+ "variegated-pio-spi-sd-card",
  "variegated-timekeeping",
 ]
 
@@ -5545,6 +5546,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-pio-spi-sd-card"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+ "embassy-rp",
+ "embedded-hal 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sdio",
+ "variegated-rp-pio",
+]
+
+[[package]]
 name = "variegated-postcard-schema"
 version = "0.1.0"
 dependencies = [
@@ -5565,6 +5578,13 @@ dependencies = [
  "syn 2.0.119",
  "trybuild",
  "variegated-postcard-schema",
+]
+
+[[package]]
+name = "variegated-rp-pio"
+version = "0.1.0"
+dependencies = [
+ "fixed",
 ]
 
 [[package]]

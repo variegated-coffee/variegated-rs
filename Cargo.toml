@@ -37,6 +37,8 @@ members = [
     "crates/variegated-debug",
     "crates/variegated-postcard-schema",
     "crates/variegated-postcard-schema-derive",
+    "crates/variegated-rp-pio",
+    "crates/variegated-pio-spi-sd-card",
 
     # The `#[board_cfg(...)]` / `aliased_bind_interrupts!` macro. It is published to
     # crates.io from here. Both it and its fixture crate are deliberately absent from
@@ -105,6 +107,14 @@ default-members = [
     "crates/variegated-debug",
     "crates/variegated-postcard-schema",
     "crates/variegated-postcard-schema-derive",
+    # `variegated-pio-spi-sd-card` is here despite its own `default` feature set being empty,
+    # which on its own would compile it as pure logic with no `embassy-rp`. Resolver 2
+    # unifies features across one invocation, so once a firmware in this list asks for
+    # `sd-card-pio-spi` the same build enables `rp235xb` on it and the hardware half is
+    # compiled too. Being absent would instead leave its warnings uncounted by a bare
+    # `cargo build`. `variegated-rp-pio` has no chip features at all and is pure either way.
+    "crates/variegated-rp-pio",
+    "crates/variegated-pio-spi-sd-card",
     # Neither `variegated-board-cfg` nor its fixture crate is here, for two different
     # reasons.
     #
