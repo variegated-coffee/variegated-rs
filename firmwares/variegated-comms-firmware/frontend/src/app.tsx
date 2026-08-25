@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { Alert, Badge, Button, DialogHost, tokens } from '@variegated-coffee/ui';
 import { ScheduleBuilder } from './components/ScheduleBuilder';
 import { TimezonePanel } from './components/TimezonePanel';
 import { BluetoothPanel } from './components/BluetoothPanel';
@@ -18,6 +19,20 @@ import {
   Configuration,
   RoutineSummaryStorage
 } from './schemas/schemas';
+
+/**
+ * The card each top-level section sits in.
+ *
+ * One object rather than the same six properties written out at each `<section>`, which is
+ * how three of them came to have a slightly different shadow.
+ */
+const panelStyle = {
+  marginTop: tokens.space.lg,
+  background: tokens.color.surfaceRaised,
+  padding: tokens.space.lg,
+  border: `1px solid ${tokens.color.border}`,
+  borderRadius: tokens.radius.md,
+};
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -134,56 +149,64 @@ export function App() {
     }
   }, [machineDefinition, status, config, loading]);
 
+  const reconnect = () => {
+    setError(null);
+    setLoading(true);
+    const ws = getWebSocketService();
+    if (ws) {
+      ws.connect();
+    }
+  };
+
   if (loading) {
     return (
-      <div style={{ padding: '2rem', textAlign: 'center' }}>
-        <h1>Connecting...</h1>
-        <p style={{ color: '#666' }}>Establishing WebSocket connection...</p>
+      <div style={{ padding: tokens.space.xl, textAlign: 'center' }}>
+        <h1>Connecting…</h1>
+        <p style={{ color: tokens.color.inkMuted }}>Establishing WebSocket connection…</p>
       </div>
     );
   }
 
   if (error && !connected) {
     return (
-      <div style={{ padding: '2rem', textAlign: 'center', color: 'red' }}>
-        <h1>Connection Error</h1>
-        <p>{error}</p>
-        <button
-          onClick={() => {
-            setError(null);
-            setLoading(true);
-            const ws = getWebSocketService();
-            if (ws) {
-              ws.connect();
-            }
-          }}
-          style={{
-            marginTop: '1rem',
-            padding: '0.5rem 1rem',
-            cursor: 'pointer'
-          }}
-        >
-          Retry Connection
-        </button>
+      <div style={{ padding: tokens.space.xl, maxWidth: '32rem', margin: '0 auto' }}>
+        <Alert role="danger" title="Connection error" action={{ label: 'Retry', onClick: reconnect }}>
+          {error}
+        </Alert>
       </div>
     );
   }
 
   return (
+    // One host for the whole app. Every confirmation and every notification routes through
+    // it, which is what lets `window.confirm` and `alert` leave the tree entirely.
+    <DialogHost>
     <MachineProvider machineDefinition={machineDefinition as MachineDefinition}>
-      <div style={{ padding: '2rem', maxWidth: '1200px', margin: '0 auto' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
-          <h1>{machineDefinition?.name || 'Espresso Machine'}</h1>
-          <span style={{
-            padding: '0.25rem 0.5rem',
-            borderRadius: '4px',
-            fontSize: '0.75rem',
-            background: connected ? '#e6ffe6' : '#ffe6e6',
-            color: connected ? '#006600' : '#660000'
-          }}>
+      <div style={{ padding: tokens.space.xl, maxWidth: '1200px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.space.xl, gap: tokens.space.md }}>
+          <h1 style={{ margin: 0 }}>{machineDefinition?.name || 'Espresso Machine'}</h1>
+          <Badge role={connected ? 'ok' : 'danger'}>
             {connected ? 'Connected' : 'Disconnected'}
-          </span>
+          </Badge>
         </div>
+
+        {/* The connection is the precondition for every control below, so it is stated once
+            here rather than discovered one failed button at a time. The panels are also
+            told, so they can disable what cannot work -- a control that looks available and
+            answers "Not connected to the machine" after you press it is the failure this
+            replaces. */}
+        {!connected && (
+          <div style={{ marginBottom: tokens.space.md }}>
+            <Alert
+              role="danger"
+              title="Not connected to the machine"
+              action={{ label: 'Retry', onClick: reconnect }}
+            >
+              Readings are the last ones received. Controls that need the machine are
+              unavailable until the connection is back.
+            </Alert>
+          </div>
+        )}
 
         {/* Status Display */}
         <StatusDisplay status={status as Status} routines={routines as RoutineSummaryStorage} />
@@ -192,12 +215,12 @@ export function App() {
         <ConfigurationPanel configuration={config as Configuration} />
 
         {/* Shot upload */}
-        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+        <section style={panelStyle}>
           <ShotUploadPanel shotUpload={(config as Configuration)?.shot_upload} />
         </section>
 
         {/* Bluetooth peripherals */}
-        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+        <section style={panelStyle}>
           <BluetoothPanel
             associations={(config as Configuration)?.bluetooth_peripherals || []}
             scan={(status as Status).bluetooth}
@@ -215,8 +238,9 @@ export function App() {
         </section>
 
         {/* Shot log */}
-        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+        <section style={panelStyle}>
           <ShotLogPanel
+            connected={connected}
             pending={(status as Status).pending_shot_annotations}
             sdCardPresent={(status as Status).sd_card_present}
             // The groups the machine actually has, rather than a hardcoded `[0]`: the
@@ -228,7 +252,7 @@ export function App() {
 
         {/* Schedules, and the timezone they fire on -- together, because a schedule time
             means nothing without knowing which clock it is on. */}
-        <section style={{ marginTop: '1.5rem', background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+        <section style={panelStyle}>
           <TimezonePanel timezone={(config as Configuration)?.timezone} />
           <ScheduleBuilder schedules={(config as Configuration)?.schedules || []} />
         </section>
@@ -244,65 +268,32 @@ export function App() {
           </section>
         )}
 
-        {/* Footer with JSON Modal Triggers */}
-        <footer style={{ marginTop: '2rem', paddingTop: '1.5rem', borderTop: '1px solid #ddd', textAlign: 'center', color: '#666', fontSize: '0.875rem' }}>
-          <p>
-            <button
-              onClick={() => setShowStatusJson(true)}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#0066cc',
-                cursor: 'pointer',
-                textDecoration: 'underline',
-                marginRight: '1rem',
-                fontSize: '0.875rem'
-              }}
-            >
-              Show Status JSON
-            </button>
-            <button
-              onClick={() => setShowConfigJson(true)}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#0066cc',
-                cursor: 'pointer',
-                textDecoration: 'underline',
-                marginRight: '1rem',
-                fontSize: '0.875rem'
-              }}
-            >
-              Show Configuration JSON
-            </button>
-            <button
-              onClick={() => setShowRoutinesJson(true)}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#0066cc',
-                cursor: 'pointer',
-                textDecoration: 'underline',
-                marginRight: '1rem',
-                fontSize: '0.875rem'
-              }}
-            >
-              Show Routines JSON
-            </button>
-            <button
-              onClick={() => setShowMachineDefJson(true)}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: '#0066cc',
-                cursor: 'pointer',
-                textDecoration: 'underline',
-                fontSize: '0.875rem'
-              }}
-            >
-              Show Machine Definition JSON
-            </button>
-          </p>
+        {/* Diagnostics. Quiet, because reading raw JSON is a debugging errand rather than
+            something a machine owner does -- these were four blue underlined links
+            competing with the actions above them. */}
+        <footer
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: tokens.space.sm,
+            justifyContent: 'center',
+            marginTop: tokens.space.xl,
+            paddingTop: tokens.space.lg,
+            borderTop: `1px solid ${tokens.color.border}`,
+          }}
+        >
+          <Button variant="quiet" size="sm" onClick={() => setShowStatusJson(true)}>
+            Status JSON
+          </Button>
+          <Button variant="quiet" size="sm" onClick={() => setShowConfigJson(true)}>
+            Configuration JSON
+          </Button>
+          <Button variant="quiet" size="sm" onClick={() => setShowRoutinesJson(true)}>
+            Routines JSON
+          </Button>
+          <Button variant="quiet" size="sm" onClick={() => setShowMachineDefJson(true)}>
+            Machine definition JSON
+          </Button>
         </footer>
 
         {/* JSON Modals */}
@@ -332,5 +323,6 @@ export function App() {
         />
       </div>
     </MachineProvider>
+    </DialogHost>
   );
 }

@@ -1,5 +1,6 @@
 import { memo } from 'preact/compat';
-import { useState } from 'preact/hooks';
+import { useId, useState } from 'preact/hooks';
+import { Alert, Badge, tokens } from '@variegated-coffee/ui';
 import { useMachine } from '../contexts/MachineContext';
 import { SteamWandStatus } from '../schemas/schemas';
 import { getWebSocketService } from '../services/websocket';
@@ -15,6 +16,9 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [opennessValue, setOpennessValue] = useState(status.valve_openness);
+  // A range input is one of the controls `Field` cannot own -- it has no text to format --
+  // so it takes the id directly and wires its own label.
+  const sliderId = useId();
 
   const showSuccess = (message: string) => {
     setSuccessMessage(message);
@@ -29,7 +33,7 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
   const handleOpennessChange = (newOpenness: number) => {
     const ws = getWebSocketService();
     if (!ws) {
-      showError('WebSocket not connected');
+      showError('Not connected to the machine');
       setOpennessValue(status.valve_openness);
       return;
     }
@@ -37,102 +41,79 @@ const SteamWandStatusCardComponent = ({ index, status }: SteamWandStatusCardProp
     showSuccess(`Valve openness set to ${newOpenness}%`);
   };
 
-  // Determine status color based on steaming state
-  const getStatusColor = () => {
-    if (status.is_steaming) {
-      return '#28a745'; // green - active
-    }
-    return '#6c757d'; // gray - idle
-  };
-
   return (
     <div
       style={{
-        padding: '1rem',
-        backgroundColor: 'white',
-        border: status.is_steaming ? '2px solid #28a745' : '1px solid #ddd',
-        borderRadius: '8px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.sm,
+        padding: tokens.space.md,
+        backgroundColor: tokens.color.surfaceRaised,
+        // Steaming is a state worth seeing from across the room, so the whole card carries
+        // it. The border keeps its 1px width in both states -- a 2px border on one of them
+        // shifted the card's contents by a pixel every time steaming started.
+        border: `1px solid ${status.is_steaming ? tokens.color.ok : tokens.color.border}`,
+        boxShadow: status.is_steaming ? `0 0 0 1px ${tokens.color.ok}` : undefined,
+        borderRadius: tokens.radius.md,
         flex: '1 1 300px',
-        minWidth: '250px'
+        minWidth: '250px',
       }}
     >
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: '600' }}>{name}</h3>
-        <span
-          style={{
-            padding: '0.25rem 0.75rem',
-            backgroundColor: getStatusColor(),
-            color: 'white',
-            borderRadius: '12px',
-            fontSize: '0.75rem',
-            fontWeight: '500'
-          }}
-        >
-          {status.is_steaming ? 'STEAMING' : 'IDLE'}
-        </span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
+        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>{name}</h3>
+        <Badge role={status.is_steaming ? 'ok' : undefined}>
+          {status.is_steaming ? 'Steaming' : 'Idle'}
+        </Badge>
       </div>
 
-      {/* Valve Openness */}
-      <div style={{ marginBottom: '0.75rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-          <span style={{ fontSize: '0.85rem', color: '#666' }}>Valve Openness:</span>
-          <span style={{ fontSize: '0.85rem', fontWeight: '600' }}>{opennessValue}%</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.xs }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: tokens.space.sm }}>
+          <label
+            for={sliderId}
+            style={{ font: `0.85rem ${tokens.font.sans}`, color: tokens.color.inkMuted }}
+          >
+            Valve openness
+          </label>
+          <span
+            style={{
+              font: `0.85rem ${tokens.font.mono}`,
+              fontVariantNumeric: 'tabular-nums',
+              fontWeight: 500,
+            }}
+          >
+            {opennessValue}
+            <span style={{ fontSize: '0.85em', color: tokens.color.inkMuted }}> %</span>
+          </span>
         </div>
 
-        {/* Slider */}
         <input
+          id={sliderId}
           type="range"
           min="0"
           max="100"
           value={opennessValue}
+          // The value is announced as a percentage rather than as a bare number, which is
+          // all a range input says by default.
+          aria-valuetext={`${opennessValue}%`}
           onChange={(e) => setOpennessValue(Number(e.currentTarget.value))}
           onMouseUp={() => void handleOpennessChange(opennessValue)}
           onTouchEnd={() => void handleOpennessChange(opennessValue)}
+          // Committed on key release as well as on pointer release. Without this the
+          // slider could be moved with the arrow keys and never send anything -- the
+          // control looked usable from the keyboard and silently was not.
+          onKeyUp={() => void handleOpennessChange(opennessValue)}
           style={{
             width: '100%',
             height: '6px',
             borderRadius: '3px',
-            background: `linear-gradient(to right, #0066cc 0%, #0066cc ${opennessValue}%, #ddd ${opennessValue}%, #ddd 100%)`,
-            outline: 'none',
-            cursor: 'pointer'
+            background: `linear-gradient(to right, ${tokens.color.info} 0%, ${tokens.color.info} ${opennessValue}%, ${tokens.color.border} ${opennessValue}%, ${tokens.color.border} 100%)`,
+            cursor: 'pointer',
           }}
         />
       </div>
 
-      {/* Success Message */}
-      {successMessage && (
-        <div
-          style={{
-            marginTop: '0.75rem',
-            padding: '0.5rem',
-            backgroundColor: '#d4edda',
-            color: '#155724',
-            borderRadius: '4px',
-            fontSize: '0.85rem',
-            textAlign: 'center'
-          }}
-        >
-          {successMessage}
-        </div>
-      )}
-
-      {/* Error Message */}
-      {error && (
-        <div
-          style={{
-            marginTop: '0.75rem',
-            padding: '0.5rem',
-            backgroundColor: '#f8d7da',
-            color: '#721c24',
-            borderRadius: '4px',
-            fontSize: '0.85rem',
-            textAlign: 'center'
-          }}
-        >
-          {error}
-        </div>
-      )}
+      {successMessage && <Alert role="ok">{successMessage}</Alert>}
+      {error && <Alert role="danger">{error}</Alert>}
     </div>
   );
 };

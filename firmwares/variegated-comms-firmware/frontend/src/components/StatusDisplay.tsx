@@ -1,5 +1,15 @@
+import type { ComponentChildren } from 'preact';
 import { useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import {
+  Alert,
+  Badge,
+  Readout,
+  Section,
+  focusRingStyle,
+  tokens,
+  useInteractive,
+} from '@variegated-coffee/ui';
 import { Status, RoutineSummaryStorage } from '../schemas/schemas';
 import { useMachine } from '../contexts/MachineContext';
 import { BoilerStatusCard } from './BoilerStatusCard';
@@ -13,18 +23,133 @@ interface StatusDisplayProps {
   routines: RoutineSummaryStorage;
 }
 
+type MachineMode = 'On' | 'Off' | 'PowerSaveStandby';
+
+const MODES: { value: MachineMode; label: string }[] = [
+  { value: 'On', label: 'On' },
+  { value: 'Off', label: 'Off' },
+  { value: 'PowerSaveStandby', label: 'Power save' },
+];
+
+/**
+ * One of three mutually exclusive machine modes.
+ *
+ * Rendered as a real radio group rather than three buttons. It was three `<button>`s, each
+ * of which turned a different colour when it happened to be the active one -- green for
+ * On, grey for Off, amber for Power save -- so the control had three selected appearances
+ * and nothing that said "these are alternatives". Tab reached all three separately, and
+ * nothing announced which was current.
+ *
+ * `role="radio"` gives it the semantics it always had, and one selected treatment means
+ * the selected state is comparable across the three.
+ */
+function ModeSelector({
+  mode,
+  onSelect,
+}: {
+  mode: MachineMode;
+  onSelect: (mode: MachineMode) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Machine mode"
+      style={{ display: 'flex', gap: tokens.space.sm }}
+    >
+      {MODES.map((option) => (
+        <ModeOption
+          key={option.value}
+          label={option.label}
+          selected={mode === option.value}
+          onSelect={() => onSelect(option.value)}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ModeOption({
+  label,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const { hovered, focusRing, handlers } = useInteractive();
+
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      style={{
+        flex: 1,
+        padding: `${tokens.space.sm} ${tokens.space.sm}`,
+        background: selected
+          ? tokens.color.info
+          : hovered
+            ? tokens.color.surface
+            : tokens.color.surfaceRaised,
+        color: selected ? tokens.color.surfaceRaised : tokens.color.ink,
+        border: `1px solid ${selected ? tokens.color.info : tokens.color.border}`,
+        borderRadius: tokens.radius.sm,
+        font: `0.875rem ${tokens.font.sans}`,
+        fontWeight: selected ? 500 : 400,
+        cursor: 'pointer',
+        ...(focusRing ? focusRingStyle(tokens.color.info) : {}),
+      }}
+      {...handlers}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Wi-Fi signal strength, in words.
+ *
+ * The emoji is gone. All three branches of the old ternary rendered the same `📶`, so the
+ * glyph carried no information at any strength -- and the dBm figure sat behind a `title`
+ * tooltip, which a machine-side tablet has no way to show. The word and the number are
+ * both visible now, which is what the tooltip was standing in for.
+ */
+function wifiQuality(rssi: number): { label: string; role: 'ok' | 'warn' | 'danger' } {
+  if (rssi >= -60) return { label: 'Excellent', role: 'ok' };
+  if (rssi >= -70) return { label: 'Good', role: 'warn' };
+  return { label: 'Poor', role: 'danger' };
+}
+
+/** The strip of facts across the top: one plane, one set of paddings. */
+function Tile({ children }: { children: ComponentChildren }) {
+  return (
+    <div
+      style={{
+        flex: '1 1 auto',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.sm,
+        padding: tokens.space.sm,
+        backgroundColor: tokens.color.surfaceSunken,
+        border: `1px solid ${tokens.color.border}`,
+        borderRadius: tokens.radius.sm,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
   const { getBoilerEntries, getGroupEntries } = useMachine();
-  const [boilersExpanded, setBoilersExpanded] = useState(true);
-  const [groupsExpanded, setGroupsExpanded] = useState(true);
-  const [steamWandsExpanded, setSteamWandsExpanded] = useState(true);
-  const [detailsExpanded, setDetailssExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const showSuccess = (message: string) => {
-    setSuccessMessage(message);
-    setTimeout(() => setSuccessMessage(null), 3000);
+  const showNotice = (message: string) => {
+    setNotice(message);
+    setTimeout(() => setNotice(null), 3000);
   };
 
   const showError = (message: string) => {
@@ -32,14 +157,16 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleSetMode = (modeType: 'On' | 'Off' | 'PowerSaveStandby') => {
+  const handleSetMode = (modeType: MachineMode) => {
     const ws = getWebSocketService();
     if (!ws) {
-      showError('WebSocket not connected');
+      showError('Not connected to the machine');
       return;
     }
     ws.setMode(modeType);
-    showSuccess(`Machine mode set to ${modeType}`);
+    // What is known: the command went out. The selected mode above updates when the
+    // machine reports it, which is the actual confirmation.
+    showNotice('Mode change sent');
   };
 
   const boilerEntries = getBoilerEntries();
@@ -48,115 +175,39 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
   const tankStatusEntries = Array.from(status.tank_statuses.entries());
   const waterTapStatusEntries = Array.from(status.water_tap_statuses.entries());
 
+  const rssi = status.comms_status?.wifi_rssi;
+  const quality = rssi !== null && rssi !== undefined ? wifiQuality(rssi) : null;
+
+  const cardRow = {
+    display: 'flex',
+    gap: tokens.space.md,
+    flexWrap: 'wrap' as const,
+  };
+
   return (
     <div
       style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '1.5rem',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.md,
+        backgroundColor: tokens.color.surfaceRaised,
+        border: `1px solid ${tokens.color.border}`,
+        borderRadius: tokens.radius.md,
+        padding: tokens.space.lg,
       }}
     >
-      <h2 style={{ marginTop: 0, marginBottom: '1rem' }}>Machine Status</h2>
+      <h2 style={{ margin: 0 }}>Machine status</h2>
 
-      {/* Error/Success Messages */}
-      {error && (
-        <div style={{
-          fontSize: '0.9rem',
-          color: '#721c24',
-          marginBottom: '0.75rem',
-          padding: '0.5rem',
-          backgroundColor: '#f8d7da',
-          borderRadius: '4px',
-          border: '1px solid #f5c6cb'
-        }}>
-          ❌ {error}
-        </div>
-      )}
+      {error && <Alert role="danger">{error}</Alert>}
+      {notice && <Alert role="ok">{notice}</Alert>}
 
-      {successMessage && (
-        <div style={{
-          fontSize: '0.9rem',
-          color: '#155724',
-          marginBottom: '0.75rem',
-          padding: '0.5rem',
-          backgroundColor: '#d4edda',
-          borderRadius: '4px',
-          border: '1px solid #c3e6cb'
-        }}>
-          ✅ {successMessage}
-        </div>
-      )}
-
-      {/* Top Level Status */}
-      <div style={{ display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-        {/* Machine Mode */}
-        <div
-          style={{
-            flex: '1 1 auto',
-            padding: '0.75rem 1rem',
-            backgroundColor: '#f8f9fa',
-            borderRadius: '6px'
-          }}
-        >
-          <div style={{ fontWeight: '500', marginBottom: '0.5rem' }}>Machine Mode:</div>
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button
-              onClick={() => void handleSetMode('On')}
-              disabled={status.mode.type === 'On'}
-              style={{
-                flex: 1,
-                padding: '0.5rem 0.75rem',
-                backgroundColor: status.mode.type === 'On' ? '#28a745' : '#e0e0e0',
-                color: status.mode.type === 'On' ? 'white' : '#333',
-                border: status.mode.type === 'On' ? '2px solid #28a745' : '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                fontWeight: '500',
-                cursor: status.mode.type === 'On' ? 'default' : 'pointer',
-                opacity: status.mode.type === 'On' ? 1 : 0.9
-              }}
-            >
-              On
-            </button>
-            <button
-              onClick={() => void handleSetMode('Off')}
-              disabled={status.mode.type === 'Off'}
-              style={{
-                flex: 1,
-                padding: '0.5rem 0.75rem',
-                backgroundColor: status.mode.type === 'Off' ? '#6c757d' : '#e0e0e0',
-                color: status.mode.type === 'Off' ? 'white' : '#333',
-                border: status.mode.type === 'Off' ? '2px solid #6c757d' : '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                fontWeight: '500',
-                cursor: status.mode.type === 'Off' ? 'default' : 'pointer',
-                opacity: status.mode.type === 'Off' ? 1 : 0.9
-              }}
-            >
-              Off
-            </button>
-            <button
-              onClick={() => void handleSetMode('PowerSaveStandby')}
-              disabled={status.mode.type === 'PowerSaveStandby'}
-              style={{
-                flex: 1,
-                padding: '0.5rem 0.75rem',
-                backgroundColor: status.mode.type === 'PowerSaveStandby' ? '#ffc107' : '#e0e0e0',
-                color: status.mode.type === 'PowerSaveStandby' ? '#333' : '#333',
-                border: status.mode.type === 'PowerSaveStandby' ? '2px solid #ffc107' : '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.875rem',
-                fontWeight: '500',
-                cursor: status.mode.type === 'PowerSaveStandby' ? 'default' : 'pointer',
-                opacity: status.mode.type === 'PowerSaveStandby' ? 1 : 0.9
-              }}
-            >
-              Power Save
-            </button>
+      <div style={{ display: 'flex', gap: tokens.space.md, flexWrap: 'wrap' }}>
+        <Tile>
+          <div style={{ font: `0.85rem ${tokens.font.sans}`, color: tokens.color.inkMuted }}>
+            Machine mode
           </div>
-        </div>
+          <ModeSelector mode={status.mode.type as MachineMode} onSelect={handleSetMode} />
+        </Tile>
 
         {/* SD card.
             Shown here rather than only inside the shot-log panel, because an absent card
@@ -168,102 +219,49 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
             null`: `!status.sd_card_present` would be true for null as well and would
             render "No card" on a machine that never had a slot. */}
         {status.sd_card_present !== null && (
-          <div
-            style={{
-              flex: '1 1 auto',
-              padding: '0.75rem 1rem',
-              backgroundColor: '#f8f9fa',
-              borderRadius: '6px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
-            }}
-          >
-            <span style={{ fontWeight: '500' }}>SD card:</span>
-            <span
-              style={{
-                padding: '0.25rem 0.75rem',
-                backgroundColor: status.sd_card_present ? '#28a745' : '#dc3545',
-                color: 'white',
-                borderRadius: '12px',
-                fontSize: '0.875rem',
-                fontWeight: '500'
-              }}
-            >
-              {status.sd_card_present ? 'Inserted' : 'No card'}
-            </span>
-          </div>
-        )}
-
-        {/* WiFi Status */}
-        {status.comms_status && (
-          <div
-            style={{
-              flex: '1 1 auto',
-              padding: '0.75rem 1rem',
-              backgroundColor: '#f8f9fa',
-              borderRadius: '6px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
-            }}
-          >
-            <span style={{ fontWeight: '500' }}>WiFi:</span>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span
-                style={{
-                  padding: '0.25rem 0.75rem',
-                  backgroundColor: status.comms_status.wifi_connected ? '#28a745' : '#dc3545',
-                  color: 'white',
-                  borderRadius: '12px',
-                  fontSize: '0.875rem',
-                  fontWeight: '500'
-                }}
-              >
-                {status.comms_status.wifi_connected ? 'Connected' : 'Disconnected'}
+          <Tile>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
+              <span style={{ font: `0.85rem ${tokens.font.sans}`, color: tokens.color.inkMuted }}>
+                SD card
               </span>
-              {status.comms_status.wifi_connected && status.comms_status.wifi_rssi !== null && status.comms_status.wifi_rssi !== undefined && (
-                <span
-                  style={{
-                    fontSize: '0.875rem',
-                    color: '#666',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.25rem'
-                  }}
-                  title={`Signal Strength: ${status.comms_status.wifi_rssi} dBm`}
-                >
-                  <span>{status.comms_status.wifi_rssi} dBm</span>
-                  <span style={{ fontSize: '1rem' }}>
-                    {status.comms_status.wifi_rssi >= -60 ? '📶' :
-                     status.comms_status.wifi_rssi >= -70 ? '📶' :
-                     '📶'}
-                  </span>
-                  <span style={{ fontSize: '0.75rem', fontWeight: '500', color: status.comms_status.wifi_rssi >= -60 ? '#28a745' : status.comms_status.wifi_rssi >= -70 ? '#ffc107' : '#dc3545' }}>
-                    ({status.comms_status.wifi_rssi >= -60 ? 'Excellent' :
-                      status.comms_status.wifi_rssi >= -70 ? 'Good' :
-                      'Poor'})
-                  </span>
-                </span>
-              )}
+              <Badge role={status.sd_card_present ? 'ok' : 'warn'}>
+                {status.sd_card_present ? 'Inserted' : 'No card'}
+              </Badge>
             </div>
-          </div>
+          </Tile>
         )}
 
-        {/* Current Time */}
+        {status.comms_status && (
+          <Tile>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+              <span style={{ font: `0.85rem ${tokens.font.sans}`, color: tokens.color.inkMuted }}>
+                Wi-Fi
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
+                <Badge role={status.comms_status.wifi_connected ? 'ok' : 'danger'}>
+                  {status.comms_status.wifi_connected ? 'Connected' : 'Disconnected'}
+                </Badge>
+                {status.comms_status.wifi_connected && quality && rssi !== null && rssi !== undefined && (
+                  <>
+                    <Badge role={quality.role}>{quality.label}</Badge>
+                    <span
+                      style={{
+                        font: `0.8rem ${tokens.font.mono}`,
+                        fontVariantNumeric: 'tabular-nums',
+                        color: tokens.color.inkMuted,
+                      }}
+                    >
+                      {rssi} dBm
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+          </Tile>
+        )}
+
         {status.current_local_time && (
-          <div
-            style={{
-              flex: '1 1 auto',
-              padding: '0.75rem 1rem',
-              backgroundColor: '#f8f9fa',
-              borderRadius: '6px',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center'
-            }}
-          >
-            <span style={{ fontWeight: '500' }}>Time:</span>
+          <Tile>
             {/*
               Rendered as sent, not re-parsed. `current_local_time` is a chrono `NaiveDateTime`
               -- an ISO-8601 string with no offset -- already in the *machine's* zone.
@@ -276,244 +274,123 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
               doing something at a particular hour. It also forced `en-US` MM/DD/YYYY on
               everyone regardless of locale.
             */}
-            <span style={{ fontSize: '0.875rem', fontWeight: '500', fontFamily: 'monospace' }}>
-              {status.current_local_time.replace('T', ' ')}
-            </span>
-          </div>
+            <Readout
+              label="Machine time"
+              value={status.current_local_time.replace('T', ' ')}
+            />
+          </Tile>
         )}
       </div>
 
-      {/* Routine Execution */}
       {status.routine_execution && (
         <RoutineExecutionCard execution={status.routine_execution} routines={routines} status={status} />
       )}
 
-
-        {/* Groups Section */}
-        {groupEntries.length > 0 && (
-            <div style={{ marginBottom: '1rem' }}>
-                <button
-                    onClick={() => setGroupsExpanded(!groupsExpanded)}
-                    style={{
-                        width: '100%',
-                        padding: '0.75rem',
-                        backgroundColor: '#f8f9fa',
-                        border: '1px solid #ddd',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        fontSize: '1rem',
-                        fontWeight: '500'
-                    }}
-                >
-                    <span>Groups ({groupEntries.length})</span>
-                    <span style={{ fontSize: '1.2rem' }}>{groupsExpanded ? '▼' : '▶'}</span>
-                </button>
-
-                {groupsExpanded && (
-                    <div
-                        style={{
-                            display: 'flex',
-                            gap: '1rem',
-                            marginTop: '1rem',
-                            flexWrap: 'wrap'
-                        }}
-                    >
-                        {groupEntries.map(([key], index) => {
-                            const groupStatus = status.group_statuses.get(key);
-                            return groupStatus ? (
-                                <GroupStatusCard key={key} index={index} status={groupStatus} />
-                            ) : null;
-                        })}
-                    </div>
-                )}
-            </div>
-        )}
-
-      {/* Boilers Section */}
-      {boilerEntries.length > 0 && (
-        <div style={{ marginBottom: '1rem' }}>
-          <button
-            onClick={() => setBoilersExpanded(!boilersExpanded)}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              backgroundColor: '#f8f9fa',
-              border: '1px solid #ddd',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              fontSize: '1rem',
-              fontWeight: '500'
-            }}
-          >
-            <span>Boilers ({boilerEntries.length})</span>
-            <span style={{ fontSize: '1.2rem' }}>{boilersExpanded ? '▼' : '▶'}</span>
-          </button>
-
-          {boilersExpanded && (
-            <div
-              style={{
-                display: 'flex',
-                gap: '1rem',
-                marginTop: '1rem',
-                flexWrap: 'wrap'
-              }}
-            >
-              {boilerEntries.map(([key], index) => {
-                const boilerStatus = status.boiler_statuses.get(key);
-                return boilerStatus ? (
-                  <BoilerStatusCard key={key} index={index} status={boilerStatus} />
-                ) : null;
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Steam Wands Section (collapsible) */}
-      {status.steam_wand_statuses.size > 0 && (
-        <div>
-          <button
-            onClick={() => setSteamWandsExpanded(!steamWandsExpanded)}
-            style={{
-              width: '100%',
-              padding: '0.75rem',
-              backgroundColor: '#f8f9fa',
-              border: '1px solid #ddd',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              fontSize: '1rem',
-              fontWeight: '500'
-            }}
-          >
-            <span>Steam Wands ({status.steam_wand_statuses.size})</span>
-            <span style={{ fontSize: '1.2rem' }}>{steamWandsExpanded ? '▼' : '▶'}</span>
-          </button>
-
-          {steamWandsExpanded && (
-            <div
-              style={{
-                display: 'flex',
-                gap: '1rem',
-                marginTop: '1rem',
-                flexWrap: 'wrap'
-              }}
-            >
-              {steamWandStatusEntries.map(([key, wandStatus]) => (
-                <SteamWandStatusCard key={key} index={key} status={wandStatus} />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Additional Details Section (collapsible) */}
-      <div>
-        <button
-          onClick={() => setDetailssExpanded(!detailsExpanded)}
-          style={{
-            width: '100%',
-            padding: '0.75rem',
-            backgroundColor: '#f8f9fa',
-            border: '1px solid #ddd',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            fontSize: '1rem',
-            fontWeight: '500'
-          }}
-        >
-          <span>Other Components</span>
-          <span style={{ fontSize: '1.2rem' }}>{detailsExpanded ? '▼' : '▶'}</span>
-        </button>
-
-        {detailsExpanded && (
-          <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {/* Tanks */}
-            {status.tank_statuses.size > 0 && (
-              <div
-                style={{
-                  padding: '1rem',
-                  backgroundColor: '#f8f9fa',
-                  borderRadius: '6px',
-                  border: '1px solid #e0e0e0'
-                }}
-              >
-                <h4 style={{ margin: '0 0 0.5rem 0' }}>Tanks</h4>
-                {tankStatusEntries.map(([key, tank]) => (
-                  <div key={key} style={{ fontSize: '0.9rem' }}>
-                    <strong>{key}:</strong>
-                    {tank.water_level !== null && tank.water_level !== undefined && (
-                      <span> Water Level: {tank.water_level.toFixed(1)}%</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Water Taps */}
-            {status.water_tap_statuses.size > 0 && (
-              <div
-                style={{
-                  padding: '1rem',
-                  backgroundColor: '#f8f9fa',
-                  borderRadius: '6px',
-                  border: '1px solid #e0e0e0'
-                }}
-              >
-                <h4 style={{ margin: '0 0 0.5rem 0' }}>Water Taps</h4>
-                {waterTapStatusEntries.map(([key, tap]) => (
-                  <div key={key} style={{ fontSize: '0.9rem' }}>
-                    <strong>{key}:</strong> {tap.is_dispensing ? 'Dispensing' : 'Idle'}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Peripherals */}
-            {status.peripheral_status.peripherals.size > 0 && (
-              <div
-                style={{
-                  padding: '1rem',
-                  backgroundColor: '#f8f9fa',
-                  borderRadius: '6px',
-                  border: '1px solid #e0e0e0'
-                }}
-              >
-                <h4 style={{ margin: '0 0 0.5rem 0' }}>Peripherals</h4>
-                {Array.from(status.peripheral_status.peripherals.entries()).map(([key, peripheral]) => (
-                  <div key={key} style={{ fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between' }}>
-                    <span>
-                      <strong>{key}</strong> ({peripheral.peripheral_type})
-                    </span>
-                    <span
-                      style={{
-                        padding: '0.125rem 0.5rem',
-                        backgroundColor: peripheral.is_available ? '#28a745' : '#6c757d',
-                        color: 'white',
-                        borderRadius: '8px',
-                        fontSize: '0.75rem'
-                      }}
-                    >
-                      {peripheral.is_available ? 'Available' : 'Unavailable'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
+      {groupEntries.length > 0 && (
+        <Section title="Groups" annotation={<Badge numeric>{groupEntries.length}</Badge>}>
+          <div style={cardRow}>
+            {groupEntries.map(([key], index) => {
+              const groupStatus = status.group_statuses.get(key);
+              return groupStatus ? (
+                <GroupStatusCard key={key} index={index} status={groupStatus} />
+              ) : null;
+            })}
           </div>
-        )}
-      </div>
+        </Section>
+      )}
+
+      {boilerEntries.length > 0 && (
+        <Section title="Boilers" annotation={<Badge numeric>{boilerEntries.length}</Badge>}>
+          <div style={cardRow}>
+            {boilerEntries.map(([key], index) => {
+              const boilerStatus = status.boiler_statuses.get(key);
+              return boilerStatus ? (
+                <BoilerStatusCard key={key} index={index} status={boilerStatus} />
+              ) : null;
+            })}
+          </div>
+        </Section>
+      )}
+
+      {status.steam_wand_statuses.size > 0 && (
+        <Section
+          title="Steam wands"
+          annotation={<Badge numeric>{status.steam_wand_statuses.size}</Badge>}
+        >
+          <div style={cardRow}>
+            {steamWandStatusEntries.map(([key, wandStatus]) => (
+              <SteamWandStatusCard key={key} index={key} status={wandStatus} />
+            ))}
+          </div>
+        </Section>
+      )}
+
+      <Section title="Other components" defaultOpen={false}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+          {status.tank_statuses.size > 0 && (
+            <Tile>
+              <h4 style={{ margin: 0 }}>Tanks</h4>
+              {tankStatusEntries.map(([key, tank]) => (
+                <Readout
+                  key={key}
+                  label={`Tank ${key}`}
+                  value={
+                    tank.water_level !== null && tank.water_level !== undefined
+                      ? tank.water_level.toFixed(1)
+                      : '—'
+                  }
+                  unit={
+                    tank.water_level !== null && tank.water_level !== undefined ? '%' : undefined
+                  }
+                />
+              ))}
+            </Tile>
+          )}
+
+          {status.water_tap_statuses.size > 0 && (
+            <Tile>
+              <h4 style={{ margin: 0 }}>Water taps</h4>
+              {waterTapStatusEntries.map(([key, tap]) => (
+                <Readout
+                  key={key}
+                  label={`Tap ${key}`}
+                  value={tap.is_dispensing ? 'Dispensing' : 'Idle'}
+                />
+              ))}
+            </Tile>
+          )}
+
+          {status.peripheral_status.peripherals.size > 0 && (
+            <Tile>
+              <h4 style={{ margin: 0 }}>Peripherals</h4>
+              {Array.from(status.peripheral_status.peripherals.entries()).map(
+                ([key, peripheral]) => (
+                  <div
+                    key={key}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: tokens.space.sm,
+                      fontSize: '0.9rem',
+                    }}
+                  >
+                    <span>
+                      <strong>{key}</strong>{' '}
+                      <span style={{ color: tokens.color.inkMuted }}>
+                        ({peripheral.peripheral_type})
+                      </span>
+                    </span>
+                    <Badge role={peripheral.is_available ? 'ok' : undefined}>
+                      {peripheral.is_available ? 'Available' : 'Unavailable'}
+                    </Badge>
+                  </div>
+                )
+              )}
+            </Tile>
+          )}
+        </div>
+      </Section>
     </div>
   );
 };

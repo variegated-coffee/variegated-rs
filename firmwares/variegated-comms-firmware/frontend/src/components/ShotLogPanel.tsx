@@ -1,5 +1,15 @@
 import { memo } from 'preact/compat';
 import { useCallback, useEffect, useState } from 'preact/hooks';
+import {
+  Alert,
+  Badge,
+  Button,
+  EmptyState,
+  Field,
+  TextInput,
+  tokens,
+  useDialogs,
+} from '@variegated-coffee/ui';
 import { ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogListEntry } from '../schemas/schemas';
 import * as shotLogApi from '../api/shotLogs';
 import { useShotLogEvents } from '../state/shotLogEvents';
@@ -13,6 +23,15 @@ import {
 } from '../utils/shotAnnotations';
 
 interface ShotLogPanelProps {
+  /**
+   * Whether the machine is reachable.
+   *
+   * Every control in this panel needs it, and until now none of them knew: the buttons
+   * stayed enabled and full-contrast, and pressing one produced "Not connected to the
+   * machine" from the API layer. The banner arrived after the attempt, which is the wrong
+   * end of the interaction to put it.
+   */
+  connected: boolean;
   /** From `status.pending_shot_annotations` -- what the next shot will be stamped with. */
   pending: ShotAnnotations;
   /**
@@ -26,40 +45,6 @@ interface ShotLogPanelProps {
   /** Group indices that have a scale, for the dose buttons. */
   groupIndices: number[];
 }
-
-const buttonStyle = {
-  padding: '0.4rem 0.75rem',
-  border: 'none',
-  borderRadius: '4px',
-  fontSize: '0.85rem',
-  cursor: 'pointer',
-  color: 'white',
-  background: '#0066cc',
-};
-
-const secondaryButtonStyle = {
-  ...buttonStyle,
-  background: '#666',
-};
-
-const chipStyle = {
-  display: 'inline-block',
-  padding: '0.15rem 0.5rem',
-  marginRight: '0.35rem',
-  borderRadius: '10px',
-  fontSize: '0.75rem',
-  background: '#eef2f7',
-  color: '#333',
-};
-
-const inputStyle = {
-  padding: '0.35rem 0.5rem',
-  border: '1px solid #ccc',
-  borderRadius: '4px',
-  fontSize: '0.85rem',
-};
-
-const noteStyle = { color: '#666', fontSize: '0.85rem' };
 
 /**
  * `YYYYMMDD` + `HHMMSSxx` rendered as something readable.
@@ -104,7 +89,13 @@ function compareListing(a: ShotLogListEntry, b: ShotLogListEntry): number {
   return b.id.time - a.id.time;
 }
 
-const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLogPanelProps) => {
+const ShotLogPanelComponent = ({
+  connected,
+  pending,
+  sdCardPresent,
+  groupIndices,
+}: ShotLogPanelProps) => {
+  const { confirm } = useDialogs();
   const [entries, setEntries] = useState<ShotLogListEntry[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -230,127 +221,218 @@ const ShotLogPanelComponent = ({ pending, sdCardPresent, groupIndices }: ShotLog
    * Confirmed because it cannot be undone and cannot report failure: the machine queues
    * the command and answers 200, and the only evidence it worked is the `Deleted` push
    * that removes the row. If no push arrives the row stays, which is the honest outcome.
+   *
+   * The prompt names the shot. `window.confirm` was already doing that here -- this keeps
+   * it, in a dialog that belongs to the app, is styled like it, and cannot be suppressed
+   * per-origin by the browser the way the native one can.
    */
   const remove = async (entry: ShotLogListEntry) => {
-    if (
-      !window.confirm(
-        `Delete the shot from ${formatShotTime(entry.id)}? This cannot be undone.`
-      )
-    ) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Delete the shot from ${formatShotTime(entry.id)}?`,
+      body: 'This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
     await run(() => shotLogApi.deleteShotLog(entry.id));
   };
 
   // Three different situations that look identical if you only check for an empty list,
-  // and lead somewhere completely different.
-  const emptyMessage = (): string => {
-    if (sdCardPresent === null) return 'This machine has no SD card storage.';
-    if (sdCardPresent === false) return 'No SD card inserted.';
-    return 'No shots recorded yet.';
+  // and lead somewhere completely different. Each gets the next step it actually has --
+  // and the one with no next step gets none rather than an invented one.
+  const emptyState = () => {
+    if (sdCardPresent === null) {
+      return (
+        <EmptyState
+          title="This machine has no SD card storage."
+          detail="Shots are not recorded on this build. Nothing here needs fixing."
+        />
+      );
+    }
+    if (sdCardPresent === false) {
+      return (
+        <EmptyState
+          title="No SD card inserted."
+          detail="Insert a card and refresh — shots are recorded to the card, so nothing is being saved until one is in."
+          action={{ label: 'Refresh', onClick: () => void refresh() }}
+        />
+      );
+    }
+    return (
+      <EmptyState
+        title="No shots recorded yet."
+        detail="The next shot you pull will appear here."
+      />
+    );
   };
 
+  // Nothing in this panel can reach the machine while it is down, and the annotation
+  // fields edit machine-side state rather than local state, so they go read-only too.
+  const offline = !connected;
+
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
         <h2 style={{ margin: 0 }}>Shot log</h2>
-        <button style={secondaryButtonStyle} onClick={() => void refresh()} disabled={loading}>
+        <Button variant="secondary" size="sm" onClick={() => void refresh()} disabled={loading || offline}>
           {loading ? 'Loading…' : 'Refresh'}
-        </button>
+        </Button>
       </div>
 
       {error && (
-        <div style={{ padding: '0.5rem 0.75rem', marginBottom: '1rem', borderRadius: '4px', background: '#ffe6e6', color: '#660000', fontSize: '0.85rem' }}>
+        <Alert role="danger" onDismiss={() => setError(null)}>
           {error}
-        </div>
+        </Alert>
       )}
 
-      {/* Next shot */}
-      <div style={{ padding: '0.75rem', marginBottom: '1rem', background: '#f7f9fc', borderRadius: '6px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-          <strong style={{ fontSize: '0.9rem' }}>Next shot</strong>
-          <input
-            style={inputStyle}
-            placeholder="Beans"
-            value={beans}
-            onInput={(e) => setBeansDraft((e.target as HTMLInputElement).value)}
-          />
-          <input
-            style={inputStyle}
-            placeholder="Grind"
-            value={grind}
-            onInput={(e) => setGrindDraft((e.target as HTMLInputElement).value)}
-          />
-          <span style={noteStyle}>{dose === null ? 'no dose' : `dose ${dose} g`}</span>
-          <button style={buttonStyle} onClick={() => void savePending()}>
-            Save
-          </button>
-          {groupIndices.map((group) => (
-            <button
-              key={group}
-              style={secondaryButtonStyle}
-              onClick={() => void run(() => shotLogApi.tagDoseFromScale(group))}
-            >
-              {groupIndices.length > 1 ? `Take dose from group ${group + 1}` : 'Take dose from scale'}
-            </button>
-          ))}
+      {/* The empty state goes above the controls, not below them.
+          It was a 13px grey sentence underneath the whole block -- the one fact that
+          explains why the panel is useless, in the panel's least prominent position. A
+          user read the controls first, tried one, and only then found the explanation. */}
+      {entries.length === 0 && emptyState()}
+
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: tokens.space.sm,
+          padding: tokens.space.md,
+          background: tokens.color.surfaceSunken,
+          border: `1px solid ${tokens.color.border}`,
+          borderRadius: tokens.radius.sm,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+          <strong style={{ fontSize: '0.9rem', paddingBottom: tokens.space.sm }}>Next shot</strong>
+
+          <div style={{ minWidth: '10rem' }}>
+            <Field label="Beans">
+              {(control) => (
+                <TextInput
+                  {...control}
+                  value={beans}
+                  onInput={setBeansDraft}
+                  disabled={offline}
+                />
+              )}
+            </Field>
+          </div>
+
+          <div style={{ minWidth: '8rem' }}>
+            <Field label="Grind">
+              {(control) => (
+                <TextInput
+                  {...control}
+                  value={grind}
+                  onInput={setGrindDraft}
+                  disabled={offline}
+                />
+              )}
+            </Field>
+          </div>
+
+          <div style={{ paddingBottom: tokens.space.sm }}>
+            <Badge numeric>{dose === null ? 'no dose' : `dose ${dose} g`}</Badge>
+          </div>
+
+          <div style={{ display: 'flex', gap: tokens.space.sm, flexWrap: 'wrap', paddingBottom: tokens.space.sm }}>
+            <Button variant="primary" size="sm" onClick={() => void savePending()} disabled={offline}>
+              Save
+            </Button>
+            {groupIndices.map((group) => (
+              <Button
+                key={group}
+                variant="secondary"
+                size="sm"
+                disabled={offline}
+                onClick={() => void run(() => shotLogApi.tagDoseFromScale(group))}
+              >
+                {groupIndices.length > 1 ? `Take dose from group ${group + 1}` : 'Take dose from scale'}
+              </Button>
+            ))}
+          </div>
         </div>
-        <div style={{ ...noteStyle, marginTop: '0.5rem' }}>
+
+        <div style={{ font: `0.85rem ${tokens.font.sans}`, lineHeight: 1.5, color: tokens.color.inkMuted }}>
           Put the basket on the scale before taking a dose &mdash; the reading is used as it
           stands, and the scale is not tared. Cleared by the machine when a shot ends.
         </div>
       </div>
 
-      {entries.length === 0 ? (
-        <div style={noteStyle}>{emptyMessage()}</div>
-      ) : (
+      {entries.length > 0 && (
         <div>
           {entries.map((entry) => {
-            const key = `${entry.id.day ?? 'nodate'}-${entry.id.time}`;
+            const key = entryKey(entry.id);
             return (
               <div
                 key={key}
-                style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.5rem 0', borderBottom: '1px solid #eee', flexWrap: 'wrap' }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: tokens.space.sm,
+                  padding: `${tokens.space.sm} 0`,
+                  borderBottom: `1px solid ${tokens.color.border}`,
+                  flexWrap: 'wrap',
+                }}
               >
-                <span style={{ fontFamily: 'monospace', fontSize: '0.85rem', minWidth: '11rem' }}>
+                <span
+                  style={{
+                    font: `0.85rem ${tokens.font.mono}`,
+                    fontVariantNumeric: 'tabular-nums',
+                    minWidth: '11rem',
+                  }}
+                >
                   {formatShotTime(entry.id)}
                 </span>
-                <span style={noteStyle}>{formatSize(entry.size_bytes)}</span>
-                <span style={{ flex: 1 }}>
+                <span
+                  style={{
+                    font: `0.85rem ${tokens.font.mono}`,
+                    fontVariantNumeric: 'tabular-nums',
+                    color: tokens.color.inkMuted,
+                  }}
+                >
+                  {formatSize(entry.size_bytes)}
+                </span>
+                <span style={{ flex: 1, display: 'flex', flexWrap: 'wrap', gap: tokens.space.xs }}>
                   {entry.annotations.entries.map((annotation, i) => (
-                    <span key={i} style={chipStyle}>
+                    <Badge key={i}>
                       {formatKey(annotation.key)}: {formatValue(annotation.value)}
-                    </span>
+                    </Badge>
                   ))}
                 </span>
                 {/* A plain anchor is the whole download implementation: same origin, and
                     the firmware sets Content-Disposition, so the browser saves it under a
                     name that stays unique across days. */}
-                <a
+                <Button
+                  variant="secondary"
+                  size="sm"
                   href={shotLogApi.shotDownloadUrl(entry.id)}
                   download
-                  style={{ ...secondaryButtonStyle, textDecoration: 'none' }}
+                  disabled={offline}
                 >
                   Download
-                </a>
-                <button
-                  style={{ ...secondaryButtonStyle, background: '#a33' }}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  disabled={offline}
                   onClick={() => void remove(entry)}
                 >
                   Delete
-                </button>
+                </Button>
               </div>
             );
           })}
           {hasMore && (
-            <div style={{ marginTop: '0.75rem' }}>
-              <button
-                style={secondaryButtonStyle}
+            <div style={{ marginTop: tokens.space.sm }}>
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => void loadOlder()}
-                disabled={loading}
+                disabled={loading || offline}
               >
                 {loading ? 'Loading…' : 'Load older'}
-              </button>
+              </Button>
             </div>
           )}
         </div>

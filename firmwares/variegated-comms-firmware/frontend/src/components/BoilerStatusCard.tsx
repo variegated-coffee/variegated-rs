@@ -1,4 +1,5 @@
 import { memo } from 'preact/compat';
+import { Badge, Readout, ReadoutGroup, tokens, type StatusRole } from '@variegated-coffee/ui';
 import { useMachine } from '../contexts/MachineContext';
 import { BoilerStatus } from '../schemas/schemas';
 
@@ -7,152 +8,134 @@ interface BoilerStatusCardProps {
   status: BoilerStatus;
 }
 
+/**
+ * The control mode as a status role.
+ *
+ * `Temperature` and `Pressure` are both "this boiler is being controlled" -- they differ in
+ * *what* is being held, which the badge's own text says. They were previously green and
+ * blue, which read as two different degrees of good. `Off` is not a fault either; it is
+ * `idle`, and `Badge` renders a role-less badge in exactly that grey.
+ */
+function modeRole(mode: string): StatusRole | undefined {
+  return mode === 'Off' ? undefined : 'ok';
+}
+
 const BoilerStatusCardComponent = ({ index, status }: BoilerStatusCardProps) => {
   const { getBoilerName, hasBoilerSensor } = useMachine();
   const name = getBoilerName(index);
 
-  // Determine status color based on control mode
-  const getStatusColor = () => {
-    switch (status.control_state.mode.type) {
-      case 'Temperature':
-        return '#28a745'; // green
-      case 'Pressure':
-        return '#007bff'; // blue
-      case 'Off':
-        return '#6c757d'; // gray
-      default:
-        return '#6c757d';
-    }
-  };
-
-  // Format output display
-  const getOutputDisplay = () => {
-    if (status.output.type === 'Off') {
-      return 'Off';
-    } else if (status.output.type === 'FixedDutyCycle') {
-      return `Fixed: ${status.output.value.toFixed(1)}%`;
-    } else if (status.output.type === 'PidOutput') {
-      return `PID: ${status.output.value.out.toFixed(1)}%`;
-    }
-    return 'Unknown';
-  };
+  const output = status.output;
 
   return (
     <div
       style={{
-        padding: '1rem',
-        backgroundColor: 'white',
-        border: '1px solid #ddd',
-        borderRadius: '8px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.sm,
+        padding: tokens.space.md,
+        backgroundColor: tokens.color.surfaceRaised,
+        border: `1px solid ${tokens.color.border}`,
+        borderRadius: tokens.radius.md,
         flex: '1 1 300px',
-        minWidth: '250px'
+        minWidth: '250px',
       }}
     >
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: '600' }}>{name}</h3>
-        <span
-          style={{
-            padding: '0.25rem 0.75rem',
-            backgroundColor: getStatusColor(),
-            color: 'white',
-            borderRadius: '12px',
-            fontSize: '0.75rem',
-            fontWeight: '500'
-          }}
-        >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
+        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>{name}</h3>
+        <Badge role={modeRole(status.control_state.mode.type)}>
           {status.control_state.mode.type}
-        </span>
+        </Badge>
       </div>
 
-      {/* Sensor Readings */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-        {hasBoilerSensor(index, { type: 'Temperature' }) && status.temperature !== null && status.temperature !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Temperature:</span>
-            <span style={{ fontWeight: '500' }}>{status.temperature.toFixed(1)}°C</span>
-          </div>
-        )}
+      <ReadoutGroup>
+        {hasBoilerSensor(index, { type: 'Temperature' }) &&
+          status.temperature !== null &&
+          status.temperature !== undefined && (
+            <Readout label="Temperature" value={status.temperature.toFixed(1)} unit="°C" />
+          )}
 
-        {hasBoilerSensor(index, { type: 'Pressure' }) && status.pressure !== null && status.pressure !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Pressure:</span>
-            <span style={{ fontWeight: '500' }}>{status.pressure.toFixed(2)} bar</span>
-          </div>
-        )}
+        {hasBoilerSensor(index, { type: 'Pressure' }) &&
+          status.pressure !== null &&
+          status.pressure !== undefined && (
+            <Readout label="Pressure" value={status.pressure.toFixed(2)} unit="bar" />
+          )}
 
-        {hasBoilerSensor(index, { type: 'WaterLevel' }) && status.water_level !== null && status.water_level !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Water Level:</span>
-            <span style={{ fontWeight: '500' }}>{status.water_level.toFixed(1)}%</span>
-          </div>
-        )}
-      </div>
+        {hasBoilerSensor(index, { type: 'WaterLevel' }) &&
+          status.water_level !== null &&
+          status.water_level !== undefined && (
+            <Readout label="Water level" value={status.water_level.toFixed(1)} unit="%" />
+          )}
+      </ReadoutGroup>
 
-      {/* Control Target - only show relevant target based on mode */}
+      {/* The target, only for the quantity actually being controlled. */}
       {status.control_state.mode.type !== 'Off' && (
-        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #eee' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Target:</span>
-            <span style={{ fontWeight: '500' }}>
-              {status.control_state.mode.type === 'Temperature'
-                ? `${status.control_state.values.target_temperature.toFixed(1)}°C`
-                : `${status.control_state.values.target_pressure.toFixed(2)} bar`
-              }
-            </span>
-          </div>
+        <div style={{ paddingTop: tokens.space.sm, borderTop: `1px solid ${tokens.color.border}` }}>
+          {status.control_state.mode.type === 'Temperature' ? (
+            <Readout
+              label="Target"
+              value={status.control_state.values.target_temperature.toFixed(1)}
+              unit="°C"
+              emphasis
+            />
+          ) : (
+            <Readout
+              label="Target"
+              value={status.control_state.values.target_pressure.toFixed(2)}
+              unit="bar"
+              emphasis
+            />
+          )}
         </div>
       )}
 
-      {/* Output */}
-      <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #eee' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-          <span style={{ color: '#666' }}>Output:</span>
-          <span style={{ fontWeight: '500' }}>{getOutputDisplay()}</span>
-        </div>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: tokens.space.sm,
+          paddingTop: tokens.space.sm,
+          borderTop: `1px solid ${tokens.color.border}`,
+        }}
+      >
+        {output.type === 'Off' && <Readout label="Output" value="Off" emphasis />}
+        {output.type === 'FixedDutyCycle' && (
+          <Readout label="Output" value={output.value.toFixed(1)} unit="% fixed" emphasis />
+        )}
+        {output.type === 'PidOutput' && (
+          <>
+            <Readout label="Output" value={output.value.out.toFixed(1)} unit="% PID" emphasis />
 
-        {/* PID Details - show when using PID control */}
-        {status.output.type === 'PidOutput' && (
-          <div style={{ marginTop: '0.75rem', padding: '0.5rem', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
-            <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.5rem', fontWeight: '500' }}>
-              PID Terms:
+            {/* Loop internals. Kept, because they are how a boiler that is misbehaving gets
+                diagnosed -- but visibly secondary to the figure above, which is the one a
+                machine owner reads. */}
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: tokens.space.sm,
+                padding: tokens.space.sm,
+                backgroundColor: tokens.color.surfaceSunken,
+                borderRadius: tokens.radius.sm,
+              }}
+            >
+              <ReadoutGroup title="PID terms">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
+                  <Readout label="P" value={output.value.p.toFixed(2)} size="sm" />
+                  <Readout label="I" value={output.value.i.toFixed(2)} size="sm" />
+                  <Readout label="D" value={output.value.d.toFixed(2)} size="sm" />
+                  <Readout label="Sum" value={output.value.out.toFixed(2)} size="sm" emphasis />
+                </div>
+              </ReadoutGroup>
+
+              <ReadoutGroup title="Acting parameters">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
+                  <Readout label="Kp" value={output.value.acting_kp.toFixed(4)} size="sm" />
+                  <Readout label="Ki" value={output.value.acting_ki.toFixed(4)} size="sm" />
+                  <Readout label="Kd" value={output.value.acting_kd.toFixed(4)} size="sm" />
+                </div>
+              </ReadoutGroup>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.8rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>P:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.output.value.p.toFixed(2)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>I:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.output.value.i.toFixed(2)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>D:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.output.value.d.toFixed(2)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Sum:</span>
-                <span style={{ fontFamily: 'monospace', fontWeight: '500' }}>{status.output.value.out.toFixed(2)}</span>
-              </div>
-            </div>
-            <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.5rem', marginBottom: '0.25rem', fontWeight: '500' }}>
-              Acting Parameters:
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.75rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Kp:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.output.value.acting_kp.toFixed(4)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Ki:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.output.value.acting_ki.toFixed(4)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Kd:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.output.value.acting_kd.toFixed(4)}</span>
-              </div>
-            </div>
-          </div>
+          </>
         )}
       </div>
     </div>

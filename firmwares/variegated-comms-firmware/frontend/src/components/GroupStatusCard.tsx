@@ -1,5 +1,14 @@
 import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
+import {
+  Alert,
+  Badge,
+  Button,
+  Readout,
+  ReadoutGroup,
+  tokens,
+  useDialogs,
+} from '@variegated-coffee/ui';
 import { useMachine } from '../contexts/MachineContext';
 import { GroupStatus } from '../schemas/schemas';
 import { getWebSocketService } from '../services/websocket';
@@ -9,15 +18,43 @@ interface GroupStatusCardProps {
   status: GroupStatus;
 }
 
+/**
+ * The three shot phases, using the design system's own phase vocabulary.
+ *
+ * These were `#ffc107`, `#fd7e14` and `#28a745` with a `22` alpha suffix -- an amber, an
+ * orange and the same green the status badge uses, so "extracting" and "everything is
+ * fine" were the same colour. `tokens.phase` already names exactly these three states,
+ * because the shot charts shade the same bands behind their traces. Using them here means
+ * a phase looks the same on the machine as it does on the chart of the shot it produced.
+ */
+const SHOT_PHASES: Record<string, { label: string; fill: string; description: string }> = {
+  HeadspaceFill: {
+    label: 'Headspace fill',
+    fill: tokens.phase.headspaceFill,
+    description: 'Filling headspace and wetting the puck',
+  },
+  Saturation: {
+    label: 'Saturation',
+    fill: tokens.phase.saturation,
+    description: 'Puck saturating, pressure building',
+  },
+  PostFirstDrop: {
+    label: 'Extracting',
+    fill: tokens.phase.postFirstDrop,
+    description: 'First drops detected, extracting',
+  },
+};
+
 const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
   const { getGroupName, hasGroupSensor } = useMachine();
+  const { confirm } = useDialogs();
   const name = getGroupName(index);
   const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const showSuccess = (message: string) => {
-    setSuccessMessage(message);
-    setTimeout(() => setSuccessMessage(null), 3000);
+  const showNotice = (message: string) => {
+    setNotice(message);
+    setTimeout(() => setNotice(null), 3000);
   };
 
   const showError = (message: string) => {
@@ -25,73 +62,65 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
     setTimeout(() => setError(null), 5000);
   };
 
-  const handleTareScale = () => {
+  /**
+   * Send a scale command, and say only what is actually known.
+   *
+   * These used to report "Scale tared successfully" the instant the command was queued.
+   * Nothing here can know that: the command goes out over the websocket, and a tare on
+   * these scales spans several measuring cycles before the reading settles at zero. The
+   * wording now describes what happened -- the command was sent -- and leaves the reading
+   * itself to say when it took effect, which it does, live, a few rows above.
+   */
+  const send = (action: (ws: NonNullable<ReturnType<typeof getWebSocketService>>) => void, sent: string) => {
     const ws = getWebSocketService();
     if (!ws) {
-      showError('WebSocket not connected');
+      showError('Not connected to the machine');
       return;
     }
-    ws.tareGroupScale(index);
-    showSuccess('Scale tared successfully');
+    action(ws);
+    showNotice(sent);
   };
 
+  const handleTareScale = () => {
+    send((ws) => ws.tareGroupScale(index), 'Tare sent — watch the weight settle to zero');
+  };
+
+  /*
+   * Both calibrations are confirmed, and the confirmation states the physical precondition
+   * rather than asking "are you sure". They overwrite a stored calibration, and getting
+   * one wrong means every shot weight after it is wrong -- quietly, and by an amount
+   * nothing on screen would reveal.
+   */
   const handleZeroCalibrateScale = () => {
-    const ws = getWebSocketService();
-    if (!ws) {
-      showError('WebSocket not connected');
-      return;
-    }
-    ws.zeroCalibrateGroupScale(index);
-    showSuccess('Scale zero calibrated successfully');
+    void confirm({
+      title: 'Zero-calibrate this scale?',
+      body: 'Take everything off the scale first. This replaces the stored zero point, and every weight after it is measured against the new one.',
+      confirmLabel: 'Calibrate zero',
+    }).then((ok) => {
+      if (ok) send((ws) => ws.zeroCalibrateGroupScale(index), 'Zero calibration sent');
+    });
   };
 
   const handleCalibrateScale100g = () => {
-    const ws = getWebSocketService();
-    if (!ws) {
-      showError('WebSocket not connected');
-      return;
-    }
-    ws.calibrateGroupScale100g(index);
-    showSuccess('Scale calibrated with 100g successfully');
+    void confirm({
+      title: 'Calibrate this scale with 100 g?',
+      body: 'Place a known 100 g weight on the scale first. This replaces the stored scale factor.',
+      confirmLabel: 'Calibrate',
+    }).then((ok) => {
+      if (ok) send((ws) => ws.calibrateGroupScale100g(index), '100 g calibration sent');
+    });
   };
 
-  // Determine status color based on brewing state
-  const getStatusColor = () => {
-    if (status.is_brewing) {
-      return '#28a745'; // green - active
-    }
-    return '#6c757d'; // gray - idle
-  };
+  const shotPhase = status.current_brew?.shot_state
+    ? SHOT_PHASES[status.current_brew.shot_state.type]
+    : undefined;
 
-  // Format shot state display
-  const getShotStateDisplay = () => {
-    // Shot state is a property of the brew in progress, not of the group, so it
-    // only exists while `current_brew` does. Bound to a local because optional
-    // chaining does not narrow across statements.
-    const shotState = status.current_brew?.shot_state;
-    if (!shotState) return null;
-
-    const stateInfo: Record<string, { label: string; color: string; description: string }> = {
-      HeadspaceFill: { label: 'Headspace Fill', color: '#ffc107', description: 'Filling headspace & wetting puck' },
-      Saturation: { label: 'Saturation', color: '#fd7e14', description: 'Puck saturating, pressure building' },
-      PostFirstDrop: { label: 'Extracting', color: '#28a745', description: 'First drops detected, extracting' }
-    };
-
-    const info = stateInfo[shotState.type];
-    return info || null;
-  };
-
-  const shotStateDisplay = getShotStateDisplay();
-
-  // Format brew time
   const formatBrewTime = (brew_time: { secs: bigint; nanos: number } | null | undefined) => {
-    if (!brew_time) return '0s';
+    if (!brew_time) return '0.0';
     const totalMs = Number(brew_time.secs) * 1000 + brew_time.nanos / 1000000;
-    return `${(totalMs / 1000).toFixed(1)}s`;
+    return (totalMs / 1000).toFixed(1);
   };
 
-  // Format output display.
-  //
   // `pump_output` is on the pump's own 0-255 scale, not a percentage -- the schema decodes
   // `HexadecimalDutyCycle` transparently to a `number`, so nothing here would have caught
   // the old `%` suffix having become wrong by a factor of 2.55. Both are shown: the raw
@@ -99,337 +128,266 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
   const PUMP_FULL_SCALE = 255;
   const asPercent = (raw: number) => (raw * 100) / PUMP_FULL_SCALE;
 
-  const getOutputDisplay = () => {
-    if (status.pump_output.type === 'Off') {
-      return 'Off';
-    } else if (status.pump_output.type === 'FixedDutyCycle') {
-      const raw = status.pump_output.value;
-      return `${raw}/255 (${asPercent(raw).toFixed(0)}%)`;
-    } else if (status.pump_output.type === 'PidOutput') {
-      const raw = status.pump_output.value.out;
-      return `${raw.toFixed(1)}/255 (${asPercent(raw).toFixed(0)}%)`;
-    }
-    return 'Unknown';
-  };
+  const pump = status.pump_output;
 
   return (
     <div
       style={{
-        padding: '1rem',
-        backgroundColor: 'white',
-        border: status.is_brewing ? '2px solid #28a745' : '1px solid #ddd',
-        borderRadius: '8px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.sm,
+        padding: tokens.space.md,
+        backgroundColor: tokens.color.surfaceRaised,
+        // 1px in both states, with the emphasis carried by a ring rather than by a thicker
+        // border -- a 2px border only while brewing shifted the card's contents by a pixel
+        // at the start of every shot.
+        border: `1px solid ${status.is_brewing ? tokens.color.ok : tokens.color.border}`,
+        boxShadow: status.is_brewing ? `0 0 0 1px ${tokens.color.ok}` : undefined,
+        borderRadius: tokens.radius.md,
         flex: '1 1 300px',
-        minWidth: '250px'
+        minWidth: '250px',
       }}
     >
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: '600' }}>{name}</h3>
-        <span
-          style={{
-            padding: '0.25rem 0.75rem',
-            backgroundColor: getStatusColor(),
-            color: 'white',
-            borderRadius: '12px',
-            fontSize: '0.75rem',
-            fontWeight: '500'
-          }}
-        >
-          {status.is_brewing ? `BREWING (${formatBrewTime(status.current_brew?.brew_time)})` : 'IDLE'}
-        </span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
+        <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>{name}</h3>
+        <Badge role={status.is_brewing ? 'ok' : undefined} numeric={status.is_brewing}>
+          {status.is_brewing
+            ? `Brewing ${formatBrewTime(status.current_brew?.brew_time)} s`
+            : 'Idle'}
+        </Badge>
       </div>
 
-      {/* Control Mode */}
-      <div style={{ marginBottom: '0.75rem' }}>
-        <span style={{ fontSize: '0.85rem', color: '#666' }}>Mode: </span>
-        <span style={{ fontSize: '0.85rem', fontWeight: '500' }}>{status.control_state.mode.type}</span>
-      </div>
+      <ReadoutGroup>
+        <Readout label="Mode" value={status.control_state.mode.type} />
 
-      {/* Sensor Readings */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-        {hasGroupSensor(index, { type: 'Temperature' }) && status.temperature !== null && status.temperature !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Temperature:</span>
-            <span style={{ fontWeight: '500' }}>{status.temperature.toFixed(1)}°C</span>
-          </div>
-        )}
+        {hasGroupSensor(index, { type: 'Temperature' }) &&
+          status.temperature !== null &&
+          status.temperature !== undefined && (
+            <Readout label="Temperature" value={status.temperature.toFixed(1)} unit="°C" />
+          )}
 
-        {hasGroupSensor(index, { type: 'Pressure' }) && status.pressure !== null && status.pressure !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Pressure:</span>
-            <span style={{ fontWeight: '500' }}>{status.pressure.toFixed(2)} bar</span>
-          </div>
-        )}
+        {hasGroupSensor(index, { type: 'Pressure' }) &&
+          status.pressure !== null &&
+          status.pressure !== undefined && (
+            <Readout label="Pressure" value={status.pressure.toFixed(2)} unit="bar" />
+          )}
 
-        {hasGroupSensor(index, { type: 'InputFlowRate' }) && status.input_flow_rate !== null && status.input_flow_rate !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Input Flow:</span>
-            <span style={{ fontWeight: '500' }}>{status.input_flow_rate.toFixed(1)} mL/s</span>
-          </div>
-        )}
+        {hasGroupSensor(index, { type: 'InputFlowRate' }) &&
+          status.input_flow_rate !== null &&
+          status.input_flow_rate !== undefined && (
+            <Readout label="Input flow" value={status.input_flow_rate.toFixed(1)} unit="mL/s" />
+          )}
 
-        {hasGroupSensor(index, { type: 'OutputFlowRate' }) && status.output_flow_rate !== null && status.output_flow_rate !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Output Flow:</span>
-            <span style={{ fontWeight: '500' }}>{status.output_flow_rate.toFixed(1)} mL/s</span>
-          </div>
-        )}
+        {hasGroupSensor(index, { type: 'OutputFlowRate' }) &&
+          status.output_flow_rate !== null &&
+          status.output_flow_rate !== undefined && (
+            <Readout label="Output flow" value={status.output_flow_rate.toFixed(1)} unit="mL/s" />
+          )}
 
-        {hasGroupSensor(index, { type: 'Weight' }) && status.output_weight !== null && status.output_weight !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Output Weight:</span>
-            <span style={{ fontWeight: '500' }}>{status.output_weight.toFixed(1)} g</span>
-          </div>
-        )}
+        {hasGroupSensor(index, { type: 'Weight' }) &&
+          status.output_weight !== null &&
+          status.output_weight !== undefined && (
+            <Readout label="Output weight" value={status.output_weight.toFixed(1)} unit="g" />
+          )}
 
         {/* Brew-sensor readings. Output temperature and extraction rate have no
             SensorCapability of their own to gate on, so they rely on the value
             being present, which it only is once a BrewSensor reports. */}
         {status.output_temperature !== null && status.output_temperature !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Output Temp:</span>
-            <span style={{ fontWeight: '500' }}>{status.output_temperature.toFixed(1)}°C</span>
-          </div>
+          <Readout label="Output temp" value={status.output_temperature.toFixed(1)} unit="°C" />
         )}
 
         {/* mS/cm, not µS/cm, and two decimals rather than none: espresso runs around
             1-3 mS/cm at the spout, so the old µS label was out by a factor of a thousand and
             `toFixed(0)` then rounded the whole useful range to "1", "2" or "3". The unit is
             pinned in `ECType`. */}
-        {hasGroupSensor(index, { type: 'ElectricalConductivity' }) && status.output_electrical_conductivity !== null && status.output_electrical_conductivity !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>EC:</span>
-            <span style={{ fontWeight: '500' }}>{status.output_electrical_conductivity.toFixed(2)} mS/cm</span>
-          </div>
-        )}
+        {hasGroupSensor(index, { type: 'ElectricalConductivity' }) &&
+          status.output_electrical_conductivity !== null &&
+          status.output_electrical_conductivity !== undefined && (
+            <Readout
+              label="Conductivity"
+              value={status.output_electrical_conductivity.toFixed(2)}
+              unit="mS/cm"
+            />
+          )}
 
         {/* Not a percentage of anything. Extraction rate is conductivity times output flow;
             see `ExtractionRateType`. */}
         {status.extraction_rate !== null && status.extraction_rate !== undefined && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-            <span style={{ color: '#666' }}>Extraction:</span>
-            <span style={{ fontWeight: '500' }}>{status.extraction_rate.toFixed(2)} mS·mL/cm·s</span>
-          </div>
+          <Readout
+            label="Extraction"
+            value={status.extraction_rate.toFixed(2)}
+            unit="mS·mL/cm·s"
+          />
         )}
-      </div>
+      </ReadoutGroup>
 
-      {/* Brew Stats (if brewing or previous brew exists) */}
       {status.is_brewing && (
-        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #eee' }}>
-          <div style={{ fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>Current Shot:</div>
-
-          {/* Shot State Indicator */}
-          {shotStateDisplay && (
-            <div style={{
-              marginBottom: '0.5rem',
-              padding: '0.375rem 0.5rem',
-              backgroundColor: `${shotStateDisplay.color}22`,
-              borderLeft: `3px solid ${shotStateDisplay.color}`,
-              borderRadius: '4px'
-            }}>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '0.5rem'
-              }}>
-                <span style={{
-                  fontWeight: 600,
-                  color: shotStateDisplay.color,
-                  fontSize: '0.85rem'
-                }}>
-                  {shotStateDisplay.label}
-                </span>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: tokens.space.sm,
+            paddingTop: tokens.space.sm,
+            borderTop: `1px solid ${tokens.color.border}`,
+          }}
+        >
+          {shotPhase && (
+            <div
+              style={{
+                padding: tokens.space.sm,
+                backgroundColor: shotPhase.fill,
+                borderRadius: tokens.radius.sm,
+              }}
+            >
+              {/* The phase name carries the identity, as it does on the charts -- these
+                  fills are deliberately too pale to be told apart by colour alone. */}
+              <div style={{ fontWeight: 600, fontSize: '0.85rem', color: tokens.color.ink }}>
+                {shotPhase.label}
               </div>
-              <div style={{
-                fontSize: '0.75rem',
-                color: '#666',
-                marginTop: '0.125rem'
-              }}>
-                {shotStateDisplay.description}
+              <div style={{ fontSize: '0.75rem', color: tokens.color.inkMuted, marginTop: '0.125rem' }}>
+                {shotPhase.description}
               </div>
             </div>
           )}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.85rem' }}>
-            {status.current_brew != null && status.current_brew.brew_input_volume != null && (
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Input Volume:</span>
-                <span>{status.current_brew.brew_input_volume.toFixed(1)} mL</span>
-              </div>
+          <ReadoutGroup title="Current shot">
+            {status.current_brew?.brew_input_volume != null && (
+              <Readout
+                label="Input volume"
+                value={status.current_brew.brew_input_volume.toFixed(1)}
+                unit="mL"
+                size="sm"
+              />
             )}
-
-            {status.current_brew != null && status.current_brew.output_volume != null && (
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Output Volume:</span>
-                <span>{status.current_brew.output_volume.toFixed(1)} mL</span>
-              </div>
+            {status.current_brew?.output_volume != null && (
+              <Readout
+                label="Output volume"
+                value={status.current_brew.output_volume.toFixed(1)}
+                unit="mL"
+                size="sm"
+              />
             )}
-
-            {status.current_brew != null && status.current_brew.extracted_solids != null && (
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Extracted Solids:</span>
-                <span>{status.current_brew.extracted_solids.toFixed(1)} g</span>
-              </div>
+            {status.current_brew?.extracted_solids != null && (
+              <Readout
+                label="Extracted solids"
+                value={status.current_brew.extracted_solids.toFixed(1)}
+                unit="g"
+                size="sm"
+              />
             )}
-          </div>
+          </ReadoutGroup>
         </div>
       )}
 
       {!status.is_brewing && status.previous_brew && (
-        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #eee' }}>
-          <div style={{ fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>Last Shot:</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', fontSize: '0.85rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={{ color: '#888' }}>Time:</span>
-              <span>{formatBrewTime(status.previous_brew.brew_time)}</span>
-            </div>
-            {status.previous_brew.output_weight !== null && status.previous_brew.output_weight !== undefined && (
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Weight:</span>
-                <span>{status.previous_brew.output_weight.toFixed(1)} g</span>
-              </div>
-            )}
-          </div>
+        <div style={{ paddingTop: tokens.space.sm, borderTop: `1px solid ${tokens.color.border}` }}>
+          <ReadoutGroup title="Last shot">
+            <Readout
+              label="Time"
+              value={formatBrewTime(status.previous_brew.brew_time)}
+              unit="s"
+              size="sm"
+            />
+            {status.previous_brew.output_weight !== null &&
+              status.previous_brew.output_weight !== undefined && (
+                <Readout
+                  label="Weight"
+                  value={status.previous_brew.output_weight.toFixed(1)}
+                  unit="g"
+                  size="sm"
+                />
+              )}
+          </ReadoutGroup>
         </div>
       )}
 
-      {/* Pump Output */}
-      <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #eee' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem' }}>
-          <span style={{ color: '#666' }}>Pump Output:</span>
-          <span style={{ fontWeight: '500' }}>{getOutputDisplay()}</span>
-        </div>
-
-        {/* PID Details - show when using PID control */}
-        {status.pump_output.type === 'PidOutput' && (
-          <div style={{ marginTop: '0.75rem', padding: '0.5rem', backgroundColor: '#f8f9fa', borderRadius: '4px' }}>
-            <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.5rem', fontWeight: '500' }}>
-              PID Terms:
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: tokens.space.sm,
+          paddingTop: tokens.space.sm,
+          borderTop: `1px solid ${tokens.color.border}`,
+        }}
+      >
+        {pump.type === 'Off' && <Readout label="Pump output" value="Off" emphasis />}
+        {pump.type === 'FixedDutyCycle' && (
+          <Readout
+            label="Pump output"
+            value={`${pump.value}/255`}
+            unit={`${asPercent(pump.value).toFixed(0)}%`}
+            emphasis
+          />
+        )}
+        {pump.type === 'PidOutput' && (
+          <>
+            <Readout
+              label="Pump output"
+              value={`${pump.value.out.toFixed(1)}/255`}
+              unit={`${asPercent(pump.value.out).toFixed(0)}%`}
+              emphasis
+            />
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: tokens.space.sm,
+                padding: tokens.space.sm,
+                backgroundColor: tokens.color.surfaceSunken,
+                borderRadius: tokens.radius.sm,
+              }}
+            >
+              <ReadoutGroup title="PID terms">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
+                  <Readout label="P" value={pump.value.p.toFixed(2)} size="sm" />
+                  <Readout label="I" value={pump.value.i.toFixed(2)} size="sm" />
+                  <Readout label="D" value={pump.value.d.toFixed(2)} size="sm" />
+                  <Readout label="Sum" value={pump.value.out.toFixed(2)} size="sm" emphasis />
+                </div>
+              </ReadoutGroup>
+              <ReadoutGroup title="Acting parameters">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
+                  <Readout label="Kp" value={pump.value.acting_kp.toFixed(4)} size="sm" />
+                  <Readout label="Ki" value={pump.value.acting_ki.toFixed(4)} size="sm" />
+                  <Readout label="Kd" value={pump.value.acting_kd.toFixed(4)} size="sm" />
+                </div>
+              </ReadoutGroup>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.8rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>P:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.pump_output.value.p.toFixed(2)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>I:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.pump_output.value.i.toFixed(2)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>D:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.pump_output.value.d.toFixed(2)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Sum:</span>
-                <span style={{ fontFamily: 'monospace', fontWeight: '500' }}>{status.pump_output.value.out.toFixed(2)}</span>
-              </div>
-            </div>
-            <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.5rem', marginBottom: '0.25rem', fontWeight: '500' }}>
-              Acting Parameters:
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', fontSize: '0.75rem' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Kp:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.pump_output.value.acting_kp.toFixed(4)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Ki:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.pump_output.value.acting_ki.toFixed(4)}</span>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <span style={{ color: '#888' }}>Kd:</span>
-                <span style={{ fontFamily: 'monospace' }}>{status.pump_output.value.acting_kd.toFixed(4)}</span>
-              </div>
-            </div>
-          </div>
+          </>
         )}
       </div>
 
-      {/* Scale Calibration Actions */}
       {hasGroupSensor(index, { type: 'Weight' }) && (
-        <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid #eee' }}>
-          <div style={{ fontSize: '0.85rem', color: '#666', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Scale Actions:
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: tokens.space.sm,
+            paddingTop: tokens.space.sm,
+            borderTop: `1px solid ${tokens.color.border}`,
+          }}
+        >
+          <div style={{ font: `0.85rem ${tokens.font.sans}`, fontWeight: 500, color: tokens.color.inkMuted }}>
+            Scale
           </div>
 
-          {/* Success Message */}
-          {successMessage && (
-            <div style={{
-              fontSize: '0.85rem',
-              color: '#155724',
-              marginBottom: '0.5rem',
-              padding: '0.5rem',
-              backgroundColor: '#d4edda',
-              borderRadius: '4px',
-              border: '1px solid #c3e6cb'
-            }}>
-              ✅ {successMessage}
-            </div>
-          )}
+          {notice && <Alert role="ok">{notice}</Alert>}
+          {error && <Alert role="danger">{error}</Alert>}
 
-          {/* Error Message */}
-          {error && (
-            <div style={{
-              fontSize: '0.85rem',
-              color: '#721c24',
-              marginBottom: '0.5rem',
-              padding: '0.5rem',
-              backgroundColor: '#f8d7da',
-              borderRadius: '4px',
-              border: '1px solid #f5c6cb'
-            }}>
-              ❌ {error}
-            </div>
-          )}
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <button
-              onClick={() => void handleTareScale()}
-              style={{
-                padding: '0.5rem 0.75rem',
-                backgroundColor: '#0066cc',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Tare Scale
-            </button>
-            <button
-              onClick={() => void handleZeroCalibrateScale()}
-              style={{
-                padding: '0.5rem 0.75rem',
-                backgroundColor: '#fd7e14',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Zero Calibrate
-            </button>
-            <button
-              onClick={() => void handleCalibrateScale100g()}
-              style={{
-                padding: '0.5rem 0.75rem',
-                backgroundColor: '#28a745',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.85rem',
-                fontWeight: '500'
-              }}
-            >
-              Calibrate (100g)
-            </button>
+          {/* One primary. Taring is the thing you do between shots; the two calibrations
+              are setup, done once, and were previously competing with it in orange and
+              green as though all three were equally routine. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: tokens.space.sm }}>
+            <Button variant="primary" size="sm" onClick={() => void handleTareScale()}>
+              Tare
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void handleZeroCalibrateScale()}>
+              Calibrate zero
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void handleCalibrateScale100g()}>
+              Calibrate 100 g
+            </Button>
           </div>
         </div>
       )}

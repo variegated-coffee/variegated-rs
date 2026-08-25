@@ -1,5 +1,6 @@
 import { memo } from 'preact/compat';
 import { useEffect, useState } from 'preact/hooks';
+import { Alert, Badge, Button, Readout, tokens, useDialogs } from '@variegated-coffee/ui';
 import { RoutineExecutionStatus, Status, RoutineSummaryStorage, RoutineCommand, RoutineExit } from '../schemas/schemas';
 import { useMachine } from '../contexts/MachineContext';
 import { formatCommand } from '../utils/commandFormatter';
@@ -23,13 +24,14 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
   const execution = executionProp;
 
   const { getBoilerName, getGroupName } = useMachine();
+  const { confirm } = useDialogs();
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
-  const showSuccess = (message: string) => {
-    setSuccessMessage(message);
-    setTimeout(() => setSuccessMessage(null), 3000);
+  const showNotice = (message: string) => {
+    setNotice(message);
+    setTimeout(() => setNotice(null), 3000);
   };
 
   const showError = (message: string) => {
@@ -37,14 +39,33 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
     setTimeout(() => setError(null), 5000);
   };
 
+  /**
+   * Cancel, after asking.
+   *
+   * Confirmed because it stops a routine mid-shot and there is no undo -- and because this
+   * card appears unprompted on the main screen whenever a routine runs, so its Cancel is
+   * sitting under the pointer of someone who came here to read a temperature.
+   *
+   * The message says the command was sent rather than that the routine stopped. Only the
+   * machine can say the latter, and it does: this card disappears when the execution ends.
+   */
   const handleCancel = () => {
-    const ws = getWebSocketService();
-    if (!ws) {
-      showError('WebSocket not connected');
-      return;
-    }
-    ws.cancelRoutine();
-    showSuccess('Routine cancelled successfully');
+    void confirm({
+      title: `Cancel ${summary?.name ?? 'this routine'}?`,
+      body: 'The routine stops where it is. Anything it was going to do next will not happen.',
+      confirmLabel: 'Cancel routine',
+      cancelLabel: 'Keep running',
+      destructive: true,
+    }).then((ok) => {
+      if (!ok) return;
+      const ws = getWebSocketService();
+      if (!ws) {
+        showError('Not connected to the machine');
+        return;
+      }
+      ws.cancelRoutine();
+      showNotice('Cancel sent');
+    });
   };
 
   // The name and the step total come from the summary, which is always present -- so the
@@ -76,18 +97,11 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
 
   if (!summary) {
     return (
-      <div
-        style={{
-          padding: '0.75rem 1rem',
-          backgroundColor: '#d1ecf1',
-          border: '1px solid #bee5eb',
-          borderRadius: '6px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center'
-        }}
-      >
-        <span style={{ fontWeight: '500' }}>Routine {routineLabel} Running (routine not found)</span>
+      <div style={{ marginBottom: tokens.space.md }}>
+        <Alert role="warn" title={`Routine ${routineLabel} is running`}>
+          The machine is running a routine this browser has no record of — its name and
+          steps cannot be shown.
+        </Alert>
       </div>
     );
   }
@@ -102,11 +116,12 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
   const totalSteps = summary.step_count;
   const stepNumber = (execution.current_step ?? 0) + 1;
 
-  // Format times
+  // The figure only. The unit is the `Readout`'s, so a column of times aligns on the number
+  // rather than on the end of the string.
   const formatDuration = (duration: { secs: bigint; nanos: number } | null | undefined) => {
-    if (!duration) return '0.0s';
+    if (!duration) return '0.0';
     const totalSecs = Number(duration.secs) + duration.nanos / 1000000000;
-    return `${totalSecs.toFixed(1)}s`;
+    return totalSecs.toFixed(1);
   };
 
   const stepElapsedTime = formatDuration(execution.step_elapsed_time);
@@ -127,12 +142,12 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
       const action = formatExitAction(exit);
 
       return (
-        <div key={idx} style={{ fontSize: '0.85rem', marginBottom: '0.25rem' }}>
-          <span style={{ color: '#0066cc', fontWeight: '500' }}>•</span> {description}
+        <div key={idx} style={{ fontSize: '0.85rem', marginBottom: tokens.space.xs }}>
+          <span style={{ color: tokens.color.info, fontWeight: 500 }}>•</span> {description}
           {conditionText !== description && (
-            <span style={{ color: '#888', marginLeft: '0.5rem' }}>({conditionText})</span>
+            <span style={{ color: tokens.color.inkMuted, marginLeft: tokens.space.sm }}>({conditionText})</span>
           )}
-          <span style={{ color: '#666', marginLeft: '0.5rem', fontSize: '0.8rem' }}>→ {action}</span>
+          <span style={{ color: tokens.color.inkMuted, marginLeft: tokens.space.sm, fontSize: '0.8rem' }}>→ {action}</span>
         </div>
       );
     });
@@ -152,7 +167,7 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
 
       if (exit.condition.type === 'Always' || exit.condition.type === 'Never') {
         return (
-          <div key={idx} style={{ fontSize: '0.9rem', color: '#155724' }}>
+          <div key={idx} style={{ fontSize: '0.9rem', color: tokens.color.ink }}>
             {exit.description || exit.condition.type}
           </div>
         );
@@ -275,7 +290,7 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
             : current.type === 'Saturation' ? 'saturating'
             : 'extracting';
           return (
-            <div key={idx} style={{ fontSize: '0.9rem', color: '#155724' }}>
+            <div key={idx} style={{ fontSize: '0.9rem', color: tokens.color.ink }}>
               {exit.description || wanted}:{' '}
               <span style={{ fontWeight: '600' }}>{reached}</span>
             </div>
@@ -285,14 +300,14 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
           const groupKey = Array.from(status.group_statuses.keys())[groupIdx];
           const groupStatus = status.group_statuses.get(groupKey);
           return (
-            <div key={idx} style={{ fontSize: '0.9rem', color: '#155724' }}>
+            <div key={idx} style={{ fontSize: '0.9rem', color: tokens.color.ink }}>
               {exit.description || `Group ${groupIdx} ${stateCondition.type === 'Brewing' ? 'brewing' : 'not brewing'}`}:{' '}
               <span style={{ fontWeight: '600' }}>{groupStatus?.is_brewing ? 'Yes' : 'No'}</span>
             </div>
           );
         } else {
           return (
-            <div key={idx} style={{ fontSize: '0.9rem', color: '#155724' }}>
+            <div key={idx} style={{ fontSize: '0.9rem', color: tokens.color.ink }}>
               {exit.description || stateCondition.type}
             </div>
           );
@@ -302,7 +317,7 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
       if (!label) return null;
 
       return (
-        <div key={idx} style={{ fontSize: '0.9rem', color: '#155724' }}>
+        <div key={idx} style={{ fontSize: '0.9rem', color: tokens.color.ink }}>
           {label}:{' '}
           <span style={{ fontWeight: '600' }}>
             {currentVal} {unit}
@@ -317,163 +332,105 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
   };
 
   return (
+    // A white card with an `ok` ring, exactly like a brewing group -- because that is the
+    // same class of fact. This was previously a solid green panel with green text
+    // throughout, which said "success": a routine that is running has not succeeded, it is
+    // simply happening, and the card had no way left to show that one had gone wrong.
     <div
       style={{
-        padding: '1rem',
-        backgroundColor: '#d4edda',
-        border: '2px solid #28a745',
-        borderRadius: '8px',
-        marginBottom: '1rem'
+        display: 'flex',
+        flexDirection: 'column',
+        gap: tokens.space.sm,
+        padding: tokens.space.md,
+        backgroundColor: tokens.color.surfaceRaised,
+        border: `1px solid ${tokens.color.ok}`,
+        boxShadow: `0 0 0 1px ${tokens.color.ok}`,
+        borderRadius: tokens.radius.md,
+        marginBottom: tokens.space.md,
       }}
     >
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: tokens.space.sm }}>
         <div>
-          <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: '600', color: '#155724' }}>
-            {summary.name}
-          </h3>
-          <div style={{ fontSize: '0.9rem', color: '#155724', marginTop: '0.25rem' }}>
+          <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>{summary.name}</h3>
+          <div style={{ fontSize: '0.9rem', color: tokens.color.inkMuted, marginTop: tokens.space.xs }}>
             Step {stepNumber} of {totalSteps}
             {currentStep?.description && `: ${currentStep.description}`}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-          <span
-            style={{
-              padding: '0.35rem 0.85rem',
-              backgroundColor: '#28a745',
-              color: 'white',
-              borderRadius: '12px',
-              fontSize: '0.8rem',
-              fontWeight: '600',
-              textTransform: 'uppercase'
-            }}
-          >
-            Running
-          </span>
-          <button
-            onClick={() => void handleCancel()}
-            style={{
-              padding: '0.35rem 0.85rem',
-              backgroundColor: '#dc3545',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '0.8rem',
-              fontWeight: '500'
-            }}
-          >
+        <div style={{ display: 'flex', gap: tokens.space.sm, alignItems: 'center' }}>
+          <Badge role="ok">Running</Badge>
+          {/* Quiet until pointed at. It stops a shot in progress, and it sits on a card
+              that appears unasked-for on the main screen. */}
+          <Button variant="destructive" size="sm" onClick={() => void handleCancel()}>
             Cancel
-          </button>
+          </Button>
         </div>
       </div>
 
-      {/* Error Message */}
-      {error && (
-        <div style={{
-          fontSize: '0.9rem',
-          color: '#721c24',
-          marginBottom: '0.75rem',
-          padding: '0.5rem',
-          backgroundColor: '#f8d7da',
-          borderRadius: '4px',
-          border: '1px solid #f5c6cb'
-        }}>
-          ❌ {error}
-        </div>
-      )}
+      {error && <Alert role="danger">{error}</Alert>}
+      {notice && <Alert role="ok">{notice}</Alert>}
 
-      {/* Success Message */}
-      {successMessage && (
-        <div style={{
-          fontSize: '0.9rem',
-          color: '#155724',
-          marginBottom: '0.75rem',
-          padding: '0.5rem',
-          backgroundColor: '#d4edda',
-          borderRadius: '4px',
-          border: '1px solid #c3e6cb'
-        }}>
-          ✅ {successMessage}
-        </div>
-      )}
-
-      {/* Progress Bar */}
       <div
+        role="progressbar"
+        aria-valuenow={stepNumber}
+        aria-valuemin={0}
+        aria-valuemax={totalSteps}
+        aria-valuetext={`Step ${stepNumber} of ${totalSteps}`}
         style={{
           width: '100%',
           height: '8px',
-          backgroundColor: '#c3e6cb',
-          borderRadius: '4px',
+          backgroundColor: tokens.color.surface,
+          border: `1px solid ${tokens.color.border}`,
+          borderRadius: tokens.radius.sm,
           overflow: 'hidden',
-          marginBottom: '0.75rem'
         }}
       >
         <div
           style={{
             width: `${progressPercent}%`,
             height: '100%',
-            backgroundColor: '#28a745',
-            transition: 'width 0.3s ease'
+            backgroundColor: tokens.color.ok,
+            transition: 'width 0.3s ease',
           }}
         />
       </div>
 
-      {/* Timers */}
-      <div style={{ display: 'flex', gap: '1.5rem', marginBottom: '0.75rem', fontSize: '0.9rem' }}>
-        <div>
-          <span style={{ color: '#155724', fontWeight: '500' }}>Step Time:</span>{' '}
-          <span style={{ fontWeight: '600' }}>{stepElapsedTime}</span>
-        </div>
-        <div>
-          <span style={{ color: '#155724', fontWeight: '500' }}>Total Time:</span>{' '}
-          <span style={{ fontWeight: '600' }}>{totalElapsedTime}</span>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.md }}>
+        <Readout label="Step time" value={stepElapsedTime} unit="s" />
+        <Readout label="Total time" value={totalElapsedTime} unit="s" />
       </div>
 
-      {/* Exit Conditions (Simplified) */}
-      <div style={{ marginBottom: '0.75rem' }}>
-        {formatExitConditions()}
-      </div>
+      <div>{formatExitConditions()}</div>
 
-      {/* Details Toggle */}
-      <button
-        onClick={() => setDetailsExpanded(!detailsExpanded)}
-        style={{
-          background: 'none',
-          border: 'none',
-          color: '#155724',
-          cursor: 'pointer',
-          fontSize: '0.85rem',
-          fontWeight: '500',
-          padding: '0.25rem 0',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.25rem'
-        }}
-      >
-        <span style={{ fontSize: '0.7rem' }}>{detailsExpanded ? '▼' : '▶'}</span>
-        Details
-      </button>
+      <div>
+        <Button
+          variant="quiet"
+          size="sm"
+          onClick={() => setDetailsExpanded(!detailsExpanded)}
+          ariaExpanded={detailsExpanded}
+        >
+          <span aria-hidden="true" style={{ fontSize: '0.7rem' }}>
+            {detailsExpanded ? '▼' : '▶'}
+          </span>
+          Details
+        </Button>
+      </div>
 
       {/* Expanded Details */}
       {detailsExpanded && (
         <div
           style={{
-            marginTop: '0.75rem',
-            padding: '0.75rem',
-            backgroundColor: '#fff',
-            borderRadius: '6px',
-            border: '1px solid #c3e6cb'
+            padding: tokens.space.sm,
+            backgroundColor: tokens.color.surfaceSunken,
+            borderRadius: tokens.radius.sm,
+            border: `1px solid ${tokens.color.border}`,
           }}
         >
-          {/* Entry Commands */}
-          <div style={{ marginBottom: '0.75rem' }}>
-            <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#155724', marginBottom: '0.25rem' }}>
-              Entry Commands:
+          <div style={{ marginBottom: tokens.space.sm }}>
+            <div style={{ fontSize: '0.85rem', fontWeight: 600, color: tokens.color.inkMuted, marginBottom: tokens.space.xs }}>
+              Entry commands
             </div>
-            <div style={{ fontSize: '0.85rem', color: '#333' }}>
+            <div style={{ fontSize: '0.85rem', color: tokens.color.ink }}>
               {currentStep?.entry_command && currentStep.entry_command.length > 0 ? (
                 currentStep.entry_command.length === 1 ? (
                   formatCommand(currentStep.entry_command[0], getBoilerName, getGroupName)
@@ -490,24 +447,20 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
             </div>
           </div>
 
-          {/* Exit Conditions (Detailed) */}
           <div>
-            <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#155724', marginBottom: '0.25rem' }}>
-              Exit Conditions:
+            <div style={{ fontSize: '0.85rem', fontWeight: 600, color: tokens.color.inkMuted, marginBottom: tokens.space.xs }}>
+              Exit conditions
             </div>
             {formatDetailedExitConditions()}
           </div>
 
-          {/* Parameters (if any) */}
           {execution.resolved_parameters.size > 0 && (
-            <div style={{ marginTop: '0.75rem' }}>
-              <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#155724', marginBottom: '0.25rem' }}>
-                Parameters:
+            <div style={{ marginTop: tokens.space.sm }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: 600, color: tokens.color.inkMuted, marginBottom: tokens.space.xs }}>
+                Parameters
               </div>
               {Array.from(execution.resolved_parameters.entries()).map(([key, value]) => (
-                <div key={key} style={{ fontSize: '0.85rem', color: '#333' }}>
-                  {key}: {value}
-                </div>
+                <Readout key={key} label={String(key)} value={String(value)} size="sm" />
               ))}
             </div>
           )}
