@@ -497,9 +497,29 @@ fn the_cards_real_reported_size_formats_with_the_expected_geometry() {
 
 /// Hand the volume to an implementation that shares nothing with ours.
 ///
-/// Skipped rather than failed where `fsck_exfat` is absent: it ships with macOS, and a
-/// Linux host would need `exfatprogs`. A test that cannot run is not a test that failed,
-/// but one that silently never runs is worse than either -- hence the printed notice.
+/// Skipped rather than failed where the tools are absent: `fsck_exfat` and `hdiutil` ship
+/// with macOS, and a Linux host would need `exfatprogs` and a loop device. A test that
+/// cannot run is not a test that failed, but one that silently never runs is worse than
+/// either -- hence the printed notice.
+///
+/// **The image is attached as a device rather than handed to `fsck_exfat` as a file.**
+/// That is not a preference. `fsck_exfat` opens its argument and asks for the block count
+/// and block size by `ioctl`; against a regular file both fail with `ENOTTY`, and it then
+/// reports
+///
+/// ```text
+/// Main boot region is invalid. Trying alternate boot region.
+/// ```
+///
+/// for *any* content whatsoever -- a volume this crate wrote and a file of zeros are
+/// rejected identically, so the check was passing judgement on the file type rather than on
+/// the volume. Apple's own `newfs_exfat` will not touch a plain file either; it prepends
+/// `/dev/` to its argument and fails outright. Attached with `hdiutil` the same bytes pass
+/// completely: "The volume VARIEGATED appears to be OK".
+///
+/// Note for a sandboxed or containerised runner: `hdiutil attach` needs to create a device
+/// node. Where it cannot, this skips with a notice rather than failing, on the same
+/// reasoning as a missing `fsck_exfat`.
 #[test]
 fn fsck_accepts_the_volume() {
     let fsck = PathBuf::from("/sbin/fsck_exfat");
@@ -507,20 +527,55 @@ fn fsck_accepts_the_volume() {
         eprintln!("skipping: {} not present", fsck.display());
         return;
     }
+    let hdiutil = PathBuf::from("/usr/bin/hdiutil");
+    if !hdiutil.exists() {
+        eprintln!("skipping: {} not present", hdiutil.display());
+        return;
+    }
 
     let device = formatted(64);
     let path = std::env::temp_dir().join("variegated-exfat-format-test.img");
     std::fs::write(&path, device.to_image()).expect("write image");
 
-    let output = std::process::Command::new(&fsck)
-        .arg("-n")
+    // `-nomount` because the volume is to be inspected, not used, and letting Disk
+    // Arbitration mount it would put a second implementation between the bytes and the
+    // check. `CRawDiskImage` because the file is a bare volume image with no partition map
+    // or trailer -- without it hdiutil looks for a format it recognises and finds none.
+    let attach = std::process::Command::new(&hdiutil)
+        .args(["attach", "-nomount", "-imagekey", "diskimage-class=CRawDiskImage"])
         .arg(&path)
         .output()
-        .expect("run fsck_exfat");
+        .expect("run hdiutil attach");
 
+    if !attach.status.success() {
+        let _ = std::fs::remove_file(&path);
+        eprintln!(
+            "skipping: hdiutil could not attach the image\n{}",
+            String::from_utf8_lossy(&attach.stderr)
+        );
+        return;
+    }
+
+    let attached = String::from_utf8_lossy(&attach.stdout);
+    let node = attached
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .expect("hdiutil named a device")
+        .to_string();
+
+    let output = std::process::Command::new(&fsck).arg("-n").arg(&node).output();
+
+    // Detached before the assertion, never after: an `assert!` unwinds, and a device left
+    // attached by a failing run outlives the test process and accumulates across runs.
+    let _ = std::process::Command::new(&hdiutil)
+        .args(["detach", &node])
+        .output();
+    let _ = std::fs::remove_file(&path);
+
+    let output = output.expect("run fsck_exfat");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let _ = std::fs::remove_file(&path);
 
     assert!(
         output.status.success(),
