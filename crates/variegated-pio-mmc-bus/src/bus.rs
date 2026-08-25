@@ -28,6 +28,7 @@ use embassy_futures::select::{Either, select};
 use embassy_rp::Peri;
 use embassy_rp::clocks::clk_sys_freq;
 use embassy_rp::dma;
+use embassy_rp::gpio::Level;
 use embassy_rp::pio::{Common, Direction, Instance, PioPin, StateMachine};
 use embassy_time::{Duration, Instant, Timer};
 use fixed::FixedU32;
@@ -745,7 +746,7 @@ impl<'d, P: Instance, const SM_DAT: usize, const SM_CLK: usize> MmcBus
         self.installed.set_divider(self.div);
 
         mmc_trace!(
-            "pio-mmc: init_idle at {=u32} Hz, clk_sys {=u32} Hz",
+            "pio-mmc: init_idle at {=u32} Hz, clk_sys {=u32} Hz, DAT3 driven high for SD mode",
             hz,
             clk_sys_freq()
         );
@@ -762,6 +763,31 @@ impl<'d, P: Instance, const SM_DAT: usize, const SM_CLK: usize> MmcBus
         self.quiesce();
         self.sm_dat.set_config(&self.installed.cmd_rsp);
         self.sm_dat.set_pin_dirs(Direction::Out, &[&self.pins.clk]);
+
+        // DAT3 driven high, and this is what selects the bus mode rather than a nicety.
+        //
+        // Card pin 1 is CS in SPI mode and DAT3 in SD mode, and the card decides which of
+        // the two it is by **sampling that pin when it receives CMD0**: low selects SPI,
+        // high leaves it in native SD mode. A host that leaves the line to a pull-up is
+        // betting the card's input threshold against whatever that pull-up can hold, and
+        // losing the bet does not fail loudly -- the card answers no native command on CMD
+        // ever again, so identification times out with nothing sent back.
+        //
+        // The bet is a bad one here. `pins::PioPins::new` sets an internal pull-up and says
+        // in the same breath that roughly 50 kOhm is a floor rather than a substitute for
+        // an external one, and a board need not have an external one at all.
+        //
+        // **The latch is sticky until the card loses power.** Resetting the MCU does not
+        // clear it, which is what makes this failure look permanent and identical on every
+        // retry.
+        //
+        // Only DAT3: it is the only line that selects anything, and DAT0..DAT2 keep their
+        // pull-ups. Level before direction, so the pad never briefly drives low. Released
+        // again by `arm_read`, which puts all four back to inputs before the first data
+        // transfer -- the card owns them from then on.
+        self.sm_dat.set_pins(Level::High, &[&self.pins.dat[3]]);
+        self.sm_dat.set_pin_dirs(Direction::Out, &[&self.pins.dat[3]]);
+
         // SAFETY: the state machine is stopped and `cmd_rsp` enables autopull.
         unsafe {
             self.sm_dat.set_x(79); // 10 bytes * 8 bits - 1
