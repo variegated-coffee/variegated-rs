@@ -1,6 +1,6 @@
 import { memo } from 'preact/compat';
 import { useEffect, useState } from 'preact/hooks';
-import { Alert, Badge, Button, Readout, tokens, useDialogs } from '@variegated-coffee/ui';
+import { Alert, Badge, Button, Reading, tokens, useDialogs } from '@variegated-coffee/ui';
 import { RoutineExecutionStatus, Status, RoutineSummaryStorage, RoutineCommand, RoutineExit } from '../schemas/schemas';
 import { useMachine } from '../contexts/MachineContext';
 import { formatCommand } from '../utils/commandFormatter';
@@ -116,7 +116,7 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
   const totalSteps = summary.step_count;
   const stepNumber = (execution.current_step ?? 0) + 1;
 
-  // The figure only. The unit is the `Readout`'s, so a column of times aligns on the number
+  // The figure only. The unit is the `Reading`'s, so a column of times aligns on the number
   // rather than on the end of the string.
   const formatDuration = (duration: { secs: bigint; nanos: number } | null | undefined) => {
     if (!duration) return '0.0';
@@ -396,8 +396,8 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.md }}>
-        <Readout label="Step time" value={stepElapsedTime} unit="s" />
-        <Readout label="Total time" value={totalElapsedTime} unit="s" />
+        <Reading label="Step time" value={stepElapsedTime} unit="s" />
+        <Reading label="Total time" value={totalElapsedTime} unit="s" />
       </div>
 
       <div>{formatExitConditions()}</div>
@@ -460,7 +460,7 @@ const RoutineExecutionCardComponent = ({ execution: executionProp, routines, sta
                 Parameters
               </div>
               {Array.from(execution.resolved_parameters.entries()).map(([key, value]) => (
-                <Readout key={key} label={String(key)} value={String(value)} size="sm" />
+                <Reading key={key} label={String(key)} value={String(value)} size="sm" />
               ))}
             </div>
           )}

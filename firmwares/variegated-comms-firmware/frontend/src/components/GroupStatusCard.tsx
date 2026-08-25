@@ -4,8 +4,8 @@ import {
   Alert,
   Badge,
   Button,
-  Readout,
-  ReadoutGroup,
+  Reading,
+  ReadingGroup,
   tokens,
   useDialogs,
 } from '@variegated-coffee/ui';
@@ -157,44 +157,44 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
         </Badge>
       </div>
 
-      <ReadoutGroup>
-        <Readout label="Mode" value={status.control_state.mode.type} />
+      <ReadingGroup>
+        <Reading label="Mode" value={status.control_state.mode.type} />
 
         {hasGroupSensor(index, { type: 'Temperature' }) &&
           status.temperature !== null &&
           status.temperature !== undefined && (
-            <Readout label="Temperature" value={status.temperature.toFixed(1)} unit="°C" />
+            <Reading label="Temperature" value={status.temperature.toFixed(1)} unit="°C" />
           )}
 
         {hasGroupSensor(index, { type: 'Pressure' }) &&
           status.pressure !== null &&
           status.pressure !== undefined && (
-            <Readout label="Pressure" value={status.pressure.toFixed(2)} unit="bar" />
+            <Reading label="Pressure" value={status.pressure.toFixed(2)} unit="bar" />
           )}
 
         {hasGroupSensor(index, { type: 'InputFlowRate' }) &&
           status.input_flow_rate !== null &&
           status.input_flow_rate !== undefined && (
-            <Readout label="Input flow" value={status.input_flow_rate.toFixed(1)} unit="mL/s" />
+            <Reading label="Input flow" value={status.input_flow_rate.toFixed(1)} unit="mL/s" />
           )}
 
         {hasGroupSensor(index, { type: 'OutputFlowRate' }) &&
           status.output_flow_rate !== null &&
           status.output_flow_rate !== undefined && (
-            <Readout label="Output flow" value={status.output_flow_rate.toFixed(1)} unit="mL/s" />
+            <Reading label="Output flow" value={status.output_flow_rate.toFixed(1)} unit="mL/s" />
           )}
 
         {hasGroupSensor(index, { type: 'Weight' }) &&
           status.output_weight !== null &&
           status.output_weight !== undefined && (
-            <Readout label="Output weight" value={status.output_weight.toFixed(1)} unit="g" />
+            <Reading label="Output weight" value={status.output_weight.toFixed(1)} unit="g" />
           )}
 
         {/* Brew-sensor readings. Output temperature and extraction rate have no
             SensorCapability of their own to gate on, so they rely on the value
             being present, which it only is once a BrewSensor reports. */}
         {status.output_temperature !== null && status.output_temperature !== undefined && (
-          <Readout label="Output temp" value={status.output_temperature.toFixed(1)} unit="°C" />
+          <Reading label="Output temp" value={status.output_temperature.toFixed(1)} unit="°C" />
         )}
 
         {/* mS/cm, not µS/cm, and two decimals rather than none: espresso runs around
@@ -204,7 +204,7 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
         {hasGroupSensor(index, { type: 'ElectricalConductivity' }) &&
           status.output_electrical_conductivity !== null &&
           status.output_electrical_conductivity !== undefined && (
-            <Readout
+            <Reading
               label="Conductivity"
               value={status.output_electrical_conductivity.toFixed(2)}
               unit="mS/cm"
@@ -214,13 +214,13 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
         {/* Not a percentage of anything. Extraction rate is conductivity times output flow;
             see `ExtractionRateType`. */}
         {status.extraction_rate !== null && status.extraction_rate !== undefined && (
-          <Readout
+          <Reading
             label="Extraction"
             value={status.extraction_rate.toFixed(2)}
             unit="mS·mL/cm·s"
           />
         )}
-      </ReadoutGroup>
+      </ReadingGroup>
 
       {status.is_brewing && (
         <div
@@ -251,9 +251,9 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
             </div>
           )}
 
-          <ReadoutGroup title="Current shot">
+          <ReadingGroup title="Current shot">
             {status.current_brew?.brew_input_volume != null && (
-              <Readout
+              <Reading
                 label="Input volume"
                 value={status.current_brew.brew_input_volume.toFixed(1)}
                 unit="mL"
@@ -261,7 +261,7 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
               />
             )}
             {status.current_brew?.output_volume != null && (
-              <Readout
+              <Reading
                 label="Output volume"
                 value={status.current_brew.output_volume.toFixed(1)}
                 unit="mL"
@@ -269,21 +269,21 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
               />
             )}
             {status.current_brew?.extracted_solids != null && (
-              <Readout
+              <Reading
                 label="Extracted solids"
                 value={status.current_brew.extracted_solids.toFixed(1)}
                 unit="g"
                 size="sm"
               />
             )}
-          </ReadoutGroup>
+          </ReadingGroup>
         </div>
       )}
 
       {!status.is_brewing && status.previous_brew && (
         <div style={{ paddingTop: tokens.space.sm, borderTop: `1px solid ${tokens.color.border}` }}>
-          <ReadoutGroup title="Last shot">
-            <Readout
+          <ReadingGroup title="Last shot">
+            <Reading
               label="Time"
               value={formatBrewTime(status.previous_brew.brew_time)}
               unit="s"
@@ -291,14 +291,14 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
             />
             {status.previous_brew.output_weight !== null &&
               status.previous_brew.output_weight !== undefined && (
-                <Readout
+                <Reading
                   label="Weight"
                   value={status.previous_brew.output_weight.toFixed(1)}
                   unit="g"
                   size="sm"
                 />
               )}
-          </ReadoutGroup>
+          </ReadingGroup>
         </div>
       )}
 
@@ -311,9 +311,9 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
           borderTop: `1px solid ${tokens.color.border}`,
         }}
       >
-        {pump.type === 'Off' && <Readout label="Pump output" value="Off" emphasis />}
+        {pump.type === 'Off' && <Reading label="Pump output" value="Off" emphasis />}
         {pump.type === 'FixedDutyCycle' && (
-          <Readout
+          <Reading
             label="Pump output"
             value={`${pump.value}/255`}
             unit={`${asPercent(pump.value).toFixed(0)}%`}
@@ -322,7 +322,7 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
         )}
         {pump.type === 'PidOutput' && (
           <>
-            <Readout
+            <Reading
               label="Pump output"
               value={`${pump.value.out.toFixed(1)}/255`}
               unit={`${asPercent(pump.value.out).toFixed(0)}%`}
@@ -338,21 +338,25 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
                 borderRadius: tokens.radius.sm,
               }}
             >
-              <ReadoutGroup title="PID terms">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
-                  <Readout label="P" value={pump.value.p.toFixed(2)} size="sm" />
-                  <Readout label="I" value={pump.value.i.toFixed(2)} size="sm" />
-                  <Readout label="D" value={pump.value.d.toFixed(2)} size="sm" />
-                  <Readout label="Sum" value={pump.value.out.toFixed(2)} size="sm" emphasis />
+              <ReadingGroup title="PID terms">
+                {/* See BoilerStatusCard: a tight gap runs the next label into the previous
+                    right-aligned number. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: `${tokens.space.xs} ${tokens.space.md}` }}>
+                  <Reading label="P" value={pump.value.p.toFixed(2)} size="sm" />
+                  <Reading label="I" value={pump.value.i.toFixed(2)} size="sm" />
+                  <Reading label="D" value={pump.value.d.toFixed(2)} size="sm" />
+                  <Reading label="Sum" value={pump.value.out.toFixed(2)} size="sm" emphasis />
                 </div>
-              </ReadoutGroup>
-              <ReadoutGroup title="Acting parameters">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
-                  <Readout label="Kp" value={pump.value.acting_kp.toFixed(4)} size="sm" />
-                  <Readout label="Ki" value={pump.value.acting_ki.toFixed(4)} size="sm" />
-                  <Readout label="Kd" value={pump.value.acting_kd.toFixed(4)} size="sm" />
+              </ReadingGroup>
+              <ReadingGroup title="Acting parameters">
+                {/* See BoilerStatusCard: a tight gap runs the next label into the previous
+                    right-aligned number. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: `${tokens.space.xs} ${tokens.space.md}` }}>
+                  <Reading label="Kp" value={pump.value.acting_kp.toFixed(4)} size="sm" />
+                  <Reading label="Ki" value={pump.value.acting_ki.toFixed(4)} size="sm" />
+                  <Reading label="Kd" value={pump.value.acting_kd.toFixed(4)} size="sm" />
                 </div>
-              </ReadoutGroup>
+              </ReadingGroup>
             </div>
           </>
         )}

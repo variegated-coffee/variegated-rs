@@ -4,7 +4,7 @@ import { memo } from 'preact/compat';
 import {
   Alert,
   Badge,
-  Readout,
+  Reading,
   Section,
   focusRingStyle,
   tokens,
@@ -274,7 +274,7 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
               doing something at a particular hour. It also forced `en-US` MM/DD/YYYY on
               everyone regardless of locale.
             */}
-            <Readout
+            <Reading
               label="Machine time"
               value={status.current_local_time.replace('T', ' ')}
             />
@@ -331,7 +331,7 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
             <Tile>
               <h4 style={{ margin: 0 }}>Tanks</h4>
               {tankStatusEntries.map(([key, tank]) => (
-                <Readout
+                <Reading
                   key={key}
                   label={`Tank ${key}`}
                   value={
@@ -351,7 +351,7 @@ const StatusDisplayComponent = ({ status, routines }: StatusDisplayProps) => {
             <Tile>
               <h4 style={{ margin: 0 }}>Water taps</h4>
               {waterTapStatusEntries.map(([key, tap]) => (
-                <Readout
+                <Reading
                   key={key}
                   label={`Tap ${key}`}
                   value={tap.is_dispensing ? 'Dispensing' : 'Idle'}

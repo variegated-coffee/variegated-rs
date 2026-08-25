@@ -1,5 +1,5 @@
 import { memo } from 'preact/compat';
-import { Badge, Button, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
+import { Badge, Button, Reading, ReadingGroup, tokens } from '@variegated-coffee/ui';
 import {
   BoilerConfiguration,
   GroupConfiguration,
@@ -29,7 +29,7 @@ const ConfigurationCardComponent = ({ name, entityType, configuration, onConfigu
     };
 
     return (
-      <ReadoutGroup>
+      <ReadingGroup>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
           <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Mode</span>
           <Badge role={config.control_state.mode.type === 'Off' ? undefined : 'ok'}>
@@ -38,17 +38,17 @@ const ConfigurationCardComponent = ({ name, entityType, configuration, onConfigu
         </div>
         {/* Two targets, two rows. They were one string joined by a slash, so neither
             number could line up with anything and the units read as part of the value. */}
-        <Readout
+        <Reading
           label="Target temperature"
           value={config.control_state.values.target_temperature.toFixed(1)}
           unit="°C"
         />
-        <Readout
+        <Reading
           label="Target pressure"
           value={config.control_state.values.target_pressure.toFixed(1)}
           unit="bar"
         />
-      </ReadoutGroup>
+      </ReadingGroup>
     );
   };
 
@@ -67,15 +67,15 @@ const ConfigurationCardComponent = ({ name, entityType, configuration, onConfigu
     };
 
     return (
-      <ReadoutGroup>
+      <ReadingGroup>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
           <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Mode</span>
           <Badge role={config.brew_control_state.mode.type === 'Off' ? undefined : 'ok'}>
             {modeShortNames[config.brew_control_state.mode.type] || config.brew_control_state.mode.type}
           </Badge>
         </div>
-        <Readout label="Auto-tare" value={config.auto_tare_enabled ? 'On' : 'Off'} />
-      </ReadoutGroup>
+        <Reading label="Auto-tare" value={config.auto_tare_enabled ? 'On' : 'Off'} />
+      </ReadingGroup>
     );
   };
 
@@ -92,44 +92,44 @@ const ConfigurationCardComponent = ({ name, entityType, configuration, onConfigu
   const renderWaterTapInfo = (config: WaterTapConfiguration) => {
     const target = config.temperature_target;
     return (
-      <ReadoutGroup>
-        <Readout
+      <ReadingGroup>
+        <Reading
           label="Strategy"
           value={config.pump_strategy.type === 'AlwaysPump' ? 'Pump' : 'Gravity'}
         />
-        <Readout
+        <Reading
           label="Target temperature"
           value={optional(target, 1)}
           unit={target !== null && target !== undefined ? '°C' : undefined}
         />
-      </ReadoutGroup>
+      </ReadingGroup>
     );
   };
 
   const renderSteamWandInfo = (config: SteamWandConfiguration) => {
     const target = config.temperature_target;
     return (
-      <ReadoutGroup>
-        <Readout label="Auto-purge" value={config.auto_purge_enabled ? 'On' : 'Off'} />
-        <Readout
+      <ReadingGroup>
+        <Reading label="Auto-purge" value={config.auto_purge_enabled ? 'On' : 'Off'} />
+        <Reading
           label="Target temperature"
           value={optional(target, 0)}
           unit={target !== null && target !== undefined ? '°C' : undefined}
         />
-      </ReadoutGroup>
+      </ReadingGroup>
     );
   };
 
   const renderTankInfo = (config: TankConfiguration) => {
     const threshold = config.low_level_warning_threshold;
     return (
-      <ReadoutGroup>
-        <Readout
+      <ReadingGroup>
+        <Reading
           label="Low level alert"
           value={optional(threshold, 1)}
           unit={threshold !== null && threshold !== undefined ? '%' : undefined}
         />
-      </ReadoutGroup>
+      </ReadingGroup>
     );
   };
 

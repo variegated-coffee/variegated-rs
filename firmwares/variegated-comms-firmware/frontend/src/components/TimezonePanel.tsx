@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
-import { Alert, Button, Field, Readout, TextInput, tokens } from '@variegated-coffee/ui';
+import { Alert, Button, Field, Reading, TextInput, tokens } from '@variegated-coffee/ui';
 import { TimezoneSetting } from '../schemas/schemas';
 import { setTimezone } from '../api/timezone';
 import { ConfigurationSection } from './ConfigurationSection';
@@ -113,7 +113,7 @@ export const TimezonePanel = memo(({ timezone }: TimezonePanelProps) => {
           ))}
         </datalist>
 
-        <Readout label="Currently" value={stored === '' ? 'UTC' : stored} />
+        <Reading label="Currently" value={stored === '' ? 'UTC' : stored} />
 
         {error && <Alert role="danger">{error}</Alert>}
 

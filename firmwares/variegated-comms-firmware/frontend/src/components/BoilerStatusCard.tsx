@@ -1,5 +1,5 @@
 import { memo } from 'preact/compat';
-import { Badge, Readout, ReadoutGroup, tokens, type StatusRole } from '@variegated-coffee/ui';
+import { Badge, Reading, ReadingGroup, tokens, type StatusRole } from '@variegated-coffee/ui';
 import { useMachine } from '../contexts/MachineContext';
 import { BoilerStatus } from '../schemas/schemas';
 
@@ -47,38 +47,38 @@ const BoilerStatusCardComponent = ({ index, status }: BoilerStatusCardProps) => 
         </Badge>
       </div>
 
-      <ReadoutGroup>
+      <ReadingGroup>
         {hasBoilerSensor(index, { type: 'Temperature' }) &&
           status.temperature !== null &&
           status.temperature !== undefined && (
-            <Readout label="Temperature" value={status.temperature.toFixed(1)} unit="°C" />
+            <Reading label="Temperature" value={status.temperature.toFixed(1)} unit="°C" />
           )}
 
         {hasBoilerSensor(index, { type: 'Pressure' }) &&
           status.pressure !== null &&
           status.pressure !== undefined && (
-            <Readout label="Pressure" value={status.pressure.toFixed(2)} unit="bar" />
+            <Reading label="Pressure" value={status.pressure.toFixed(2)} unit="bar" />
           )}
 
         {hasBoilerSensor(index, { type: 'WaterLevel' }) &&
           status.water_level !== null &&
           status.water_level !== undefined && (
-            <Readout label="Water level" value={status.water_level.toFixed(1)} unit="%" />
+            <Reading label="Water level" value={status.water_level.toFixed(1)} unit="%" />
           )}
-      </ReadoutGroup>
+      </ReadingGroup>
 
       {/* The target, only for the quantity actually being controlled. */}
       {status.control_state.mode.type !== 'Off' && (
         <div style={{ paddingTop: tokens.space.sm, borderTop: `1px solid ${tokens.color.border}` }}>
           {status.control_state.mode.type === 'Temperature' ? (
-            <Readout
+            <Reading
               label="Target"
               value={status.control_state.values.target_temperature.toFixed(1)}
               unit="°C"
               emphasis
             />
           ) : (
-            <Readout
+            <Reading
               label="Target"
               value={status.control_state.values.target_pressure.toFixed(2)}
               unit="bar"
@@ -97,13 +97,13 @@ const BoilerStatusCardComponent = ({ index, status }: BoilerStatusCardProps) => 
           borderTop: `1px solid ${tokens.color.border}`,
         }}
       >
-        {output.type === 'Off' && <Readout label="Output" value="Off" emphasis />}
+        {output.type === 'Off' && <Reading label="Output" value="Off" emphasis />}
         {output.type === 'FixedDutyCycle' && (
-          <Readout label="Output" value={output.value.toFixed(1)} unit="% fixed" emphasis />
+          <Reading label="Output" value={output.value.toFixed(1)} unit="% fixed" emphasis />
         )}
         {output.type === 'PidOutput' && (
           <>
-            <Readout label="Output" value={output.value.out.toFixed(1)} unit="% PID" emphasis />
+            <Reading label="Output" value={output.value.out.toFixed(1)} unit="% PID" emphasis />
 
             {/* Loop internals. Kept, because they are how a boiler that is misbehaving gets
                 diagnosed -- but visibly secondary to the figure above, which is the one a
@@ -118,22 +118,28 @@ const BoilerStatusCardComponent = ({ index, status }: BoilerStatusCardProps) => 
                 borderRadius: tokens.radius.sm,
               }}
             >
-              <ReadoutGroup title="PID terms">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
-                  <Readout label="P" value={output.value.p.toFixed(2)} size="sm" />
-                  <Readout label="I" value={output.value.i.toFixed(2)} size="sm" />
-                  <Readout label="D" value={output.value.d.toFixed(2)} size="sm" />
-                  <Readout label="Sum" value={output.value.out.toFixed(2)} size="sm" emphasis />
+              <ReadingGroup title="PID terms">
+                {/* `space.md`, not `sm`: each cell is a label left and a right-aligned
+                    number, so a tight gap puts the next label hard against the previous
+                    value and "12.40" then "I" reads as one token. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: `${tokens.space.xs} ${tokens.space.md}` }}>
+                  <Reading label="P" value={output.value.p.toFixed(2)} size="sm" />
+                  <Reading label="I" value={output.value.i.toFixed(2)} size="sm" />
+                  <Reading label="D" value={output.value.d.toFixed(2)} size="sm" />
+                  <Reading label="Sum" value={output.value.out.toFixed(2)} size="sm" emphasis />
                 </div>
-              </ReadoutGroup>
+              </ReadingGroup>
 
-              <ReadoutGroup title="Acting parameters">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: tokens.space.sm }}>
-                  <Readout label="Kp" value={output.value.acting_kp.toFixed(4)} size="sm" />
-                  <Readout label="Ki" value={output.value.acting_ki.toFixed(4)} size="sm" />
-                  <Readout label="Kd" value={output.value.acting_kd.toFixed(4)} size="sm" />
+              <ReadingGroup title="Acting parameters">
+                {/* `space.md`, not `sm`: each cell is a label left and a right-aligned
+                    number, so a tight gap puts the next label hard against the previous
+                    value and "12.40" then "I" reads as one token. */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: `${tokens.space.xs} ${tokens.space.md}` }}>
+                  <Reading label="Kp" value={output.value.acting_kp.toFixed(4)} size="sm" />
+                  <Reading label="Ki" value={output.value.acting_ki.toFixed(4)} size="sm" />
+                  <Reading label="Kd" value={output.value.acting_kd.toFixed(4)} size="sm" />
                 </div>
-              </ReadoutGroup>
+              </ReadingGroup>
             </div>
           </>
         )}

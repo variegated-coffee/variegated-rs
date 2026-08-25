@@ -1,4 +1,4 @@
-import { Alert, Badge, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
+import { Alert, Badge, Reading, ReadingGroup, tokens } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
 import {
   ConfigurationSection,
@@ -48,7 +48,7 @@ export const GroupConfigurationDetail = ({
   /**
    * The target, split into a figure and its unit.
    *
-   * Returned as a pair rather than a formatted string so `Readout` can align a column of
+   * Returned as a pair rather than a formatted string so `Reading` can align a column of
    * these on the number. The curve and on/off modes have no figure at all, which is why
    * `unit` is optional rather than always present.
    */
@@ -87,7 +87,7 @@ export const GroupConfigurationDetail = ({
       <EntityDetailHeader name={name} index={entityKey} />
 
       <ConfigurationSection title="Basic settings">
-        <ReadoutGroup>
+        <ReadingGroup>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
             <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Auto-tare scale</span>
             <Badge role={groupConfig.auto_tare_enabled ? 'ok' : undefined}>
@@ -95,7 +95,7 @@ export const GroupConfigurationDetail = ({
             </Badge>
           </div>
 
-          <Readout
+          <Reading
             label="Supply tank"
             value={
               groupConfig.supply_tank_index !== null && groupConfig.supply_tank_index !== undefined
@@ -104,31 +104,31 @@ export const GroupConfigurationDetail = ({
             }
           />
 
-          <Readout
+          <Reading
             label="Max brew time"
             value={optionalValue(max_brew_time_seconds, 0)}
             unit={optionalUnit(max_brew_time_seconds, 's')}
           />
 
-          <Readout
+          <Reading
             label="Flow sensor calibration"
             value={optionalValue(flow_sensor_pulses_per_liter, 0)}
             unit={optionalUnit(flow_sensor_pulses_per_liter, 'pulses/L')}
           />
-        </ReadoutGroup>
+        </ReadingGroup>
       </ConfigurationSection>
 
       <ConfigurationSection title="Control state">
         <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
-          <ReadoutGroup>
+          <ReadingGroup>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
               <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Control mode</span>
               <Badge role={groupConfig.brew_control_state.mode.type === 'Off' ? undefined : 'ok'}>
                 {formatControlMode(groupConfig.brew_control_state.mode.type)}
               </Badge>
             </div>
-            <Readout label="Current target" value={target.value} unit={target.unit} />
-          </ReadoutGroup>
+            <Reading label="Current target" value={target.value} unit={target.unit} />
+          </ReadingGroup>
 
           <SettingRow
             title="Control settings"

@@ -1,4 +1,4 @@
-import { Alert, Readout, ReadoutGroup } from '@variegated-coffee/ui';
+import { Alert, Reading, ReadingGroup } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
 import {
   ConfigurationSection,
@@ -34,13 +34,13 @@ export const TankConfigurationDetail = ({
       <EntityDetailHeader name={name} index={entityKey} />
 
       <ConfigurationSection title="Basic settings">
-        <ReadoutGroup>
-          <Readout
+        <ReadingGroup>
+          <Reading
             label="Low level warning threshold"
             value={optionalValue(threshold, 1)}
             unit={optionalUnit(threshold, '%')}
           />
-        </ReadoutGroup>
+        </ReadingGroup>
       </ConfigurationSection>
 
       <ConfigurationSection title="Sensor filtering">

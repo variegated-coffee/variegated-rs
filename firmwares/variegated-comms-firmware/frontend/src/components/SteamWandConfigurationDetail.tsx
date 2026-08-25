@@ -1,4 +1,4 @@
-import { Alert, Badge, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
+import { Alert, Badge, Reading, ReadingGroup, tokens } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
 import {
   ConfigurationSection,
@@ -33,7 +33,7 @@ export const SteamWandConfigurationDetail = ({
       <EntityDetailHeader name={name} index={entityKey} />
 
       <ConfigurationSection title="Basic settings">
-        <ReadoutGroup>
+        <ReadingGroup>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
             <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Auto-purge</span>
             <Badge role={steamWandConfig.auto_purge_enabled ? 'ok' : undefined}>
@@ -41,7 +41,7 @@ export const SteamWandConfigurationDetail = ({
             </Badge>
           </div>
 
-          <Readout
+          <Reading
             label="Supply tank"
             value={
               steamWandConfig.supply_tank_index !== null &&
@@ -51,24 +51,24 @@ export const SteamWandConfigurationDetail = ({
             }
           />
 
-          <Readout
+          <Reading
             label="Temperature target"
             value={optionalValue(temperature_target, 1)}
             unit={optionalUnit(temperature_target, '°C')}
           />
 
-          <Readout
+          <Reading
             label="Purge time"
             value={optionalValue(purge_time_seconds, 1)}
             unit={optionalUnit(purge_time_seconds, 's')}
           />
 
-          <Readout
+          <Reading
             label="Max steam time"
             value={optionalValue(max_steam_time_seconds, 0)}
             unit={optionalUnit(max_steam_time_seconds, 's')}
           />
-        </ReadoutGroup>
+        </ReadingGroup>
       </ConfigurationSection>
     </div>
   );

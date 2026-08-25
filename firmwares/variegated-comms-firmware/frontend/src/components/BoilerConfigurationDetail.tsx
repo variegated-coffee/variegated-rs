@@ -1,4 +1,4 @@
-import { Alert, Badge, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
+import { Alert, Badge, Reading, ReadingGroup, tokens } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
 import {
   ConfigurationSection,
@@ -47,24 +47,24 @@ export const BoilerConfigurationDetail = ({
 
       <ConfigurationSection title="Control state">
         <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
-          <ReadoutGroup>
+          <ReadingGroup>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
               <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Control mode</span>
               <Badge role={boilerConfig.control_state.mode.type === 'Off' ? undefined : 'ok'}>
                 {formatControlMode(boilerConfig.control_state.mode.type)}
               </Badge>
             </div>
-            <Readout
+            <Reading
               label="Target temperature"
               value={boilerConfig.control_state.values.target_temperature.toFixed(1)}
               unit="°C"
             />
-            <Readout
+            <Reading
               label="Target pressure"
               value={boilerConfig.control_state.values.target_pressure.toFixed(2)}
               unit="bar"
             />
-          </ReadoutGroup>
+          </ReadingGroup>
 
           <SettingRow
             title="Control settings"
@@ -77,8 +77,8 @@ export const BoilerConfigurationDetail = ({
       {/* These are the limits that stop a boiler doing damage, so they read as a group of
           their own rather than as four more rows of settings. */}
       <ConfigurationSection title="Safety limits">
-        <ReadoutGroup>
-          <Readout
+        <ReadingGroup>
+          <Reading
             label="Supply tank"
             value={
               boilerConfig.supply_tank_index !== null && boilerConfig.supply_tank_index !== undefined
@@ -86,22 +86,22 @@ export const BoilerConfigurationDetail = ({
                 : '—'
             }
           />
-          <Readout
+          <Reading
             label="Minimum safe level"
             value={optionalValue(minimum_safe_level, 1)}
             unit={optionalUnit(minimum_safe_level, '%')}
           />
-          <Readout
+          <Reading
             label="Max temperature"
             value={optionalValue(max_temperature, 1)}
             unit={optionalUnit(max_temperature, '°C')}
           />
-          <Readout
+          <Reading
             label="Max pressure"
             value={optionalValue(max_pressure, 2)}
             unit={optionalUnit(max_pressure, 'bar')}
           />
-        </ReadoutGroup>
+        </ReadingGroup>
       </ConfigurationSection>
 
       <ConfigurationSection title="PID controllers">
@@ -145,13 +145,13 @@ export const BoilerConfigurationDetail = ({
       {fill && (
         <ConfigurationSection title="Fill">
           <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
-            <ReadoutGroup>
-              <Readout
+            <ReadingGroup>
+              <Reading
                 label="Fill threshold"
                 value={optionalValue(fill.fill_threshold, 1)}
                 unit={optionalUnit(fill.fill_threshold, '%')}
               />
-            </ReadoutGroup>
+            </ReadingGroup>
             <SettingRow
               title="Fill pump"
               description="Duty cycle, ramp times, flow sensor"

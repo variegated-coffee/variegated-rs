@@ -1,4 +1,4 @@
-import { Alert, Badge, Readout, ReadoutGroup, tokens } from '@variegated-coffee/ui';
+import { Alert, Badge, Reading, ReadingGroup, tokens } from '@variegated-coffee/ui';
 import { Configuration } from '../schemas/schemas';
 import {
   ConfigurationSection,
@@ -44,7 +44,7 @@ export const WaterTapConfigurationDetail = ({
       <EntityDetailHeader name={name} index={entityKey} />
 
       <ConfigurationSection title="Basic settings">
-        <ReadoutGroup>
+        <ReadingGroup>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
             <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Pump strategy</span>
             {/* Role-less: which strategy a tap uses is a configuration choice, not a
@@ -52,7 +52,7 @@ export const WaterTapConfigurationDetail = ({
             <Badge>{formatPumpStrategy(tapConfig.pump_strategy.type)}</Badge>
           </div>
 
-          <Readout
+          <Reading
             label="Supply tank"
             value={
               tapConfig.supply_tank_index !== null && tapConfig.supply_tank_index !== undefined
@@ -61,24 +61,24 @@ export const WaterTapConfigurationDetail = ({
             }
           />
 
-          <Readout
+          <Reading
             label="Temperature target"
             value={optionalValue(temperature_target, 1)}
             unit={optionalUnit(temperature_target, '°C')}
           />
 
-          <Readout
+          <Reading
             label="Flow rate limit"
             value={optionalValue(flow_rate_limit, 1)}
             unit={optionalUnit(flow_rate_limit, 'mL/s')}
           />
 
-          <Readout
+          <Reading
             label="Max dispense time"
             value={optionalValue(max_dispense_time_seconds, 0)}
             unit={optionalUnit(max_dispense_time_seconds, 's')}
           />
-        </ReadoutGroup>
+        </ReadingGroup>
       </ConfigurationSection>
 
       <ConfigurationSection title="Pump">
