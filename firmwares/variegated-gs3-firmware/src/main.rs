@@ -75,10 +75,8 @@ use variegated_controller_lib::{SdShotLogStorage, ShotLogStorage};
 use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
 #[cfg(feature = "sd-card-storage")]
 use variegated_controller_lib::shot_log_storage::{
-    format_budget, handle_shot_log_query, ShotLogStorageError, BUS_LEASE_TIMEOUT,
+    format_card, handle_shot_log_query, run_self_test, ShotLogStorageError, BUS_LEASE_TIMEOUT,
 };
-#[cfg(feature = "sd-card-storage")]
-use variegated_controller_lib::exfat_format;
 use embassy_sync::channel::Sender;
 
 mod display_state;
@@ -1773,18 +1771,9 @@ async fn shot_log_storage_task(
                 match request {
                     SdMaintenance::SelfTest => {
                         let card = storage.as_mut().expect("ensured above");
-                        let report = card.self_test().await;
-                        // The whole report at info, so the result is readable in a probe
-                        // log without a host tool -- this is what gets pasted back after a
-                        // flash.
-                        log_info!("SD self-test: {:?}", report);
-                        if report.passed() {
-                            log_info!(
-                                "SD self-test: PASS ({} entries in SHOTS/)",
-                                report.listed_entries
-                            );
-                        } else {
-                            log_error!("SD self-test: FAIL");
+                        if !run_self_test(card).await {
+                            // A failed self-test makes the mount suspect, exactly as a
+                            // failed store does.
                             parked = storage_take(&mut storage);
                         }
                     }
@@ -1800,53 +1789,25 @@ async fn shot_log_storage_task(
                             continue;
                         };
 
-                        // A volume serial, which only has to be arbitrary. The clock is
-                        // preferred over uptime because two cards formatted at the same
-                        // point in two boots would otherwise get the same serial.
-                        let serial = match variegated_timekeeping::TimeKeeper::now_utc() {
-                            Some(now) => now.timestamp() as u32,
-                            None => embassy_time::Instant::now().as_ticks() as u32,
-                        };
-
-                        log_warn!("SD format: erasing the card and writing a new exFAT volume");
-
-                        // One lease for the whole format. It writes the FAT a sector at a
-                        // time -- several megabytes on a large card -- so this holds the
-                        // display's bus for a few seconds and the panel does not update
-                        // during it. Acceptable for a command someone typed; it would not
-                        // be for anything automatic.
+                        // The lease is the only part of this that is this board's; the
+                        // format itself lives in the library, since the other board runs
+                        // exactly the same operation with nothing to lease.
+                        //
+                        // One lease for the whole format, and it has to cover the budget
+                        // computation too -- reading the card's size is a card operation
+                        // like any other. The format writes the FAT a sector at a time --
+                        // several megabytes on a large card -- so this holds the display's
+                        // bus for a few seconds and the panel does not update during it.
+                        // Acceptable for a command someone typed; it would not be for
+                        // anything automatic.
                         if !shared_bus.lease_within(BUS_LEASE_TIMEOUT).await {
                             log_error!("SD format: could not take the SPI bus");
                             parked = Some(device);
                             continue;
                         }
 
-                        // The failsafe, sized from what this particular card's layout will
-                        // actually make the formatter write -- see `format_budget`. Taken
-                        // inside the lease, because reading the card's size is a card
-                        // operation like any other.
-                        let budget = format_budget(&mut device).await;
-
-                        let result = embassy_time::with_timeout(
-                            budget,
-                            exfat_format::format(&mut device, "VARIEGATED", serial),
-                        )
-                        .await;
+                        let _ = format_card(&mut device).await;
                         shared_bus.release();
-
-                        match result {
-                            Ok(Ok(geo)) => log_info!(
-                                "SD format: done -- {} clusters of {} bytes, root at {}",
-                                geo.cluster_count,
-                                geo.bytes_per_cluster(),
-                                geo.first_cluster_of_root
-                            ),
-                            Ok(Err(e)) => log_error!("SD format: failed: {:?}", e),
-                            Err(_) => log_error!(
-                                "SD format: abandoned after {} s; the card is now unformatted",
-                                budget.as_secs()
-                            ),
-                        }
 
                         // Parked rather than remounted here, either way. The next request
                         // re-probes the volume start, which after a successful format

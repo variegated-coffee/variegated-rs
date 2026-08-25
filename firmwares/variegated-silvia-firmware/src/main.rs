@@ -96,7 +96,7 @@ use variegated_controller_lib::sd_card_pio::{
 };
 #[cfg(feature = "sd-card-pio")]
 use variegated_controller_lib::shot_log_storage::{
-    handle_shot_log_query, ShotLogStorage, ShotLogStorageError,
+    format_card, handle_shot_log_query, run_self_test, ShotLogStorage, ShotLogStorageError,
 };
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
@@ -517,6 +517,37 @@ static SHOT_LOG_EVENT_CHANNEL: StaticCell<
 #[cfg(feature = "sd-card-pio")]
 static SD_CARD_PRESENT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+
+/// A maintenance operation someone asked for over the debug channel.
+#[cfg(feature = "sd-card-pio")]
+#[derive(Clone, Copy, PartialEq, Eq, defmt::Format)]
+enum SdMaintenance {
+    /// Exercise the whole card path and report what worked.
+    SelfTest,
+    /// Erase the card and write a fresh exFAT volume.
+    Format,
+}
+
+/// The pending maintenance request, if any.
+///
+/// A `Signal` rather than a channel, because these coalesce: two self-tests queued behind
+/// each other is not a thing anyone wants, and the second arriving mid-first should replace
+/// it rather than run again afterwards.
+///
+/// A plain `static` on `CriticalSectionRawMutex`, unlike the channels above, because
+/// `debug_command_task` has to reach it and `Signal::new` is `const` where `NoopRawMutex`
+/// is not even `Sync`. The query sender next to it cannot be a `static` for exactly that
+/// reason and is passed as a parameter instead.
+#[cfg(feature = "sd-card-pio")]
+static SD_MAINTENANCE_REQUEST: Signal<CriticalSectionRawMutex, SdMaintenance> = Signal::new();
+
+/// How many shots `AppDebugOp::SdListShots` asks for.
+///
+/// Enough to be a real exercise of the listing -- it walks day directories and
+/// prefix-decodes every file it returns -- while staying inside what is readable in a probe
+/// log. The listing reports `truncated` if the card holds more.
+#[cfg(feature = "sd-card-pio")]
+const SD_LIST_SHOTS_LIMIT: u16 = 16;
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
 static UI_STATUS_CHANNEL: StaticCell<Channel<NoopRawMutex, UIStatus, 10>> = StaticCell::new();
@@ -1194,7 +1225,7 @@ async fn main_task(spawner: Spawner) -> ! {
     // Fifth status subscriber -- see STATUS_RECEIVERS.
     let debug_status_receiver = status_channel.subscriber().unwrap();
     spawner.spawn(debug_snapshot_task(psram_heap, debug_status_receiver).unwrap());
-    spawner.spawn(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap).unwrap());
+    spawner.spawn(debug_command_task(debug_command_receiver, command_channel.sender(), psram_heap, shot_log_query_sender).unwrap());
 
     info!("Creating huge future join task");
 
@@ -1340,6 +1371,13 @@ async fn debug_command_task(
     receiver: embassy_sync::channel::Receiver<'static, CriticalSectionRawMutex, DebugCommand, 4>,
     command_sender: embassy_sync::channel::Sender<'static, NoopRawMutex, MachineCommand, 10>,
     psram_heap: bool,
+    // Passed rather than reached for as a `static`, unlike `SD_MAINTENANCE_REQUEST` beside
+    // it: the shot-log channels are on `NoopRawMutex`, which is not `Sync`, so they cannot
+    // be `static`s at all. `None` in a build with no card.
+    #[cfg_attr(not(feature = "sd-card-pio"), allow(unused_variables))]
+    shot_log_query_sender: Option<
+        embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogQuery, 1>,
+    >,
 ) {
     // A handle rather than a `watch` wrapper: the loop body is right here, so it can report
     // that it *ran* rather than merely that it was polled. Nothing here fails in a way worth
@@ -1370,20 +1408,67 @@ async fn debug_command_task(
                 bus::emit_event(DebugEvent::CountersReset);
             }
             DebugCommand::App(AppDebugOp::Ping) => {}
-            // This board has no card reader: this crate has no `sd-card-storage`
-            // feature at all. Answered rather than ignored, so an operator who runs
-            // the self-test against the wrong machine gets told why nothing happened.
+            #[cfg(feature = "sd-card-pio")]
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
-                warn!("SD self-test requested, but this board has no SD card");
+                SD_MAINTENANCE_REQUEST.signal(SdMaintenance::SelfTest);
             }
+            #[cfg(feature = "sd-card-pio")]
             DebugCommand::App(AppDebugOp::SdListShots) => {
-                warn!("SD listing requested, but this board has no SD card");
+                // Goes down the same query channel the comms processor uses, rather than a
+                // signal of its own. That is the point of the command: it exercises the real
+                // request path end to end, so a bug in the channel or in the storage task's
+                // query arm shows up here.
+                //
+                // `try_send`: a full depth-1 channel means a request is already in flight,
+                // and the honest response to a debug command in that case is to say so
+                // rather than to queue behind it.
+                let query = ShotLogQuery::List(variegated_controller_types::ShotLogListRequest {
+                    limit: SD_LIST_SHOTS_LIMIT,
+                    before: None,
+                    day: variegated_controller_types::ShotLogDayFilter::All,
+                });
+                match shot_log_query_sender {
+                    Some(sender) if sender.try_send(query).is_ok() => {}
+                    Some(_) => {
+                        warn!("SD list requested, but a shot-log request is already in flight")
+                    }
+                    None => warn!("SD list requested, but this build has no SD storage"),
+                }
             }
+            #[cfg(feature = "sd-card-pio")]
+            DebugCommand::App(AppDebugOp::SdFormatCard { confirm }) => {
+                // Guarded here rather than in the storage task, so a refused command never
+                // reaches the code that can erase anything. See
+                // `variegated_debug::commands::confirmed` for why this variant needs one.
+                if variegated_debug::commands::confirmed(
+                    confirm,
+                    variegated_controller_types::debug_command::SD_FORMAT_CONFIRM,
+                    "SD format",
+                ) {
+                    warn!("SD format requested; the card's contents will be lost");
+                    SD_MAINTENANCE_REQUEST.signal(SdMaintenance::Format);
+                }
+            }
+            // Answered rather than ignored, so an operator who runs one of these against
+            // the wrong machine gets told why nothing happened.
+            #[cfg(not(feature = "sd-card-pio"))]
+            DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
+                warn!("SD self-test requested, but this build has no SD storage");
+            }
+            #[cfg(not(feature = "sd-card-pio"))]
+            DebugCommand::App(AppDebugOp::SdListShots) => {
+                warn!("SD listing requested, but this build has no SD storage");
+            }
+            #[cfg(not(feature = "sd-card-pio"))]
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
-                warn!("SD format requested, but this board has no SD card");
+                warn!("SD format requested, but this build has no SD storage");
             }
+            // Not gated, unlike the three above: this op reports the state of the *shared
+            // SPI bus lease*, and this board's card is not on a shared bus at all. It owns
+            // its PIO block and its six GPIOs outright, so there is no lease to describe --
+            // in either build.
             DebugCommand::App(AppDebugOp::SdBusState) => {
-                warn!("SD bus state requested, but this board has no SD card");
+                warn!("SD bus state requested, but this board's card is on PIO, not a shared SPI bus");
             }
             DebugCommand::App(AppDebugOp::ClearWifiCredentials { confirm }) => {
                 // Guarded here, so a refused command never reaches the code that can forget
@@ -1533,7 +1618,7 @@ async fn shot_log_storage_task(
     mut det: Input<'static>,
     checkin: variegated_checkin::CheckinHandle,
 ) {
-    use embassy_futures::select::{select, select3, Either, Either3};
+    use embassy_futures::select::{select, select4, Either, Either4};
     use variegated_controller_types::{ShotLogEvent, ShotLogListEntry};
 
     info!("Shot log storage task started");
@@ -1567,9 +1652,10 @@ async fn shot_log_storage_task(
         // nobody has pulled a shot on. Without it the row could not tell an idle task from
         // a wedged one.
         match select(
-            select3(
+            select4(
                 shot_log_receiver.receive(),
                 query_receiver.receive(),
+                SD_MAINTENANCE_REQUEST.wait(),
                 det.wait_for_any_edge(),
             ),
             Timer::after(variegated_checkin::HEARTBEAT),
@@ -1578,7 +1664,7 @@ async fn shot_log_storage_task(
         {
             Either::Second(_) => continue,
             Either::First(event) => match event {
-                Either3::First(shot_log) => {
+                Either4::First(shot_log) => {
                     if !ensure_card_ready(&mut storage, &mut parked, &mut det).await {
                         warn!("SD: card unavailable, dropping a completed shot log");
                         continue;
@@ -1618,7 +1704,7 @@ async fn shot_log_storage_task(
                         }
                     }
                 }
-                Either3::Second(query) => {
+                Either4::Second(query) => {
                     // Captured before `query` is moved into the handler below. A delete is
                     // the one query with no waiter, so it is also the one that must not
                     // leave an answer on a channel a list request could collect.
@@ -1659,7 +1745,51 @@ async fn shot_log_storage_task(
                         warn!("SD: dropped a shot-log reply; the reply channel was full");
                     }
                 }
-                Either3::Third(()) => {
+                Either4::Third(request) => {
+                    if !ensure_card_ready(&mut storage, &mut parked, &mut det).await {
+                        warn!("SD maintenance: card could not be brought up");
+                        continue;
+                    }
+
+                    match request {
+                        SdMaintenance::SelfTest => {
+                            let card = storage.as_mut().expect("ensured above");
+                            if !run_self_test(card).await {
+                                // A failed self-test makes the mount suspect, exactly as a
+                                // failed store does.
+                                parked = storage_take(&mut storage);
+                            }
+                        }
+                        SdMaintenance::Format => {
+                            // The filesystem has to go before the card can be reformatted:
+                            // it caches the boot sector, the up-case table and the
+                            // allocation bitmap, all of which are about to stop being true.
+                            // Taking the storage apart yields the *bare* card --
+                            // `storage_take` unwraps the partition offset too, which is
+                            // what lets the format write at absolute LBA 0.
+                            let Some(mut device) = storage_take(&mut storage) else {
+                                warn!("SD format: no card to format");
+                                continue;
+                            };
+
+                            // No lease to take, unlike the dual-boiler board: nothing else
+                            // is on this bus. The format still writes the FAT a sector at a
+                            // time, which is several megabytes on a large card and a few
+                            // seconds of bus time -- but it only holds up this task, not
+                            // the panel.
+                            let _ = format_card(&mut device).await;
+
+                            // Parked rather than remounted, either way. The next request
+                            // re-probes the volume start, which after a successful format
+                            // finds the boot record at LBA 0 instead of wherever the old
+                            // partition table pointed -- and after a failed one finds
+                            // nothing and reports it, which is the correct outcome for a
+                            // card that is now genuinely unformatted.
+                            parked = Some(device);
+                        }
+                    }
+                }
+                Either4::Fourth(()) => {
                     // Settle before reading, so one swap is classified once rather than once
                     // per contact bounce.
                     Timer::after(SD_DEBOUNCE).await;

@@ -1499,6 +1499,102 @@ fn current_shot_id(shot: &ShotLog) -> ShotLogId {
     }
 }
 
+/// The label written into a volume this firmware formats.
+pub const VOLUME_LABEL: &str = "VARIEGATED";
+
+/// Run the card self-test and log the whole report.
+///
+/// Returns whether it passed, which is what the caller uses to decide whether to park the
+/// device: a failed self-test makes the mount suspect exactly as a failed store does.
+///
+/// Here rather than in a firmware because both boards run the identical operation --
+/// `self_test` is inherent on [`SdShotLogStorage`] and generic over the block device, so
+/// there is nothing board-specific left once the logging comes with it.
+pub async fn run_self_test<'a, BD, M, BUS>(card: &mut SdShotLogStorage<'a, BD, M, BUS>) -> bool
+where
+    BD: BlockDevice<BLOCK_SIZE>,
+    BD::Error: Debug,
+    M: embassy_sync::blocking_mutex::raw::RawMutex,
+{
+    let report = card.self_test().await;
+    // The whole report at info, so the result is readable in a probe log without a host
+    // tool -- this is what gets pasted back after a flash.
+    log_info!("SD self-test: {:?}", report);
+    if report.passed() {
+        log_info!(
+            "SD self-test: PASS ({} entries in SHOTS/)",
+            report.listed_entries
+        );
+        true
+    } else {
+        log_error!("SD self-test: FAIL");
+        false
+    }
+}
+
+/// Erase a card and write a fresh exFAT volume onto it.
+///
+/// Takes the **bare** device, and that is a requirement rather than a convenience. A
+/// [`FileSystem`] caches the boot sector, the up-case table and the allocation bitmap, all
+/// of which this is about to invalidate; and the partition offset has to come off too, or
+/// the new boot record lands at the old partition's start instead of absolute LBA 0.
+///
+/// The timeout is [`format_budget`]'s, computed here rather than left to the caller: it is
+/// derived from what *this* card's layout will actually make the formatter write, and a
+/// budget guessed from capacity would be wrong in the direction that abandons a format
+/// half-done. A caller that has a bus to lease must hold it across this call, since reading
+/// the card's size is a card operation like any other.
+///
+/// Returns whether the volume was written. The caller parks the device either way: after a
+/// success the next bring-up finds the boot record at LBA 0, and after a failure it finds
+/// nothing and says so, which is the correct answer for a card that is now genuinely
+/// unformatted.
+pub async fn format_card<BD>(device: &mut BD) -> bool
+where
+    BD: BlockDevice<BLOCK_SIZE, Align = aligned::A4>,
+    BD::Error: Debug,
+{
+    // A volume serial, which only has to be arbitrary. The clock is preferred over uptime
+    // because two cards formatted at the same point in two boots would otherwise get the
+    // same serial.
+    let serial = match variegated_timekeeping::TimeKeeper::now_utc() {
+        Some(now) => now.timestamp() as u32,
+        None => embassy_time::Instant::now().as_ticks() as u32,
+    };
+
+    log_warn!("SD format: erasing the card and writing a new exFAT volume");
+
+    let budget = format_budget(device).await;
+
+    match embassy_time::with_timeout(
+        budget,
+        exfat_format::format(device, VOLUME_LABEL, serial),
+    )
+    .await
+    {
+        Ok(Ok(geo)) => {
+            log_info!(
+                "SD format: done -- {} clusters of {} bytes, root at {}",
+                geo.cluster_count,
+                geo.bytes_per_cluster(),
+                geo.first_cluster_of_root
+            );
+            true
+        }
+        Ok(Err(e)) => {
+            log_error!("SD format: failed: {:?}", e);
+            false
+        }
+        Err(_) => {
+            log_error!(
+                "SD format: abandoned after {} s; the card is now unformatted",
+                budget.as_secs()
+            );
+            false
+        }
+    }
+}
+
 /// Answer one [`ShotLogQuery`] against a card that is already up.
 ///
 /// Here rather than in a firmware because it is entirely generic over
