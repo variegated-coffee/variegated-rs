@@ -28,6 +28,25 @@ Select exactly one of the `rp2040`, `rp235xa` or `rp235xb` features. With none o
 the crate builds for the host as pure logic — the CRCs, the command framing and the PIO
 assembly — which is what `scripts/test-host.sh` exercises.
 
+## Checking it
+
+```bash
+# The pure modules, on the host. Also run by scripts/test-host.sh.
+cargo test-aarch64 -p variegated-pio-mmc-bus --no-default-features
+
+# The hardware half. Both chips, because they are different code paths and
+# neither firmware builds for RP2040.
+cargo check --target thumbv8m.main-none-eabihf -p variegated-pio-mmc-bus --features rp235xb
+cargo check --target thumbv6m-none-eabi       -p variegated-pio-mmc-bus --features rp2040
+
+# The defmt format strings, which only compile when the feature is on.
+cargo check --target thumbv8m.main-none-eabihf -p variegated-pio-mmc-bus --features rp235xb,trace
+```
+
+None of that drives a single SD clock edge. Bring-up starts by scoping `init_idle`'s
+80 clocks against an empty slot — CMD high throughout, CLK ending low — and only then
+puts a card in.
+
 ## Attribution
 
 The PIO programs and the protocol sequencing are adapted from

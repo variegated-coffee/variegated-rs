@@ -1,4 +1,10 @@
 [toolchain]
 channel = "1.95.0"
 components = ["rust-src", "rustfmt", "clippy"]
-targets = ["thumbv8m.main-none-eabihf"]
+# `thumbv6m-none-eabi` is here for RP2040 only, and only one crate targets it:
+# `variegated-pio-mmc-bus` carries an `rp2040` feature, and without the target installed
+# that half of it is never type-checked by anyone. Nothing is *built* for RP2040 -- both
+# espresso firmwares are rp235xb -- so this costs one `rust-std` download and buys a
+# `cargo check --target thumbv6m-none-eabi -p variegated-pio-mmc-bus --features rp2040`
+# that actually runs. Drop it if RP2040 support ever goes away.
+targets = ["thumbv8m.main-none-eabihf", "thumbv6m-none-eabi"]
