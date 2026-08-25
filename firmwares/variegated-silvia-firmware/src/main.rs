@@ -87,14 +87,14 @@ use variegated_controller_lib::external_sensor_dispatcher::NoopDispatcher;
 // `None` when there is no card, which is what makes the transceiver answer a request with
 // `CardNotPresent` rather than drop it.
 use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 use variegated_controller_lib::sd_card::probe_volume_start;
-#[cfg(feature = "sd-card-pio")]
-use variegated_controller_lib::sd_card_pio::{
-    mount_pio_sd_card, new_pio_sd_card_device_with_dma, reacquire_pio_sd_card,
-    SdCardPioBlockDevice, SdCardPioShotLogStorage,
+#[cfg(feature = "sd-card-pio-spi")]
+use variegated_controller_lib::sd_card_pio_spi::{
+    mount_pio_spi_sd_card, new_pio_spi_sd_card_device_with_pins, reacquire_pio_spi_sd_card,
+    SdCardPioSpiBlockDevice, SdCardPioSpiShotLogStorage,
 };
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 use variegated_controller_lib::shot_log_storage::{
     format_card, handle_shot_log_query, run_self_test, ShotLogStorage, ShotLogStorageError,
 };
@@ -238,15 +238,13 @@ struct RotaryEncoderPeripherals {
 // Narrowly, and only in the build that has no card: the struct is deliberately declared in
 // both, so silencing this unconditionally would stop the compiler reporting it if the
 // build that *does* have a card ever stopped constructing it.
-#[cfg_attr(not(feature = "sd-card-pio"), allow(dead_code))]
+#[cfg_attr(not(feature = "sd-card-pio-spi"), allow(dead_code))]
 struct SdCardPeripherals {
     pio: Peri<'static, ()>,
-    pin_clk: Peri<'static, ()>,
-    pin_cmd: Peri<'static, ()>,
-    pin_d0: Peri<'static, ()>,
-    pin_d1: Peri<'static, ()>,
-    pin_d2: Peri<'static, ()>,
-    pin_d3: Peri<'static, ()>,
+    pin_sck: Peri<'static, ()>,
+    pin_mosi: Peri<'static, ()>,
+    pin_miso: Peri<'static, ()>,
+    pin_cs: Peri<'static, ()>,
     pin_det: Peri<'static, ()>,
     dma_rx: Peri<'static, ()>,
     dma_tx: Peri<'static, ()>,
@@ -497,16 +495,16 @@ static CLEAR_WIFI_CREDENTIALS_REQUEST: Signal<CriticalSectionRawMutex, ()> = Sig
 /// Depth 1 on the query and reply pair: the protocol carries no correlation id, so a
 /// second outstanding request would be answerable only by guessing. Depth 2 on the events,
 /// which is one `Stored` and one `Deleted`.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 static SHOT_LOG_CHANNEL: StaticCell<Channel<NoopRawMutex, variegated_controller_types::ShotLog, 2>> =
     StaticCell::new();
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 static SHOT_LOG_QUERY_CHANNEL: StaticCell<Channel<NoopRawMutex, ShotLogQuery, 1>> =
     StaticCell::new();
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 static SHOT_LOG_REPLY_CHANNEL: StaticCell<Channel<NoopRawMutex, ShotLogReply, 1>> =
     StaticCell::new();
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 static SHOT_LOG_EVENT_CHANNEL: StaticCell<
     Channel<NoopRawMutex, variegated_controller_types::ShotLogEvent, 2>,
 > = StaticCell::new();
@@ -514,12 +512,12 @@ static SHOT_LOG_EVENT_CHANNEL: StaticCell<
 ///
 /// A plain `static` because `AtomicBool::new` is `const` and the controller holds a
 /// `&'static` to it. Written only by the storage task.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 static SD_CARD_PRESENT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// A maintenance operation someone asked for over the debug channel.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 #[derive(Clone, Copy, PartialEq, Eq, defmt::Format)]
 enum SdMaintenance {
     /// Exercise the whole card path and report what worked.
@@ -538,7 +536,7 @@ enum SdMaintenance {
 /// `debug_command_task` has to reach it and `Signal::new` is `const` where `NoopRawMutex`
 /// is not even `Sync`. The query sender next to it cannot be a `static` for exactly that
 /// reason and is passed as a parameter instead.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 static SD_MAINTENANCE_REQUEST: Signal<CriticalSectionRawMutex, SdMaintenance> = Signal::new();
 
 /// How many shots `AppDebugOp::SdListShots` asks for.
@@ -546,7 +544,7 @@ static SD_MAINTENANCE_REQUEST: Signal<CriticalSectionRawMutex, SdMaintenance> = 
 /// Enough to be a real exercise of the listing -- it walks day directories and
 /// prefix-decodes every file it returns -- while staying inside what is readable in a probe
 /// log. The listing reports `truncated` if the card holds more.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 const SD_LIST_SHOTS_LIMIT: u16 = 16;
 static STATUS_CHANNEL: StaticCell<StatusChannel> = StaticCell::new();
 static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new();
@@ -990,7 +988,7 @@ async fn main_task(spawner: Spawner) -> ! {
     // -- so this is not a bring-up. The pins are consumed exactly once here and every
     // actual identification happens later, on demand, which is what lets a card seated a
     // second late still come up.
-    #[cfg(feature = "sd-card-pio")]
+    #[cfg(feature = "sd-card-pio-spi")]
     let (shot_log_channel, shot_log_query_channel, shot_log_reply_channel, shot_log_event_channel) = (
         SHOT_LOG_CHANNEL.init(Channel::new()),
         SHOT_LOG_QUERY_CHANNEL.init(Channel::new()),
@@ -998,44 +996,41 @@ async fn main_task(spawner: Spawner) -> ! {
         SHOT_LOG_EVENT_CHANNEL.init(Channel::new()),
     );
 
-    #[cfg(feature = "sd-card-pio")]
+    #[cfg(feature = "sd-card-pio-spi")]
     let (sd_device, sd_det) = {
         let sd_card_p = sd_card_peripherals!(p);
-        // `sm0`/`sm1`, so `SM_DAT = 0` and `SM_CLK = 1`. `PioMmcBus` asserts
-        // `SM_CLK > SM_DAT` at compile time; the clock machine has to be the higher index
-        // because the two are started together and the data machine must be armed first.
+        // One state machine. The whole SPI master is two PIO instructions -- `out pins, 1`
+        // with SCK low, `in pins, 1` with SCK high -- against the 4-bit transport's six
+        // programs across two machines and 31 of the block's 32 instruction slots.
         let Pio {
-            mut common,
-            sm0,
-            sm1,
-            ..
+            mut common, sm0, ..
         } = Pio::new(sd_card_p.pio, Irqs);
         (
-            new_pio_sd_card_device_with_dma(
+            new_pio_spi_sd_card_device_with_pins(
                 &mut common,
                 sm0,
-                sm1,
-                sd_card_p.pin_clk,
-                sd_card_p.pin_cmd,
-                sd_card_p.pin_d0,
-                sd_card_p.pin_d1,
-                sd_card_p.pin_d2,
-                sd_card_p.pin_d3,
-                dma::Channel::new(sd_card_p.dma_rx, Irqs),
-                dma::Channel::new(sd_card_p.dma_tx, Irqs),
+                sd_card_p.pin_sck,
+                sd_card_p.pin_mosi,
+                sd_card_p.pin_miso,
+                sd_card_p.dma_tx,
+                sd_card_p.dma_rx,
+                Irqs,
+                // High: deselected. Held low by `SpiMmcBus` for the duration of each
+                // command, and this is also DAT3 -- which in SPI mode is what the pin is.
+                Output::new(sd_card_p.pin_cs, High),
             ),
             // Active low: the switch closes to ground when a card is seated.
             Input::new(sd_card_p.pin_det, Pull::Up),
         )
     };
 
-    #[cfg(feature = "sd-card-pio")]
+    #[cfg(feature = "sd-card-pio-spi")]
     let (shot_log_sender, sd_card_present, shot_log_query_sender) = (
         Some(shot_log_channel.sender()),
         Some(&SD_CARD_PRESENT),
         Some(shot_log_query_channel.sender()),
     );
-    #[cfg(not(feature = "sd-card-pio"))]
+    #[cfg(not(feature = "sd-card-pio-spi"))]
     let (shot_log_sender, sd_card_present, shot_log_query_sender): (
         Option<embassy_sync::channel::Sender<'static, NoopRawMutex, variegated_controller_types::ShotLog, 2>>,
         Option<&'static core::sync::atomic::AtomicBool>,
@@ -1189,18 +1184,18 @@ async fn main_task(spawner: Spawner) -> ! {
     // arm parks forever and a request from the comms processor is answered with
     // `ShotLogError(CardNotPresent)` rather than being silently dropped -- a request that
     // gets no answer at all is indistinguishable from a dead link.
-    #[cfg(feature = "sd-card-pio")]
+    #[cfg(feature = "sd-card-pio-spi")]
     let (sd_query_sender, sd_reply_receiver, sd_event_receiver) = (
         Some(shot_log_query_channel.sender()),
         Some(shot_log_reply_channel.receiver()),
         Some(shot_log_event_channel.receiver()),
     );
-    #[cfg(not(feature = "sd-card-pio"))]
+    #[cfg(not(feature = "sd-card-pio-spi"))]
     let (sd_query_sender, sd_reply_receiver, sd_event_receiver) = (None, None, None);
 
     spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition.clone(), debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver"), sd_query_sender, sd_reply_receiver, sd_event_receiver).unwrap());
 
-    #[cfg(feature = "sd-card-pio")]
+    #[cfg(feature = "sd-card-pio-spi")]
     spawner.spawn(
         shot_log_storage_task(
             shot_log_channel.receiver(),
@@ -1374,7 +1369,7 @@ async fn debug_command_task(
     // Passed rather than reached for as a `static`, unlike `SD_MAINTENANCE_REQUEST` beside
     // it: the shot-log channels are on `NoopRawMutex`, which is not `Sync`, so they cannot
     // be `static`s at all. `None` in a build with no card.
-    #[cfg_attr(not(feature = "sd-card-pio"), allow(unused_variables))]
+    #[cfg_attr(not(feature = "sd-card-pio-spi"), allow(unused_variables))]
     shot_log_query_sender: Option<
         embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogQuery, 1>,
     >,
@@ -1408,11 +1403,11 @@ async fn debug_command_task(
                 bus::emit_event(DebugEvent::CountersReset);
             }
             DebugCommand::App(AppDebugOp::Ping) => {}
-            #[cfg(feature = "sd-card-pio")]
+            #[cfg(feature = "sd-card-pio-spi")]
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
                 SD_MAINTENANCE_REQUEST.signal(SdMaintenance::SelfTest);
             }
-            #[cfg(feature = "sd-card-pio")]
+            #[cfg(feature = "sd-card-pio-spi")]
             DebugCommand::App(AppDebugOp::SdListShots) => {
                 // Goes down the same query channel the comms processor uses, rather than a
                 // signal of its own. That is the point of the command: it exercises the real
@@ -1435,7 +1430,7 @@ async fn debug_command_task(
                     None => warn!("SD list requested, but this build has no SD storage"),
                 }
             }
-            #[cfg(feature = "sd-card-pio")]
+            #[cfg(feature = "sd-card-pio-spi")]
             DebugCommand::App(AppDebugOp::SdFormatCard { confirm }) => {
                 // Guarded here rather than in the storage task, so a refused command never
                 // reaches the code that can erase anything. See
@@ -1451,15 +1446,15 @@ async fn debug_command_task(
             }
             // Answered rather than ignored, so an operator who runs one of these against
             // the wrong machine gets told why nothing happened.
-            #[cfg(not(feature = "sd-card-pio"))]
+            #[cfg(not(feature = "sd-card-pio-spi"))]
             DebugCommand::App(AppDebugOp::SdCardSelfTest) => {
                 warn!("SD self-test requested, but this build has no SD storage");
             }
-            #[cfg(not(feature = "sd-card-pio"))]
+            #[cfg(not(feature = "sd-card-pio-spi"))]
             DebugCommand::App(AppDebugOp::SdListShots) => {
                 warn!("SD listing requested, but this build has no SD storage");
             }
-            #[cfg(not(feature = "sd-card-pio"))]
+            #[cfg(not(feature = "sd-card-pio-spi"))]
             DebugCommand::App(AppDebugOp::SdFormatCard { .. }) => {
                 warn!("SD format requested, but this build has no SD storage");
             }
@@ -1490,12 +1485,26 @@ async fn debug_command_task(
 
 /// The clock to run the card at once it has been identified.
 ///
-/// 25 MHz is the SD default-speed ceiling, and four data lines at that rate is what the PIO
-/// bus exists for. `sdio` drives CMD0/CMD8/ACMD41 at its own 400 kHz `INIT_FREQ` regardless
-/// and only moves up afterwards, and `PioMmcBus` clamps whatever is asked for to what the
-/// current system clock can actually divide down to -- so this is a request, not a promise.
-#[cfg(feature = "sd-card-pio")]
-const SD_OPERATING_HZ: u32 = 25_000_000;
+/// **10 MHz, which is the rate the GS3 carrier has always driven its card at, and not the
+/// 25 MHz `sdio` reports as its SPI ceiling.**
+///
+/// The number is deliberately conservative and was chosen the hard way. The PIO SPI
+/// transport was first proven on the GS3, where the same card and the same `sdio` work every
+/// day over the hardware SPI peripheral -- and the first run there failed every read of
+/// block 0 with a data CRC mismatch, because the harness asked for 25 MHz on wiring that had
+/// only ever seen 10. The transport was correct; the clock was not. At 10 MHz it passed
+/// outright.
+///
+/// This board's slot is unproven in a way the GS3's is not, so it starts at the rate that is
+/// known to work rather than at a ceiling. Raising it is a measurement, not a default: the
+/// first thing to try if reads fail *only* at a higher rate is bypassing the PIO input
+/// synchroniser on MISO, which costs two `clk_sys` cycles of sampling skew and is a third of
+/// the eye at 25 MHz.
+///
+/// `sdio` drives CMD0/CMD8/ACMD41 at its own 400 kHz `INIT_FREQ` regardless and only moves
+/// up to this afterwards.
+#[cfg(feature = "sd-card-pio-spi")]
+const SD_OPERATING_HZ: u32 = 10_000_000;
 
 /// How long one identification attempt may take before it is abandoned.
 ///
@@ -1503,7 +1512,7 @@ const SD_OPERATING_HZ: u32 = 25_000_000;
 /// in a few milliseconds, and an empty slot reads all-ones forever. Two seconds is far
 /// beyond anything a working card needs and short enough that a request against an empty
 /// slot is answered rather than hung.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 const SD_INIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Settling time after a card-detect edge.
@@ -1511,24 +1520,25 @@ const SD_INIT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Mechanical switch: one swap produces a burst of edges, and without this each would be
 /// classified separately -- so a single insertion could report "inserted, removed,
 /// inserted" and tear down a mount that was about to be built.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 const SD_DEBOUNCE: Duration = Duration::from_millis(250);
 
 /// The card, and the card with a filesystem on it.
 ///
-/// `0` and `1` are `SM_DAT` and `SM_CLK`, matching the `sm0`/`sm1` handed to the
-/// constructor in `main_task`.
-#[cfg(feature = "sd-card-pio")]
-type SdDevice = SdCardPioBlockDevice<'static, SdCardPeripheralsPio, 0, 1>;
-#[cfg(feature = "sd-card-pio")]
-type SdStorage = SdCardPioShotLogStorage<'static, SdCardPeripheralsPio, 0, 1>;
+/// `0` is the state machine index, matching the `sm0` handed to the constructor in
+/// `main_task`. One index rather than the 4-bit transport's two, because an SPI master is
+/// one program.
+#[cfg(feature = "sd-card-pio-spi")]
+type SdDevice = SdCardPioSpiBlockDevice<'static, SdCardPeripheralsPio, 0>;
+#[cfg(feature = "sd-card-pio-spi")]
+type SdStorage = SdCardPioSpiShotLogStorage<'static, SdCardPeripheralsPio, 0>;
 
 /// Take the mount apart and get the bare card back.
 ///
 /// Two layers come off: the filesystem, whose cached boot sector and allocation bitmap
 /// cannot outlive a card swap, and the partition offset, which was read from *this* card's
 /// MBR and would address a different one at the wrong LBA.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 fn storage_take(storage: &mut Option<SdStorage>) -> Option<SdDevice> {
     storage.take().map(|s| s.into_device().into_inner())
 }
@@ -1538,7 +1548,7 @@ fn storage_take(storage: &mut Option<SdStorage>) -> Option<SdDevice> {
 /// Demand-driven rather than at startup: identification is retried on every request, so a
 /// card seated late, or one that was not ready when the machine powered on, comes up on the
 /// next thing that needs it. There is exactly one retry path rather than two.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 async fn ensure_card_ready(
     storage: &mut Option<SdStorage>,
     parked: &mut Option<SdDevice>,
@@ -1562,7 +1572,7 @@ async fn ensure_card_ready(
         return false;
     }
 
-    if let Err(e) = reacquire_pio_sd_card(&mut device, SD_OPERATING_HZ, SD_INIT_TIMEOUT).await {
+    if let Err(e) = reacquire_pio_spi_sd_card(&mut device, SD_OPERATING_HZ, SD_INIT_TIMEOUT).await {
         warn!("SD: could not identify the card: {:?}", e);
         *parked = Some(device);
         return false;
@@ -1585,7 +1595,7 @@ async fn ensure_card_ready(
         }
     };
 
-    *storage = Some(mount_pio_sd_card(device, first_lba));
+    *storage = Some(mount_pio_spi_sd_card(device, first_lba));
     true
 }
 
@@ -1595,7 +1605,7 @@ async fn ensure_card_ready(
 /// `SharedSpiBus` and no lease anywhere in here: a PIO card owns its block, its two state
 /// machines and its six GPIOs outright, so there is nothing to arbitrate against the
 /// display. That is the whole difference between this task and the other board's.
-#[cfg(feature = "sd-card-pio")]
+#[cfg(feature = "sd-card-pio-spi")]
 #[allow(clippy::too_many_arguments)]
 #[embassy_executor::task]
 async fn shot_log_storage_task(

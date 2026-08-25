@@ -67,6 +67,57 @@ pub fn new_pio_spi_sd_card_device<'d, P: Instance, const SM: usize>(
     sdio::BlockDevice::new_uninit_sd_card(bus, embassy_time::Delay)
 }
 
+/// As [`new_pio_spi_sd_card_device`], but claims the state machine and pins too.
+///
+/// This is the one a board uses. It exists so a firmware names only its own PIO instance and
+/// state-machine index -- `sdio` and `variegated-pio-mmc-bus` stay out of its dependency
+/// list, exactly as [`crate::sd_card_pio::new_pio_sd_card_device_with_dma`] arranges for the
+/// 4-bit path.
+///
+/// SCK, MOSI and MISO become PIO pins; **CS does not**, and must not. `sdio::spi::SpiMmcBus`
+/// owns the chip select and holds it low across a whole command, so it is an ordinary
+/// [`Output`] passed straight through.
+///
+/// `Config::default()` is mode 0 at 1 MHz, which is what an SD card in SPI mode wants and is
+/// overridden immediately anyway: `sdio` calls `set_hz(400_000)` before CMD0 and again with
+/// the operating clock once the card is identified.
+#[allow(clippy::too_many_arguments)]
+pub fn new_pio_spi_sd_card_device_with_pins<'d, P, const SM: usize, TxDma, RxDma>(
+    common: &mut embassy_rp::pio::Common<'d, P>,
+    sm: embassy_rp::pio::StateMachine<'d, P, SM>,
+    sck: embassy_rp::Peri<'d, impl embassy_rp::pio::PioPin>,
+    mosi: embassy_rp::Peri<'d, impl embassy_rp::pio::PioPin>,
+    miso: embassy_rp::Peri<'d, impl embassy_rp::pio::PioPin>,
+    tx_dma: embassy_rp::Peri<'d, TxDma>,
+    rx_dma: embassy_rp::Peri<'d, RxDma>,
+    irq: impl embassy_rp::interrupt::typelevel::Binding<
+            TxDma::Interrupt,
+            embassy_rp::dma::InterruptHandler<TxDma>,
+        > + embassy_rp::interrupt::typelevel::Binding<
+            RxDma::Interrupt,
+            embassy_rp::dma::InterruptHandler<RxDma>,
+        > + 'd,
+    cs: Output<'static>,
+) -> SdCardPioSpiBlockDevice<'d, P, SM>
+where
+    P: Instance,
+    TxDma: embassy_rp::dma::ChannelInstance,
+    RxDma: embassy_rp::dma::ChannelInstance,
+{
+    let bus = PioSpiBus::new(
+        common,
+        sm,
+        sck,
+        mosi,
+        miso,
+        tx_dma,
+        rx_dma,
+        irq,
+        embassy_rp::spi::Config::default(),
+    );
+    new_pio_spi_sd_card_device(bus, cs)
+}
+
 /// Re-run identification on a card that is already wrapped in a block device.
 ///
 /// How a card swap is handled, and the same argument applies as on both other paths: the

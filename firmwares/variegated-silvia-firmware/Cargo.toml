@@ -82,23 +82,38 @@ futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 [features]
 # One crate, one machine: `default` *is* this machine's configuration, so a plain
 # `cargo build` produces the firmware. There is no umbrella feature selecting the machine.
-# `sd-card-pio-trace` is in here **temporarily**, while the PIO card is being brought up on
-# hardware. It implies `sd-card-pio`. Take it out once the card identifies reliably: it
+# `sd-card-pio-spi-trace` is in here **temporarily**, while the card is being brought up on
+# hardware. It implies `sd-card-pio-spi`. Take it out once the card identifies reliably: it
 # logs every command, response and data token, which is thousands of lines per filesystem
 # operation and will bury anything else on the debug link.
-default = ["rp235xb", "gravity", "sd-card-pio-trace"]
+default = ["rp235xb", "gravity", "sd-card-pio-spi-trace"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
 gravity = ["dep:variegated-gravity-driver"]
-# The SD shot log, on a PIO-driven 4-bit bus rather than SPI -- both of this board's SPI
-# instances are taken (SPI0 the display, SPI1 the internal ADC bus), which is why it is not
-# `sd-card-storage` the way the GS3's is. Nothing here names `sdio`, `exfat-slim` or
-# `variegated-pio-mmc-bus`; `variegated-controller-lib`'s `sd_card_pio` module is the whole
-# interface. In `default` because the board has the slot.
+# The SD shot log, in **SPI mode** on a PIO SPI master. Both of this board's SPI peripherals
+# are taken -- SPI0 the display, SPI1 the internal ADC bus -- which is why the card cannot
+# use `sd-card-storage` the way the GS3's does, and why the master is PIO.
+#
+# Nothing here names `sdio`, `exfat-slim` or `variegated-pio-mmc-bus`:
+# `variegated-controller-lib`'s `sd_card_pio_spi` module is the whole interface, and it takes
+# raw pins for exactly that reason. In `default` because the board has the slot.
+sd-card-pio-spi = ["variegated-controller-lib/sd-card-pio-spi"]
+# Bring-up tracing, off by default. `sdio`'s half is the useful one: every command frame,
+# every R1 with its idle-byte count, every data token, and a marker naming the patched fork
+# -- which is what tells "the firmware is not running the fork" apart from "the card is not
+# answering".
+sd-card-pio-spi-trace = [
+    "sd-card-pio-spi",
+    "variegated-controller-lib/sd-card-pio-spi-trace",
+]
+
+# The 4-bit native transport, kept buildable but no longer wired to this board.
+#
+# It never brought a card up here and its bring-up is unfinished; SPI mode is the supported
+# path. Retained rather than deleted because it is the only route to the card's full 4-bit
+# bandwidth if it is ever made to work, and because its 45 host tests still run. Selecting it
+# requires editing `board-cfg.toml` back to the six-pin native pinout -- the two transports
+# want the same slot and the same PIO block.
 sd-card-pio = ["variegated-controller-lib/sd-card-pio"]
-# Bring-up tracing for the card, off by default. Build with
-# `--features sd-card-pio-trace` when a card will not identify; it names the window
-# arithmetic and every command and response, which is what tells a pin fault apart from a
-# card that is simply not answering.
 sd-card-pio-trace = ["sd-card-pio", "variegated-controller-lib/sd-card-pio-trace"]

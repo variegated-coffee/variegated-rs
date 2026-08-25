@@ -47,25 +47,34 @@ pin_dt = "embassy_rp::peripherals::PIN_22"
 pin_sw = "embassy_rp::peripherals::PIN_1"
 pio = "embassy_rp::peripherals::PIO0"
 
-# The card is on a native 4-bit bus driven by PIO, not on SPI -- see
-# `variegated-pio-mmc-bus`. DAT0..DAT3 must be four consecutive ascending GPIOs, and on
-# RP2350B all six must share one GPIOBASE window; 41-46 are all in the upper one (16-47).
+# The card is driven in **SPI mode** from a PIO SPI master, because both of this board's
+# SPI peripherals are taken -- SPI0 is the display and SPI1 the internal ADC bus.
 #
-# PIO1 because PIO0 is the rotary encoder. The card needs two state machines and 31 of
-# the block's 32 instruction slots, so it cannot share with anything.
+# The pin names look like a remap and are not: an SD card in SPI mode uses the same physical
+# contacts it uses in native 4-bit mode, so the slot is wired once and the names differ only
+# by which mode is talking to it.
 #
-# DMA_CH6/CH7 are the first free pair: CH0/CH1 are the internal SPI bus, CH2/CH3 the
-# display and CH4/CH5 the ESP32 UART. They are optional -- `PioMmcBus::new` takes none --
-# but a polled 512-byte block holds the executor for ~50 us and this board has channels
-# to spare.
+#   SCK  = CLK  = GPIO 41      MISO = DAT0 = GPIO 43
+#   MOSI = CMD  = GPIO 42      CS   = DAT3 = GPIO 46
+#
+# DAT1 (44) and DAT2 (45) are unused in SPI mode. They are deliberately *not* declared here:
+# leaving them out of `SdCardPeripherals` leaves them in `Peripherals`, unclaimed and
+# floating with the card's own pull-ups on them, which is what the SD specification asks
+# for. Do not hand them to anything else -- they are the card's.
+#
+# CS is a plain GPIO rather than a PIO pin. `sdio::spi::SpiMmcBus` owns it and holds it low
+# across a whole command, header and data phase together, which is not something a PIO
+# side-set or a per-transaction `SpiDevice` can express.
+#
+# PIO1 because PIO0 is the rotary encoder. One state machine now, not the two the 4-bit
+# transport needed. DMA_CH6/CH7 are the first free pair: CH0/CH1 are the internal SPI bus,
+# CH2/CH3 the display and CH4/CH5 the ESP32 UART.
 [sd_card_peripherals]
 pio = "embassy_rp::peripherals::PIO1"
-pin_clk = "embassy_rp::peripherals::PIN_41"
-pin_cmd = "embassy_rp::peripherals::PIN_42"
-pin_d0 = "embassy_rp::peripherals::PIN_43"
-pin_d1 = "embassy_rp::peripherals::PIN_44"
-pin_d2 = "embassy_rp::peripherals::PIN_45"
-pin_d3 = "embassy_rp::peripherals::PIN_46"
+pin_sck = "embassy_rp::peripherals::PIN_41"
+pin_mosi = "embassy_rp::peripherals::PIN_42"
+pin_miso = "embassy_rp::peripherals::PIN_43"
+pin_cs = "embassy_rp::peripherals::PIN_46"
 pin_det = "embassy_rp::peripherals::PIN_26"
 dma_rx = "embassy_rp::peripherals::DMA_CH6"
 dma_tx = "embassy_rp::peripherals::DMA_CH7"
