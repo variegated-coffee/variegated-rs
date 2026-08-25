@@ -60,6 +60,11 @@ pub mod sd_card;
 // transport is shared with `sd_card`; only the bus underneath differs.
 #[cfg(feature = "sd-card-pio")]
 pub mod sd_card_pio;
+// The same card again, in SPI mode on a PIO SPI master. `sdio::spi` supplies the protocol,
+// so unlike `sd_card_pio` this adds no framing of its own -- only the type aliases that keep
+// `sdio` out of a firmware's dependency list.
+#[cfg(feature = "sd-card-pio-spi")]
+pub mod sd_card_pio_spi;
 #[cfg(feature = "sd-card-storage")]
 pub mod shot_log_storage;
 // The exFAT formatter lives in `variegated-exfat-format`, not here. It is pure logic over

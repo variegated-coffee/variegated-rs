@@ -3,7 +3,7 @@ name = "variegated-pio-mmc-bus"
 version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "A PIO-backed 4-bit SD/MMC host bus for RP2040/RP2350, implementing sdio::MmcBus"
+description = "PIO-backed SD/MMC transports for RP2040/RP2350: a native 4-bit sdio::MmcBus, and an SPI master for sdio's SPI transport"
 repository = "https://github.com/variegated-coffee/variegated-rs"
 license = "MIT"
 keywords = ["embedded", "async", "sdio", "sd-card", "pio"]
@@ -20,6 +20,12 @@ bench = false
 sdio.workspace = true
 aligned.workspace = true
 fixed.workspace = true
+
+# For the SPI transport's `SpiBus<u8>` impl. Not optional: the trait and its `ErrorType`
+# supertrait are the whole interface `sdio::spi::SpiMmcBus` consumes, and both crates are
+# `no_std` and dependency-light enough that gating them behind `_chip` would buy nothing.
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
 
 # Not optional, and deliberately so: `pio_asm!` runs at compile time and `pio-core` is
 # host-buildable, which makes the assembled programs themselves host-testable -- the

@@ -135,9 +135,14 @@ mod bus;
 mod install;
 #[cfg(feature = "_chip")]
 mod pins;
+/// The same card over plain SPI, on a PIO SPI master rather than a native 4-bit bus.
+#[cfg(feature = "_chip")]
+pub mod spi;
 
 #[cfg(feature = "_chip")]
 pub use bus::PioMmcBus;
+#[cfg(feature = "_chip")]
+pub use spi::PioSpiBus;
 
 // Silence `unused_macros` in the pure-host build, where nothing that uses them is
 // compiled. Deliberately not `#[allow]` on the macros themselves: they *should* warn if
