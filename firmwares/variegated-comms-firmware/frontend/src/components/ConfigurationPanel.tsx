@@ -1,5 +1,6 @@
 import { useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import { Alert, Badge, Button, Section, tokens } from '@variegated-coffee/ui';
 import {
   Configuration,
   PidParameters,
@@ -155,9 +156,20 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
     }
 
     return (
-      <div style={{ fontSize: '0.9rem', color: '#666', marginBottom: '1rem' }}>
-        {parts.join(' > ')}
-      </div>
+      // A breadcrumb, so it is announced as navigation rather than as a stray sentence,
+      // and the separator is `aria-hidden` so it is not read as "greater than" between
+      // every level.
+      <nav
+        aria-label="Configuration breadcrumb"
+        style={{ fontSize: '0.9rem', color: tokens.color.inkMuted, marginBottom: tokens.space.md }}
+      >
+        {parts.map((part, i) => (
+          <span key={i}>
+            {i > 0 && <span aria-hidden="true"> › </span>}
+            {part}
+          </span>
+        ))}
+      </nav>
     );
   };
 
@@ -174,35 +186,28 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
         {/* Machine Configuration Summary */}
         <div
           style={{
-            marginBottom: '1.5rem',
-            padding: '1rem',
-            backgroundColor: '#f8f9fa',
-            borderRadius: '8px',
-            border: '1px solid #ddd'
+            marginBottom: tokens.space.lg,
+            padding: tokens.space.md,
+            backgroundColor: tokens.color.surfaceSunken,
+            borderRadius: tokens.radius.md,
+            border: `1px solid ${tokens.color.border}`,
           }}
         >
-          <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem' }}>Machine Configuration</h3>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
-            <label style={{ fontWeight: '500' }}>Heating Element Interlock:</label>
-            <span
-              style={{
-                padding: '0.25rem 0.75rem',
-                backgroundColor: configuration.machine_config.heating_element_interlock ? '#28a745' : '#6c757d',
-                color: 'white',
-                borderRadius: '12px',
-                fontSize: '0.75rem',
-                fontWeight: '500'
-              }}
-            >
+          <h3 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '1.1rem' }}>Machine</h3>
+          {/* Was a `<label>` with nothing to label -- it pointed at no control, because
+              this is a readout rather than a field. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm, fontSize: '0.9rem' }}>
+            <span style={{ fontWeight: 500 }}>Heating element interlock</span>
+            <Badge role={configuration.machine_config.heating_element_interlock ? 'ok' : undefined}>
               {configuration.machine_config.heating_element_interlock ? 'Enabled' : 'Disabled'}
-            </span>
+            </Badge>
           </div>
         </div>
 
         {/* Boilers */}
         {boilerEntries.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+            <h3 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '1.1rem' }}>
               Boilers ({boilerEntries.length})
             </h3>
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
@@ -226,7 +231,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
         {/* Groups */}
         {groupEntries.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+            <h3 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '1.1rem' }}>
               Groups ({groupEntries.length})
             </h3>
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
@@ -250,7 +255,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
         {/* Water Taps */}
         {waterTapEntries.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+            <h3 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '1.1rem' }}>
               Water Taps ({waterTapEntries.length})
             </h3>
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
@@ -274,7 +279,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
         {/* Steam Wands */}
         {steamWandEntries.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+            <h3 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '1.1rem' }}>
               Steam Wands ({steamWandEntries.length})
             </h3>
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
@@ -294,7 +299,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
         {/* Tanks */}
         {tankEntries.length > 0 && (
           <div style={{ marginBottom: '1.5rem' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '1.1rem', color: '#333' }}>
+            <h3 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '1.1rem' }}>
               Tanks ({tankEntries.length})
             </h3>
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
@@ -401,20 +406,11 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
 
     return (
       <div>
-        <button
-          onClick={goBack}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: 'white',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            marginBottom: '1rem',
-            fontSize: '0.9rem'
-          }}
-        >
-          ← Back
-        </button>
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Button variant="secondary" size="sm" onClick={goBack}>
+            <span aria-hidden="true">←</span> Back
+          </Button>
+        </div>
         {detailView}
       </div>
     );
@@ -590,8 +586,12 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           case 'temperature_pid':
             editor = (
               <PidParametersEditor
-                title="Temperature PID Parameters"
+                title="Temperature PID parameters"
                 parameters={entityConfig.temperature_pid_parameters}
+                // A boiler's temperature loop drives a heating element, so its gains are
+                // percent of output per degree of error.
+                errorUnit="°C"
+                outputUnit="%"
                 onSave={handleSaveWrapper}
                 onCancel={handleCancel}
               />
@@ -600,8 +600,10 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           case 'pressure_pid':
             editor = (
               <PidParametersEditor
-                title="Pressure PID Parameters"
+                title="Pressure PID parameters"
                 parameters={entityConfig.pressure_pid_parameters}
+                errorUnit="bar"
+                outputUnit="%"
                 onSave={handleSaveWrapper}
                 onCancel={handleCancel}
               />
@@ -663,8 +665,11 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           case 'flow_rate_pid':
             editor = (
               <PidParametersEditor
-                title="Flow Rate PID Parameters"
+                title="Flow rate PID parameters"
                 parameters={entityConfig.flow_rate_pid_parameters}
+                // A group's loops drive the pump, whose output is its duty cycle.
+                errorUnit="mL/s"
+                outputUnit="%"
                 onSave={handleSaveWrapper}
                 onCancel={handleCancel}
               />
@@ -673,8 +678,10 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           case 'output_flow_rate_pid':
             editor = (
               <PidParametersEditor
-                title="Output Flow Rate PID Parameters"
+                title="Output flow rate PID parameters"
                 parameters={entityConfig.output_flow_rate_pid_parameters}
+                errorUnit="mL/s"
+                outputUnit="%"
                 onSave={handleSaveWrapper}
                 onCancel={handleCancel}
               />
@@ -683,8 +690,10 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           case 'pressure_pid':
             editor = (
               <PidParametersEditor
-                title="Pressure PID Parameters"
+                title="Pressure PID parameters"
                 parameters={entityConfig.pressure_pid_parameters}
+                errorUnit="bar"
+                outputUnit="%"
                 onSave={handleSaveWrapper}
                 onCancel={handleCancel}
               />
@@ -811,151 +820,96 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
 
     return (
       <div>
-        <button
-          onClick={goBack}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: 'white',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            marginBottom: '1rem',
-            fontSize: '0.9rem'
-          }}
-        >
-          ← Back
-        </button>
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Button variant="secondary" size="sm" onClick={goBack}>
+            <span aria-hidden="true">←</span> Back
+          </Button>
+        </div>
         {editor || (
-          <div
-            style={{
-              padding: '1.5rem',
-              backgroundColor: '#f8f9fa',
-              borderRadius: '8px',
-              border: '1px solid #ddd'
-            }}
-          >
-            <p>Parameter editor not found for: {navigation.parameterCategory}</p>
-          </div>
+          // A build that knows a parameter category the UI has no editor for. Not an empty
+          // state -- there is nothing to add -- so it is a warning naming the category, so
+          // the gap is reportable rather than just blank.
+          <Alert role="warn" title="No editor for this setting">
+            This build has no editor for <code>{navigation.parameterCategory}</code>. The
+            machine still holds the setting; it just cannot be changed from here.
+          </Alert>
         )}
       </div>
     );
   };
 
-  if (!isExpanded) {
-    return (
-      <div
-        style={{
-          backgroundColor: 'white',
-          borderRadius: '8px',
-          padding: '1.5rem',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-          marginTop: '1.5rem'
-        }}
-      >
-        <button
-          onClick={() => setIsExpanded(true)}
-          style={{
-            width: '100%',
-            padding: '0.75rem',
-            backgroundColor: '#f8f9fa',
-            border: '1px solid #ddd',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            fontSize: '1.1rem',
-            fontWeight: '500'
-          }}
-        >
-          <span>Configuration</span>
-          <span style={{ fontSize: '1.2rem' }}>▶</span>
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div
       style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '1.5rem',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-        marginTop: '1.5rem'
+        backgroundColor: tokens.color.surfaceRaised,
+        border: `1px solid ${tokens.color.border}`,
+        borderRadius: tokens.radius.md,
+        padding: tokens.space.lg,
+        marginTop: tokens.space.lg,
       }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-        <h2 style={{ margin: 0 }}>Configuration</h2>
-        <button
-          onClick={() => {
-            setIsExpanded(false);
+      {/*
+        One control, in one place, in both states.
+
+        This was finding 08's headline example: collapsed, the whole header was a button
+        with a `▶`; expanded, that button vanished and a bordered *Collapse* appeared in
+        the opposite corner. Two controls, two positions, one action -- and the expanded
+        header printed "Configuration" twice, as title and as description.
+
+        Collapsing resets the navigation as it did before, which is why `onToggle` is used
+        rather than letting `Section` own the state alone: reopening at level 3 of a
+        breadcrumb the user cannot see the top of is disorienting.
+      */}
+      <Section
+        title="Configuration"
+        defaultOpen={false}
+        open={isExpanded}
+        onToggle={(open) => {
+          setIsExpanded(open);
+          if (!open) {
             setNavigation({ level: 1, entityType: null, entityKey: null, parameterCategory: null });
-          }}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: 'white',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem'
-          }}
-        >
-          Collapse
-        </button>
-      </div>
+          }
+        }}
+      >
+        {renderBreadcrumb()}
 
-      {renderBreadcrumb()}
+        {optimizeMessage && (
+          <div style={{ marginTop: tokens.space.md }}>
+            <Alert role={optimizeMessage.type === 'success' ? 'ok' : 'danger'}>
+              {optimizeMessage.text}
+            </Alert>
+          </div>
+        )}
 
-      {/* Success/Error Message */}
-      {optimizeMessage && (
-        <div style={{
-          padding: '0.75rem',
-          marginTop: '1rem',
-          backgroundColor: optimizeMessage.type === 'success' ? '#d4edda' : '#f8d7da',
-          color: optimizeMessage.type === 'success' ? '#155724' : '#721c24',
-          border: `1px solid ${optimizeMessage.type === 'success' ? '#c3e6cb' : '#f5c6cb'}`,
-          borderRadius: '4px',
-          fontSize: '0.9rem'
-        }}>
-          {optimizeMessage.type === 'success' ? '✅' : '❌'} {optimizeMessage.text}
-        </div>
-      )}
+        {navigation.level === 1 && renderLevel1()}
+        {navigation.level === 2 && renderLevel2()}
+        {navigation.level === 3 && renderLevel3()}
 
-      {navigation.level === 1 && renderLevel1()}
-      {navigation.level === 2 && renderLevel2()}
-      {navigation.level === 3 && renderLevel3()}
-
-      {/* Storage Optimization - Housekeeping */}
-      {isExpanded && navigation.level === 1 && (
-        <div style={{
-          marginTop: '1.5rem',
-          paddingTop: '1rem',
-          borderTop: '1px solid #eee',
-          display: 'flex',
-          justifyContent: 'flex-end'
-        }}>
-          <button
-            onClick={() => void handleOptimizeStorage()}
+        {navigation.level === 1 && (
+          <div
             style={{
-              padding: '0.5rem 0.75rem',
-              fontSize: '0.8rem',
-              color: '#666',
-              backgroundColor: 'transparent',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              gap: '0.5rem'
+              justifyContent: 'space-between',
+              gap: tokens.space.sm,
+              flexWrap: 'wrap',
+              marginTop: tokens.space.lg,
+              paddingTop: tokens.space.md,
+              borderTop: `1px solid ${tokens.color.border}`,
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f5f5f5'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
           >
-            🗜️ Optimize Storage
-          </button>
-        </div>
-      )}
+            {/* Named for what it does, like the schedule list's. "🗜️ Optimize Storage"
+                was an unexplained action with a clamp emoji for a label. */}
+            <span style={{ fontSize: '0.8rem', color: tokens.color.inkMuted, maxWidth: '48ch' }}>
+              Changing settings leaves gaps in the machine's storage. Compacting reclaims
+              them; it does not change any setting.
+            </span>
+            <Button variant="quiet" size="sm" onClick={() => void handleOptimizeStorage()}>
+              Compact storage
+            </Button>
+          </div>
+        )}
+      </Section>
     </div>
   );
 };

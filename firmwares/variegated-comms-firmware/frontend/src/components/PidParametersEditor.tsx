@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Alert, Button, Field, TextInput, tokens } from '@variegated-coffee/ui';
 import { PidParameters, Limits } from '../schemas/schemas';
 
 interface PidParametersEditorProps {
@@ -6,6 +7,15 @@ interface PidParametersEditorProps {
   parameters: PidParameters;
   onSave: (params: PidParameters) => void;
   onCancel: () => void;
+  /**
+   * What the gains act on, so each field can say what it is in.
+   *
+   * A PID gain is not dimensionless: `kp` for a temperature loop is percent output per
+   * degree of error. Twelve near-identical fields per boiler said nothing about their
+   * units, which was half of finding 10.
+   */
+  errorUnit?: string;
+  outputUnit?: string;
 }
 
 // Editable representation of limits - allows null during editing
@@ -25,20 +35,23 @@ const fromLimits = (limits: Limits | null | undefined): EditableLimits => {
   };
 };
 
-// Convert editable limits back to schema form (null becomes Infinity, with validation)
-const toLimits = (editable: EditableLimits): Limits => {
-  const hasUpper = editable.upper !== null && isFinite(editable.upper);
-  const hasLower = editable.lower !== null && isFinite(editable.lower);
-
-  // If both are set and finite, use them
-  if (hasUpper && hasLower) {
-    // Type guard: we know both are non-null and finite at this point
-    return { upper: editable.upper!, lower: editable.lower! };
-  }
-
-  // If only one is set, or neither, return no limits (Infinity)
-  return { upper: Infinity, lower: -Infinity };
-};
+/**
+ * Back to the schema's form, where an absent bound is an infinity.
+ *
+ * # The bug this replaces
+ *
+ * The previous version required **both** bounds to be finite and threw away *both* if only
+ * one was: a term clamped to "at most 40, no lower bound" was stored as unbounded in both
+ * directions. That is a silent loss of a safety limit on a boiler — the field kept showing
+ * 40 until the next configuration push replaced it, so nothing on screen said the limit had
+ * gone.
+ *
+ * The two bounds are independent, so they convert independently.
+ */
+const toLimits = (editable: EditableLimits): Limits => ({
+  upper: editable.upper !== null && isFinite(editable.upper) ? editable.upper : Infinity,
+  lower: editable.lower !== null && isFinite(editable.lower) ? editable.lower : -Infinity,
+});
 
 // Editable representation of a PID term
 type EditablePidTerm = {
@@ -92,219 +105,206 @@ const toParameters = (editable: EditablePidParameters): PidParameters => ({
   }
 });
 
-export const PidParametersEditor = ({ title, parameters, onSave, onCancel }: PidParametersEditorProps) => {
+/**
+ * Parse a gain the user typed.
+ *
+ * Returns `null` for anything unparseable rather than falling back to a number. The old
+ * `parseFloat(value) || 0` turned a typo into a **zero gain** and saved it: an integral
+ * term silently switched off, on a boiler, with the field showing `0` as though that had
+ * been the intent. `null` here becomes a validation error at the field instead.
+ *
+ * Note this also catches the `|| 0` operator's other victim: `parseFloat("0")` is `0`,
+ * which is falsy, so the old code took the fallback branch for a legitimately-typed zero
+ * too. Same result by luck rather than by design.
+ */
+function parseNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const parsed = Number.parseFloat(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export const PidParametersEditor = ({
+  title,
+  parameters,
+  onSave,
+  onCancel,
+  errorUnit,
+  outputUnit,
+}: PidParametersEditorProps) => {
   // Use editable types for state management
   const [localParams, setLocalParams] = useState<EditablePidParameters>(
     fromParameters(parameters)
   );
+  /*
+   * What is in each box, keyed by field.
+   *
+   * Held as text rather than as numbers for the whole time the field is focused, because a
+   * half-typed `0.` or `-` is not a number and reformatting it into one moves the caret.
+   * The committed value in `localParams` is only updated when the text parses.
+   */
   const [editingValues, setEditingValues] = useState<Record<string, string>>({});
+  const [errors, setErrors] = useState<Record<string, string>>({});
+
+  const invalid = Object.keys(errors).length > 0;
 
   const handleSave = () => {
-    // Convert back to schema types with validation
+    if (invalid) return;
     onSave(toParameters(localParams));
   };
 
-  const updateKpField = (field: 'positive_scale' | 'negative_scale', value: number) => {
-    setLocalParams(prev => ({
+  const updateTerm = (
+    term: 'kp' | 'ki' | 'kd',
+    field: 'positive_scale' | 'negative_scale',
+    value: number
+  ) => {
+    setLocalParams((prev) => ({ ...prev, [term]: { ...prev[term], [field]: value } }));
+  };
+
+  const updateLimit = (term: 'kp' | 'ki' | 'kd', subfield: 'upper' | 'lower', value: number | null) => {
+    setLocalParams((prev) => ({
       ...prev,
-      kp: { ...prev.kp, [field]: value }
+      [term]: { ...prev[term], limits: { ...prev[term].limits, [subfield]: value } },
     }));
   };
 
-  const updateKpLimit = (subfield: 'upper' | 'lower', value: number | null) => {
-    setLocalParams(prev => ({
-      ...prev,
-      kp: {
-        ...prev.kp,
-        limits: { ...prev.kp.limits, [subfield]: value }
+  const setError = (key: string, message: string | null) => {
+    setErrors((prev) => {
+      if (message === null) {
+        const { [key]: _unused, ...rest } = prev;
+        return rest;
       }
-    }));
-  };
-
-  const updateKiField = (field: 'positive_scale' | 'negative_scale', value: number) => {
-    setLocalParams(prev => ({
-      ...prev,
-      ki: { ...prev.ki, [field]: value }
-    }));
-  };
-
-  const updateKiLimit = (subfield: 'upper' | 'lower', value: number | null) => {
-    setLocalParams(prev => ({
-      ...prev,
-      ki: {
-        ...prev.ki,
-        limits: { ...prev.ki.limits, [subfield]: value }
-      }
-    }));
-  };
-
-  const updateKdField = (field: 'positive_scale' | 'negative_scale', value: number) => {
-    setLocalParams(prev => ({
-      ...prev,
-      kd: { ...prev.kd, [field]: value }
-    }));
-  };
-
-  const updateKdLimit = (subfield: 'upper' | 'lower', value: number | null) => {
-    setLocalParams(prev => ({
-      ...prev,
-      kd: {
-        ...prev.kd,
-        limits: { ...prev.kd.limits, [subfield]: value }
-      }
-    }));
+      return { ...prev, [key]: message };
+    });
   };
 
   const renderTermEditor = (
+    termKey: 'kp' | 'ki' | 'kd',
     termName: string,
-    term: EditablePidTerm,
-    updateField: (field: 'positive_scale' | 'negative_scale', value: number) => void,
-    updateLimit: (subfield: 'upper' | 'lower', value: number | null) => void
+    term: EditablePidTerm
   ) => {
-    // Helper to format limit value for display (empty string for null)
-    const formatLimitValue = (value: number | null): string => {
-      if (value === null) {
-        return '';
-      }
-      return value.toString();
+    /**
+     * A gain field. Required, so an empty box is an error rather than a zero.
+     *
+     * `numeric` on `TextInput` is what fixes finding 04: it renders `type="text"` with
+     * `inputMode="decimal"` and monospace tabular figures. The old `type="number"` was
+     * formatted and parsed by the *browser's* locale, so `1.4` displayed as `1,4` beside a
+     * limit reading `100` — the same firmware value shown two ways on two machines in the
+     * same kitchen.
+     */
+    const gainField = (field: 'positive_scale' | 'negative_scale', label: string, help: string) => {
+      const key = `${termKey}_${field}`;
+      return (
+        <Field
+          label={label}
+          help={errors[key] ? undefined : help}
+          error={errors[key]}
+          unit={errorUnit && outputUnit ? `${outputUnit}/${errorUnit}` : undefined}
+          required
+        >
+          {(control) => (
+            <TextInput
+              {...control}
+              numeric
+              value={editingValues[key] ?? String(term[field])}
+              onInput={(value) => {
+                setEditingValues((prev) => ({ ...prev, [key]: value }));
+                const parsed = parseNumber(value);
+                if (parsed === null) {
+                  setError(key, 'Enter a number, using a full stop for the decimal point.');
+                } else {
+                  setError(key, null);
+                  updateTerm(termKey, field, parsed);
+                }
+              }}
+              onBlur={() => {
+                // Give the box back to the committed value, so a valid but oddly-typed
+                // entry (`.5`, `1.`) settles into its canonical form once focus leaves.
+                setEditingValues((prev) => {
+                  const { [key]: _unused, ...rest } = prev;
+                  return rest;
+                });
+              }}
+            />
+          )}
+        </Field>
+      );
+    };
+
+    /** A limit field. Optional, and empty genuinely means unbounded. */
+    const limitField = (subfield: 'upper' | 'lower', label: string) => {
+      const key = `${termKey}_limits_${subfield}`;
+      const committed = term.limits[subfield];
+      return (
+        <Field
+          label={label}
+          // The help moves below the control. "Upper Limit (empty = no limit)" put it
+          // inside the label, where it wrapped onto a second line and pushed the label
+          // away from its own input.
+          help={errors[key] ? undefined : 'Empty means no limit.'}
+          error={errors[key]}
+          unit={outputUnit}
+        >
+          {(control) => (
+            <TextInput
+              {...control}
+              numeric
+              value={editingValues[key] ?? (committed === null ? '' : String(committed))}
+              onInput={(value) => {
+                setEditingValues((prev) => ({ ...prev, [key]: value }));
+                if (value.trim() === '') {
+                  setError(key, null);
+                  updateLimit(termKey, subfield, null);
+                  return;
+                }
+                const parsed = parseNumber(value);
+                if (parsed === null) {
+                  setError(key, 'Enter a number, or leave empty for no limit.');
+                } else {
+                  setError(key, null);
+                  updateLimit(termKey, subfield, parsed);
+                }
+              }}
+              onBlur={() => {
+                setEditingValues((prev) => {
+                  const { [key]: _unused, ...rest } = prev;
+                  return rest;
+                });
+              }}
+            />
+          )}
+        </Field>
+      );
     };
 
     return (
       <div
         style={{
-          marginBottom: '1.5rem',
-          padding: '1rem',
-          backgroundColor: '#f8f9fa',
-          borderRadius: '6px',
-          border: '1px solid #e0e0e0'
+          marginBottom: tokens.space.lg,
+          padding: tokens.space.md,
+          backgroundColor: tokens.color.surfaceSunken,
+          borderRadius: tokens.radius.md,
+          border: `1px solid ${tokens.color.border}`,
         }}
       >
-        <h4 style={{ marginTop: 0, marginBottom: '0.75rem', fontSize: '0.95rem' }}>
-          {termName} Term
+        <h4 style={{ marginTop: 0, marginBottom: tokens.space.sm, fontSize: '0.95rem' }}>
+          {termName}
         </h4>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Positive Scale
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              value={editingValues[`${termName}_positive_scale`] ?? term.positive_scale.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, [`${termName}_positive_scale`]: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('positive_scale', parsed);
-                setEditingValues(prev => {
-                  const { [`${termName}_positive_scale`]: _unused, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Negative Scale
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              value={editingValues[`${termName}_negative_scale`] ?? term.negative_scale.toString()}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, [`${termName}_negative_scale`]: val }));
-              }}
-              onBlur={(e) => {
-                const parsed = parseFloat(e.currentTarget.value) || 0;
-                updateField('negative_scale', parsed);
-                setEditingValues(prev => {
-                  const { [`${termName}_negative_scale`]: _unused, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Upper Limit <span style={{ color: '#999', fontSize: '0.8rem' }}>(empty = no limit)</span>
-            </label>
-            <input
-              type="number"
-              step="0.1"
-              value={editingValues[`${termName}_limits_upper`] ?? formatLimitValue(term.limits.upper)}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, [`${termName}_limits_upper`]: val }));
-              }}
-              onBlur={(e) => {
-                const val = e.currentTarget.value.trim();
-                const parsed = val === '' ? null : parseFloat(val);
-                updateLimit('upper', parsed);
-                setEditingValues(prev => {
-                  const { [`${termName}_limits_upper`]: _unused, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-          </div>
-
-          <div>
-            <label style={{ display: 'block', fontSize: '0.85rem', color: '#666', marginBottom: '0.25rem' }}>
-              Lower Limit <span style={{ color: '#999', fontSize: '0.8rem' }}>(empty = no limit)</span>
-            </label>
-            <input
-              type="number"
-              step="0.1"
-              value={editingValues[`${termName}_limits_lower`] ?? formatLimitValue(term.limits.lower)}
-              onChange={(e) => {
-                const val = e.currentTarget.value;
-                setEditingValues(prev => ({ ...prev, [`${termName}_limits_lower`]: val }));
-              }}
-              onBlur={(e) => {
-                const val = e.currentTarget.value.trim();
-                const parsed = val === '' ? null : parseFloat(val);
-                updateLimit('lower', parsed);
-                setEditingValues(prev => {
-                  const { [`${termName}_limits_lower`]: _unused, ...rest } = prev;
-                  return rest;
-                });
-              }}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}
-            />
-          </div>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(11rem, 1fr))',
+            gap: tokens.space.sm,
+          }}
+        >
+          {/* The asymmetry is the reason these are two fields rather than one gain, so it
+              is worth saying which direction each acts in -- a boiler heats but cannot
+              cool, so the negative scale is usually zero and is not a typo. */}
+          {gainField('positive_scale', 'Positive scale', 'Applied when the reading is below target.')}
+          {gainField('negative_scale', 'Negative scale', 'Applied when the reading is above target.')}
+          {limitField('upper', 'Upper limit')}
+          {limitField('lower', 'Lower limit')}
         </div>
       </div>
     );
@@ -312,43 +312,28 @@ export const PidParametersEditor = ({ title, parameters, onSave, onCancel }: Pid
 
   return (
     <div>
-      <div style={{ marginBottom: '1rem' }}>
-        <h3 style={{ margin: 0 }}>{title}</h3>
-      </div>
+      <h3 style={{ marginTop: 0, marginBottom: tokens.space.md }}>{title}</h3>
 
-      {renderTermEditor('Proportional (Kp)', localParams.kp, updateKpField, updateKpLimit)}
-      {renderTermEditor('Integral (Ki)', localParams.ki, updateKiField, updateKiLimit)}
-      {renderTermEditor('Derivative (Kd)', localParams.kd, updateKdField, updateKdLimit)}
+      {renderTermEditor('kp', 'Proportional (Kp)', localParams.kp)}
+      {renderTermEditor('ki', 'Integral (Ki)', localParams.ki)}
+      {renderTermEditor('kd', 'Derivative (Kd)', localParams.kd)}
 
-      <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1.5rem' }}>
-        <button
-          onClick={onCancel}
-          style={{
-            padding: '0.5rem 1.5rem',
-            backgroundColor: 'white',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem'
-          }}
-        >
+      {invalid && (
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Alert role="danger">
+            Some fields do not hold a number. Fix them before saving — these gains go
+            straight to a boiler's control loop.
+          </Alert>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: tokens.space.sm, justifyContent: 'flex-end' }}>
+        <Button variant="secondary" onClick={onCancel}>
           Cancel
-        </button>
-        <button
-          onClick={handleSave}
-          style={{
-            padding: '0.5rem 1.5rem',
-            backgroundColor: '#0066cc',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-            fontWeight: '500'
-          }}
-        >
-          Save Changes
-        </button>
+        </Button>
+        <Button variant="primary" onClick={handleSave} disabled={invalid}>
+          Save changes
+        </Button>
       </div>
     </div>
   );
