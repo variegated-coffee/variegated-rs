@@ -1,0 +1,66 @@
+[package]
+name = "variegated-pio-mmc-bus"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "A PIO-backed 4-bit SD/MMC host bus for RP2040/RP2350, implementing sdio::MmcBus"
+repository = "https://github.com/variegated-coffee/variegated-rs"
+license = "MIT"
+keywords = ["embedded", "async", "sdio", "sd-card", "pio"]
+categories = ["embedded", "hardware-support", "no-std"]
+
+[lib]
+# `test = true` (the default), unlike most crates in this workspace, which set it false
+# because they cannot link on the host. Here the module split exists precisely so that
+# `crc`, `frame`, `clock` and `programs` are free of `embassy-rp` and *do* build for the
+# host -- and they are the parts a logic analyser cannot check. See `scripts/test-host.sh`.
+bench = false
+
+[dependencies]
+sdio.workspace = true
+aligned.workspace = true
+fixed.workspace = true
+
+# Not optional, and deliberately so: `pio_asm!` runs at compile time and `pio-core` is
+# host-buildable, which makes the assembled programs themselves host-testable -- the
+# instruction budget, the opcode encodings and the `wait gpio` patch are all checked in
+# `programs.rs`'s test module rather than discovered as a boot-time panic.
+#
+# `pio-proc` is *not* needed as a direct dependency: `pio::pio_asm!` expands through
+# `pio::_export`, which re-exports it. `variegated-hal` does the same.
+pio.workspace = true
+
+# Gated behind `_chip` rather than listed unconditionally. Everything that touches
+# hardware lives in `pins`/`install`/`bus`, and without a chip feature none of it is
+# compiled -- which is what lets the pure modules be tested on an aarch64 host.
+embassy-rp = { workspace = true, optional = true }
+embassy-time = { workspace = true, optional = true }
+embassy-futures = { workspace = true, optional = true }
+
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+
+# One feature per chip, forwarding to embassy-rp, per the convention in
+# `variegated-hal/Cargo.toml`. Source gates on the `rp235x` umbrella, never on a/b.
+rp2040 = ["_chip", "embassy-rp/rp2040"]
+rp235xa = ["_chip", "rp235x", "embassy-rp/rp235xa"]
+rp235xb = ["_chip", "rp235x", "embassy-rp/rp235xb"]
+rp235x = []
+
+# Internal. Named with a leading underscore because selecting it alone is meaningless --
+# embassy-rp needs a chip, and picking one is the caller's job.
+_chip = ["dep:embassy-rp", "dep:embassy-time", "dep:embassy-futures"]
+
+# Opt-in, never a hard dependency. defmt declares `links = "defmt"` and emits
+# `extern "Rust"` references to `_defmt_acquire` and friends with no provider, so a host
+# test binary that monomorphizes any `Format` impl fails to link -- and fails as
+# "Too many sections!" rather than as anything mentioning defmt.
+defmt = ["dep:defmt", "sdio/defmt"]
+
+# Wire-level tracing of card bring-up and command framing. Off by default and not implied
+# by `defmt`, for the same reason as `sdio`'s feature of the same name: it logs every
+# command, response and data token at `info`, which is the right granularity for
+# diagnosing a card that will not initialise and far too much for anything else.
+trace = ["defmt"]

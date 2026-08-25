@@ -95,6 +95,10 @@ aligned = { workspace = true, optional = true }
 # implementation produced; see the note at its re-export in `lib.rs`.
 variegated-exfat-format = { version = "0.1.0", path = "../variegated-exfat-format", optional = true, features = ["defmt"] }
 block-device-driver = { workspace = true, optional = true }
+# The native 4-bit transport, as an alternative to `sdio`'s SPI one. Optional and
+# additive: a board that has the card on SPI does not pay for it, and a board that has it
+# on a PIO block gets four data lines instead of one.
+variegated-pio-mmc-bus = { version = "0.1.0", path = "../variegated-pio-mmc-bus", optional = true, features = ["defmt"] }
 
 [features]
 # `hardware` and `defmt` on, matching what every firmware build already asked for. A host
@@ -132,13 +136,25 @@ std = ["variegated-controller-types/std", "variegated-control-algorithm/std"]
 serde = ["variegated-controller-types/serde"]
 
 # The chip features imply `hardware`: naming a chip is asking for the peripheral half.
-rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040"]
-rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa"]
-rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb"]
+#
+# `variegated-pio-mmc-bus?/...` uses the weak form deliberately. That crate needs a chip
+# named or it will not compile at all, but it is only in the graph when `sd-card-pio` is
+# on -- and the strong form (`variegated-pio-mmc-bus/rp2040`) would drag it in for every
+# board, including the ones whose card is on SPI.
+rp2040 = ["hardware", "embassy-rp/rp2040", "variegated-log/rp2040", "variegated-hal/rp2040", "variegated-pio-mmc-bus?/rp2040"]
+rp235xa = ["hardware", "embassy-rp/rp235xa", "rp235x", "variegated-log/rp235xa", "variegated-hal/rp235xa", "variegated-pio-mmc-bus?/rp235xa"]
+rp235xb = ["hardware", "embassy-rp/rp235xb", "rp235x", "variegated-log/rp235xb", "variegated-hal/rp235xb", "variegated-pio-mmc-bus?/rp235xb"]
 rp235x = []
 pwm-steam-valve = []
 # Implies `hardware`: the card hangs off a `Spi` and the storage layer names one.
 sd-card-storage = ["hardware", "dep:sdio", "dep:exfat-slim", "dep:aligned", "dep:block-device-driver", "dep:variegated-exfat-format"]
+
+# The same card stack over a PIO-driven 4-bit bus instead of SPI. Additive rather than
+# exclusive: it builds on `sd-card-storage` because everything above the transport --
+# the partition offset, the shot-log storage, the formatter -- is unchanged, and only the
+# bus underneath differs. A board still picks one at the call site by which constructor
+# it names.
+sd-card-pio = ["sd-card-storage", "dep:variegated-pio-mmc-bus"]
 
 # Forwarded to `variegated-controller-types`, which needs one of them to know which
 # machine's boiler and group enumerations exist.

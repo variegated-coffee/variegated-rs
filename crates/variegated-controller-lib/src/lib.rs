@@ -56,6 +56,10 @@ pub use shot_state::{ShotStateInputs, ShotStateTracker};
 
 #[cfg(feature = "sd-card-storage")]
 pub mod sd_card;
+// The same card, on a PIO block instead of the display's SPI bus. Everything above the
+// transport is shared with `sd_card`; only the bus underneath differs.
+#[cfg(feature = "sd-card-pio")]
+pub mod sd_card_pio;
 #[cfg(feature = "sd-card-storage")]
 pub mod shot_log_storage;
 // The exFAT formatter lives in `variegated-exfat-format`, not here. It is pure logic over

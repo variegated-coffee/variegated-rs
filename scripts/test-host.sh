@@ -121,4 +121,11 @@ run "variegated-exfat-format" -p variegated-exfat-format "$@"
 # in this fixture crate. It is an ordinary std crate and is not a workspace default member.
 run "variegated-board-cfg-tests" -p variegated-board-cfg-tests "$@"
 
+# `--no-default-features` is what makes `variegated-pio-mmc-bus` runnable at all: its chip
+# features are what pull in embassy-rp, and embassy-rp cannot build for a host. With none
+# of them on, the crate is its pure modules -- the CRCs, the command framing, the clock
+# divider and the assembled PIO programs -- which is precisely the code that a logic
+# analyser on a live SD bus cannot check.
+run "variegated-pio-mmc-bus" -p variegated-pio-mmc-bus --no-default-features "$@"
+
 exit $RC
