@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Alert, Badge, Button, EmptyState, tokens, useDialogs } from '@variegated-coffee/ui';
 import { RoutineStep, RoutineParameter, DerivedParameter } from '../../schemas/schemas';
 import { StepEditor } from './StepEditor';
 import { getRoutineCommandSummary } from './RoutineCommandSummary';
@@ -15,6 +16,7 @@ interface StepsTabProps {
 
 export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }: StepsTabProps) {
   const machine = useMachine();
+  const { confirm } = useDialogs();
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [isAdding, setIsAdding] = useState(false);
 
@@ -39,10 +41,19 @@ export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }
     setIsAdding(false);
   };
 
-  const handleDeleteStep = (index: number) => {
-    if (confirm(`Delete step ${index}?`)) {
-      onStepsChange(steps.filter((_, i) => i !== index));
-    }
+  const handleDeleteStep = async (index: number) => {
+    const step = steps[index];
+    const ok = await confirm({
+      title: step?.description ? `Delete step ${index} — ${step.description}?` : `Delete step ${index}?`,
+      // Steps are addressed by position, so removing one renumbers everything after it.
+      body:
+        index < steps.length - 1
+          ? 'The steps after it move up, and any exit condition that jumps to a step by number will point somewhere else.'
+          : undefined,
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (ok) onStepsChange(steps.filter((_, i) => i !== index));
   };
 
   const handleMoveUp = (index: number) => {
@@ -60,52 +71,45 @@ export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }
   };
 
   return (
-    <div style={{ padding: '1.5rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-        <h3 style={{ margin: 0 }}>Steps ({steps.length})</h3>
-        <button
-          onClick={() => setIsAdding(true)}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: '#0066cc',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem'
-          }}
-        >
-          + Add Step
-        </button>
+    <div style={{ padding: tokens.space.lg }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm, marginBottom: tokens.space.md, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
+          <h3 style={{ margin: 0 }}>Steps</h3>
+          <Badge numeric>{steps.length}</Badge>
+        </div>
+        <Button variant="secondary" size="sm" onClick={() => setIsAdding(true)}>
+          Add step
+        </Button>
       </div>
 
       {steps.length === 0 ? (
-        <div style={{
-          padding: '2rem',
-          textAlign: 'center',
-          color: '#666',
-          border: '2px dashed #ccc',
-          borderRadius: '4px'
-        }}>
-          No steps defined. Click "Add Step" to create the first step.
-        </div>
+        <EmptyState
+          title="No steps"
+          detail="A step sets the machine up, then waits for a condition before moving on. A routine needs at least one."
+          action={{ label: 'Add step', onClick: () => setIsAdding(true) }}
+        />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
           {steps.map((step, index) => (
             <div
               key={index}
               style={{
-                padding: '1rem',
-                backgroundColor: '#f5f5f5',
-                borderRadius: '4px',
-                borderLeft: '4px solid #0066cc'
+                padding: tokens.space.md,
+                backgroundColor: tokens.color.surfaceSunken,
+                border: `1px solid ${tokens.color.border}`,
+                borderRadius: tokens.radius.sm,
+                borderLeft: `4px solid ${tokens.color.info}`,
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: '500', marginBottom: '0.5rem', fontSize: '1rem' }}>
-                    Step {index}
-                    {step.description && <span style={{ color: '#666', fontWeight: 'normal' }}>: {step.description}</span>}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: tokens.space.md, flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: '14rem' }}>
+                  <div style={{ fontWeight: 500, marginBottom: tokens.space.sm, fontSize: '1rem' }}>
+                    <span style={{ fontFamily: tokens.font.mono }}>Step {index}</span>
+                    {step.description && (
+                      <span style={{ color: tokens.color.inkMuted, fontWeight: 'normal' }}>
+                        {' '}— {step.description}
+                      </span>
+                    )}
                   </div>
 
                   {/* A transition whose starting point depends on how the step was entered.
@@ -113,25 +117,14 @@ export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }
                       it, and it is occasionally exactly what was meant. See
                       `utils/transitionWarnings`. */}
                   {(warningsByStep.get(index) ?? []).map((message, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        fontSize: '0.85rem',
-                        color: '#8a6d00',
-                        backgroundColor: '#fff8e1',
-                        border: '1px solid #ffe082',
-                        borderRadius: '3px',
-                        padding: '0.4rem 0.6rem',
-                        marginBottom: '0.5rem',
-                      }}
-                    >
-                      ⚠ {message}
+                    <div key={i} style={{ marginBottom: tokens.space.sm }}>
+                      <Alert role="warn">{message}</Alert>
                     </div>
                   ))}
 
                   {step.entry_command.length > 0 && (
-                    <div style={{ fontSize: '0.85rem', color: '#444', marginBottom: '0.25rem' }}>
-                      <span style={{ fontWeight: '500' }}>Entry:</span>{' '}
+                    <div style={{ fontSize: '0.85rem', color: tokens.color.ink, marginBottom: tokens.space.xs }}>
+                      <span style={{ fontWeight: 500 }}>Entry:</span>{' '}
                       {step.entry_command.length === 1
                         ? getRoutineCommandSummary(step.entry_command[0], machine.getBoilerName, machine.getGroupName)
                         : `${step.entry_command.length} commands: ${step.entry_command.map((cmd, i) => `${i + 1}. ${getRoutineCommandSummary(cmd, machine.getBoilerName, machine.getGroupName)}`).join('; ')}`
@@ -139,69 +132,46 @@ export function StepsTab({ steps, onStepsChange, parameters, derivedParameters }
                     </div>
                   )}
 
-                  <div style={{ fontSize: '0.85rem', color: '#666' }}>
+                  <div style={{ fontSize: '0.85rem', color: tokens.color.inkMuted }}>
                     {formatExitConditionsSummary(step.exits, machine.getBoilerName, machine.getGroupName)}
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
-                  <button
+                <div style={{ display: 'flex', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => handleMoveUp(index)}
                     disabled={index === 0}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      backgroundColor: index === 0 ? '#e0e0e0' : 'white',
-                      border: '1px solid #ccc',
-                      borderRadius: '4px',
-                      cursor: index === 0 ? 'not-allowed' : 'pointer',
-                      fontSize: '0.8rem'
-                    }}
-                    title="Move up"
+                    ariaLabel={`Move step ${index} earlier`}
                   >
-                    ↑
-                  </button>
-                  <button
+                    <span aria-hidden="true">↑</span>
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => handleMoveDown(index)}
                     disabled={index === steps.length - 1}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      backgroundColor: index === steps.length - 1 ? '#e0e0e0' : 'white',
-                      border: '1px solid #ccc',
-                      borderRadius: '4px',
-                      cursor: index === steps.length - 1 ? 'not-allowed' : 'pointer',
-                      fontSize: '0.8rem'
-                    }}
-                    title="Move down"
+                    ariaLabel={`Move step ${index} later`}
                   >
-                    ↓
-                  </button>
-                  <button
+                    <span aria-hidden="true">↓</span>
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={() => setEditingIndex(index)}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      backgroundColor: 'white',
-                      border: '1px solid #ccc',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '0.8rem'
-                    }}
+                    ariaLabel={`Edit step ${index}`}
                   >
                     Edit
-                  </button>
-                  <button
-                    onClick={() => handleDeleteStep(index)}
-                    style={{
-                      padding: '0.25rem 0.5rem',
-                      backgroundColor: '#dc3545',
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: '4px',
-                      cursor: 'pointer',
-                      fontSize: '0.8rem'
-                    }}
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => void handleDeleteStep(index)}
+                    ariaLabel={`Delete step ${index}`}
                   >
-                    ✕
-                  </button>
+                    Delete
+                  </Button>
                 </div>
               </div>
             </div>

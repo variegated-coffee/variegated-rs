@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Badge, Button, Dialog, EmptyState, Field, TextInput, tokens } from '@variegated-coffee/ui';
 import { RoutineStep, RoutineCommand, RoutineExit, RoutineParameter, DerivedParameter } from '../../schemas/schemas';
 import { RoutineCommandBuilder } from './RoutineCommandBuilder';
 import { ExitConditionEditor } from './ExitConditionEditor';
@@ -43,10 +44,10 @@ export function StepEditor({ step, onSave, onCancel, parameters, derivedParamete
   const [isAddingExit, setIsAddingExit] = useState(false);
 
   const handleSave = () => {
-    if (exits.length === 0) {
-      alert('At least one exit condition is required');
-      return;
-    }
+    // Save is disabled while this holds, and the exit-conditions section says why in
+    // place. The `alert()` that used to fire here was telling the user about a rule the
+    // form could simply enforce.
+    if (exits.length === 0) return;
 
     onSave({
       description: description.trim() || null,
@@ -101,166 +102,125 @@ export function StepEditor({ step, onSave, onCancel, parameters, derivedParamete
     setExits(exits.filter((_, i) => i !== index));
   };
 
+  const rowStyle = {
+    padding: tokens.space.sm,
+    backgroundColor: tokens.color.surfaceSunken,
+    border: `1px solid ${tokens.color.border}`,
+    borderRadius: tokens.radius.sm,
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: tokens.space.sm,
+    flexWrap: 'wrap' as const,
+  };
+
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1000,
-      padding: '1rem'
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        maxWidth: '900px',
-        width: '100%',
-        maxHeight: '90vh',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden'
-      }}>
-        {/* Header */}
-        <div style={{ padding: '1.5rem', borderBottom: '1px solid #ddd' }}>
-          <h2 style={{ margin: 0 }}>{step ? 'Edit Step' : 'New Step'}</h2>
-        </div>
+    <>
+      <Dialog
+        title={step ? 'Edit step' : 'New step'}
+        onClose={onCancel}
+        width="900px"
+        footer={
+          <>
+            <Button variant="secondary" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={handleSave} disabled={exits.length === 0}>
+              Save step
+            </Button>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.lg }}>
+          <Field
+            label="Description"
+            help="Optional. Shown on the step list and while the routine runs."
+          >
+            {(control) => (
+              <TextInput
+                {...control}
+                value={description}
+                onInput={setDescription}
+                placeholder="Preinfusion, Main extraction, Pressure ramp, …"
+              />
+            )}
+          </Field>
 
-        {/* Content */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '1.5rem' }}>
-          {/* Description */}
-          <div style={{ marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-              Description (optional)
-            </label>
-            <input
-              type="text"
-              value={description}
-              onChange={(e) => setDescription(e.currentTarget.value)}
-              placeholder="e.g., Preinfusion, Main extraction, Pressure ramp"
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '1rem'
-              }}
-            />
-          </div>
-
-          {/* Entry Commands */}
-          <div style={{ marginBottom: '1.5rem' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <label style={{ fontWeight: '500' }}>
-                Entry Commands ({entryCommands.length}) <span style={{ fontWeight: 'normal', fontSize: '0.85rem', color: '#666' }}>- optional, execute in order</span>
-              </label>
-              <button
-                onClick={() => setIsAddingCommand(true)}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: '#28a745',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem'
-                }}
-              >
-                + Add Command
-              </button>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: tokens.space.sm, marginBottom: tokens.space.sm, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
+                  <strong>Entry commands</strong>
+                  <Badge numeric>{entryCommands.length}</Badge>
+                </div>
+                <div style={{ fontSize: '0.85rem', color: tokens.color.inkMuted, marginTop: tokens.space.xs }}>
+                  Optional. Run in order the moment the step is entered.
+                </div>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => setIsAddingCommand(true)}>
+                Add command
+              </Button>
             </div>
 
             {entryCommands.length === 0 ? (
-              <div style={{
-                padding: '1rem',
-                textAlign: 'center',
-                color: '#666',
-                border: '2px dashed #ccc',
-                borderRadius: '4px',
-                fontSize: '0.9rem'
-              }}>
-                No entry commands. Commands execute when the step starts.
-              </div>
+              <EmptyState
+                title="No entry commands"
+                detail="A step with none simply waits for its exit condition."
+                action={{ label: 'Add command', onClick: () => setIsAddingCommand(true) }}
+              />
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
                 {entryCommands.map((cmd, index) => (
-                  <div
-                    key={index}
-                    style={{
-                      padding: '0.75rem',
-                      backgroundColor: '#f5f5f5',
-                      borderRadius: '4px',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}
-                  >
-                    <div style={{ flex: 1, fontSize: '0.9rem' }}>
-                      {index + 1}. {getRoutineCommandSummary(cmd, machine.getBoilerName, machine.getGroupName)}
+                  <div key={index} style={rowStyle}>
+                    <div style={{ flex: 1, minWidth: '12rem', fontSize: '0.9rem' }}>
+                      <span
+                        style={{
+                          fontFamily: tokens.font.mono,
+                          fontVariantNumeric: 'tabular-nums',
+                          color: tokens.color.inkMuted,
+                          marginRight: tokens.space.sm,
+                        }}
+                      >
+                        #{index + 1}
+                      </span>
+                      {getRoutineCommandSummary(cmd, machine.getBoilerName, machine.getGroupName)}
                     </div>
 
-                    <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
-                      <button
+                    <div style={{ display: 'flex', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={() => handleMoveCommandUp(index)}
                         disabled={index === 0}
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          backgroundColor: index === 0 ? '#e0e0e0' : 'white',
-                          border: '1px solid #ccc',
-                          borderRadius: '4px',
-                          cursor: index === 0 ? 'not-allowed' : 'pointer',
-                          fontSize: '0.8rem'
-                        }}
-                        title="Move up"
+                        ariaLabel={`Move command ${index + 1} earlier`}
                       >
-                        ↑
-                      </button>
-                      <button
+                        <span aria-hidden="true">↑</span>
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={() => handleMoveCommandDown(index)}
                         disabled={index === entryCommands.length - 1}
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          backgroundColor: index === entryCommands.length - 1 ? '#e0e0e0' : 'white',
-                          border: '1px solid #ccc',
-                          borderRadius: '4px',
-                          cursor: index === entryCommands.length - 1 ? 'not-allowed' : 'pointer',
-                          fontSize: '0.8rem'
-                        }}
-                        title="Move down"
+                        ariaLabel={`Move command ${index + 1} later`}
                       >
-                        ↓
-                      </button>
-                      <button
+                        <span aria-hidden="true">↓</span>
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={() => setEditingCommandIndex(index)}
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          backgroundColor: 'white',
-                          border: '1px solid #ccc',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
+                        ariaLabel={`Edit command ${index + 1}`}
                       >
                         Edit
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
                         onClick={() => handleDeleteCommand(index)}
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          backgroundColor: '#dc3545',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
+                        ariaLabel={`Remove command ${index + 1}`}
                       >
-                        ✕
-                      </button>
+                        Remove
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -268,86 +228,59 @@ export function StepEditor({ step, onSave, onCancel, parameters, derivedParamete
             )}
           </div>
 
-          {/* Exit Conditions */}
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-              <label style={{ fontWeight: '500' }}>Exit Conditions ({exits.length})</label>
-              <button
-                onClick={() => setIsAddingExit(true)}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: '#0066cc',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem'
-                }}
-              >
-                + Add Exit
-              </button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: tokens.space.sm, marginBottom: tokens.space.sm, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
+                  <strong>Exit conditions</strong>
+                  <Badge numeric role={exits.length === 0 ? 'warn' : undefined}>
+                    {exits.length}
+                  </Badge>
+                </div>
+                <div style={{ fontSize: '0.85rem', color: tokens.color.inkMuted, marginTop: tokens.space.xs }}>
+                  Required. The first one to be met decides where the routine goes next.
+                </div>
+              </div>
+              <Button variant="secondary" size="sm" onClick={() => setIsAddingExit(true)}>
+                Add exit
+              </Button>
             </div>
 
             {exits.length === 0 ? (
-              <div style={{
-                padding: '2rem',
-                textAlign: 'center',
-                color: '#666',
-                border: '2px dashed #ccc',
-                borderRadius: '4px'
-              }}>
-                No exit conditions. Click "Add Exit" to add one.
-              </div>
+              <EmptyState
+                title="No exit conditions"
+                detail="Without one the routine would stop here for good, so a step cannot be saved until it has at least one."
+                action={{ label: 'Add exit', onClick: () => setIsAddingExit(true) }}
+              />
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
                 {exits.map((exit, index) => (
-                  <div
-                    key={index}
-                    style={{
-                      padding: '0.75rem',
-                      backgroundColor: '#f5f5f5',
-                      borderRadius: '4px',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center'
-                    }}
-                  >
-                    <div>
+                  <div key={index} style={rowStyle}>
+                    <div style={{ flex: 1, minWidth: '12rem' }}>
                       <div style={{ fontSize: '0.9rem' }}>{getExitSummary(exit)}</div>
                       {exit.description && (
-                        <div style={{ fontSize: '0.8rem', color: '#666', marginTop: '0.25rem' }}>
+                        <div style={{ fontSize: '0.8rem', color: tokens.color.inkMuted, marginTop: tokens.space.xs }}>
                           {exit.description}
                         </div>
                       )}
                     </div>
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                      <button
+                    <div style={{ display: 'flex', gap: tokens.space.sm }}>
+                      <Button
+                        variant="secondary"
+                        size="sm"
                         onClick={() => setEditingExitIndex(index)}
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          backgroundColor: 'white',
-                          border: '1px solid #ccc',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
+                        ariaLabel={`Edit exit condition ${index + 1}`}
                       >
                         Edit
-                      </button>
-                      <button
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
                         onClick={() => handleDeleteExit(index)}
-                        style={{
-                          padding: '0.25rem 0.5rem',
-                          backgroundColor: '#dc3545',
-                          color: 'white',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
+                        ariaLabel={`Remove exit condition ${index + 1}`}
                       >
-                        ✕
-                      </button>
+                        Remove
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -355,46 +288,7 @@ export function StepEditor({ step, onSave, onCancel, parameters, derivedParamete
             )}
           </div>
         </div>
-
-        {/* Footer */}
-        <div style={{
-          padding: '1rem 1.5rem',
-          borderTop: '1px solid #ddd',
-          display: 'flex',
-          gap: '1rem',
-          justifyContent: 'flex-end'
-        }}>
-          <button
-            onClick={onCancel}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={exits.length === 0}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: exits.length === 0 ? '#ccc' : '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: exits.length === 0 ? 'not-allowed' : 'pointer'
-            }}
-          >
-            Save Step
-          </button>
-        </div>
-      </div>
+      </Dialog>
 
       {/* Nested modals */}
       {isAddingCommand && (
@@ -444,6 +338,6 @@ export function StepEditor({ step, onSave, onCancel, parameters, derivedParamete
           totalSteps={totalSteps}
         />
       )}
-    </div>
+    </>
   );
 }

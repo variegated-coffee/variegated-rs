@@ -1,5 +1,7 @@
 import { useState } from 'preact/hooks';
+import { Button, Dialog, Field, Select, TextInput, tokens } from '@variegated-coffee/ui';
 import { RoutineParameter, ParameterUnit } from '../../schemas/schemas';
+import { NumberField } from '../NumberField';
 
 interface ParameterEditorProps {
   parameter: RoutineParameter | null;
@@ -8,17 +10,24 @@ interface ParameterEditorProps {
   existingIndices: number[];
 }
 
-const PARAMETER_UNITS: ParameterUnit[] = [
-  { type: 'Seconds' },
-  { type: 'Celsius' },
-  { type: 'Bar' },
-  { type: 'MillilitersPerSecond' },
-  { type: 'Grams' },
-  { type: 'Percent' },
-  { type: 'Milliliters' },
-  { type: 'MillisiemensPerCentimeter' },
-  { type: 'ExtractionRate' },
-  { type: 'ExtractedSolids' }
+/**
+ * The units a parameter can carry, with the name a person uses for each.
+ *
+ * The options were the enum variants themselves, so the list read
+ * "MillisiemensPerCentimeter" and "MillilitersPerSecond" -- names written for the wire
+ * format, offered to someone choosing a unit for a dose.
+ */
+const PARAMETER_UNITS: { unit: ParameterUnit; label: string }[] = [
+  { unit: { type: 'Seconds' }, label: 'Seconds (s)' },
+  { unit: { type: 'Celsius' }, label: 'Degrees Celsius (°C)' },
+  { unit: { type: 'Bar' }, label: 'Bar' },
+  { unit: { type: 'MillilitersPerSecond' }, label: 'Millilitres per second (mL/s)' },
+  { unit: { type: 'Grams' }, label: 'Grams (g)' },
+  { unit: { type: 'Percent' }, label: 'Percent (%)' },
+  { unit: { type: 'Milliliters' }, label: 'Millilitres (mL)' },
+  { unit: { type: 'MillisiemensPerCentimeter' }, label: 'Conductivity (mS/cm)' },
+  { unit: { type: 'ExtractionRate' }, label: 'Extraction rate (mS·mL/cm·s)' },
+  { unit: { type: 'ExtractedSolids' }, label: 'Extracted solids (mS·mL/cm)' },
 ];
 
 /// Shot attributes a parameter can mirror.
@@ -31,6 +40,9 @@ const LINKABLE_ATTRIBUTES = [
   { value: 'DoseWeight', label: 'Dose weight (g)' }
 ] as const;
 
+/** The parameter slots the firmware stores. Mirrors `MAX_PARAMETERS` in ParametersTab. */
+const MAX_INDEX = 7;
+
 export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }: ParameterEditorProps) {
   const [index, setIndex] = useState<number>(
     parameter?.index ?? (existingIndices.length > 0 ? Math.max(...existingIndices) + 1 : 0)
@@ -41,18 +53,25 @@ export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }
   const [linkedAttribute, setLinkedAttribute] = useState<RoutineParameter['linked_attribute']>(
     parameter?.linked_attribute ?? null
   );
+  const [defaultInvalid, setDefaultInvalid] = useState(false);
+
+  /*
+   * Both of these used to be `alert()` calls inside `handleSave` -- a native dialog fired
+   * after the button was pressed, telling the user about a field they had already left.
+   * They are field errors now, and Save is disabled while either holds.
+   */
+  const nameError = name.trim() === '' ? 'A parameter needs a name.' : undefined;
+  const indexError =
+    !parameter && existingIndices.includes(index)
+      ? `P${index} is already used by another parameter.`
+      : index < 0 || index > MAX_INDEX
+        ? `Must be between 0 and ${MAX_INDEX}.`
+        : undefined;
+
+  const invalid = Boolean(nameError) || Boolean(indexError) || defaultInvalid;
 
   const handleSave = () => {
-    if (!name.trim()) {
-      alert('Parameter name is required');
-      return;
-    }
-
-    if (!parameter && existingIndices.includes(index)) {
-      alert(`Parameter index ${index} is already in use`);
-      return;
-    }
-
+    if (invalid) return;
     onSave({
       index,
       name: name.trim(),
@@ -63,178 +82,96 @@ export function ParameterEditor({ parameter, onSave, onCancel, existingIndices }
   };
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1001
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '2rem',
-        maxWidth: '500px',
-        width: '90%'
-      }}>
-        <h2 style={{ marginBottom: '1.5rem' }}>
-          {parameter ? 'Edit Parameter' : 'New Parameter'}
-        </h2>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Index (0-7)
-          </label>
-          <input
-            type="number"
-            min="0"
-            max="7"
-            value={index}
-            onChange={(e) => setIndex(parseInt(e.currentTarget.value) || 0)}
-            disabled={parameter !== null}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              backgroundColor: parameter ? '#f5f5f5' : 'white'
-            }}
-          />
-          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-            This will be referenced as P{index}
-          </div>
-        </div>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Name
-          </label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="e.g. Preinfusion Time, Target Pressure"
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          />
-        </div>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Default Value
-          </label>
-          <input
-            type="number"
-            step="0.1"
-            value={defaultValue}
-            onChange={(e) => setDefaultValue(parseFloat(e.currentTarget.value) || 0)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          />
-        </div>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Unit (optional)
-          </label>
-          <select
-            value={unit?.type || ''}
-            onChange={(e) => setUnit(e.currentTarget.value ? { type: e.currentTarget.value } as ParameterUnit : null)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <option value="">None</option>
-            {PARAMETER_UNITS.map(u => (
-              <option key={u.type} value={u.type}>{u.type}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Linked shot attribute (optional)
-          </label>
-          <select
-            value={linkedAttribute?.type ?? ''}
-            onChange={(e) => setLinkedAttribute(
-              e.currentTarget.value
-                ? { type: e.currentTarget.value } as RoutineParameter['linked_attribute']
-                : null
-            )}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <option value="">None</option>
-            {LINKABLE_ATTRIBUTES.map(a => (
-              <option key={a.value} value={a.value}>{a.label}</option>
-            ))}
-          </select>
-          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-            A linked parameter is seeded from the shot attribute before the routine runs, and
-            the value it runs with is recorded against the shot. Only numeric attributes can
-            be linked &mdash; beans and grind size are text.
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Save
-          </button>
-          <button
-            onClick={onCancel}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
+    <Dialog
+      title={parameter ? 'Edit parameter' : 'New parameter'}
+      onClose={onCancel}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onCancel}>
             Cancel
-          </button>
-        </div>
+          </Button>
+          <Button variant="primary" onClick={handleSave} disabled={invalid}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.lg }}>
+        <Field
+          label="Slot"
+          help={indexError ? undefined : `Steps refer to this parameter as P${index}.`}
+          error={indexError}
+        >
+          {(control) => (
+            <TextInput
+              {...control}
+              numeric
+              value={String(index)}
+              // Fixed once the parameter exists: changing it would silently orphan every
+              // step and derived parameter that refers to it.
+              disabled={parameter !== null}
+              onInput={(value) => {
+                const parsed = Number.parseInt(value, 10);
+                setIndex(Number.isNaN(parsed) ? -1 : parsed);
+              }}
+            />
+          )}
+        </Field>
+
+        <Field label="Name" error={nameError} required>
+          {(control) => (
+            <TextInput
+              {...control}
+              value={name}
+              onInput={setName}
+              placeholder="Preinfusion time, Target pressure, …"
+            />
+          )}
+        </Field>
+
+        <NumberField
+          label="Default value"
+          value={defaultValue}
+          onChange={setDefaultValue}
+          onValidityChange={(valid) => setDefaultInvalid(!valid)}
+          help="Used when the routine runs without being given a value."
+        />
+
+        <Field label="Unit" help="Optional. Shown next to the value wherever it appears.">
+          {(control) => (
+            <Select
+              {...control}
+              value={unit?.type ?? ''}
+              onChange={(value) => setUnit(value ? ({ type: value } as ParameterUnit) : null)}
+              options={[
+                { value: '', label: 'No unit' },
+                ...PARAMETER_UNITS.map((u) => ({ value: u.unit.type, label: u.label })),
+              ]}
+            />
+          )}
+        </Field>
+
+        <Field
+          label="Linked shot attribute"
+          help="Optional. A linked parameter is seeded from the shot attribute before the routine runs, and the value it runs with is recorded against the shot. Only numeric attributes can be linked — beans and grind size are text."
+        >
+          {(control) => (
+            <Select
+              {...control}
+              value={linkedAttribute?.type ?? ''}
+              onChange={(value) =>
+                setLinkedAttribute(
+                  value ? ({ type: value } as RoutineParameter['linked_attribute']) : null
+                )
+              }
+              options={[
+                { value: '', label: 'Not linked' },
+                ...LINKABLE_ATTRIBUTES.map((a) => ({ value: a.value, label: a.label })),
+              ]}
+            />
+          )}
+        </Field>
       </div>
-    </div>
+    </Dialog>
   );
 }

@@ -1,5 +1,8 @@
+import type { ComponentChildren } from 'preact';
 import { useState } from 'preact/hooks';
+import { Alert, Button, Dialog, Field, Select, TextInput, tokens } from '@variegated-coffee/ui';
 import { DerivedParameter, DerivedFormula, ParameterUnit, RoutineParameter } from '../../schemas/schemas';
+import { NumberField } from '../NumberField';
 
 interface DerivedParameterEditorProps {
   parameter: DerivedParameter | null;
@@ -11,14 +14,18 @@ interface DerivedParameterEditorProps {
 
 type FormulaType = 'Linear' | 'Sum' | 'Difference' | 'Product';
 
-const PARAMETER_UNITS: ParameterUnit[] = [
-  { type: 'Seconds' },
-  { type: 'Celsius' },
-  { type: 'Bar' },
-  { type: 'MillilitersPerSecond' },
-  { type: 'Grams' },
-  { type: 'Percent' }
+/** Named the way a person names them, not the way the wire format does. */
+const PARAMETER_UNITS: { unit: ParameterUnit; label: string }[] = [
+  { unit: { type: 'Seconds' }, label: 'Seconds (s)' },
+  { unit: { type: 'Celsius' }, label: 'Degrees Celsius (°C)' },
+  { unit: { type: 'Bar' }, label: 'Bar' },
+  { unit: { type: 'MillilitersPerSecond' }, label: 'Millilitres per second (mL/s)' },
+  { unit: { type: 'Grams' }, label: 'Grams (g)' },
+  { unit: { type: 'Percent' }, label: 'Percent (%)' },
 ];
+
+/** The derived slots the firmware stores. Mirrors `MAX_DERIVED_PARAMETERS`. */
+const MAX_INDEX = 15;
 
 function getFormulaType(formula: DerivedFormula): FormulaType {
   return formula.type as FormulaType;
@@ -68,21 +75,45 @@ export function DerivedParameterEditor({
     initialFormula.type === 'Difference' ? initialFormula.value.param_b : 0
   );
 
+  const [numbersInvalid, setNumbersInvalid] = useState<Record<string, true>>({});
+
+  /*
+   * Three `alert()` calls used to live inside `handleSave`, firing a native dialog after
+   * the button was pressed about fields the user had already left. Two are field errors
+   * now; the third is a precondition of the whole editor, so it is stated at the top.
+   */
+  const nameError = name.trim() === '' ? 'A derived parameter needs a name.' : undefined;
+  const indexError =
+    !parameter && existingIndices.includes(index)
+      ? `D${index} is already used by another derived parameter.`
+      : index < 0 || index > MAX_INDEX
+        ? `Must be between 0 and ${MAX_INDEX}.`
+        : undefined;
+  const noBaseParameters = availableParameters.length === 0;
+
+  const invalid =
+    Boolean(nameError) ||
+    Boolean(indexError) ||
+    noBaseParameters ||
+    Object.keys(numbersInvalid).length > 0;
+
+  const numberValidity = (key: string) => (valid: boolean) =>
+    setNumbersInvalid((prev) => {
+      if (valid) {
+        const { [key]: _unused, ...rest } = prev;
+        return rest;
+      }
+      return { ...prev, [key]: true };
+    });
+
+  /** The parameters a formula can be built from, as select options. */
+  const parameterOptions = availableParameters.map((p) => ({
+    value: String(p.index),
+    label: `P${p.index}: ${p.name}`,
+  }));
+
   const handleSave = () => {
-    if (!name.trim()) {
-      alert('Parameter name is required');
-      return;
-    }
-
-    if (!parameter && existingIndices.includes(index)) {
-      alert(`Derived parameter index ${index} is already in use`);
-      return;
-    }
-
-    if (availableParameters.length === 0) {
-      alert('You must define at least one regular parameter first');
-      return;
-    }
+    if (invalid) return;
 
     let formula: DerivedFormula;
     switch (formulaType) {
@@ -138,321 +169,206 @@ export function DerivedParameterEditor({
   };
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1001
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '2rem',
-        maxWidth: '600px',
-        width: '90%',
-        maxHeight: '90vh',
-        overflow: 'auto'
-      }}>
-        <h2 style={{ marginBottom: '1.5rem' }}>
-          {parameter ? 'Edit Derived Parameter' : 'New Derived Parameter'}
-        </h2>
+    <Dialog
+      title={parameter ? 'Edit derived parameter' : 'New derived parameter'}
+      onClose={onCancel}
+      width="600px"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleSave} disabled={invalid}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.lg }}>
+        {noBaseParameters && (
+          <Alert role="warn">
+            A derived parameter is computed from the regular ones, so there is nothing to
+            build this from yet. Add a parameter first.
+          </Alert>
+        )}
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Index (0-15)
-          </label>
-          <input
-            type="number"
-            min="0"
-            max="15"
-            value={index}
-            onChange={(e) => setIndex(parseInt(e.currentTarget.value) || 0)}
-            disabled={parameter !== null}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              backgroundColor: parameter ? '#f5f5f5' : 'white'
-            }}
-          />
-          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-            This will be referenced as D{index}
-          </div>
-        </div>
+        <Field
+          label="Slot"
+          help={indexError ? undefined : `Steps refer to this as D${index}.`}
+          error={indexError}
+        >
+          {(control) => (
+            <TextInput
+              {...control}
+              numeric
+              value={String(index)}
+              disabled={parameter !== null}
+              onInput={(value) => {
+                const parsed = Number.parseInt(value, 10);
+                setIndex(Number.isNaN(parsed) ? -1 : parsed);
+              }}
+            />
+          )}
+        </Field>
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Name
-          </label>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="e.g. Total Time, Flow Rate Ratio"
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          />
-        </div>
+        <Field label="Name" error={nameError} required>
+          {(control) => (
+            <TextInput
+              {...control}
+              value={name}
+              onInput={setName}
+              placeholder="Total time, Brew ratio, …"
+            />
+          )}
+        </Field>
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Unit (optional)
-          </label>
-          <select
-            value={unit?.type || ''}
-            onChange={(e) => setUnit(e.currentTarget.value ? { type: e.currentTarget.value } as ParameterUnit : null)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <option value="">None</option>
-            {PARAMETER_UNITS.map(u => (
-              <option key={u.type} value={u.type}>{u.type}</option>
-            ))}
-          </select>
-        </div>
+        <Field label="Unit" help="Optional. Shown next to the value wherever it appears.">
+          {(control) => (
+            <Select
+              {...control}
+              value={unit?.type ?? ''}
+              onChange={(value) => setUnit(value ? ({ type: value } as ParameterUnit) : null)}
+              options={[
+                { value: '', label: 'No unit' },
+                ...PARAMETER_UNITS.map((u) => ({ value: u.unit.type, label: u.label })),
+              ]}
+            />
+          )}
+        </Field>
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Formula Type
-          </label>
-          <select
-            value={formulaType}
-            onChange={(e) => handleFormulaTypeChange(e.currentTarget.value as FormulaType)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <option value="Linear">Linear (a * P + b)</option>
-            <option value="Sum">Sum (P1 + P2 + ...)</option>
-            <option value="Difference">Difference (P1 - P2)</option>
-            <option value="Product">Product (P1 * P2 * ...)</option>
-          </select>
-        </div>
+        <Field label="Formula">
+          {(control) => (
+            <Select
+              {...control}
+              value={formulaType}
+              onChange={(value) => handleFormulaTypeChange(value as FormulaType)}
+              options={[
+                { value: 'Linear', label: 'Scale and offset one parameter' },
+                { value: 'Sum', label: 'Add parameters together' },
+                { value: 'Difference', label: 'Subtract one parameter from another' },
+                { value: 'Product', label: 'Multiply parameters together' },
+              ]}
+            />
+          )}
+        </Field>
 
-        {/* Linear Formula */}
         {formulaType === 'Linear' && (
-          <div style={{ padding: '1rem', backgroundColor: '#f5f5f5', borderRadius: '4px', marginBottom: '1.5rem' }}>
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Base Parameter
-              </label>
-              <select
-                value={linearBaseParam}
-                onChange={(e) => setLinearBaseParam(parseInt(e.currentTarget.value))}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px'
-                }}
-              >
-                {availableParameters.map(p => (
-                  <option key={p.index} value={p.index}>P{p.index}: {p.name}</option>
-                ))}
-              </select>
-            </div>
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Multiplier
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                value={linearMultiplier}
-                onChange={(e) => setLinearMultiplier(parseFloat(e.currentTarget.value) || 0)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px'
-                }}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Offset
-              </label>
-              <input
-                type="number"
-                step="0.1"
-                value={linearOffset}
-                onChange={(e) => setLinearOffset(parseFloat(e.currentTarget.value) || 0)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px'
-                }}
-              />
-            </div>
-            <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666' }}>
-              Formula: D{index} = {linearMultiplier} * P{linearBaseParam} + {linearOffset}
-            </div>
+          <div style={{ padding: tokens.space.md, backgroundColor: tokens.color.surfaceSunken, border: `1px solid ${tokens.color.border}`, borderRadius: tokens.radius.sm, display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+            <Field label="Base parameter">
+              {(control) => (
+                <Select
+                  {...control}
+                  value={String(linearBaseParam)}
+                  onChange={(value) => setLinearBaseParam(Number.parseInt(value, 10))}
+                  options={parameterOptions}
+                />
+              )}
+            </Field>
+            <NumberField
+              label="Multiplier"
+              value={linearMultiplier}
+              onChange={setLinearMultiplier}
+              onValidityChange={numberValidity('multiplier')}
+            />
+            <NumberField
+              label="Offset"
+              value={linearOffset}
+              onChange={setLinearOffset}
+              onValidityChange={numberValidity('offset')}
+            />
+            <FormulaPreview>
+              D{index} = {linearMultiplier} × P{linearBaseParam} + {linearOffset}
+            </FormulaPreview>
           </div>
         )}
 
-        {/* Sum/Product Formula */}
         {(formulaType === 'Sum' || formulaType === 'Product') && (
-          <div style={{ padding: '1rem', backgroundColor: '#f5f5f5', borderRadius: '4px', marginBottom: '1.5rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-              Parameters
-            </label>
+          <div style={{ padding: tokens.space.md, backgroundColor: tokens.color.surfaceSunken, border: `1px solid ${tokens.color.border}`, borderRadius: tokens.radius.sm, display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
             {listParams.map((paramIdx, idx) => (
-              <div key={idx} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                <select
-                  value={paramIdx}
-                  onChange={(e) => updateListParam(idx, parseInt(e.currentTarget.value))}
-                  style={{
-                    flex: 1,
-                    padding: '0.5rem',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px'
-                  }}
-                >
-                  {availableParameters.map(p => (
-                    <option key={p.index} value={p.index}>P{p.index}: {p.name}</option>
-                  ))}
-                </select>
-                <button
+              <div key={idx} style={{ display: 'flex', gap: tokens.space.sm, alignItems: 'flex-end' }}>
+                <div style={{ flex: 1 }}>
+                  <Field label={`Parameter ${idx + 1}`}>
+                    {(control) => (
+                      <Select
+                        {...control}
+                        value={String(paramIdx)}
+                        onChange={(value) => updateListParam(idx, Number.parseInt(value, 10))}
+                        options={parameterOptions}
+                      />
+                    )}
+                  </Field>
+                </div>
+                <Button
+                  variant="destructive"
+                  size="sm"
                   onClick={() => removeListParam(idx)}
                   disabled={listParams.length === 1}
-                  style={{
-                    padding: '0.5rem 0.75rem',
-                    backgroundColor: '#dc3545',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: listParams.length === 1 ? 'not-allowed' : 'pointer',
-                    opacity: listParams.length === 1 ? 0.5 : 1
-                  }}
+                  ariaLabel={`Remove parameter ${idx + 1} from the formula`}
                 >
-                  ✕
-                </button>
+                  Remove
+                </Button>
               </div>
             ))}
-            <button
-              onClick={addListParam}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: '#28a745',
-                color: 'white',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.9rem',
-                marginTop: '0.5rem'
-              }}
-            >
-              + Add Parameter
-            </button>
-            <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666' }}>
-              Formula: D{index} = {listParams.map(p => `P${p}`).join(formulaType === 'Sum' ? ' + ' : ' × ')}
-            </div>
-          </div>
-        )}
-
-        {/* Difference Formula */}
-        {formulaType === 'Difference' && (
-          <div style={{ padding: '1rem', backgroundColor: '#f5f5f5', borderRadius: '4px', marginBottom: '1.5rem' }}>
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Parameter A
-              </label>
-              <select
-                value={diffParamA}
-                onChange={(e) => setDiffParamA(parseInt(e.currentTarget.value))}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px'
-                }}
-              >
-                {availableParameters.map(p => (
-                  <option key={p.index} value={p.index}>P{p.index}: {p.name}</option>
-                ))}
-              </select>
-            </div>
             <div>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                Parameter B
-              </label>
-              <select
-                value={diffParamB}
-                onChange={(e) => setDiffParamB(parseInt(e.currentTarget.value))}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px'
-                }}
-              >
-                {availableParameters.map(p => (
-                  <option key={p.index} value={p.index}>P{p.index}: {p.name}</option>
-                ))}
-              </select>
+              <Button variant="secondary" size="sm" onClick={addListParam}>
+                Add parameter
+              </Button>
             </div>
-            <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666' }}>
-              Formula: D{index} = P{diffParamA} - P{diffParamB}
-            </div>
+            <FormulaPreview>
+              D{index} = {listParams.map(p => `P${p}`).join(formulaType === 'Sum' ? ' + ' : ' × ')}
+            </FormulaPreview>
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Save
-          </button>
-          <button
-            onClick={onCancel}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-        </div>
+        {formulaType === 'Difference' && (
+          <div style={{ padding: tokens.space.md, backgroundColor: tokens.color.surfaceSunken, border: `1px solid ${tokens.color.border}`, borderRadius: tokens.radius.sm, display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+            <Field label="Subtract from">
+              {(control) => (
+                <Select
+                  {...control}
+                  value={String(diffParamA)}
+                  onChange={(value) => setDiffParamA(Number.parseInt(value, 10))}
+                  options={parameterOptions}
+                />
+              )}
+            </Field>
+            <Field label="Subtract">
+              {(control) => (
+                <Select
+                  {...control}
+                  value={String(diffParamB)}
+                  onChange={(value) => setDiffParamB(Number.parseInt(value, 10))}
+                  options={parameterOptions}
+                />
+              )}
+            </Field>
+            <FormulaPreview>
+              D{index} = P{diffParamA} − P{diffParamB}
+            </FormulaPreview>
+          </div>
+        )}
+
       </div>
+    </Dialog>
+  );
+}
+
+/**
+ * The formula as it will actually be evaluated, spelled out.
+ *
+ * Monospace, because it is an expression -- the indices line up under each other when the
+ * formula type is changed, which is how you notice you are subtracting the wrong way round.
+ */
+function FormulaPreview({ children }: { children: ComponentChildren }) {
+  return (
+    <div
+      style={{
+        fontSize: '0.9rem',
+        color: tokens.color.inkMuted,
+        fontFamily: tokens.font.mono,
+      }}
+    >
+      {children}
     </div>
   );
 }

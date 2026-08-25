@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
+import { Field, Select, tokens } from '@variegated-coffee/ui';
 import { StateCondition, ParameterValue, RoutineParameter, DerivedParameter, ParameterUnit, ShotState } from '../../schemas/schemas';
 import { ParameterValueEditor } from './ParameterValueEditor';
 import { EntitySelector, EntityType } from '../EntitySelector';
@@ -221,56 +222,51 @@ export function StateConditionEditor({ condition, onChange, parameters, derivedP
   };
 
   return (
-    <div>
-      <div style={{ marginBottom: '1rem' }}>
-        <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Condition Type</label>
-        <select
-          value={conditionType}
-          onChange={(e) => handleTypeChange(e.currentTarget.value as ConditionType)}
-          style={{
-            width: '100%',
-            padding: '0.5rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            fontSize: '1rem'
-          }}
-        >
-          <optgroup label="Brewing State">
-            <option value="Brewing">Brewing</option>
-            <option value="NotBrewing">Not Brewing</option>
-          </optgroup>
-          <optgroup label="Boiler Conditions">
-            <option value="BoilerTemperatureAbove">Boiler Temperature Above</option>
-            <option value="BoilerTemperatureBelow">Boiler Temperature Below</option>
-            <option value="BoilerPressureAbove">Boiler Pressure Above</option>
-            <option value="BoilerPressureBelow">Boiler Pressure Below</option>
-          </optgroup>
-          <optgroup label="Group Conditions">
-            <option value="GroupInputFlowRateAbove">Group Input Flow Rate Above</option>
-            <option value="GroupInputFlowRateBelow">Group Input Flow Rate Below</option>
-            <option value="GroupPressureAbove">Group Pressure Above</option>
-            <option value="GroupPressureBelow">Group Pressure Below</option>
-            <option value="OutputWeightAbove">Output Weight Above</option>
-            <option value="OutputWeightBelow">Output Weight Below</option>
-            <option value="InputVolumeAboveRelativeToStart">Input Volume Above (Relative to Start)</option>
-          </optgroup>
-          <optgroup label="Shot Phase">
-            <option value="ShotStateReached">Shot has reached a phase</option>
-          </optgroup>
-          <optgroup label="Extraction Conditions">
-            <option value="GroupOutputConductivityAbove">Output Conductivity Above</option>
-            <option value="GroupOutputConductivityBelow">Output Conductivity Below</option>
-            <option value="GroupExtractionRateAbove">Extraction Rate Above</option>
-            <option value="GroupExtractionRateBelow">Extraction Rate Below</option>
-            <option value="ExtractedSolidsAbove">Extracted Solids Above</option>
-            <option value="ExtractedSolidsBelow">Extracted Solids Below</option>
-          </optgroup>
-          <optgroup label="Water Tap Conditions">
-            <option value="WaterTapFlowRateAbove">Water Tap Flow Rate Above</option>
-            <option value="WaterTapFlowRateBelow">Water Tap Flow Rate Below</option>
-          </optgroup>
-        </select>
-      </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+      <Field label="Condition">
+        {(control) => (
+          <Select
+            {...control}
+            value={conditionType}
+            onChange={(value) => handleTypeChange(value as ConditionType)}
+            // The direction is spelled "is above" / "is below" rather than "Above" /
+            // "Below", so each option reads as the sentence the condition actually is.
+            options={[
+              { value: 'Brewing', label: 'Is brewing', group: 'Brewing' },
+              { value: 'NotBrewing', label: 'Is not brewing', group: 'Brewing' },
+
+              { value: 'BoilerTemperatureAbove', label: 'Temperature is above', group: 'Boiler' },
+              { value: 'BoilerTemperatureBelow', label: 'Temperature is below', group: 'Boiler' },
+              { value: 'BoilerPressureAbove', label: 'Pressure is above', group: 'Boiler' },
+              { value: 'BoilerPressureBelow', label: 'Pressure is below', group: 'Boiler' },
+
+              { value: 'GroupInputFlowRateAbove', label: 'Input flow is above', group: 'Group' },
+              { value: 'GroupInputFlowRateBelow', label: 'Input flow is below', group: 'Group' },
+              { value: 'GroupPressureAbove', label: 'Pressure is above', group: 'Group' },
+              { value: 'GroupPressureBelow', label: 'Pressure is below', group: 'Group' },
+              { value: 'OutputWeightAbove', label: 'Output weight is above', group: 'Group' },
+              { value: 'OutputWeightBelow', label: 'Output weight is below', group: 'Group' },
+              {
+                value: 'InputVolumeAboveRelativeToStart',
+                label: 'Input volume since the start is above',
+                group: 'Group',
+              },
+
+              { value: 'ShotStateReached', label: 'Shot has reached a phase', group: 'Shot phase' },
+
+              { value: 'GroupOutputConductivityAbove', label: 'Conductivity is above', group: 'Extraction' },
+              { value: 'GroupOutputConductivityBelow', label: 'Conductivity is below', group: 'Extraction' },
+              { value: 'GroupExtractionRateAbove', label: 'Extraction rate is above', group: 'Extraction' },
+              { value: 'GroupExtractionRateBelow', label: 'Extraction rate is below', group: 'Extraction' },
+              { value: 'ExtractedSolidsAbove', label: 'Extracted solids are above', group: 'Extraction' },
+              { value: 'ExtractedSolidsBelow', label: 'Extracted solids are below', group: 'Extraction' },
+
+              { value: 'WaterTapFlowRateAbove', label: 'Flow rate is above', group: 'Water tap' },
+              { value: 'WaterTapFlowRateBelow', label: 'Flow rate is below', group: 'Water tap' },
+            ]}
+          />
+        )}
+      </Field>
 
       <EntitySelector
         entityType={getEntityType()}
@@ -279,29 +275,19 @@ export function StateConditionEditor({ condition, onChange, parameters, derivedP
       />
 
       {conditionType === 'ShotStateReached' && (
-        <div style={{ marginBottom: '1rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Phase</label>
-          <select
-            value={phase.type}
-            onChange={(e) => handlePhaseChange(e.currentTarget.value as ShotState['type'])}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            {SHOT_PHASES.map(p => (
-              <option key={p.value} value={p.value}>{p.label}</option>
-            ))}
-          </select>
-          <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-            {SHOT_PHASES.find(p => p.value === phase.type)?.hint}
-            {' '}Fires once the shot has reached this phase or passed it, and only while a
-            shot is running.
-          </div>
-        </div>
+        <Field
+          label="Phase"
+          help={`${SHOT_PHASES.find(p => p.value === phase.type)?.hint ?? ''} Fires once the shot has reached this phase or passed it, and only while a shot is running.`}
+        >
+          {(control) => (
+            <Select
+              {...control}
+              value={phase.type}
+              onChange={(value) => handlePhaseChange(value as ShotState['type'])}
+              options={SHOT_PHASES.map(p => ({ value: p.value, label: p.label }))}
+            />
+          )}
+        </Field>
       )}
 
       {needsThreshold && (

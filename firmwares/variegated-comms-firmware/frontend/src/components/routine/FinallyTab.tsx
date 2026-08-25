@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Badge, Button, EmptyState, tokens, useDialogs } from '@variegated-coffee/ui';
 import { RoutineCommand, RoutineParameter, DerivedParameter } from '../../schemas/schemas';
 import { RoutineCommandBuilder } from './RoutineCommandBuilder';
 import { getRoutineCommandSummary } from './RoutineCommandSummary';
@@ -18,6 +19,7 @@ export function FinallyTab({
   derivedParameters
 }: FinallyTabProps) {
   const machine = useMachine();
+  const { confirm } = useDialogs();
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [isAdding, setIsAdding] = useState(false);
 
@@ -33,10 +35,18 @@ export function FinallyTab({
     setIsAdding(false);
   };
 
-  const handleDeleteCommand = (index: number) => {
-    if (confirm('Delete this command?')) {
-      onFinallyCommandsChange(finallyCommands.filter((_, i) => i !== index));
-    }
+  const handleDeleteCommand = async (index: number) => {
+    const ok = await confirm({
+      title: `Remove finally command ${index + 1}?`,
+      body: getRoutineCommandSummary(
+        finallyCommands[index]!,
+        machine.getBoilerName,
+        machine.getGroupName
+      ),
+      confirmLabel: 'Remove',
+      destructive: true,
+    });
+    if (ok) onFinallyCommandsChange(finallyCommands.filter((_, i) => i !== index));
   };
 
   const handleMoveUp = (index: number) => {
@@ -54,118 +64,94 @@ export function FinallyTab({
   };
 
   return (
-    <div style={{ padding: '1.5rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+    <div style={{ padding: tokens.space.lg }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: tokens.space.sm, marginBottom: tokens.space.md, flexWrap: 'wrap' }}>
         <div>
-          <h3 style={{ margin: 0, marginBottom: '0.25rem' }}>Finally Commands ({finallyCommands.length})</h3>
-          <p style={{ margin: 0, fontSize: '0.85rem', color: '#666' }}>
-            These commands run when the routine completes
+          <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm, marginBottom: tokens.space.xs }}>
+            <h3 style={{ margin: 0 }}>Finally</h3>
+            <Badge numeric>{finallyCommands.length}</Badge>
+          </div>
+          <p style={{ margin: 0, fontSize: '0.85rem', color: tokens.color.inkMuted }}>
+            Run when the routine ends, however it ends.
           </p>
         </div>
-        <button
-          onClick={() => setIsAdding(true)}
-          style={{
-            padding: '0.5rem 1rem',
-            backgroundColor: '#28a745',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontSize: '0.9rem'
-          }}
-        >
-          + Add Command
-        </button>
+        <Button variant="secondary" size="sm" onClick={() => setIsAdding(true)}>
+          Add command
+        </Button>
       </div>
 
       {finallyCommands.length === 0 ? (
-        <div style={{
-          padding: '2rem',
-          textAlign: 'center',
-          color: '#666',
-          border: '2px dashed #ccc',
-          borderRadius: '4px'
-        }}>
-          No finally commands defined. These are optional cleanup commands.
-        </div>
+        <EmptyState
+          title="No finally commands"
+          detail="Optional. Use these to put the machine back to a known state — pump off, valve closed — whether the routine finished or was cancelled."
+          action={{ label: 'Add command', onClick: () => setIsAdding(true) }}
+        />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
           {finallyCommands.map((cmd, index) => (
             <div
               key={index}
               style={{
-                padding: '0.75rem',
-                backgroundColor: '#f5f5f5',
-                borderRadius: '4px',
+                padding: tokens.space.sm,
+                backgroundColor: tokens.color.surfaceSunken,
+                border: `1px solid ${tokens.color.border}`,
+                borderRadius: tokens.radius.sm,
                 display: 'flex',
                 justifyContent: 'space-between',
-                alignItems: 'center'
+                alignItems: 'center',
+                gap: tokens.space.sm,
+                flexWrap: 'wrap',
               }}
             >
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: '0.9rem' }}>
-                  {index + 1}. {getRoutineCommandSummary(cmd, machine.getBoilerName, machine.getGroupName)}
-                </div>
+              <div style={{ flex: 1, minWidth: '12rem', fontSize: '0.9rem' }}>
+                <span
+                  style={{
+                    fontFamily: tokens.font.mono,
+                    fontVariantNumeric: 'tabular-nums',
+                    color: tokens.color.inkMuted,
+                    marginRight: tokens.space.sm,
+                  }}
+                >
+                  #{index + 1}
+                </span>
+                {getRoutineCommandSummary(cmd, machine.getBoilerName, machine.getGroupName)}
               </div>
 
-              <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
-                <button
+              <div style={{ display: 'flex', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => handleMoveUp(index)}
                   disabled={index === 0}
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: index === 0 ? '#e0e0e0' : 'white',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: index === 0 ? 'not-allowed' : 'pointer',
-                    fontSize: '0.8rem'
-                  }}
-                  title="Move up"
+                  ariaLabel={`Move command ${index + 1} earlier`}
                 >
-                  ↑
-                </button>
-                <button
+                  <span aria-hidden="true">↑</span>
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => handleMoveDown(index)}
                   disabled={index === finallyCommands.length - 1}
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: index === finallyCommands.length - 1 ? '#e0e0e0' : 'white',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: index === finallyCommands.length - 1 ? 'not-allowed' : 'pointer',
-                    fontSize: '0.8rem'
-                  }}
-                  title="Move down"
+                  ariaLabel={`Move command ${index + 1} later`}
                 >
-                  ↓
-                </button>
-                <button
+                  <span aria-hidden="true">↓</span>
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => setEditingIndex(index)}
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: 'white',
-                    border: '1px solid #ccc',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem'
-                  }}
+                  ariaLabel={`Edit command ${index + 1}`}
                 >
                   Edit
-                </button>
-                <button
-                  onClick={() => handleDeleteCommand(index)}
-                  style={{
-                    padding: '0.25rem 0.5rem',
-                    backgroundColor: '#dc3545',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '0.8rem'
-                  }}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => void handleDeleteCommand(index)}
+                  ariaLabel={`Remove command ${index + 1}`}
                 >
-                  ✕
-                </button>
+                  Remove
+                </Button>
               </div>
             </div>
           ))}

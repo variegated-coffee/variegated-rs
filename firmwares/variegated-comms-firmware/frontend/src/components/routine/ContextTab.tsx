@@ -1,3 +1,4 @@
+import { Alert, Field, TextInput, tokens } from '@variegated-coffee/ui';
 import { RoutineParameter, RoutinePrerequisite, SensorCapability, ShotAnnotation } from '../../schemas/schemas';
 import { MAX_ROUTINE_SHOT_ANNOTATIONS, isLinkedTo } from '../../utils/routineHelpers';
 
@@ -66,9 +67,16 @@ export function ContextTab({
     return found.value.type === 'Number' ? String(found.value.value) : found.value.value;
   };
 
-  const sectionStyle = { padding: '1.5rem', borderBottom: '1px solid #eee' };
-  const headingStyle = { margin: '0 0 0.25rem 0', fontSize: '1.05rem' };
-  const blurbStyle = { margin: '0 0 1rem 0', fontSize: '0.85rem', color: '#666' };
+  const sectionStyle = {
+    padding: tokens.space.lg,
+    borderBottom: `1px solid ${tokens.color.border}`,
+  };
+  const headingStyle = { margin: `0 0 ${tokens.space.xs} 0`, fontSize: '1.05rem' };
+  const blurbStyle = {
+    margin: `0 0 ${tokens.space.md} 0`,
+    fontSize: '0.85rem',
+    color: tokens.color.inkMuted,
+  };
 
   return (
     <div>
@@ -82,12 +90,20 @@ export function ContextTab({
         {CAPABILITIES.map(c => (
           <label
             key={c.value}
-            style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.5rem' }}
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: tokens.space.sm,
+              marginBottom: tokens.space.sm,
+              cursor: 'pointer',
+            }}
           >
             <input type="checkbox" checked={has(c.value)} onChange={() => toggle(c.value)} />
             <span>
               {c.label}
-              <span style={{ color: '#666', fontSize: '0.85rem' }}> &mdash; {c.hint}</span>
+              <span style={{ color: tokens.color.inkMuted, fontSize: '0.85rem' }}>
+                {' '}&mdash; {c.hint}
+              </span>
             </span>
           </label>
         ))}
@@ -103,40 +119,38 @@ export function ContextTab({
         {ATTRIBUTE_KEYS.map(a => {
           const clash = a.numeric && parameters.some(p => isLinkedTo(p, a.value));
           return (
-            <div key={a.value} style={{ marginBottom: '1rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.25rem', fontWeight: 500 }}>
-                {a.label}
-              </label>
-              <input
-                type={a.numeric ? 'number' : 'text'}
-                step={a.numeric ? '0.1' : undefined}
-                value={attributeValue(a.value)}
-                onChange={(e) => setAttribute(a.value, e.currentTarget.value, a.numeric)}
-                placeholder="Leave blank to record nothing"
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              />
-              {clash && (
+            <div key={a.value} style={{ marginBottom: tokens.space.md }}>
+              <Field
+                label={a.label}
                 // Not an error: the runtime resolves it, and predictably. Worth saying
                 // because the value typed here will not be the one recorded, which is
                 // otherwise indistinguishable from the field being ignored.
-                <div style={{ fontSize: '0.85rem', color: '#a15c00', marginTop: '0.25rem' }}>
-                  A parameter is linked to this attribute. The parameter&rsquo;s value is what
-                  gets recorded; this one only seeds it.
-                </div>
-              )}
+                help={
+                  clash
+                    ? 'A parameter is linked to this attribute. The parameter’s value is what gets recorded; this one only seeds it.'
+                    : undefined
+                }
+              >
+                {(control) => (
+                  <TextInput
+                    {...control}
+                    // `numeric` rather than `type="number"`: a dose of 18.5 typed on a
+                    // machine in a comma locale would otherwise render as 18,5 here and
+                    // be recorded against the shot that way.
+                    numeric={a.numeric}
+                    value={attributeValue(a.value)}
+                    onInput={(value) => setAttribute(a.value, value, a.numeric)}
+                    placeholder="Leave blank to record nothing"
+                  />
+                )}
+              </Field>
             </div>
           );
         })}
         {shotAnnotations.length > MAX_ROUTINE_SHOT_ANNOTATIONS && (
-          <div style={{ fontSize: '0.85rem', color: '#c00' }}>
+          <Alert role="danger">
             Too many shot attributes &mdash; the machine will refuse to store this routine.
-          </div>
+          </Alert>
         )}
       </div>
     </div>

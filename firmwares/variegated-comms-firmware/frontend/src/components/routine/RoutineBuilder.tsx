@@ -1,5 +1,15 @@
+import type { ComponentChildren } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 import { memo } from 'preact/compat';
+import {
+  Alert,
+  Badge,
+  Button,
+  EmptyState,
+  Tabs,
+  tokens,
+  useDialogs,
+} from '@variegated-coffee/ui';
 import { Routine, MachineDefinition, PeripheralStatus, RoutineSummary, RoutineSummaryStorage } from '../../schemas/schemas';
 import {
   capabilityLabel,
@@ -33,6 +43,7 @@ interface RoutineBuilderProps {
 }
 
 const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus }: RoutineBuilderProps) => {
+  const { confirm } = useDialogs();
   const [editingRoutine, setEditingRoutine] = useState<RoutineIdentifier | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [addingType, setAddingType] = useState<'custom' | 'function'>('custom');
@@ -93,9 +104,13 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
   };
 
   const handleDelete = async (identifier: RoutineIdentifier, routineName: string) => {
-    if (!confirm(`Delete routine "${routineName}"?`)) {
-      return;
-    }
+    const ok = await confirm({
+      title: `Delete “${routineName}”?`,
+      body: 'This cannot be undone. Any schedule that runs it will stop working.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (!ok) return;
 
     try {
       await deleteRoutine(identifier);
@@ -123,25 +138,28 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
     }
   };
 
+  // These two are the fire-and-forget pair, so they say the command was sent rather than
+  // that it worked. The routine execution card appearing on the main screen is what says
+  // a routine actually started.
   const handleRun = (identifier: RoutineIdentifier) => {
     const ws = getWebSocketService();
     if (!ws) {
-      showError('WebSocket not connected');
+      showError('Not connected to the machine');
       return;
     }
 
     ws.runRoutine(indexFromIdentifier(identifier));
-    showSuccess('Routine started successfully');
+    showSuccess('Start sent');
   };
 
   const handleOptimizeStorage = () => {
     const ws = getWebSocketService();
     if (!ws) {
-      showError('WebSocket not connected');
+      showError('Not connected to the machine');
       return;
     }
     ws.optimizeRoutineStorage();
-    showSuccess('Storage optimized successfully');
+    showSuccess('Compaction sent');
   };
 
   // Rendered entirely from the summary. The counts below are the reason a summary carries
@@ -164,27 +182,31 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
       return `${getRoutineTypeLabel(identifier.type)} #${identifier.index}`;
     };
 
+    const missingLabel = missing.map(p => capabilityLabel(p.capability)).join(' and ');
+
     return (
       <div
         key={`${identifier.type}-${identifier.index}`}
         style={{
-          padding: '1rem',
-          border: '1px solid #ddd',
-          borderRadius: '4px',
-          backgroundColor: '#fafafa',
+          padding: tokens.space.md,
+          border: `1px solid ${tokens.color.border}`,
+          borderRadius: tokens.radius.md,
+          backgroundColor: tokens.color.surfaceSunken,
           display: 'flex',
           justifyContent: 'space-between',
-          alignItems: 'center'
+          alignItems: 'center',
+          gap: tokens.space.md,
+          flexWrap: 'wrap',
         }}
       >
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: '500', fontSize: '1.1rem', marginBottom: '0.25rem' }}>
+        <div style={{ flex: 1, minWidth: '14rem' }}>
+          <div style={{ fontWeight: 500, fontSize: '1.1rem', marginBottom: tokens.space.xs }}>
             {routine.name}
           </div>
-          <div style={{ fontSize: '0.75rem', color: '#999', marginBottom: '0.25rem' }}>
+          <div style={{ fontSize: '0.75rem', color: tokens.color.inkMuted, marginBottom: tokens.space.xs }}>
             {getRoutineLabel()}
           </div>
-          <div style={{ fontSize: '0.85rem', color: '#666' }}>
+          <div style={{ fontSize: '0.85rem', color: tokens.color.inkMuted }}>
             {routine.parameter_count} parameter{routine.parameter_count !== 1 ? 's' : ''}
             {routine.derived_parameter_count > 0 && ` + ${routine.derived_parameter_count} derived`}
             {' • '}
@@ -193,75 +215,54 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
           </div>
           {!runnable && (
             // Named, not just disabled. "Needs a scale" tells someone what to go and do;
-            // a greyed button with no reason reads as a broken page.
-            <div style={{ fontSize: '0.85rem', color: '#a15c00', marginTop: '0.35rem' }}>
-              Needs {missing.map(p => capabilityLabel(p.capability)).join(' and ')}
+            // a greyed button with no reason reads as a broken page. It is a badge rather
+            // than a coloured sentence so the reason travels with the row.
+            <div style={{ marginTop: tokens.space.xs }}>
+              <Badge role="warn">Needs {missingLabel}</Badge>
             </div>
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem' }}>
-          <button
+        <div style={{ display: 'flex', gap: tokens.space.sm, flexWrap: 'wrap' }}>
+          <Button
+            variant="primary"
+            size="sm"
             onClick={() => void handleRun(identifier)}
             disabled={!runnable}
-            title={runnable ? undefined : `Needs ${missing.map(p => capabilityLabel(p.capability)).join(' and ')}`}
-            style={{
-              padding: '0.5rem 1rem',
-              backgroundColor: runnable ? '#28a745' : '#c8c8c8',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: runnable ? 'pointer' : 'not-allowed',
-              fontSize: '0.9rem',
-              fontWeight: '500'
-            }}
+            // The reason is on the row as a badge, so this repeats it only for a screen
+            // reader landing on the disabled button itself.
+            ariaLabel={runnable ? `Run ${routine.name}` : `Run ${routine.name} — needs ${missingLabel}`}
           >
             Run
-          </button>
+          </Button>
           {allowEdit && (
-            <button
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => setEditingRoutine(identifier)}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: 'white',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '0.9rem'
-              }}
+              ariaLabel={`Edit ${routine.name}`}
             >
               Edit
-            </button>
+            </Button>
           )}
           {allowDelete && (
             <>
-              <button
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => void handleDuplicate(identifier)}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: 'white',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem'
-                }}
+                ariaLabel={`Duplicate ${routine.name}`}
               >
                 Duplicate
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
                 onClick={() => void handleDelete(identifier, routine.name)}
-                style={{
-                  padding: '0.5rem 1rem',
-                  backgroundColor: '#dc3545',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem'
-                }}
+                ariaLabel={`Delete ${routine.name}`}
               >
                 Delete
-              </button>
+              </Button>
             </>
           )}
         </div>
@@ -273,245 +274,158 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
                         (routines.function?.size ?? 0) +
                         (routines.custom?.size ?? 0);
 
+  const startAdding = () => {
+    setAddingType(activeTab === 'function' ? 'function' : 'custom');
+    // For function routines, set default index to first available slot
+    if (activeTab === 'function' && machineDefinition?.function_routines) {
+      const availableIndices = Array.from(machineDefinition.function_routines.keys());
+      if (availableIndices.length > 0) {
+        setAddingFunctionIndex(Math.min(...availableIndices));
+      }
+    }
+    setIsAdding(true);
+  };
+
+  const cardList = (cards: ComponentChildren) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md, paddingTop: tokens.space.md }}>
+      {cards}
+    </div>
+  );
+
   return (
     <div style={{
-      backgroundColor: 'white',
-      borderRadius: '8px',
-      padding: '1.5rem',
-      boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+      backgroundColor: tokens.color.surfaceRaised,
+      border: `1px solid ${tokens.color.border}`,
+      borderRadius: tokens.radius.md,
+      padding: tokens.space.lg,
     }}>
       <div style={{
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: '1.5rem'
+        gap: tokens.space.sm,
+        marginBottom: tokens.space.lg,
+        flexWrap: 'wrap',
       }}>
-        <h2 style={{ margin: 0 }}>Routines ({totalRoutines})</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
+          <h2 style={{ margin: 0 }}>Routines</h2>
+          <Badge numeric>{totalRoutines}</Badge>
+        </div>
         {activeTab !== 'internal' && (
-          <button
-            onClick={() => {
-              setAddingType(activeTab === 'function' ? 'function' : 'custom');
-              // For function routines, set default index to first available slot
-              if (activeTab === 'function' && machineDefinition?.function_routines) {
-                const availableIndices = Array.from(machineDefinition.function_routines.keys());
-                if (availableIndices.length > 0) {
-                  setAddingFunctionIndex(Math.min(...availableIndices));
-                }
-              }
-              setIsAdding(true);
-            }}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            + Create {activeTab === 'function' ? 'Function' : 'Custom'} Routine
-          </button>
+          <Button variant="primary" onClick={startAdding}>
+            Create {activeTab === 'function' ? 'function' : 'custom'} routine
+          </Button>
         )}
       </div>
 
       {error && (
-        <div style={{
-          fontSize: '0.9rem',
-          color: '#721c24',
-          marginBottom: '1rem',
-          padding: '0.75rem',
-          backgroundColor: '#f8d7da',
-          borderRadius: '4px',
-          border: '1px solid #f5c6cb'
-        }}>
-          ❌ {error}
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Alert role="danger" onDismiss={() => setError(null)}>{error}</Alert>
         </div>
       )}
 
       {successMessage && (
-        <div style={{
-          fontSize: '0.9rem',
-          color: '#155724',
-          marginBottom: '1rem',
-          padding: '0.75rem',
-          backgroundColor: '#d4edda',
-          borderRadius: '4px',
-          border: '1px solid #c3e6cb'
-        }}>
-          ✅ {successMessage}
+        <div style={{ marginBottom: tokens.space.md }}>
+          <Alert role="ok">{successMessage}</Alert>
         </div>
       )}
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', borderBottom: '2px solid #ddd', marginBottom: '1rem' }}>
-        <button
-          onClick={() => setActiveTab('custom')}
-          style={{
-            padding: '0.75rem 1.5rem',
-            backgroundColor: 'transparent',
-            border: 'none',
-            borderBottom: activeTab === 'custom' ? '2px solid #0066cc' : '2px solid transparent',
-            color: activeTab === 'custom' ? '#0066cc' : '#666',
-            fontWeight: activeTab === 'custom' ? '600' : 'normal',
-            cursor: 'pointer',
-            fontSize: '1rem',
-            marginBottom: '-2px'
-          }}
-        >
-          Custom ({routines.custom?.size ?? 0})
-        </button>
-        <button
-          onClick={() => setActiveTab('function')}
-          style={{
-            padding: '0.75rem 1.5rem',
-            backgroundColor: 'transparent',
-            border: 'none',
-            borderBottom: activeTab === 'function' ? '2px solid #0066cc' : '2px solid transparent',
-            color: activeTab === 'function' ? '#0066cc' : '#666',
-            fontWeight: activeTab === 'function' ? '600' : 'normal',
-            cursor: 'pointer',
-            fontSize: '1rem',
-            marginBottom: '-2px'
-          }}
-        >
-          Function ({routines.function?.size ?? 0})
-        </button>
-        <button
-          onClick={() => setActiveTab('internal')}
-          style={{
-            padding: '0.75rem 1.5rem',
-            backgroundColor: 'transparent',
-            border: 'none',
-            borderBottom: activeTab === 'internal' ? '2px solid #0066cc' : '2px solid transparent',
-            color: activeTab === 'internal' ? '#0066cc' : '#666',
-            fontWeight: activeTab === 'internal' ? '600' : 'normal',
-            cursor: 'pointer',
-            fontSize: '1rem',
-            marginBottom: '-2px'
-          }}
-        >
-          Internal ({routines.internal?.size ?? 0})
-        </button>
-      </div>
-
-      {/* Custom Routines Tab */}
-      {activeTab === 'custom' && (
-        <>
-          {(routines.custom?.size ?? 0) === 0 ? (
-            <div style={{
-              padding: '3rem',
-              textAlign: 'center',
-              color: '#999',
-              border: '2px dashed #ddd',
-              borderRadius: '4px'
-            }}>
-              No custom routines defined. Click "Create Custom Routine" to get started.
+      {/* The second of the frontend's two hand-built tab strips, and it had the same
+          problems as the routine editor's: three buttons, no roles, no keyboard. It also
+          marked the selected tab by colour alone -- blue text against grey. */}
+      <Tabs
+        label="Routine kinds"
+        active={activeTab}
+        onChange={setActiveTab}
+        tabs={[
+          { id: 'custom' as const, label: 'Custom', badge: routines.custom?.size ?? 0 },
+          { id: 'function' as const, label: 'Function', badge: routines.function?.size ?? 0 },
+          { id: 'internal' as const, label: 'Internal', badge: routines.internal?.size ?? 0 },
+        ]}
+      >
+        {activeTab === 'custom' &&
+          ((routines.custom?.size ?? 0) === 0 ? (
+            <div style={{ paddingTop: tokens.space.md }}>
+              <EmptyState
+                title="No custom routines"
+                detail="A routine is a sequence of steps the machine runs on its own — a backflush, a preinfusion profile."
+                action={{ label: 'Create custom routine', onClick: startAdding }}
+              />
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              {Array.from(routines.custom?.entries() ?? [])
+            cardList(
+              Array.from(routines.custom?.entries() ?? [])
                 .sort(([a], [b]) => Number(a) - Number(b))
-                .map(([index, routine]) => {
-                return renderRoutineCard(routine, { type: 'custom', index }, true, true);
-              })}
-            </div>
-          )}
-        </>
-      )}
+                .map(([index, routine]) =>
+                  renderRoutineCard(routine, { type: 'custom', index }, true, true)
+                )
+            )
+          ))}
 
-      {/* Function Routines Tab */}
-      {activeTab === 'function' && (
-        <>
-          {(routines.function?.size ?? 0) === 0 && !machineDefinition?.function_routines ? (
-            <div style={{
-              padding: '3rem',
-              textAlign: 'center',
-              color: '#999',
-              border: '2px dashed #ddd',
-              borderRadius: '4px'
-            }}>
-              No function routines available.
+        {activeTab === 'function' &&
+          ((routines.function?.size ?? 0) === 0 ? (
+            <div style={{ paddingTop: tokens.space.md }}>
+              <EmptyState
+                title="No function routines"
+                detail={
+                  machineDefinition?.function_routines
+                    ? `Function routines fill slots the machine defines. ${machineDefinition.function_routines.size} slot${machineDefinition.function_routines.size === 1 ? '' : 's'} available.`
+                    : 'This machine defines no function routine slots.'
+                }
+                action={
+                  machineDefinition?.function_routines
+                    ? { label: 'Create function routine', onClick: startAdding }
+                    : undefined
+                }
+              />
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              {Array.from(routines.function?.entries() ?? [])
+            cardList(
+              Array.from(routines.function?.entries() ?? [])
                 .sort(([a], [b]) => Number(a) - Number(b))
-                .map(([index, routine]) => {
-                return renderRoutineCard(routine, { type: 'function', index }, true, false);
-              })}
-              {(routines.function?.size ?? 0) === 0 && (
-                <div style={{
-                  padding: '2rem',
-                  textAlign: 'center',
-                  color: '#666',
-                  border: '1px dashed #ccc',
-                  borderRadius: '4px',
-                  fontSize: '0.9rem'
-                }}>
-                  Function routines are defined in the machine configuration. {machineDefinition?.function_routines ?
-                    `${machineDefinition.function_routines.size} function routine slot(s) available.` :
-                    'No function routine slots configured.'}
-                </div>
-              )}
-            </div>
-          )}
-        </>
-      )}
+                .map(([index, routine]) =>
+                  renderRoutineCard(routine, { type: 'function', index }, true, false)
+                )
+            )
+          ))}
 
-      {/* Internal Routines Tab */}
-      {activeTab === 'internal' && (
-        <>
-          {(routines.internal?.size ?? 0) === 0 ? (
-            <div style={{
-              padding: '3rem',
-              textAlign: 'center',
-              color: '#999',
-              border: '2px dashed #ddd',
-              borderRadius: '4px'
-            }}>
-              No internal system routines.
+        {activeTab === 'internal' &&
+          ((routines.internal?.size ?? 0) === 0 ? (
+            <div style={{ paddingTop: tokens.space.md }}>
+              <EmptyState
+                title="No internal routines"
+                detail="Internal routines are built into the firmware. This build has none."
+              />
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              {Array.from(routines.internal?.entries() ?? [])
+            cardList(
+              Array.from(routines.internal?.entries() ?? [])
                 .sort(([a], [b]) => Number(a) - Number(b))
-                .map(([index, routine]) => {
-                return renderRoutineCard(routine, { type: 'internal', index }, false, false);
-              })}
-            </div>
-          )}
-        </>
-      )}
+                .map(([index, routine]) =>
+                  renderRoutineCard(routine, { type: 'internal', index }, false, false)
+                )
+            )
+          ))}
+      </Tabs>
 
-      {/* Storage Optimization - Housekeeping */}
       {totalRoutines > 0 && (
         <div style={{
-          marginTop: '1.5rem',
-          paddingTop: '1rem',
-          borderTop: '1px solid #eee',
           display: 'flex',
-          justifyContent: 'flex-end'
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: tokens.space.sm,
+          flexWrap: 'wrap',
+          marginTop: tokens.space.lg,
+          paddingTop: tokens.space.md,
+          borderTop: `1px solid ${tokens.color.border}`,
         }}>
-          <button
-            onClick={() => void handleOptimizeStorage()}
-            style={{
-              padding: '0.5rem 0.75rem',
-              fontSize: '0.8rem',
-              color: '#666',
-              backgroundColor: 'transparent',
-              border: '1px solid #ddd',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem'
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#f5f5f5'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
-          >
-            🗜️ Optimize Storage
-          </button>
+          <span style={{ fontSize: '0.8rem', color: tokens.color.inkMuted, maxWidth: '48ch' }}>
+            Deleting routines leaves gaps in the machine's storage. Compacting reclaims
+            them; it does not change any routine.
+          </span>
+          <Button variant="quiet" size="sm" onClick={() => void handleOptimizeStorage()}>
+            Compact storage
+          </Button>
         </div>
       )}
 
@@ -589,15 +503,22 @@ const RoutineEditorForRoutine = ({ identifier, onSave, onCancel }: RoutineEditor
 
   if (loadError !== null) {
     return (
-      <div style={{ padding: '1rem', color: '#dc3545' }}>
-        Could not load this routine: {loadError}
-        <button onClick={onCancel} style={{ marginLeft: '1rem' }}>Close</button>
+      <div style={{ padding: tokens.space.md }}>
+        <Alert
+          role="danger"
+          title="Could not load this routine"
+          action={{ label: 'Close', onClick: onCancel }}
+        >
+          {loadError}
+        </Alert>
       </div>
     );
   }
 
   if (!cached) {
-    return <div style={{ padding: '1rem', color: '#666' }}>Loading routine…</div>;
+    return (
+      <div style={{ padding: tokens.space.md, color: tokens.color.inkMuted }}>Loading routine…</div>
+    );
   }
 
   return <RoutineEditor routine={cached} onSave={onSave} onCancel={onCancel} />;

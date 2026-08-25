@@ -1,4 +1,5 @@
 import { useState } from 'preact/hooks';
+import { Button, Dialog, Field, Select, tokens } from '@variegated-coffee/ui';
 import { RoutineCommand, ParameterValue, RoutineParameter, DerivedParameter, ParameterUnit, TransitionOrigin } from '../../schemas/schemas';
 import { ParameterValueEditor } from './ParameterValueEditor';
 import { EntitySelector, EntityType } from '../EntitySelector';
@@ -248,87 +249,67 @@ export function RoutineCommandBuilder({ command, onSave, onCancel, parameters, d
   };
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1002
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '2rem',
-        maxWidth: '600px',
-        width: '90%',
-        maxHeight: '80vh',
-        overflow: 'auto'
-      }}>
-        <h2 style={{ marginBottom: '1.5rem' }}>
-          {command ? 'Edit Command' : 'Add Command'}
-        </h2>
+    <Dialog
+      title={command ? 'Edit command' : 'Add command'}
+      onClose={onCancel}
+      width="600px"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleSave}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+        {/* The command names drop the "Set Group" prefix that every option in a group
+            already carries in its heading -- twenty-three options each repeating the
+            category they are filed under is what made this list hard to read. */}
+        <Field label="Command">
+          {(control) => (
+            <Select
+              {...control}
+              value={commandType}
+              onChange={(value) => setCommandType(value as CommandType)}
+              options={[
+                { value: 'StartBrewing', label: 'Start brewing', group: 'Brewing' },
+                { value: 'StopBrewing', label: 'Stop brewing', group: 'Brewing' },
 
-        {/* Command Type */}
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>Command Type</label>
-          <select
-            value={commandType}
-            onChange={(e) => setCommandType(e.currentTarget.value as CommandType)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <optgroup label="Brewing">
-              <option value="StartBrewing">Start Brewing</option>
-              <option value="StopBrewing">Stop Brewing</option>
-            </optgroup>
-            <optgroup label="Boiler">
-              <option value="SetBoilerTemperature">Set Boiler Temperature</option>
-              <option value="SetBoilerPressure">Set Boiler Pressure</option>
-              <option value="SetBoilerOff">Set Boiler Off</option>
-            </optgroup>
-            <optgroup label="Group - Direct">
-              <option value="SetGroupFlowRate">Set Group Flow Rate</option>
-              <option value="SetGroupPressure">Set Group Pressure</option>
-              <option value="SetGroupOutputFlowRate">Set Group Output Flow Rate</option>
-              <option value="SetGroupFixedDutyCycle">Set Group Fixed Duty Cycle</option>
-              <option value="SetGroupFullOn">Set Group Full On</option>
-              <option value="SetGroupOff">Set Group Off</option>
-            </optgroup>
-            <optgroup label="Group - With Transition">
-              <option value="SetGroupFlowRateWithTransition">Set Group Flow Rate (Transition)</option>
-              <option value="SetGroupPressureWithTransition">Set Group Pressure (Transition)</option>
-              <option value="SetGroupOutputFlowRateWithTransition">Set Group Output Flow Rate (Transition)</option>
-              <option value="SetGroupFixedDutyCycleWithTransition">Set Group Duty Cycle (Transition)</option>
-            </optgroup>
-            <optgroup label="Group - Bumpless Transfer">
-              <option value="InferGroupPressureIntegral">Infer Group Pressure Integral</option>
-              <option value="InferGroupFlowRateIntegral">Infer Group Flow Rate Integral</option>
-              <option value="InferGroupOutputFlowRateIntegral">Infer Group Output Flow Rate Integral</option>
-            </optgroup>
-            <optgroup label="Scale">
-              <option value="TareGroupScale">Tare Group Scale</option>
-            </optgroup>
-            <optgroup label="Water Tap">
-              <option value="StartPumpingToWaterTap">Start Pumping to Water Tap</option>
-              <option value="StopPumpingToWaterTap">Stop Pumping to Water Tap</option>
-            </optgroup>
-            <optgroup label="Steam Wand">
-              <option value="StartSteaming">Start Steaming</option>
-              <option value="StopSteaming">Stop Steaming</option>
-              <option value="SetSteamValveOpenness">Set Steam Valve Openness</option>
-            </optgroup>
-          </select>
-        </div>
+                { value: 'SetBoilerTemperature', label: 'Hold a temperature', group: 'Boiler' },
+                { value: 'SetBoilerPressure', label: 'Hold a pressure', group: 'Boiler' },
+                { value: 'SetBoilerOff', label: 'Turn off', group: 'Boiler' },
+
+                { value: 'SetGroupFlowRate', label: 'Hold a flow rate', group: 'Group' },
+                { value: 'SetGroupPressure', label: 'Hold a pressure', group: 'Group' },
+                { value: 'SetGroupOutputFlowRate', label: 'Hold an output flow rate', group: 'Group' },
+                { value: 'SetGroupFixedDutyCycle', label: 'Hold a duty cycle', group: 'Group' },
+                { value: 'SetGroupFullOn', label: 'Full on', group: 'Group' },
+                { value: 'SetGroupOff', label: 'Off', group: 'Group' },
+
+                { value: 'SetGroupFlowRateWithTransition', label: 'Ramp to a flow rate', group: 'Group — ramped' },
+                { value: 'SetGroupPressureWithTransition', label: 'Ramp to a pressure', group: 'Group — ramped' },
+                { value: 'SetGroupOutputFlowRateWithTransition', label: 'Ramp to an output flow rate', group: 'Group — ramped' },
+                { value: 'SetGroupFixedDutyCycleWithTransition', label: 'Ramp to a duty cycle', group: 'Group — ramped' },
+
+                { value: 'InferGroupPressureIntegral', label: 'Infer the pressure integral', group: 'Group — bumpless transfer' },
+                { value: 'InferGroupFlowRateIntegral', label: 'Infer the flow rate integral', group: 'Group — bumpless transfer' },
+                { value: 'InferGroupOutputFlowRateIntegral', label: 'Infer the output flow rate integral', group: 'Group — bumpless transfer' },
+
+                { value: 'TareGroupScale', label: 'Tare the scale', group: 'Scale' },
+
+                { value: 'StartPumpingToWaterTap', label: 'Start pumping', group: 'Water tap' },
+                { value: 'StopPumpingToWaterTap', label: 'Stop pumping', group: 'Water tap' },
+
+                { value: 'StartSteaming', label: 'Start steaming', group: 'Steam wand' },
+                { value: 'StopSteaming', label: 'Stop steaming', group: 'Steam wand' },
+                { value: 'SetSteamValveOpenness', label: 'Set valve openness', group: 'Steam wand' },
+              ]}
+            />
+          )}
+        </Field>
 
         {/* Entity selector */}
         {needsIndex && (
@@ -369,38 +350,44 @@ export function RoutineCommandBuilder({ command, onSave, onCancel, parameters, d
         {/* Where the ramp starts. See the note on `transitionOrigin` above for why this is
             a choice rather than an assumption, and why the default is the target. */}
         {needsTransition && (
-          <div style={{ marginBottom: '1rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.25rem' }}>Transition From</label>
-            <select
-              value={transitionOrigin.type}
-              onChange={(e) => {
-                const type = (e.target as HTMLSelectElement).value as TransitionOrigin['type'];
-                setTransitionOrigin(
-                  type === 'Value' ? { type: 'Value', value: originValue } : { type },
-                );
-              }}
-              style={{ width: '100%', padding: '0.5rem' }}
+          <div>
+            <Field
+              label="Ramp from"
+              help={
+                transitionOrigin.type === 'CurrentTarget'
+                  ? 'Starts where the previous step left the setpoint. Usually what you want.'
+                  : transitionOrigin.type === 'CurrentValue'
+                    ? 'Starts at the measured reading. If the machine is lagging behind its setpoint, a declining transition can end up ramping upward.'
+                    : 'Starts at a value you name, whatever the machine is doing.'
+              }
             >
-              <option value="CurrentTarget">Current target &mdash; continue from the last ramp</option>
-              <option value="CurrentValue">Current value &mdash; resync to what the machine measures</option>
-              <option value="Value">A specific value</option>
-            </select>
-            <div style={{ fontSize: '0.85em', opacity: 0.75, marginTop: '0.25rem' }}>
-              {transitionOrigin.type === 'CurrentTarget'
-                ? 'Starts where the previous step left the setpoint. Usually what you want.'
-                : transitionOrigin.type === 'CurrentValue'
-                ? 'Starts at the measured reading. If the machine is lagging behind its setpoint, a declining transition can end up ramping upward.'
-                : 'Starts at a value you name, whatever the machine is doing.'}
-            </div>
+              {(control) => (
+                <Select
+                  {...control}
+                  value={transitionOrigin.type}
+                  onChange={(value) => {
+                    const type = value as TransitionOrigin['type'];
+                    setTransitionOrigin(
+                      type === 'Value' ? { type: 'Value', value: originValue } : { type },
+                    );
+                  }}
+                  options={[
+                    { value: 'CurrentTarget', label: 'The current target' },
+                    { value: 'CurrentValue', label: 'The current measured value' },
+                    { value: 'Value', label: 'A specific value' },
+                  ]}
+                />
+              )}
+            </Field>
             {transitionOrigin.type === 'Value' && (
-              <div style={{ marginTop: '0.5rem' }}>
+              <div style={{ marginTop: tokens.space.sm }}>
                 <ParameterValueEditor
                   value={originValue}
                   onChange={(v) => {
                     setOriginValue(v);
                     setTransitionOrigin({ type: 'Value', value: v });
                   }}
-                  label="Start From"
+                  label="Start from"
                   unit={getValueUnit()}
                   parameters={parameters}
                   derivedParameters={derivedParameters}
@@ -410,40 +397,7 @@ export function RoutineCommandBuilder({ command, onSave, onCancel, parameters, d
           </div>
         )}
 
-        {/* Action Buttons */}
-        <div style={{ display: 'flex', gap: '1rem', marginTop: '2rem' }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Save
-          </button>
-          <button
-            onClick={onCancel}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-        </div>
       </div>
-    </div>
+    </Dialog>
   );
 }

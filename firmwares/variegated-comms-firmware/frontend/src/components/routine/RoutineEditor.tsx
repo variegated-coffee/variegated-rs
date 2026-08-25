@@ -1,6 +1,15 @@
-import { useState } from 'preact/hooks';
+import { useId, useState } from 'preact/hooks';
+import {
+  Button,
+  Field,
+  Select,
+  Tabs,
+  TextInput,
+  tokens,
+  useDialogs,
+} from '@variegated-coffee/ui';
 import { Routine, RoutineParameter, DerivedParameter, RoutineStep, RoutineCommand, RoutinePrerequisite, ShotAnnotation } from '../../schemas/schemas';
-import { ParametersTab } from './ParametersTab';
+import { ParametersTab, MAX_PARAMETERS } from './ParametersTab';
 import { StepsTab } from './StepsTab';
 import { FinallyTab } from './FinallyTab';
 import { ContextTab } from './ContextTab';
@@ -19,7 +28,15 @@ interface RoutineEditorProps {
 
 type TabType = 'parameters' | 'steps' | 'finally' | 'context';
 
+const TABS: { id: TabType; label: string }[] = [
+  { id: 'parameters', label: 'Parameters' },
+  { id: 'steps', label: 'Steps' },
+  { id: 'finally', label: 'Finally' },
+  { id: 'context', label: 'Context' },
+];
+
 export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }: RoutineEditorProps) {
+  const { notify } = useDialogs();
   const [activeTab, setActiveTab] = useState<TabType>('parameters');
   const [name, setName] = useState(routine?.name || '');
   const [parameters, setParameters] = useState<RoutineParameter[]>(routine?.parameters || []);
@@ -28,15 +45,19 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
   const [finallyCommands, setFinallyCommands] = useState<RoutineCommand[]>(routine?.finally || []);
   const [prerequisites, setPrerequisites] = useState<RoutinePrerequisite[]>(routine?.prerequisites || []);
   const [shotAnnotations, setShotAnnotations] = useState<ShotAnnotation[]>(routine?.shot_annotations || []);
+  const titleId = useId();
 
   const handleSave = () => {
     if (!name.trim()) {
-      alert('Routine name is required');
+      void notify({ title: 'A routine needs a name', body: 'Give it one before saving.' });
       return;
     }
 
     if (steps.length === 0) {
-      alert('At least one step is required');
+      void notify({
+        title: 'A routine needs at least one step',
+        body: 'Add a step on the Steps tab before saving.',
+      });
       return;
     }
 
@@ -56,124 +77,110 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
     });
   };
 
-  const getTabStyle = (tab: TabType) => ({
-    flex: 1,
-    padding: '0.75rem 1rem',
-    backgroundColor: activeTab === tab ? 'white' : '#e0e0e0',
-    border: 'none',
-    borderBottom: activeTab === tab ? '3px solid #0066cc' : '3px solid transparent',
-    cursor: 'pointer',
-    fontSize: '0.95rem',
-    fontWeight: activeTab === tab ? '500' : 'normal',
-    transition: 'all 0.2s'
-  });
+  /**
+   * What each tab's badge counts.
+   *
+   * The Parameters tab counted `parameters + derived` while the heading inside it counted
+   * only `parameters`, against a different ceiling -- so the tab read *Parameters (2)* and
+   * the heading four pixels below read *Parameters (1/8)*. It counts the same thing the
+   * tab is named after now, against the same ceiling, and the derived ones have their own
+   * heading inside.
+   */
+  const tabCount = (tab: TabType): { count: number; max?: number } => {
+    switch (tab) {
+      case 'parameters':
+        return { count: parameters.length, max: MAX_PARAMETERS };
+      case 'steps':
+        return { count: steps.length };
+      case 'finally':
+        return { count: finallyCommands.length };
+      case 'context':
+        return { count: prerequisites.length + shotAnnotations.length };
+    }
+  };
 
   return (
     <div style={{
       position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
+      inset: 0,
       backgroundColor: 'rgba(0,0,0,0.5)',
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
       zIndex: 1000,
-      padding: '1rem'
+      padding: tokens.space.md
     }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        maxWidth: '1200px',
-        width: '100%',
-        maxHeight: '90vh',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden'
-      }}>
-        {/* Header */}
-        <div style={{ padding: '1.5rem', borderBottom: '1px solid #ddd' }}>
-          <h2 style={{ margin: 0, marginBottom: '0.75rem' }}>
-            {routine ? 'Edit Routine' : 'Create New Routine'}
+      {/* Not `Dialog`: that one owns its own scrolling body and footer, and this editor is
+          a full-height three-part layout whose middle section scrolls independently. It
+          carries the same semantics by hand rather than fighting the shell. */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        style={{
+          backgroundColor: tokens.color.surfaceRaised,
+          borderRadius: tokens.radius.md,
+          maxWidth: '1200px',
+          width: '100%',
+          maxHeight: '90vh',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden'
+        }}
+      >
+        <div style={{ padding: tokens.space.lg, borderBottom: `1px solid ${tokens.color.border}`, display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+          <h2 id={titleId} style={{ margin: 0 }}>
+            {routine ? 'Edit routine' : 'New routine'}
           </h2>
 
-          {/* Function Slot Selector */}
           {functionSlotConfig && (
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{
-                display: 'block',
-                marginBottom: '0.5rem',
-                fontWeight: '500',
-                fontSize: '0.9rem',
-                color: '#333'
-              }}>
-                Function Routine Slot
-              </label>
-              <select
-                value={functionSlotConfig.index}
-                onChange={(e) => functionSlotConfig.onChange(parseInt(e.currentTarget.value))}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              >
-                {Object.entries(functionSlotConfig.availableSlots).map(([index, name]) => (
-                  <option key={index} value={index}>
-                    Slot {index}: {name}
-                  </option>
-                ))}
-              </select>
-              <div style={{
-                fontSize: '0.8rem',
-                color: '#666',
-                marginTop: '0.25rem'
-              }}>
-                Note: This will overwrite any existing routine in this slot.
-              </div>
-            </div>
+            <Field
+              label="Function routine slot"
+              help="Saving replaces whatever routine is in this slot."
+            >
+              {(control) => (
+                <Select
+                  {...control}
+                  value={String(functionSlotConfig.index)}
+                  onChange={(value) => functionSlotConfig.onChange(Number.parseInt(value, 10))}
+                  options={Object.entries(functionSlotConfig.availableSlots).map(([index, slotName]) => ({
+                    value: index,
+                    label: `Slot ${index}: ${slotName}`,
+                  }))}
+                />
+              )}
+            </Field>
           )}
 
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            placeholder="Routine name (e.g., Turbo Shot, Lungo)"
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          />
+          {/* The routine's name had a placeholder and nothing else -- no label, and so no
+              accessible name at all. A placeholder is not a label: it disappears the moment
+              anything is typed, which is exactly when a user might want to check what the
+              field is. */}
+          <Field label="Routine name" required>
+            {(control) => (
+              <TextInput
+                {...control}
+                value={name}
+                onInput={setName}
+                placeholder="Turbo shot, Lungo, …"
+              />
+            )}
+          </Field>
         </div>
 
-        {/* Tabs */}
-        <div style={{
-          display: 'flex',
-          borderBottom: '1px solid #ddd',
-          backgroundColor: '#f5f5f5'
-        }}>
-          <button onClick={() => setActiveTab('parameters')} style={getTabStyle('parameters')}>
-            Parameters ({parameters.length + derivedParameters.length})
-          </button>
-          <button onClick={() => setActiveTab('steps')} style={getTabStyle('steps')}>
-            Steps ({steps.length})
-          </button>
-          <button onClick={() => setActiveTab('finally')} style={getTabStyle('finally')}>
-            Finally ({finallyCommands.length})
-          </button>
-          <button onClick={() => setActiveTab('context')} style={getTabStyle('context')}>
-            Context ({prerequisites.length + shotAnnotations.length})
-          </button>
-        </div>
-
-        {/* Tab Content */}
-        <div style={{ flex: 1, overflow: 'auto', backgroundColor: 'white' }}>
+        <Tabs
+          label="Routine sections"
+          active={activeTab}
+          onChange={setActiveTab}
+          tabs={TABS.map((tab) => {
+            const { count, max } = tabCount(tab.id);
+            return {
+              id: tab.id,
+              label: tab.label,
+              badge: max === undefined ? count : `${count}/${max}`,
+            };
+          })}
+        >
           {activeTab === 'parameters' && (
             <ParametersTab
               parameters={parameters}
@@ -207,48 +214,29 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
               onShotAnnotationsChange={setShotAnnotations}
             />
           )}
-        </div>
+        </Tabs>
 
-        {/* Footer */}
         <div style={{
-          padding: '1rem 1.5rem',
-          borderTop: '1px solid #ddd',
+          padding: `${tokens.space.md} ${tokens.space.lg}`,
+          borderTop: `1px solid ${tokens.color.border}`,
           display: 'flex',
-          gap: '1rem',
+          gap: tokens.space.sm,
           justifyContent: 'flex-end',
-          backgroundColor: '#f9f9f9'
+          backgroundColor: tokens.color.surfaceSunken
         }}>
-          <button
-            onClick={onCancel}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
+          <Button variant="secondary" onClick={onCancel}>
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="primary"
             onClick={handleSave}
             disabled={!name.trim() || steps.length === 0}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: !name.trim() || steps.length === 0 ? '#ccc' : '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: !name.trim() || steps.length === 0 ? 'not-allowed' : 'pointer'
-            }}
           >
-            Save Routine
-          </button>
+            Save routine
+          </Button>
         </div>
       </div>
     </div>
   );
 }
+

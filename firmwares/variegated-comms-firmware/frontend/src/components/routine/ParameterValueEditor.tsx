@@ -1,5 +1,7 @@
+import { Field, Select, tokens } from '@variegated-coffee/ui';
 import { ParameterValue, ParameterUnit, RoutineParameter, DerivedParameter } from '../../schemas/schemas';
 import { getParameterValueDisplay } from './RoutineCommandSummary';
+import { NumberField } from '../NumberField';
 
 interface ParameterValueEditorProps {
   value: ParameterValue;
@@ -36,117 +38,100 @@ export function ParameterValueEditor({
     }
   };
 
-  const handleStaticChange = (num: number) => {
-    onChange({ type: 'Static', value: num });
-  };
-
-  const handleParameterChange = (index: number) => {
-    onChange({ type: 'Parameter', value: index });
-  };
-
-  const handleDerivedParameterChange = (index: number) => {
-    onChange({ type: 'DerivedParameter', value: index });
-  };
-
   return (
-    <div style={{ marginBottom: '1rem' }}>
-      <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-        {label}
-      </label>
+    <div style={{ marginBottom: tokens.space.md }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(9rem, auto) 1fr auto',
+          gap: tokens.space.sm,
+          alignItems: 'end',
+        }}
+      >
+        {/* Two controls that together are one value, so each is labelled for what it
+            contributes rather than both borrowing the caller's single label. The old
+            version had one `<label>` above the row pointing at neither of them. */}
+        <Field label={label}>
+          {(control) => (
+            <Select
+              {...control}
+              value={valueType}
+              onChange={(next) => handleTypeChange(next as ValueType)}
+              options={[
+                { value: 'Static', label: 'A fixed value' },
+                { value: 'Parameter', label: 'A parameter' },
+                { value: 'DerivedParameter', label: 'A derived parameter' },
+              ]}
+            />
+          )}
+        </Field>
 
-      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-        {/* Type selector */}
-        <select
-          value={valueType}
-          onChange={(e) => handleTypeChange(e.currentTarget.value as ValueType)}
-          style={{
-            padding: '0.5rem',
-            border: '1px solid #ccc',
-            borderRadius: '4px',
-            fontSize: '0.9rem',
-            minWidth: '120px'
-          }}
-        >
-          <option value="Static">Static Value</option>
-          <option value="Parameter">Parameter</option>
-          <option value="DerivedParameter">Derived Param</option>
-        </select>
-
-        {/* Value input */}
         {valueType === 'Static' && (
-          <input
-            type="number"
-            step="0.1"
+          <NumberField
+            label={`${label} value`}
             value={value.type === 'Static' ? value.value : 0}
-            onChange={(e) => handleStaticChange(parseFloat(e.currentTarget.value) || 0)}
-            style={{
-              flex: 1,
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '0.9rem'
-            }}
+            onChange={(next) => onChange({ type: 'Static', value: next })}
           />
         )}
 
         {valueType === 'Parameter' && (
-          <select
-            value={value.type === 'Parameter' ? value.value : 0}
-            onChange={(e) => handleParameterChange(parseInt(e.currentTarget.value))}
-            style={{
-              flex: 1,
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '0.9rem'
-            }}
-          >
-            {parameters.length === 0 ? (
-              <option value={0}>No parameters defined</option>
-            ) : (
-              parameters.map(param => (
-                <option key={param.index} value={param.index}>
-                  P{param.index}: {param.name}
-                </option>
-              ))
+          <Field label={`${label} parameter`}>
+            {(control) => (
+              <Select
+                {...control}
+                value={String(value.type === 'Parameter' ? value.value : 0)}
+                onChange={(next) => onChange({ type: 'Parameter', value: Number.parseInt(next, 10) })}
+                options={
+                  parameters.length === 0
+                    ? [{ value: '0', label: 'No parameters defined' }]
+                    : parameters.map((param) => ({
+                        value: String(param.index),
+                        label: `P${param.index}: ${param.name}`,
+                      }))
+                }
+              />
             )}
-          </select>
+          </Field>
         )}
 
         {valueType === 'DerivedParameter' && (
-          <select
-            value={value.type === 'DerivedParameter' ? value.value : 0}
-            onChange={(e) => handleDerivedParameterChange(parseInt(e.currentTarget.value))}
-            style={{
-              flex: 1,
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '0.9rem'
-            }}
-          >
-            {derivedParameters.length === 0 ? (
-              <option value={0}>No derived parameters defined</option>
-            ) : (
-              derivedParameters.map(param => (
-                <option key={param.index} value={param.index}>
-                  D{param.index}: {param.name}
-                </option>
-              ))
+          <Field label={`${label} derived parameter`}>
+            {(control) => (
+              <Select
+                {...control}
+                value={String(value.type === 'DerivedParameter' ? value.value : 0)}
+                onChange={(next) =>
+                  onChange({ type: 'DerivedParameter', value: Number.parseInt(next, 10) })
+                }
+                options={
+                  derivedParameters.length === 0
+                    ? [{ value: '0', label: 'No derived parameters defined' }]
+                    : derivedParameters.map((param) => ({
+                        value: String(param.index),
+                        label: `D${param.index}: ${param.name}`,
+                      }))
+                }
+              />
             )}
-          </select>
+          </Field>
         )}
 
-        {/* Preview */}
-        <div style={{
-          padding: '0.5rem 0.75rem',
-          backgroundColor: '#f0f0f0',
-          borderRadius: '4px',
-          fontSize: '0.9rem',
-          minWidth: '80px',
-          textAlign: 'center',
-          fontWeight: '500'
-        }}>
+        {/* What the machine will actually use, resolved. Worth keeping visible: with a
+            parameter selected, the two controls say *where* the number comes from and
+            this is the only thing that says what it is. */}
+        <div
+          style={{
+            padding: `0.4rem ${tokens.space.sm}`,
+            backgroundColor: tokens.color.surfaceSunken,
+            border: `1px solid ${tokens.color.border}`,
+            borderRadius: tokens.radius.sm,
+            font: `0.9rem ${tokens.font.mono}`,
+            fontVariantNumeric: 'tabular-nums',
+            minWidth: '5rem',
+            textAlign: 'center',
+            fontWeight: 500,
+          }}
+        >
           {getParameterValueDisplay(value, unit)}
         </div>
       </div>

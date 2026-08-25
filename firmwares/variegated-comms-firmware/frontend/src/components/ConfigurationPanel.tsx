@@ -449,12 +449,31 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
       | KalmanParameters
       | null;
 
+    /**
+     * Send a configuration change.
+     *
+     * Every one of these was followed by `alert('… updated successfully!')`. Nothing here
+     * can know that: these are fire-and-forget commands over the websocket, and the
+     * confirmation is the configuration republish that follows a moment later and redraws
+     * the screen with what the machine actually holds. The message says what happened --
+     * the change was sent -- and the panel behind it says whether it took.
+     */
     const handleSave = (data: EditorData) => {
       const ws = getWebSocketService();
       if (!ws) {
-        alert('WebSocket not connected');
+        setOptimizeMessage({ type: 'error', text: 'Not connected to the machine' });
         return;
       }
+
+      const sent = (what: string) => {
+        setOptimizeMessage({ type: 'success', text: `${what} sent` });
+        setTimeout(() => setOptimizeMessage(null), 3000);
+        goBack();
+      };
+
+      const refuse = (why: string) => {
+        setOptimizeMessage({ type: 'error', text: why });
+      };
 
       // Handle special cases for boiler and group control
       if (navigation.parameterCategory === 'boiler_control' && navigation.entityType === 'boilers' && navigation.entityKey !== null) {
@@ -467,8 +486,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
             pressure: boilerData.target_pressure ?? null
           }
         );
-        alert('Boiler control updated successfully!');
-        goBack();
+        sent('Boiler control change');
         return;
       }
 
@@ -495,8 +513,7 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
             max_output_flow_rate: null
           }
         );
-        alert('Group control updated successfully!');
-        goBack();
+        sent('Brew control change');
         return;
       }
 
@@ -517,13 +534,12 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
             target = { type: 'GroupPressure', value: navigation.entityKey };
           }
         } else {
-          alert('Invalid entity type for PID parameters');
+          refuse('PID parameters can only be set on a boiler or a group.');
           return;
         }
 
         ws.setPidParameters(target, data as PidParameters);
-        alert('PID parameters updated successfully!');
-        goBack();
+        sent('PID parameter change');
         return;
       }
 
@@ -533,14 +549,12 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
 
         if (navigation.entityType === 'groups') {
           ws.setGroupPumpConfiguration(navigation.entityKey, pumpConfig);
-          alert('Group pump configuration updated successfully!');
-          goBack();
+          sent('Pump configuration change');
         } else if (navigation.entityType === 'water_taps') {
           ws.setWaterTapPumpConfiguration(navigation.entityKey, pumpConfig);
-          alert('Water tap pump configuration updated successfully!');
-          goBack();
+          sent('Pump configuration change');
         } else {
-          alert('Invalid entity type for pump configuration');
+          refuse('A pump can only be configured on a group or a water tap.');
         }
         return;
       }
@@ -549,20 +563,28 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
       if (navigation.parameterCategory === 'fill_pump_config' && navigation.entityType === 'boilers' && navigation.entityKey !== null) {
         const pumpConfig = (data as PumpConfiguration | null) || { tacho_pulses_per_liter: null, max_duty_cycle: null, min_duty_cycle: null, ramp_up_time_ms: null, ramp_down_time_ms: null };
         ws.setFillPumpConfiguration(navigation.entityKey, pumpConfig);
-        alert('Fill pump configuration updated successfully!');
-        goBack();
+        sent('Fill pump configuration change');
         return;
       }
 
-      // TODO: Implement actual save via API for other parameter types
-      console.log('Saving configuration:', {
+      /*
+       * Nothing above matched, so there is no message for this setting yet.
+       *
+       * This used to say "Configuration saved! (Backend integration needed)" and navigate
+       * back, which is the worst of both: it told the user their change had been saved
+       * while the parenthetical admitted it had not, and then closed the editor so the
+       * unsaved values were gone. It now says what is true and stays where it is, so the
+       * edit is still on screen.
+       */
+      console.warn('No save path for configuration:', {
         entityType: navigation.entityType,
         entityKey: navigation.entityKey,
         parameterCategory: navigation.parameterCategory,
         data
       });
-      alert('Configuration saved! (Backend integration needed)');
-      goBack();
+      refuse(
+        `This build cannot send a change to ${navigation.parameterCategory ?? 'this setting'} yet. Nothing was saved.`
+      );
     };
 
     const handleCancel = () => {

@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
+import { Button, Dialog, Field, Select, TextInput, tokens } from '@variegated-coffee/ui';
+import { NumberField } from '../NumberField';
 import {
   RoutineExit,
   RoutineExitCondition,
@@ -147,73 +149,63 @@ export function ExitConditionEditor({
     });
   };
 
+  const jumpOutOfRange = exitType === 'JumpToStep' && (jumpToStep < 0 || jumpToStep > totalSteps - 1);
+
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      backgroundColor: 'rgba(0,0,0,0.5)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1003
-    }}>
-      <div style={{
-        backgroundColor: 'white',
-        borderRadius: '8px',
-        padding: '2rem',
-        maxWidth: '700px',
-        width: '90%',
-        maxHeight: '85vh',
-        overflow: 'auto'
-      }}>
-        <h2 style={{ marginBottom: '1.5rem' }}>
-          {exit ? 'Edit Exit Condition' : 'Add Exit Condition'}
-        </h2>
+    <Dialog
+      title={exit ? 'Edit exit condition' : 'Add exit condition'}
+      onClose={onCancel}
+      width="700px"
+      footer={
+        <>
+          <Button variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleSave} disabled={jumpOutOfRange}>
+            Save
+          </Button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.lg }}>
+        {/* An exit condition is a sentence -- "when X, then Y" -- so the two selects are
+            labelled as the two halves of one rather than as "Exit Condition Type" and
+            "Then Action". */}
+        <Field label="Leave this step when">
+          {(control) => (
+            <Select
+              {...control}
+              value={conditionType}
+              onChange={(value) => setConditionType(value as ExitConditionType)}
+              options={[
+                { value: 'After', label: 'A time has passed since entering the step' },
+                { value: 'AfterDurationRelativeToStart', label: 'A time has passed since the routine started' },
+                { value: 'StateConditionMet', label: 'The machine reaches a condition' },
+                { value: 'UserAction', label: 'The user presses something' },
+                { value: 'Always', label: 'Immediately' },
+                { value: 'Never', label: 'Never — hold here' },
+              ]}
+            />
+          )}
+        </Field>
 
-        {/* Condition Type */}
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Exit Condition Type
-          </label>
-          <select
-            value={conditionType}
-            onChange={(e) => setConditionType(e.currentTarget.value as ExitConditionType)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <option value="Always">Always (immediate)</option>
-            <option value="Never">Never (wait forever)</option>
-            <option value="After">After Duration</option>
-            <option value="AfterDurationRelativeToStart">After Duration (from routine start)</option>
-            <option value="StateConditionMet">When State Condition Met</option>
-            <option value="UserAction">On User Action</option>
-          </select>
-        </div>
-
-        {/* Condition-specific inputs */}
         <div style={{
-          padding: '1rem',
-          backgroundColor: '#f5f5f5',
-          borderRadius: '4px',
-          marginBottom: '1.5rem'
+          padding: tokens.space.md,
+          backgroundColor: tokens.color.surfaceSunken,
+          border: `1px solid ${tokens.color.border}`,
+          borderRadius: tokens.radius.sm,
         }}>
           {conditionType === 'Always' && (
-            <div style={{ color: '#666', fontSize: '0.9rem' }}>
-              Exit immediately upon entering this step
+            <div style={{ color: tokens.color.inkMuted, fontSize: '0.9rem' }}>
+              The step is entered and left in the same cycle. Useful for a step that only
+              runs its entry commands.
             </div>
           )}
 
           {conditionType === 'Never' && (
-            <div style={{ color: '#666', fontSize: '0.9rem' }}>
-              Never exit automatically (requires external trigger)
+            <div style={{ color: tokens.color.inkMuted, fontSize: '0.9rem' }}>
+              The routine holds here until something outside it intervenes — another exit
+              condition on this step, or a cancel.
             </div>
           )}
 
@@ -221,7 +213,7 @@ export function ExitConditionEditor({
             <ParameterValueEditor
               value={afterTime}
               onChange={setAfterTime}
-              label={conditionType === 'After' ? 'Duration (from step entry)' : 'Duration (from routine start)'}
+              label={conditionType === 'After' ? 'Duration from step entry' : 'Duration from routine start'}
               unit={{ type: 'Seconds' }}
               parameters={parameters}
               derivedParameters={derivedParameters}
@@ -238,132 +230,58 @@ export function ExitConditionEditor({
           )}
 
           {conditionType === 'UserAction' && (
-            <div>
-              <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-                User Action Index
-              </label>
-              <input
-                type="number"
-                min="0"
-                value={userActionIndex}
-                onChange={(e) => setUserActionIndex(parseInt(e.currentTarget.value) || 0)}
-                style={{
-                  width: '100%',
-                  padding: '0.5rem',
-                  border: '1px solid #ccc',
-                  borderRadius: '4px',
-                  fontSize: '1rem'
-                }}
-              />
-              <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-                Reference to a user-triggered action (e.g., button press)
-              </div>
-            </div>
+            <NumberField
+              label="User action"
+              value={userActionIndex}
+              onChange={setUserActionIndex}
+              min={0}
+              help="Which user-triggered action this waits for — a button on the machine."
+            />
           )}
         </div>
 
-        {/* Then Action */}
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Then Action
-          </label>
-          <select
-            value={exitType}
-            onChange={(e) => setExitType(e.currentTarget.value as ExitType)}
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          >
-            <option value="NextStep">Go to Next Step</option>
-            <option value="JumpToStep">Jump to Specific Step</option>
-            <option value="Finished">Finish Routine</option>
-          </select>
-        </div>
-
-        {/* Jump target */}
-        {exitType === 'JumpToStep' && (
-          <div style={{ marginBottom: '1.5rem', marginLeft: '1rem' }}>
-            <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-              Jump to Step
-            </label>
-            <input
-              type="number"
-              min="0"
-              max={totalSteps - 1}
-              value={jumpToStep}
-              onChange={(e) => setJumpToStep(parseInt(e.currentTarget.value) || 0)}
-              style={{
-                width: '100%',
-                padding: '0.5rem',
-                border: '1px solid #ccc',
-                borderRadius: '4px',
-                fontSize: '1rem'
-              }}
+        <Field label="Then">
+          {(control) => (
+            <Select
+              {...control}
+              value={exitType}
+              onChange={(value) => setExitType(value as ExitType)}
+              options={[
+                { value: 'NextStep', label: 'Go to the next step' },
+                { value: 'JumpToStep', label: 'Jump to a specific step' },
+                { value: 'Finished', label: 'Finish the routine' },
+              ]}
             />
-            <div style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.25rem' }}>
-              Step index (0-{totalSteps - 1})
-            </div>
+          )}
+        </Field>
+
+        {exitType === 'JumpToStep' && (
+          <div style={{ marginLeft: tokens.space.md }}>
+            <NumberField
+              label="Jump to step"
+              value={jumpToStep}
+              onChange={setJumpToStep}
+              min={0}
+              // The bound was on the input's `max` attribute only, which constrains the
+              // spinner and not what can be typed -- so a jump past the end of the routine
+              // could be saved.
+              max={Math.max(0, totalSteps - 1)}
+              help={`This routine has ${totalSteps} step${totalSteps === 1 ? '' : 's'}, numbered from 0.`}
+            />
           </div>
         )}
 
-        {/* Description */}
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: '500' }}>
-            Description (optional)
-          </label>
-          <input
-            type="text"
-            value={description}
-            onChange={(e) => setDescription(e.currentTarget.value)}
-            placeholder="e.g., When temperature reached, End preinfusion"
-            style={{
-              width: '100%',
-              padding: '0.5rem',
-              border: '1px solid #ccc',
-              borderRadius: '4px',
-              fontSize: '1rem'
-            }}
-          />
-        </div>
-
-        {/* Action Buttons */}
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#0066cc',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Save
-          </button>
-          <button
-            onClick={onCancel}
-            style={{
-              flex: 1,
-              padding: '0.75rem',
-              backgroundColor: '#666',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              fontSize: '1rem',
-              cursor: 'pointer'
-            }}
-          >
-            Cancel
-          </button>
-        </div>
+        <Field label="Description" help="Optional. Shown instead of the raw condition wherever this exit appears.">
+          {(control) => (
+            <TextInput
+              {...control}
+              value={description}
+              onInput={setDescription}
+              placeholder="When the puck is saturated, End preinfusion, …"
+            />
+          )}
+        </Field>
       </div>
-    </div>
+    </Dialog>
   );
 }
