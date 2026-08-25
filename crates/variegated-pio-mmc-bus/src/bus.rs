@@ -246,8 +246,23 @@ impl<'d, P: Instance, const SM_DAT: usize, const SM_CLK: usize> PioMmcBus<'d, P,
         }
 
         let mut rtn = [0u8; 17];
-        for slot in rtn.iter_mut().take(n_rsp) {
-            *slot = self.wait_word(deadline, MmcError::Timeout)? as u8;
+        // `_i` for the same reason as `_e` below: it is read only from inside `mmc_warn!`,
+        // which expands to nothing without `defmt`.
+        for (_i, slot) in rtn.iter_mut().take(n_rsp).enumerate() {
+            *slot = self
+                .wait_word(deadline, MmcError::Timeout)
+                .inspect_err(|_| {
+                    // The silent path until now, and the one a card that never answers
+                    // takes. The index separates "no response at all" -- the start bit
+                    // never arrived, which is a bus or pin fault -- from a response that
+                    // began and then stopped, which is a signal-integrity one.
+                    mmc_warn!(
+                        "pio-mmc: CMD{=u8} response timed out after {=usize}/{=usize} bytes",
+                        index,
+                        _i,
+                        n_rsp
+                    );
+                })? as u8;
         }
         self.sm_dat.set_enable(false);
 
@@ -762,6 +777,12 @@ impl<'d, P: Instance, const SM_DAT: usize, const SM_CLK: usize> MmcBus
         let _ = self.sm_dat.tx().stalled();
         while !self.sm_dat.tx().stalled() {
             if Instant::now() > deadline {
+                // Worth a warning of its own, because it is the one failure here that is
+                // not about the card at all: the eighty clocks are generated with nothing
+                // on the other end participating, so a timeout means the state machine
+                // itself never ran. Without this it returned the same bare `Timeout` as a
+                // card that would not answer, and the two are not remotely the same fault.
+                mmc_warn!("pio-mmc: init_idle never drained -- the state machine did not run");
                 return Err(MmcError::Timeout);
             }
         }

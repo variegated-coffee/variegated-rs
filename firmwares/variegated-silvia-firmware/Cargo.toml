@@ -82,7 +82,11 @@ futures = { version = "0.3.33", default-features = false, features = ["alloc"] }
 [features]
 # One crate, one machine: `default` *is* this machine's configuration, so a plain
 # `cargo build` produces the firmware. There is no umbrella feature selecting the machine.
-default = ["rp235xb", "gravity", "sd-card-pio"]
+# `sd-card-pio-trace` is in here **temporarily**, while the PIO card is being brought up on
+# hardware. It implies `sd-card-pio`. Take it out once the card identifies reliably: it
+# logs every command, response and data token, which is thousands of lines per filesystem
+# operation and will bury anything else on the debug link.
+default = ["rp235xb", "gravity", "sd-card-pio-trace"]
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
@@ -93,3 +97,8 @@ gravity = ["dep:variegated-gravity-driver"]
 # `variegated-pio-mmc-bus`; `variegated-controller-lib`'s `sd_card_pio` module is the whole
 # interface. In `default` because the board has the slot.
 sd-card-pio = ["variegated-controller-lib/sd-card-pio"]
+# Bring-up tracing for the card, off by default. Build with
+# `--features sd-card-pio-trace` when a card will not identify; it names the window
+# arithmetic and every command and response, which is what tells a pin fault apart from a
+# card that is simply not answering.
+sd-card-pio-trace = ["sd-card-pio", "variegated-controller-lib/sd-card-pio-trace"]

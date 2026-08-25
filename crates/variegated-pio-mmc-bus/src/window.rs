@@ -139,6 +139,36 @@ mod tests {
         assert_eq!(mask & broken, 0, "the wrong mask does not even overlap the right one");
     }
 
+    /// `EXECCTRL.JMP_PIN` is the third register with the five-bit trap, and the one that
+    /// actually stopped a card coming up.
+    ///
+    /// embassy's `Config::set_jmp_pin` stores `pin.pin()` -- the *absolute* number -- and
+    /// `set_config` subtracts the `GPIOBASE` shift from the `PINCTRL` bases but not from
+    /// this. `rp_pac` then masks it to five bits on write, so CMD on GPIO 42 is silently
+    /// recorded as 10 and `jmp PIN` tests some entirely different pin.
+    #[test]
+    fn the_jmp_pin_index_is_window_relative_and_fits_five_bits() {
+        let base = 16;
+
+        for (pin, want) in [(42u8, 26u8), (43, 27)] {
+            let relative = relative(pin, base);
+            assert_eq!(relative, want);
+            assert!(relative < 32, "a JMP_PIN index must fit the five-bit field");
+
+            // What embassy stores, and what the hardware keeps of it. Not merely a
+            // different pin -- a different pin that is *in use on this board*: 42 lands on
+            // 10 and 43 on 11, which under a base-16 window are the card-detect line and
+            // the settings flash's chip select.
+            let embassy_absolute = pin;
+            assert_eq!(embassy_absolute & 0x1F, pin - 32);
+            assert_ne!(
+                embassy_absolute & 0x1F,
+                relative,
+                "the truncated absolute index must not be mistaken for the relative one"
+            );
+        }
+    }
+
     #[test]
     fn a_low_bank_mask_is_unchanged_by_the_window() {
         let pins = [10u8, 11, 12, 13, 14, 15];

@@ -97,6 +97,25 @@ impl<'d, P: Instance> PioPins<'d, P> {
         let mask = window::sync_bypass_mask(&pins, gpio_base);
         common.set_input_sync_bypass(mask, mask);
 
+        // Every window-relative number this driver computes, in one line.
+        //
+        // Here rather than left to be inferred because all three of the five-bit fields --
+        // `WAIT`'s GPIO index, `INPUT_SYNC_BYPASS` and `EXECCTRL.JMP_PIN` -- fail the same
+        // silent way when they are wrong: the block watches a pin nobody chose, and the
+        // symptom is a timeout that names neither the pin nor the window. A card that will
+        // not come up is diagnosed from this line first.
+        mmc_trace!(
+            "pio-mmc: gpiobase {=u8}, clk {=u8}->{=u8}, cmd {=u8}->{=u8}, dat0 {=u8}->{=u8}, bypass {=u32:#010x}",
+            gpio_base,
+            clk.pin(),
+            window::relative(clk.pin(), gpio_base),
+            cmd.pin(),
+            window::relative(cmd.pin(), gpio_base),
+            dat[0].pin(),
+            window::relative(dat[0].pin(), gpio_base),
+            mask
+        );
+
         Self { clk, cmd, dat, gpio_base }
     }
 

@@ -10,6 +10,30 @@ use fixed::types::extra::U8;
 
 use crate::pins::PioPins;
 use crate::programs;
+use crate::window;
+
+/// Rewrite a config's `JMP_PIN` in the block's own numbering.
+///
+/// `Config::set_jmp_pin` stores the **absolute** GPIO number, and `set_config` -- which
+/// subtracts the `GPIOBASE` shift from every `PINCTRL` base -- does not subtract it from
+/// this one. `EXECCTRL.JMP_PIN` is five bits wide on RP2350 exactly as it is on RP2040, so
+/// an absolute 42 is not merely unshifted, it does not fit: `rp_pac` masks it on write and
+/// records 10.
+///
+/// The result is a `jmp PIN` that tests a pin nobody chose. On this board's pinout it is
+/// worse than arbitrary -- CMD's 42 truncates to 10, which under a base-16 window is the
+/// card-detect line, and DAT0's 43 truncates to the settings flash's chip select.
+///
+/// The same trap as [`window::sync_bypass_mask`] documents for `INPUT_SYNC_BYPASS`, in a
+/// third register. Anything handed to a five-bit PIO pin field has to go through
+/// [`window::relative`] first.
+fn set_jmp_pin_relative<'d, P: Instance>(cfg: &mut Config<'d, P>, pin: u8, gpio_base: u8) {
+    let mut exec = cfg.get_exec();
+    exec.jmp_pin = window::relative(pin, gpio_base);
+    // SAFETY: `get_exec`/`set_exec` round-trip a value embassy produced, with one field
+    // corrected. Nothing else in it is touched.
+    unsafe { cfg.set_exec(exec) };
+}
 
 /// The loaded programs and the configuration each phase applies.
 ///
@@ -69,6 +93,7 @@ impl<'d, P: Instance> Installed<'d, P> {
         cmd_rsp.set_in_pins(&cmd);
         cmd_rsp.set_set_pins(&cmd);
         cmd_rsp.set_jmp_pin(&pins.cmd);
+        set_jmp_pin_relative(&mut cmd_rsp, pins.cmd.pin(), pins.gpio_base);
         // Threshold 8 both ways: one byte per FIFO word. Autopull on, so the command frame
         // streams out a byte at a time; autopush *off*, because the program pushes
         // explicitly with `push iffull` and doing both would double-push.
@@ -90,6 +115,7 @@ impl<'d, P: Instance> Installed<'d, P> {
         rd_clk.use_program(&rd_clk_p, &clk);
         rd_clk.set_in_pins(&dat0);
         rd_clk.set_jmp_pin(&pins.dat[0]);
+        set_jmp_pin_relative(&mut rd_clk, pins.dat[0].pin(), pins.gpio_base);
         rd_clk.shift_out = ShiftConfig {
             auto_fill: true,
             direction: ShiftDirection::Left,

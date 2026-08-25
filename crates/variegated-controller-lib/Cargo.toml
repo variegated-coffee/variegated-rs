@@ -156,6 +156,14 @@ sd-card-storage = ["hardware", "dep:sdio", "dep:exfat-slim", "dep:aligned", "dep
 # it names.
 sd-card-pio = ["sd-card-storage", "dep:variegated-pio-mmc-bus"]
 
+# Wire-level tracing of the PIO card's bring-up: the window arithmetic, every command
+# frame and every response. The counterpart of `sdio/trace` above, and the same advice
+# applies -- turn it on when a card will not come up and take it out again afterwards.
+#
+# It is what makes the difference between "identification timed out" and a line naming
+# which command went unanswered, which is not a distinction the layer above can make.
+sd-card-pio-trace = ["sd-card-pio", "variegated-pio-mmc-bus?/trace"]
+
 # Forwarded to `variegated-controller-types`, which needs one of them to know which
 # machine's boiler and group enumerations exist.
 double_boiler = ["variegated-controller-types/double_boiler"]
