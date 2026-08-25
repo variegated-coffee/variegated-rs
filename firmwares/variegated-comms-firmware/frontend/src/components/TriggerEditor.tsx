@@ -75,6 +75,11 @@ export function TriggerEditor({ trigger, onChange }: TriggerEditorProps) {
           {(control) => (
             <input
               {...control}
+              // An hour is an integer with a two-digit range, so it has no decimal
+              // separator to localise and no grouping to insert -- see the note on
+              // `timeInputStyle` above. The spinner and the numeric keypad it brings on a
+              // tablet are worth having.
+              // eslint-disable-next-line no-restricted-syntax
               type="number"
               min="0"
               max="23"
@@ -89,6 +94,7 @@ export function TriggerEditor({ trigger, onChange }: TriggerEditorProps) {
           {(control) => (
             <input
               {...control}
+              // eslint-disable-next-line no-restricted-syntax -- same reasoning as the hour.
               type="number"
               min="0"
               max="59"

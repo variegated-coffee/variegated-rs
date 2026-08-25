@@ -39,7 +39,7 @@ export function FinallyTab({
     const ok = await confirm({
       title: `Remove finally command ${index + 1}?`,
       body: getRoutineCommandSummary(
-        finallyCommands[index]!,
+        finallyCommands[index],
         machine.getBoilerName,
         machine.getGroupName
       ),

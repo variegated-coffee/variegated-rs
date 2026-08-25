@@ -1,13 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { Alert, Badge, Button, DialogHost, tokens } from '@variegated-coffee/ui';
-import { ScheduleBuilder } from './components/ScheduleBuilder';
-import { TimezonePanel } from './components/TimezonePanel';
-import { BluetoothPanel } from './components/BluetoothPanel';
-import { ShotUploadPanel } from './components/ShotUploadPanel';
-import { ShotLogPanel } from './components/ShotLogPanel';
-import { RoutineBuilder } from './components/routine/RoutineBuilder';
-import { StatusDisplay } from './components/StatusDisplay';
-import { ConfigurationPanel } from './components/ConfigurationPanel';
+import { Alert, Button, DialogHost, tokens } from '@variegated-coffee/ui';
+import { MachineDashboard } from './templates/MachineDashboard';
+import { MachineSettings } from './templates/MachineSettings';
 import { JsonModal } from './components/JsonModal';
 import { MachineProvider } from './contexts/MachineContext';
 import { createWebSocketService, getWebSocketService } from './services/websocket';
@@ -19,20 +13,6 @@ import {
   Configuration,
   RoutineSummaryStorage
 } from './schemas/schemas';
-
-/**
- * The card each top-level section sits in.
- *
- * One object rather than the same six properties written out at each `<section>`, which is
- * how three of them came to have a slightly different shadow.
- */
-const panelStyle = {
-  marginTop: tokens.space.lg,
-  background: tokens.color.surfaceRaised,
-  padding: tokens.space.lg,
-  border: `1px solid ${tokens.color.border}`,
-  borderRadius: tokens.radius.md,
-};
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
@@ -183,90 +163,25 @@ export function App() {
     <DialogHost>
     <MachineProvider machineDefinition={machineDefinition as MachineDefinition}>
       <div style={{ padding: tokens.space.xl, maxWidth: '1200px', margin: '0 auto' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: tokens.space.xl, gap: tokens.space.md }}>
-          <h1 style={{ margin: 0 }}>{machineDefinition?.name || 'Espresso Machine'}</h1>
-          <Badge role={connected ? 'ok' : 'danger'}>
-            {connected ? 'Connected' : 'Disconnected'}
-          </Badge>
-        </div>
+        {/* The two templates. This component's job is the websocket and the modal state;
+            what the screen *looks like assembled* lives in `src/templates/`, where it can
+            be read, reviewed and rendered as a card in the design system. */}
+        <MachineDashboard
+          machineDefinition={machineDefinition}
+          status={status as Status}
+          configuration={config as Configuration}
+          routines={routines as RoutineSummaryStorage}
+          connected={connected}
+          onReconnect={reconnect}
+        />
 
-        {/* The connection is the precondition for every control below, so it is stated once
-            here rather than discovered one failed button at a time. The panels are also
-            told, so they can disable what cannot work -- a control that looks available and
-            answers "Not connected to the machine" after you press it is the failure this
-            replaces. */}
-        {!connected && (
-          <div style={{ marginBottom: tokens.space.md }}>
-            <Alert
-              role="danger"
-              title="Not connected to the machine"
-              action={{ label: 'Retry', onClick: reconnect }}
-            >
-              Readings are the last ones received. Controls that need the machine are
-              unavailable until the connection is back.
-            </Alert>
-          </div>
-        )}
-
-        {/* Status Display */}
-        <StatusDisplay status={status as Status} routines={routines as RoutineSummaryStorage} />
-
-        {/* Configuration Panel */}
-        <ConfigurationPanel configuration={config as Configuration} />
-
-        {/* Shot upload */}
-        <section style={panelStyle}>
-          <ShotUploadPanel shotUpload={(config as Configuration)?.shot_upload} />
-        </section>
-
-        {/* Bluetooth peripherals */}
-        <section style={panelStyle}>
-          <BluetoothPanel
-            associations={(config as Configuration)?.bluetooth_peripherals || []}
-            scan={(status as Status).bluetooth}
-            // The connection map is keyed by peripheral id and only exists once the comms
-            // processor has reported in, so an absent entry reads as "not connected"
-            // rather than as an error.
-            connected={
-              new Map(
-                Array.from((status as Status).comms_status?.peripheral_connection_status ?? []).map(
-                  ([id, wireless]) => [id, wireless.connected]
-                )
-              )
-            }
-          />
-        </section>
-
-        {/* Shot log */}
-        <section style={panelStyle}>
-          <ShotLogPanel
-            connected={connected}
-            pending={(status as Status).pending_shot_annotations}
-            sdCardPresent={(status as Status).sd_card_present}
-            // The groups the machine actually has, rather than a hardcoded `[0]`: the
-            // dose buttons address a group scale by index, and a two-group machine needs
-            // two buttons.
-            groupIndices={Array.from((status as Status).group_statuses.keys())}
-          />
-        </section>
-
-        {/* Schedules, and the timezone they fire on -- together, because a schedule time
-            means nothing without knowing which clock it is on. */}
-        <section style={panelStyle}>
-          <TimezonePanel timezone={(config as Configuration)?.timezone} />
-          <ScheduleBuilder schedules={(config as Configuration)?.schedules || []} />
-        </section>
-
-        {/* Routines */}
-        {routines && (
-          <section style={{ marginTop: '1.5rem' }}>
-            <RoutineBuilder
-              routines={routines}
-              machineDefinition={machineDefinition as MachineDefinition}
-              peripheralStatus={(status as Status)?.peripheral_status ?? null}
-            />
-          </section>
-        )}
+        <MachineSettings
+          machineDefinition={machineDefinition}
+          status={status as Status}
+          configuration={config as Configuration}
+          routines={routines}
+          connected={connected}
+        />
 
         {/* Diagnostics. Quiet, because reading raw JSON is a debugging errand rather than
             something a machine owner does -- these were four blue underlined links

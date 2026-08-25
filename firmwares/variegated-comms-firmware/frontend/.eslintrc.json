@@ -16,6 +16,37 @@
     "plugin:@typescript-eslint/recommended-requiring-type-checking"
   ],
   "rules": {
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "Literal[value=/^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/]",
+        "message": "Use a token from @variegated-coffee/ui instead of a hex colour. This frontend had 736 of these and two blues in service at once; tokens.color, tokens.pen and tokens.phase are the palette. If a role is genuinely missing, add it there rather than reaching past it here."
+      },
+      {
+        "selector": "TemplateLiteral > TemplateElement[value.raw=/#[0-9a-fA-F]{3,8}/]",
+        "message": "Use a token from @variegated-coffee/ui instead of a hex colour, even inside a template string."
+      },
+      {
+        "selector": "JSXAttribute[name.name='type'][value.value='number']",
+        "message": "Use TextInput's `numeric` prop rather than type=\"number\". A number input is rendered and parsed in the *browser's* locale, so a PID gain of 1.4 displays as 1,4 on a machine in a comma locale -- on a field the firmware then parses. Integer-only fields with a two-digit range are the one exception; add an eslint-disable with that reasoning."
+      },
+      {
+        "selector": "Literal[value='monospace']",
+        "message": "Use tokens.font.mono. The bare literal loses the fallback stack the token carries."
+      }
+    ],
+    "no-alert": "error",
+    "no-restricted-globals": [
+      "error",
+      {
+        "name": "confirm",
+        "message": "Use useDialogs().confirm from @variegated-coffee/ui. window.confirm is unstyled, untranslatable, and suppressible per-origin by the browser -- so a delete can proceed unconfirmed."
+      },
+      {
+        "name": "alert",
+        "message": "Use useDialogs().notify, or an Alert where the message belongs on the page."
+      }
+    ],
     "@typescript-eslint/no-base-to-string": "error",
     "@typescript-eslint/no-unsafe-member-access": "warn",
     "@typescript-eslint/explicit-function-return-type": "off",

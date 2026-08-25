@@ -42,13 +42,16 @@ interface RoutineBuilderProps {
   peripheralStatus: PeripheralStatus | null;
 }
 
+/** The three storage areas a routine can live in, which are also this panel's tabs. */
+type RoutineKind = 'custom' | 'function' | 'internal';
+
 const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus }: RoutineBuilderProps) => {
   const { confirm } = useDialogs();
   const [editingRoutine, setEditingRoutine] = useState<RoutineIdentifier | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [addingType, setAddingType] = useState<'custom' | 'function'>('custom');
   const [addingFunctionIndex, setAddingFunctionIndex] = useState<number>(0);
-  const [activeTab, setActiveTab] = useState<'custom' | 'function' | 'internal'>('custom');
+  const [activeTab, setActiveTab] = useState<RoutineKind>('custom');
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -333,14 +336,16 @@ const RoutineBuilderComponent = ({ routines, machineDefinition, peripheralStatus
       {/* The second of the frontend's two hand-built tab strips, and it had the same
           problems as the routine editor's: three buttons, no roles, no keyboard. It also
           marked the selected tab by colour alone -- blue text against grey. */}
-      <Tabs
+      {/* Explicit type argument — see the note in RoutineEditor: `variegated-ds` compiles
+          with `strict: false` and infers `Id` as `string` there. */}
+      <Tabs<RoutineKind>
         label="Routine kinds"
         active={activeTab}
         onChange={setActiveTab}
         tabs={[
-          { id: 'custom' as const, label: 'Custom', badge: routines.custom?.size ?? 0 },
-          { id: 'function' as const, label: 'Function', badge: routines.function?.size ?? 0 },
-          { id: 'internal' as const, label: 'Internal', badge: routines.internal?.size ?? 0 },
+          { id: 'custom', label: 'Custom', badge: routines.custom?.size ?? 0 },
+          { id: 'function', label: 'Function', badge: routines.function?.size ?? 0 },
+          { id: 'internal', label: 'Internal', badge: routines.internal?.size ?? 0 },
         ]}
       >
         {activeTab === 'custom' &&

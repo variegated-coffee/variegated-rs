@@ -185,7 +185,7 @@ export const ControlCurveEditor = ({ title, curve, unit, onSave, onCancel }: Con
             {previewPoints.map((point, idx) => {
               if (idx === 0) return null;
               const here = position(point);
-              const before = position(previewPoints[idx - 1]!);
+              const before = position(previewPoints[idx - 1]);
               return (
                 <line
                   key={idx}

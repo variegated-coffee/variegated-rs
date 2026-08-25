@@ -168,7 +168,11 @@ export function RoutineEditor({ routine, onSave, onCancel, functionSlotConfig }:
           </Field>
         </div>
 
-        <Tabs
+        {/* The type argument is explicit rather than inferred. `variegated-ds`, which
+            builds the design-system declarations, compiles with `strict: false`, and
+            inference there widens `Id` to `string` — so the same call that checks here
+            fails in that build. Pinning it makes both agree. */}
+        <Tabs<TabType>
           label="Routine sections"
           active={activeTab}
           onChange={setActiveTab}
