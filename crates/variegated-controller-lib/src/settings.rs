@@ -1,6 +1,6 @@
 use alloc::vec;
 use core::ops::{DerefMut, Range};
-use variegated_log::log_info;
+use variegated_log::{log_info, log_warn};
 use variegated_controller_types::debug::{name, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::mutex::Mutex;
@@ -325,6 +325,94 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 
         log_info!("Configuration storage optimization complete");
         Ok(())
+    }
+}
+
+/// Somewhere a settings value can be written, however the machine reaches it.
+///
+/// The two controllers hold their four peripheral stores differently -- one owns them by
+/// value, the other reaches them through a `&'static Mutex` under a timeout -- and that was
+/// the whole of the difference between two sets of `save_*` methods that were otherwise
+/// identical, comments included. This is that difference, named once.
+///
+/// Deliberately swallowing: a settings write that fails is logged and the machine carries on.
+/// The caller is the control loop, and there is nothing useful it could do with an error that
+/// it is not already doing by saying so.
+#[allow(async_fn_in_trait)]
+pub trait SettingsSink<SettingsT> {
+    /// Write `value`, naming it in the log if that fails.
+    async fn store(&mut self, value: &SettingsT, what: &'static str);
+}
+
+/// A store this controller owns outright.
+pub struct OwnedStore<StoreT>(pub StoreT);
+
+/// A store shared with another task, reached through a mutex.
+///
+/// Newtypes rather than blanket impls on `StoreT` and `&Mutex<..>`: those two would overlap as
+/// far as coherence is concerned, since nothing tells the compiler a reference to a mutex will
+/// never itself implement [`SettingsStorage`].
+pub struct LockedStore<'a, M: RawMutex, StoreT>(pub &'a Mutex<M, StoreT>);
+
+impl<SettingsT: Default, StoreT: SettingsStorage<SettingsT>> SettingsSink<SettingsT>
+    for OwnedStore<StoreT>
+{
+    async fn store(&mut self, value: &SettingsT, what: &'static str) {
+        if self.0.save_settings(value).await.is_err() {
+            log_warn!("Failed to save {}", what);
+        }
+    }
+}
+
+impl<SettingsT: Default, M: RawMutex, StoreT: SettingsStorage<SettingsT>> SettingsSink<SettingsT>
+    for LockedStore<'_, M, StoreT>
+{
+    /// The 100 ms timeout is the house style for every store lock taken from the control loop:
+    /// the thing most likely to be holding it is a flash erase far longer than this, and the
+    /// caller also runs the PID and the interlocks.
+    async fn store(&mut self, value: &SettingsT, what: &'static str) {
+        match embassy_time::with_timeout(
+            embassy_time::Duration::from_millis(100),
+            self.0.lock(),
+        )
+        .await
+        {
+            Ok(mut store) => {
+                if store.save_settings(value).await.is_err() {
+                    log_warn!("Failed to save {}", what);
+                }
+            }
+            Err(_) => log_warn!("Failed to acquire the {} store lock for save (timeout)", what),
+        }
+    }
+}
+
+/// Load a value from a store this controller owns, falling back to the default.
+impl<StoreT> OwnedStore<StoreT> {
+    /// The stored value, or `Default` if there is none or it cannot be read.
+    pub async fn load<SettingsT: Default>(&mut self) -> SettingsT
+    where
+        StoreT: SettingsStorage<SettingsT>,
+    {
+        self.0.load_settings().await.unwrap_or_default()
+    }
+}
+
+impl<M: RawMutex, StoreT> LockedStore<'_, M, StoreT> {
+    /// The stored value, or `Default` if there is none, it cannot be read, or the lock is held.
+    pub async fn load<SettingsT: Default>(&mut self) -> SettingsT
+    where
+        StoreT: SettingsStorage<SettingsT>,
+    {
+        match embassy_time::with_timeout(
+            embassy_time::Duration::from_millis(100),
+            self.0.lock(),
+        )
+        .await
+        {
+            Ok(mut store) => store.load_settings().await.unwrap_or_default(),
+            Err(_) => SettingsT::default(),
+        }
     }
 }
 

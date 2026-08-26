@@ -34,10 +34,11 @@ use variegated_controller_types::{
     MachineMode, PumpConfiguration, ScaleSelector, SteamWandIndex, StorageCommand, ValveOpenType,
     WaterDispersalPumpStrategy, WaterTapIndex,
 };
-use variegated_log::log_warn;
+use variegated_log::{log_info, log_warn};
 
 use crate::routine::RoutineRepository;
 use crate::schedule::ScheduleStore;
+use crate::settings::SettingsSink;
 use crate::shot_log_query::ShotLogQuery;
 
 use super::access::{ConfigurationAccess, TargetOutcome};
@@ -102,14 +103,40 @@ pub trait MachineCommandContext<'a>: 'a {
     /// Where an accepted discovery scan is sent, if this machine is wired for one.
     fn bluetooth_scan_sender(&self) -> Option<Sender<'a, Self::ChannelM, u16, 2>>;
 
-    /// Persist the association list.
-    async fn save_bluetooth_associations(&mut self);
+    // ---- The four peripheral stores ---------------------------------------------------
+    //
+    // Each is a `SettingsSink` and its value, returned together so the write below can take
+    // both out of one borrow. How the sink reaches its store -- owned, or through a mutex
+    // under a timeout -- is the sink's business and the only thing the two machines disagree
+    // about here. See `crate::settings::SettingsSink`.
+
+    /// Where the association list is written, and the list.
+    type BluetoothSink: SettingsSink<BluetoothAssociations>;
+    /// Where the Wi-Fi credentials are written.
+    type WifiSink: SettingsSink<StoredWifiCredentials>;
+    /// Where the shot-upload configuration is written.
+    type UploadSink: SettingsSink<ShotUploadConfig>;
+    /// Where the timezone is written.
+    type TimezoneSink: SettingsSink<TimezoneSetting>;
+
+    /// The association store, and the list to write.
+    fn bluetooth_store(&mut self) -> (&mut Self::BluetoothSink, &BluetoothAssociations);
+    /// The credentials store, and the credentials.
+    fn wifi_store(&mut self) -> (&mut Self::WifiSink, &StoredWifiCredentials);
+    /// The upload store, and the configuration.
+    fn upload_store(&mut self) -> (&mut Self::UploadSink, &ShotUploadConfig);
+    /// The timezone store, and the zone.
+    fn timezone_store(&mut self) -> (&mut Self::TimezoneSink, &TimezoneSetting);
+
+    /// Remember that `Configuration` should be republished.
+    fn mark_configuration_publish(&mut self);
+    /// Remember that the comms processor should be sent the credentials.
+    fn mark_wifi_publish(&mut self);
+    /// Remember that the comms processor should be sent the upload configuration.
+    fn mark_shot_upload_publish(&mut self);
 
     /// The stored Wi-Fi credentials.
     fn wifi_credentials_mut(&mut self) -> &mut StoredWifiCredentials;
-
-    /// Persist them.
-    async fn save_wifi_credentials(&mut self);
 
     /// Where a provisioning-window request is sent, if this machine is wired for one.
     fn wifi_provisioning_sender(&self) -> Option<Sender<'a, Self::ChannelM, u32, 2>>;
@@ -117,14 +144,83 @@ pub trait MachineCommandContext<'a>: 'a {
     /// The stored shot-upload configuration.
     fn shot_upload_config_mut(&mut self) -> &mut ShotUploadConfig;
 
-    /// Persist it.
-    async fn save_shot_upload_config(&mut self);
-
     /// The stored timezone.
     fn timezone_mut(&mut self) -> &mut TimezoneSetting;
 
-    /// Persist it.
-    async fn save_timezone(&mut self);
+    // ---- Persisting them, which is the same on both machines --------------------------
+
+    /// Persist the association list, and tell the comms processor it changed.
+    ///
+    /// The push is not a nicety. The comms processor holds no configuration of its own, so
+    /// until it is told, an association the user just created does not exist as far as the
+    /// radio is concerned. It rides on the `Configuration` publish, which compares the
+    /// *machine* configuration -- and these associations are deliberately not part of that,
+    /// since they have a store of their own. So a change here is invisible to that comparison
+    /// and has to announce itself.
+    async fn save_bluetooth_associations(&mut self) {
+        let (store, value) = self.bluetooth_store();
+        store.store(value, "Bluetooth associations").await;
+        self.mark_configuration_publish();
+    }
+
+    /// Persist the Wi-Fi credentials, and tell the comms processor they changed.
+    ///
+    /// Unlike the association list this deliberately does **not** ride on the `Configuration`
+    /// publish: that path ends at the browser, and a password has no business on it. Hence a
+    /// flag of its own rather than dirtying the configuration.
+    async fn save_wifi_credentials(&mut self) {
+        let (store, value) = self.wifi_store();
+        store.store(value, "Wi-Fi credentials").await;
+        self.mark_wifi_publish();
+    }
+
+    /// Persist the shot-upload configuration, and announce it twice.
+    ///
+    /// **Two flags, two destinations, and they are not interchangeable.** One sends the full
+    /// configuration -- token included -- to the comms processor on its own watch. The other
+    /// republishes `Configuration`, which carries the redacted view the browser reads; without
+    /// it the settings panel showed a stale endpoint for up to ten seconds after an edit.
+    async fn save_shot_upload_config(&mut self) {
+        let (store, value) = self.upload_store();
+        store.store(value, "shot upload config").await;
+        self.mark_shot_upload_publish();
+        self.mark_configuration_publish();
+    }
+
+    /// Persist the timezone, and republish the configuration that carries it.
+    ///
+    /// No watch of its own, unlike the upload configuration: the comms processor keeps time in
+    /// UTC and has no use for the zone, and the browser reads it from `Configuration`.
+    async fn save_timezone(&mut self) {
+        let (store, value) = self.timezone_store();
+        store.store(value, "timezone").await;
+        self.mark_configuration_publish();
+    }
+
+    /// Forget the stored network, persistently.
+    ///
+    /// **Writing the cleared value is the whole point.** The state this reproduces is a machine
+    /// that has *never* been provisioned; one that merely disconnected would come back knowing
+    /// a network after the next reboot. Saving also marks the Wi-Fi publish, so the comms
+    /// processor is told on the next tick and parks waiting to be provisioned -- which is what
+    /// makes a reboot unnecessary to reach the state, and still worth doing to prove it
+    /// survives one.
+    ///
+    /// A no-op with a distinct log line when there was nothing stored, rather than a silent
+    /// one: this is a debug affordance, and "already clear" is a different answer from
+    /// "cleared" to whoever just typed it.
+    ///
+    /// Never logs the SSID, here or anywhere on this path: a credential is not written to a log
+    /// someone may be sharing a screen of while provisioning.
+    async fn clear_wifi_credentials(&mut self) {
+        if self.wifi_credentials_mut().0.is_none() {
+            log_info!("Wi-Fi credentials already cleared; nothing to forget");
+            return;
+        }
+        *self.wifi_credentials_mut() = StoredWifiCredentials(None);
+        self.save_wifi_credentials().await;
+        log_warn!("Wi-Fi credentials cleared; this machine is now unprovisioned");
+    }
 
     /// The annotations waiting to be stamped onto the next shot.
     fn pending_annotations_mut(&mut self) -> &mut ShotAnnotations;

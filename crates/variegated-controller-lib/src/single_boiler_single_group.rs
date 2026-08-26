@@ -15,7 +15,7 @@ use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType, StorageCommand};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
 use crate::command;
 use crate::command::pump::PumpQuantity;
 use crate::command::{MachineCommandContext, ScaleAction};
@@ -170,7 +170,11 @@ pub struct SingleBoilerSingleGroupController<
     //
     // A single-boiler machine has a comms processor like any other, so it can carry a
     // Bluetooth scale or a water sensor; nothing about this is dual-boiler-specific.
-    bluetooth_store: BluetoothStoreT,
+    // Wrapped in `OwnedStore` because this machine owns its stores outright, where the
+    // dual-boiler reaches the same ones through a mutex. That wrapper is the whole of the
+    // difference between the two machines' `save_*` methods, which are now one set on
+    // `crate::command::MachineCommandContext`.
+    bluetooth_store: crate::settings::OwnedStore<BluetoothStoreT>,
     bluetooth_associations: BluetoothAssociations,
     bluetooth_associations_loaded: bool,
     bluetooth_scan_sender: Option<Sender<'a, ChannelM, u16, 2>>,
@@ -180,7 +184,7 @@ pub struct SingleBoilerSingleGroupController<
 
     // Wi-Fi credentials, at their own key in the settings flash range. Same reasoning as
     // the Bluetooth store above; only the payload type and the key differ.
-    wifi_store: WifiStoreT,
+    wifi_store: crate::settings::OwnedStore<WifiStoreT>,
     wifi_credentials: StoredWifiCredentials,
     wifi_credentials_loaded: bool,
     // Credentials do *not* ride on the `Configuration` publish -- that path ends at the
@@ -207,9 +211,9 @@ pub struct SingleBoilerSingleGroupController<
     // Same shape and same reasoning as the Wi-Fi trio above: its own key rather than a
     // field on the persistent configuration, and its own publish rather than riding
     // `Configuration`, because the token is a secret and that path ends at the browser.
-    shot_upload_store: UploadStoreT,
+    shot_upload_store: crate::settings::OwnedStore<UploadStoreT>,
     shot_upload_config: ShotUploadConfig,
-    timezone_store: TimezoneStoreT,
+    timezone_store: crate::settings::OwnedStore<TimezoneStoreT>,
     /// The machine's timezone, as stored. Applied to the `TimeKeeper` at boot and on change.
     ///
     /// This board has no scheduler, so the zone reaches only `Status::current_local_time` and
@@ -353,14 +357,14 @@ impl<
             machine_definition,
             prerequisite_lost_since: None,
             watchdog,
-            bluetooth_store,
+            bluetooth_store: crate::settings::OwnedStore(bluetooth_store),
             bluetooth_associations: BluetoothAssociations::default(),
             bluetooth_associations_loaded: false,
             bluetooth_scan_sender,
             bluetooth_status: BluetoothScanStatus::default(),
             configuration_publish_pending: false,
             bluetooth_scan_deadline: None,
-            wifi_store,
+            wifi_store: crate::settings::OwnedStore(wifi_store),
             wifi_credentials: StoredWifiCredentials::default(),
             wifi_credentials_loaded: false,
             wifi_publish_pending: false,
@@ -368,8 +372,8 @@ impl<
             identify_publisher,
             clear_wifi_credentials_signal,
             wifi_credentials_publisher,
-            shot_upload_store,
-            timezone_store,
+            shot_upload_store: crate::settings::OwnedStore(shot_upload_store),
+            timezone_store: crate::settings::OwnedStore(timezone_store),
             timezone: TimezoneSetting::default(),
             timezone_loaded: false,
             shot_upload_config: ShotUploadConfig::default(),
@@ -423,72 +427,11 @@ impl<
         configuration
     }
 
-    /// Persist the association list and arrange for the comms processor to hear about it.
-    ///
-    /// See the equivalent in `dual_boiler_single_group`: the change is invisible to the
-    /// machine-configuration comparison, so it has to announce itself.
-    async fn save_bluetooth_associations(&mut self) {
-        if self.bluetooth_store.save_settings(&self.bluetooth_associations).await.is_err() {
-            log_warn!("Failed to save Bluetooth associations");
-        }
-        self.configuration_publish_pending = true;
-    }
-
-    /// Persist the Wi-Fi credentials and arrange for the comms processor to hear about it.
-    ///
-    /// Unlike the association list this does **not** ride on the `Configuration` publish:
-    /// that path ends at the browser, and a password has no business on it.
-    async fn save_wifi_credentials(&mut self) {
-        if self.wifi_store.save_settings(&self.wifi_credentials).await.is_err() {
-            log_warn!("Failed to save Wi-Fi credentials");
-        }
-        self.wifi_publish_pending = true;
-    }
-
-    /// Persist the shot-log upload config and arrange for the comms processor to hear
-    /// about it. Same reasoning as `save_wifi_credentials` directly above, and for a
-    /// sharper reason: the token grants write access to an account on a public service.
-    async fn save_shot_upload_config(&mut self) {
-        if self.shot_upload_store.save_settings(&self.shot_upload_config).await.is_err() {
-            log_warn!("Failed to save shot upload config");
-        }
-        // Two flags, two destinations. This one sends the full config -- token included -- to
-        // the comms processor on its own watch.
-        self.shot_upload_publish_pending = true;
-        // And this one republishes `Configuration`, which carries the redacted
-        // `ShotUploadView` the browser reads. Without it the settings panel showed a stale
-        // endpoint for up to ten seconds after an edit.
-        self.configuration_publish_pending = true;
-    }
-
-    /// Persist the timezone, and republish the configuration that carries it.
-    ///
-    /// No watch of its own: the comms processor keeps time in UTC and has no use for the zone,
-    /// and the browser reads it from `Configuration`.
-    async fn save_timezone(&mut self) {
-        if self.timezone_store.save_settings(&self.timezone).await.is_err() {
-            log_warn!("Failed to save timezone");
-        }
-        self.configuration_publish_pending = true;
-    }
-
-    /// Forget the stored network, persistently.
-    ///
-    /// Identical to the dual boiler's, and identical for a reason: this reproduces the state a
-    /// machine is in before it has ever been provisioned, and that state is not
-    /// machine-specific. Writing the cleared value is the point -- one that merely
-    /// disconnected would come back knowing a network after the next reboot. Saving also sets
-    /// `wifi_publish_pending`, so the comms processor is told and parks.
-    async fn clear_wifi_credentials(&mut self) {
-        if self.wifi_credentials.0.is_none() {
-            log_info!("Wi-Fi credentials already cleared; nothing to forget");
-            return;
-        }
-        // Never logs the SSID. Same rule as everywhere else on this path.
-        self.wifi_credentials = StoredWifiCredentials(None);
-        self.save_wifi_credentials().await;
-        log_warn!("Wi-Fi credentials cleared; this machine is now unprovisioned");
-    }
+    // The four `save_*` methods and `clear_wifi_credentials` were here, and were identical to
+    // the dual-boiler's down to the comments -- the only difference was that this machine owns
+    // its stores where that one locks them. They are now provided methods on
+    // `crate::command::MachineCommandContext`, over the `OwnedStore`/`LockedStore` sinks that
+    // name exactly that difference.
 
     pub async fn task(&mut self) {
         let mut last_pid_update = Instant::now();
@@ -534,8 +477,7 @@ impl<
             // writer of the list, so a second load could only return what is in hand.
             if !self.bluetooth_associations_loaded {
                 self.bluetooth_associations_loaded = true;
-                self.bluetooth_associations =
-                    self.bluetooth_store.load_settings().await.unwrap_or_default();
+                self.bluetooth_associations = self.bluetooth_store.load().await;
                 log_info!("Loaded {} Bluetooth associations", self.bluetooth_associations.0.len());
                 // The comms processor asks at boot, but cannot tell a slow answer from no
                 // answer, so publish once regardless.
@@ -545,7 +487,7 @@ impl<
             // Same lazy load, same reasoning, for the credentials.
             if !self.wifi_credentials_loaded {
                 self.wifi_credentials_loaded = true;
-                self.wifi_credentials = self.wifi_store.load_settings().await.unwrap_or_default();
+                self.wifi_credentials = self.wifi_store.load().await;
                 // Logged as configured-or-not, never as a value. The SSID alone would be
                 // harmless, but a log line that prints half a credential is one edit away
                 // from printing all of it.
@@ -559,8 +501,7 @@ impl<
             // Same lazy load again, for the upload config.
             if !self.shot_upload_config_loaded {
                 self.shot_upload_config_loaded = true;
-                self.shot_upload_config =
-                    self.shot_upload_store.load_settings().await.unwrap_or_default();
+                self.shot_upload_config = self.shot_upload_store.load().await;
                 // The endpoint is not a secret and is the field you need when uploads go
                 // somewhere unexpected; the token is reported only as present-or-not.
                 log_info!(
@@ -580,7 +521,7 @@ impl<
             // `TimeKeeper` was already told in `main`, before any task was spawned.
             if !self.timezone_loaded {
                 self.timezone_loaded = true;
-                self.timezone = self.timezone_store.load_settings().await.unwrap_or_default();
+                self.timezone = self.timezone_store.load().await;
                 self.configuration_publish_pending = true;
             }
 
@@ -1048,7 +989,7 @@ impl<
                     // `Configuration` already.
                     log_warn!("Boiler heating disabled: temperature at or above configured maximum");
                     DutyCycleType::OFF
-                } else if !Self::is_boiler_level_safe(boiler_level, &self.boiler_config) {
+                } else if !command::interlocks::is_boiler_level_safe(boiler_level, &self.boiler_config) {
                     log_warn!("Boiler heating disabled: water level below minimum safe level");
                     DutyCycleType::OFF
                 } else {
@@ -1324,52 +1265,15 @@ impl<
         }
     }
 
-    /// Determines if a boiler's water level is safe for heating.
-    /// Returns true if heating is allowed, false if it should be blocked.
-    /// Logic:
-    /// - If no minimum_safe_level configured: allow (feature disabled)
-    /// - If level sensor reading available: check level >= minimum
-    /// - If no sensor reading (but feature enabled): block (assume empty for safety)
-    fn is_boiler_level_safe(level: Option<WaterLevelType>, boiler_config: &BoilerConfiguration) -> bool {
-        // If no minimum configured, feature is disabled (no level sensor needed)
-        let Some(minimum) = boiler_config.minimum_safe_level else {
-            return true;
-        };
-
-        // Feature enabled: check water level
-        match level {
-            Some(level) => level >= minimum,  // Have reading: check against threshold
-            None => false, // No reading but sensor exists: assume empty (UNSAFE)
-        }
-    }
-
-    /// Determines if we should block starting a new water operation.
-    /// Logic:
-    /// - If feature disabled: allow
-    /// - If tank not empty: allow
-    /// - If routine executing AND allow_continue=true: allow (treat as continuation)
-    /// - If routine executing AND allow_continue=false: block (abort routine)
-    /// - If no routine: block (standalone operation with empty tank)
+    /// The decision is `crate::command::interlocks`, which is pure and host-tested; this only
+    /// reads the tank for it.
     fn should_block_water_operation(&mut self) -> bool {
-        // Feature disabled?
-        if !self.machine_config.prevent_start_on_empty_tank {
-            return false;
-        }
-
-        // Tank empty?
         let tank_empty = self.is_tank_empty();
-        if !tank_empty {
-            return false;
-        }
-
-        // Tank is empty - check if routine is executing
-        if self.current_routine.is_some() {
-            // Routine executing: respect allow_continue policy
-            return !self.machine_config.allow_continue_on_empty_tank;
-        } else {
-            // No routine: always block standalone operations on empty tank
-            return true;
-        }
+        command::interlocks::should_block_water_operation(
+            &self.machine_config,
+            tank_empty,
+            self.current_routine.is_some(),
+        )
     }
 
     /// Tare or calibrate the group scale.
@@ -1971,16 +1875,41 @@ impl<
         self.bluetooth_scan_sender
     }
 
-    async fn save_bluetooth_associations(&mut self) {
-        SingleBoilerSingleGroupController::save_bluetooth_associations(self).await
+    type BluetoothSink = crate::settings::OwnedStore<BluetoothStoreT>;
+    type WifiSink = crate::settings::OwnedStore<WifiStoreT>;
+    type UploadSink = crate::settings::OwnedStore<UploadStoreT>;
+    type TimezoneSink = crate::settings::OwnedStore<TimezoneStoreT>;
+
+    fn bluetooth_store(&mut self) -> (&mut Self::BluetoothSink, &BluetoothAssociations) {
+        (&mut self.bluetooth_store, &self.bluetooth_associations)
+    }
+
+    fn wifi_store(&mut self) -> (&mut Self::WifiSink, &StoredWifiCredentials) {
+        (&mut self.wifi_store, &self.wifi_credentials)
+    }
+
+    fn upload_store(&mut self) -> (&mut Self::UploadSink, &ShotUploadConfig) {
+        (&mut self.shot_upload_store, &self.shot_upload_config)
+    }
+
+    fn timezone_store(&mut self) -> (&mut Self::TimezoneSink, &TimezoneSetting) {
+        (&mut self.timezone_store, &self.timezone)
+    }
+
+    fn mark_configuration_publish(&mut self) {
+        self.configuration_publish_pending = true;
+    }
+
+    fn mark_wifi_publish(&mut self) {
+        self.wifi_publish_pending = true;
+    }
+
+    fn mark_shot_upload_publish(&mut self) {
+        self.shot_upload_publish_pending = true;
     }
 
     fn wifi_credentials_mut(&mut self) -> &mut StoredWifiCredentials {
         &mut self.wifi_credentials
-    }
-
-    async fn save_wifi_credentials(&mut self) {
-        SingleBoilerSingleGroupController::save_wifi_credentials(self).await
     }
 
     fn wifi_provisioning_sender(&self) -> Option<Sender<'a, Self::ChannelM, u32, 2>> {
@@ -1991,16 +1920,8 @@ impl<
         &mut self.shot_upload_config
     }
 
-    async fn save_shot_upload_config(&mut self) {
-        SingleBoilerSingleGroupController::save_shot_upload_config(self).await
-    }
-
     fn timezone_mut(&mut self) -> &mut TimezoneSetting {
         &mut self.timezone
-    }
-
-    async fn save_timezone(&mut self) {
-        SingleBoilerSingleGroupController::save_timezone(self).await
     }
 
     fn pending_annotations_mut(&mut self) -> &mut variegated_controller_types::ShotAnnotations {
