@@ -19,10 +19,11 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PidParameterTarget, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_controller_types::{SteamWandStatus, ValveOpenType};
+use crate::command;
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -1759,24 +1760,33 @@ impl<
     /// Handles commands eligible for routine "finally" blocks (cleanup commands).
     /// This is the main command executor for all non-routine-lifecycle commands,
     /// whether from external sources or routine steps.
-    /// Apply a values update to the group's brew control state, field by field.
+    /// Write the persistent half of the configuration to its store.
     ///
-    /// The single-boiler controller's twin. One place, because three commands now carry the
-    /// same update — the mode command, the values command and the limit command — and three
-    /// copies of eleven `if let`s is how one of them ends up silently missing a field.
-    fn apply_group_brew_values(&mut self, update: GroupBrewControlTargetValuesUpdate) {
-        let values = &mut self.configuration.ephemeral.group_brew_control_state.values;
-        if let Some(flow_rate) = update.flow_rate { values.flow_rate = flow_rate; }
-        if let Some(curve) = update.flow_rate_curve { values.flow_rate_curve = curve; }
-        if let Some(pressure) = update.pressure { values.pressure = pressure; }
-        if let Some(curve) = update.pressure_curve { values.pressure_curve = curve; }
-        if let Some(output_flow) = update.output_flow_rate { values.output_flow_rate = output_flow; }
-        if let Some(curve) = update.output_flow_rate_curve { values.output_flow_rate_curve = curve; }
-        if let Some(duty) = update.duty_cycle { values.duty_cycle = duty; }
-        if let Some(curve) = update.duty_cycle_curve { values.duty_cycle_curve = curve; }
-        if let Some(max) = update.max_pressure { values.max_pressure = max; }
-        if let Some(max) = update.max_group_flow_rate { values.max_group_flow_rate = max; }
-        if let Some(max) = update.max_output_flow_rate { values.max_output_flow_rate = max; }
+    /// One method, because it was this same eight-line block copied at eleven call sites.
+    /// The single-boiler controller's twin owns its store outright where this one reaches it
+    /// through a mutex under a timeout, which is the whole reason persistence stayed on the
+    /// controllers when the commands themselves were shared.
+    async fn save_persistent_configuration(&mut self) {
+        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
+            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
+            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
+        }
+    }
+
+    /// Carry out what a shared target command decided.
+    ///
+    /// The decision is `crate::command::targets`, which is pure and host-tested; this is the
+    /// half that needs a clock and a store. `CurveAction::Leave` is deliberately not
+    /// `Clear` — see [`crate::command::CurveAction`].
+    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
+        match outcome.curve {
+            command::CurveAction::Start => self.curve_start_time = Some(Instant::now()),
+            command::CurveAction::Clear => self.curve_start_time = None,
+            command::CurveAction::Leave => {}
+        }
+        if outcome.persist {
+            self.save_persistent_configuration().await;
+        }
     }
 
     async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
@@ -1874,154 +1884,39 @@ impl<
             MachineCommand::SetSteamValveOpenness(_, openness) => {
                 self.set_steam_valve_openness(openness).await;
             }
+            // The six target commands are `crate::command::targets`, shared with the
+            // single-boiler controller and host-tested there. What is left here is the half
+            // that genuinely differs between the machines: which store the result goes to,
+            // and the curve clock it is measured against.
             MachineCommand::SetBoilerControlTarget(boiler_index, mode, values_update) => {
-                log_info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
-                match boiler_index {
-                    0 => {
-                        self.configuration.persistent.brew_boiler.control_state.mode = mode;
-                        if let Some(update) = values_update {
-                            if let Some(temp) = update.temperature {
-                                self.configuration.persistent.brew_boiler.control_state.values.target_temperature = temp;
-                            }
-                            if let Some(pressure) = update.pressure {
-                                self.configuration.persistent.brew_boiler.control_state.values.target_pressure = pressure;
-                            }
-                        }
-                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                        }
-                    },
-                    1 => {
-                        self.configuration.persistent.steam_boiler.control_state.mode = mode;
-                        if let Some(update) = values_update {
-                            if let Some(temp) = update.temperature {
-                                self.configuration.persistent.steam_boiler.control_state.values.target_temperature = temp;
-                            }
-                            if let Some(pressure) = update.pressure {
-                                self.configuration.persistent.steam_boiler.control_state.values.target_pressure = pressure;
-                            }
-                        }
-                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                        }
-                    },
-                    _ => {
-                        log_error!("Invalid boiler index: {}", boiler_index);
-                    }
-                }
+                let outcome = command::targets::set_boiler_control_target(
+                    &mut self.configuration, boiler_index, mode, values_update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetBoilerControlTargetValues(boiler_index, update) => {
-                log_info!("Setting boiler control values for boiler {} to {:?}", boiler_index, update);
-                match boiler_index {
-                    0 => {
-                        if let Some(temp) = update.temperature {
-                            self.configuration.persistent.brew_boiler.control_state.values.target_temperature = temp;
-                        }
-                        if let Some(pressure) = update.pressure {
-                            self.configuration.persistent.brew_boiler.control_state.values.target_pressure = pressure;
-                        }
-                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                        }
-                    },
-                    1 => {
-                        if let Some(temp) = update.temperature {
-                            self.configuration.persistent.steam_boiler.control_state.values.target_temperature = temp;
-                        }
-                        if let Some(pressure) = update.pressure {
-                            self.configuration.persistent.steam_boiler.control_state.values.target_pressure = pressure;
-                        }
-                        match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                            Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                            Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                        }
-                    },
-                    _ => {
-                        log_error!("Invalid boiler index: {}", boiler_index);
-                    }
-                }
+                let outcome = command::targets::set_boiler_control_target_values(
+                    &mut self.configuration, boiler_index, update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetGroupBrewControlTarget(group_index, mode, values_update) => {
-                log_info!("Setting group brew control mode for group {} to {:?} with values {:?}", group_index, mode, values_update);
-                if group_index == 0 {
-                    // Check if this is a curve mode and record start time
-                    match mode {
-                        GroupBrewControlMode::GroupFlowRateCurve |
-                        GroupBrewControlMode::PressureCurve |
-                        GroupBrewControlMode::OutputFlowRateCurve |
-                        GroupBrewControlMode::FixedDutyCycleCurve => {
-                            self.curve_start_time = Some(Instant::now());
-                            log_info!("Starting curve control");
-                        }
-                        _ => {
-                            // Reset curve start time for non-curve modes
-                            self.curve_start_time = None;
-                        }
-                    }
-                    self.configuration.ephemeral.group_brew_control_state.mode = mode;
-                    if let Some(update) = values_update {
-                        self.apply_group_brew_values(update);
-                    }
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
+                let outcome = command::targets::set_group_brew_control_target(
+                    &mut self.configuration, group_index, mode, values_update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetGroupBrewControlTargetValues(group_index, update) => {
-                log_info!("Setting group brew control values for group {} to {:?}", group_index, update);
-                if group_index == 0 {
-                    self.apply_group_brew_values(update);
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
+                let outcome = command::targets::set_group_brew_control_target_values(
+                    &mut self.configuration, group_index, update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetGroupBrewLimit(group_index, limit, values_update) => {
-                log_info!("Setting group brew limit for group {} to {:?} with values {:?}", group_index, limit, values_update);
-                if group_index == 0 {
-                    self.configuration.ephemeral.group_brew_control_state.limit = limit;
-                    if let Some(update) = values_update {
-                        self.apply_group_brew_values(update);
-                    }
-                    // No `curve_start_time` handling, unlike the mode command: a limit is a
-                    // constant, and arming one must not restart the ramp a curve mode is
-                    // partway through.
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
+                let outcome = command::targets::set_group_brew_limit(
+                    &mut self.configuration, group_index, limit, values_update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetPidParameters(target, params) => {
-                match target {
-                    PidParameterTarget::BoilerPressure(boiler_index) => {
-                        match boiler_index {
-                            0 => self.configuration.persistent.brew_boiler.pressure_pid_parameters = params,
-                            1 => self.configuration.persistent.steam_boiler.pressure_pid_parameters = params,
-                            _ => log_error!("Invalid boiler index for PID parameters: {}", boiler_index),
-                        }
-                    }
-                    PidParameterTarget::BoilerTemperature(boiler_index) => {
-                        match boiler_index {
-                            0 => self.configuration.persistent.brew_boiler.temperature_pid_parameters = params,
-                            1 => self.configuration.persistent.steam_boiler.temperature_pid_parameters = params,
-                            _ => log_error!("Invalid boiler index for PID parameters: {}", boiler_index),
-                        }
-                    }
-                    PidParameterTarget::GroupFlowRate(_) => {
-                        self.configuration.persistent.group.flow_rate_pid_parameters = params;
-                    }
-                    PidParameterTarget::GroupPressure(_) => {
-                        self.configuration.persistent.group.pressure_pid_parameters = params;
-                    }
-                    PidParameterTarget::GroupOutputFlowRate(_) => {
-                        self.configuration.persistent.group.output_flow_rate_pid_parameters = params;
-                    }
-                }
-                // Save after updating PID parameters
-                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                }
+                let outcome = command::targets::set_pid_parameters(
+                    &mut self.configuration, target, params);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::EnableBoiler(boiler_index) => {
                 match boiler_index {
@@ -2202,10 +2097,7 @@ impl<
                 if group_index == 0 {
                     log_info!("Setting group pump configuration: {:?}", config);
                     self.configuration.persistent.group.pump_configuration = Some(config);
-                    match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                        Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                        Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                    }
+                    self.save_persistent_configuration().await;
                 } else {
                     log_error!("Invalid group index for pump configuration: {}", group_index);
                 }
@@ -2214,10 +2106,7 @@ impl<
                 if water_tap_index == 0 {
                     log_info!("Setting water tap pump configuration: {:?}", config);
                     self.configuration.persistent.water_tap.pump_configuration = Some(config);
-                    match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                        Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                        Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                    }
+                    self.save_persistent_configuration().await;
                 } else {
                     log_error!("Invalid water tap index for pump configuration: {}", water_tap_index);
                 }
@@ -2236,10 +2125,7 @@ impl<
                             pump_configuration: Some(config),
                         });
                     }
-                    match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                        Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                        Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                    }
+                    self.save_persistent_configuration().await;
                 } else {
                     log_error!("Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)", boiler_index);
                 }
@@ -2321,27 +2207,18 @@ impl<
                 log_info!("Setting heating element interlock: {}", enabled);
                 self.configuration.persistent.machine.heating_element_interlock = enabled;
                 self.interlock_enabled_signal.signal(enabled);
-                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                }
+                self.save_persistent_configuration().await;
             }
             MachineCommand::SetHeatingElementContentionStrategy(strategy) => {
                 log_info!("Setting heating element contention strategy: {:?}", strategy);
                 self.configuration.persistent.heating_element_contention_strategy = strategy;
                 self.contention_strategy_signal.signal(strategy);
-                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                }
+                self.save_persistent_configuration().await;
             }
             MachineCommand::SetWaterDispersalPumpStrategy(index, strategy) => {
                 log_info!("Setting water dispersal pump strategy for water tap {}: {:?}", index, strategy);
                 self.configuration.persistent.water_tap.pump_strategy = strategy;
-                match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                    Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                    Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-                }
+                self.save_persistent_configuration().await;
             }
             MachineCommand::AssociateBluetoothPeripheral(association) => {
                 let id = association.id;
@@ -3071,10 +2948,7 @@ impl<
             self.configuration = routine.saved_configuration.clone();
 
             // Save the restored persistent configuration
-            match with_timeout(Duration::from_millis(100), self.configuration_store.lock()).await {
-                Ok(mut store) => { store.save_settings(&self.configuration.persistent).await.ok(); }
-                Err(_) => log_warn!("Failed to acquire configuration_store lock for save (timeout)"),
-            }
+            self.save_persistent_configuration().await;
             self.curve_start_time = None;
 
             // Finish shot logging

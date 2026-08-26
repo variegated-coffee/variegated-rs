@@ -19,10 +19,11 @@ use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBo
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_types::{
     BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues,
-    Configuration, DutyCycleType, FillConfiguration, GroupBrewControlMode, GroupBrewControlState,
-    GroupBrewControlTargetValues, GroupBrewLimitMode, GroupConfiguration, MachineConfiguration,
-    MachineMode, PidLimits, PidParameters, PidTerm, SteamWandConfiguration, SteamWandControlState,
-    TankConfiguration, WaterDispersalPumpStrategy, WaterTapConfiguration,
+    BoilerIndex, Configuration, DutyCycleType, FillConfiguration, GroupBrewControlMode,
+    GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewLimitMode, GroupConfiguration,
+    GroupIndex, MachineConfiguration, MachineMode, PidLimits, PidParameterTarget, PidParameters,
+    PidTerm, SteamWandConfiguration, SteamWandControlState, TankConfiguration,
+    WaterDispersalPumpStrategy, WaterTapConfiguration,
 };
 
 /// Persistent configuration for dual-boiler single-group machine
@@ -90,6 +91,55 @@ impl DualBoilerSingleGroupConfiguration {
             GroupBrewControlMode::Off
         } else {
             self.ephemeral.group_brew_control_state.mode
+        }
+    }
+}
+
+impl crate::command::ConfigurationAccess for DualBoilerSingleGroupConfiguration {
+    fn boiler_control_state_mut(&mut self, index: BoilerIndex) -> Option<&mut BoilerControlState> {
+        match index {
+            0 => Some(&mut self.persistent.brew_boiler.control_state),
+            1 => Some(&mut self.persistent.steam_boiler.control_state),
+            _ => None,
+        }
+    }
+
+    fn group_brew_control_state_mut(
+        &mut self,
+        index: GroupIndex,
+    ) -> Option<&mut GroupBrewControlState> {
+        match index {
+            0 => Some(&mut self.ephemeral.group_brew_control_state),
+            _ => None,
+        }
+    }
+
+    /// The boiler index selects the tuning, unlike the single-boiler machine's impl -- this
+    /// machine has two elements and two of everything that heats.
+    fn pid_parameters_mut(&mut self, target: PidParameterTarget) -> Option<&mut PidParameters> {
+        match target {
+            PidParameterTarget::BoilerPressure(index) => match index {
+                0 => Some(&mut self.persistent.brew_boiler.pressure_pid_parameters),
+                1 => Some(&mut self.persistent.steam_boiler.pressure_pid_parameters),
+                _ => None,
+            },
+            PidParameterTarget::BoilerTemperature(index) => match index {
+                0 => Some(&mut self.persistent.brew_boiler.temperature_pid_parameters),
+                1 => Some(&mut self.persistent.steam_boiler.temperature_pid_parameters),
+                _ => None,
+            },
+            // The group commands carry an index too, and it was ignored here before this was
+            // shared. Kept ignored rather than quietly tightened: there is one group, so the
+            // only reachable value is 0, and refusing a stray index would be a new refusal.
+            PidParameterTarget::GroupFlowRate(_) => {
+                Some(&mut self.persistent.group.flow_rate_pid_parameters)
+            }
+            PidParameterTarget::GroupPressure(_) => {
+                Some(&mut self.persistent.group.pressure_pid_parameters)
+            }
+            PidParameterTarget::GroupOutputFlowRate(_) => {
+                Some(&mut self.persistent.group.output_flow_rate_pid_parameters)
+            }
         }
     }
 }

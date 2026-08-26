@@ -12,7 +12,8 @@ use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewControlTargetValuesUpdate, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PidParameterTarget, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType, StorageCommand};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType, StorageCommand};
+use crate::command;
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -1325,24 +1326,29 @@ impl<
         }
     }
 
-    /// Apply a values update to the group's brew control state, field by field.
+    /// Write the persistent half of the configuration to its store.
     ///
-    /// One place, because three commands now carry the same update — the mode command, the
-    /// values command and the limit command — and three copies of eleven `if let`s is how one
-    /// of them ends up silently missing a field.
-    fn apply_group_brew_values(&mut self, update: GroupBrewControlTargetValuesUpdate) {
-        let values = &mut self.configuration.ephemeral.group_brew_control_state.values;
-        if let Some(flow_rate) = update.flow_rate { values.flow_rate = flow_rate; }
-        if let Some(curve) = update.flow_rate_curve { values.flow_rate_curve = curve; }
-        if let Some(pressure) = update.pressure { values.pressure = pressure; }
-        if let Some(curve) = update.pressure_curve { values.pressure_curve = curve; }
-        if let Some(output_flow) = update.output_flow_rate { values.output_flow_rate = output_flow; }
-        if let Some(curve) = update.output_flow_rate_curve { values.output_flow_rate_curve = curve; }
-        if let Some(duty) = update.duty_cycle { values.duty_cycle = duty; }
-        if let Some(curve) = update.duty_cycle_curve { values.duty_cycle_curve = curve; }
-        if let Some(max) = update.max_pressure { values.max_pressure = max; }
-        if let Some(max) = update.max_group_flow_rate { values.max_group_flow_rate = max; }
-        if let Some(max) = update.max_output_flow_rate { values.max_output_flow_rate = max; }
+    /// One method, because six commands end in it. The dual-boiler's twin takes a mutex
+    /// under a timeout where this one owns its store outright, which is the whole reason
+    /// persistence stayed on the controllers when the commands themselves were shared.
+    async fn save_persistent_configuration(&mut self) {
+        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+    }
+
+    /// Carry out what a shared target command decided.
+    ///
+    /// The decision is `crate::command::targets`, which is pure and host-tested; this is the
+    /// half that needs a clock and a store. `CurveAction::Leave` is deliberately not
+    /// `Clear` — see [`crate::command::CurveAction`].
+    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
+        match outcome.curve {
+            command::CurveAction::Start => self.curve_start_time = Some(Instant::now()),
+            command::CurveAction::Clear => self.curve_start_time = None,
+            command::CurveAction::Leave => {}
+        }
+        if outcome.persist {
+            self.save_persistent_configuration().await;
+        }
     }
 
     async fn handle_command(&mut self, command: MachineCommand) {
@@ -1388,131 +1394,39 @@ impl<
             MachineCommand::StopPumpingToWaterTap(_) => {
                 self.transition_to_state(SingleBoilerSingleGroupControllerState::BrewModeIdle).await;
             }
+            // The six target commands are `crate::command::targets`, shared with the
+            // dual-boiler controller and host-tested there. What is left here is the half
+            // that genuinely differs between the machines: which store the result goes to,
+            // and the curve clock it is measured against.
             MachineCommand::SetBoilerControlTarget(boiler_index, mode, values_update) => {
-                log_info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
-                match boiler_index {
-                    0 => {
-                        self.configuration.persistent.brew_boiler_control_state.mode = mode;
-                        if let Some(update) = values_update {
-                            if let Some(temp) = update.temperature {
-                                self.configuration.persistent.brew_boiler_control_state.values.target_temperature = temp;
-                            }
-                            if let Some(pressure) = update.pressure {
-                                self.configuration.persistent.brew_boiler_control_state.values.target_pressure = pressure;
-                            }
-                        }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
-                    },
-                    1 => {
-                        self.configuration.persistent.steam_boiler_control_state.mode = mode;
-                        if let Some(update) = values_update {
-                            if let Some(temp) = update.temperature {
-                                self.configuration.persistent.steam_boiler_control_state.values.target_temperature = temp;
-                            }
-                            if let Some(pressure) = update.pressure {
-                                self.configuration.persistent.steam_boiler_control_state.values.target_pressure = pressure;
-                            }
-                        }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
-                    },
-                    _ => {
-                        log_error!("Invalid boiler index: {}", boiler_index);
-                    }
-                }
+                let outcome = command::targets::set_boiler_control_target(
+                    &mut self.configuration, boiler_index, mode, values_update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetBoilerControlTargetValues(boiler_index, update) => {
-                log_info!("Setting boiler control values for boiler {} to {:?}", boiler_index, update);
-                match boiler_index {
-                    0 => {
-                        if let Some(temp) = update.temperature {
-                            self.configuration.persistent.brew_boiler_control_state.values.target_temperature = temp;
-                        }
-                        if let Some(pressure) = update.pressure {
-                            self.configuration.persistent.brew_boiler_control_state.values.target_pressure = pressure;
-                        }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
-                    },
-                    1 => {
-                        if let Some(temp) = update.temperature {
-                            self.configuration.persistent.steam_boiler_control_state.values.target_temperature = temp;
-                        }
-                        if let Some(pressure) = update.pressure {
-                            self.configuration.persistent.steam_boiler_control_state.values.target_pressure = pressure;
-                        }
-                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
-                    },
-                    _ => {
-                        log_error!("Invalid boiler index: {}", boiler_index);
-                    }
-                }
+                let outcome = command::targets::set_boiler_control_target_values(
+                    &mut self.configuration, boiler_index, update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetGroupBrewControlTarget(group_index, mode, values_update) => {
-                log_info!("Setting group brew control mode for group {} to {:?} with values {:?}", group_index, mode, values_update);
-                if group_index == 0 {
-                    // Check if this is a curve mode and record start time
-                    match mode {
-                        GroupBrewControlMode::GroupFlowRateCurve |
-                        GroupBrewControlMode::PressureCurve |
-                        GroupBrewControlMode::OutputFlowRateCurve |
-                        GroupBrewControlMode::FixedDutyCycleCurve => {
-                            self.curve_start_time = Some(Instant::now());
-                            log_info!("Starting curve control");
-                        }
-                        _ => {
-                            // Reset curve start time for non-curve modes
-                            self.curve_start_time = None;
-                        }
-                    }
-                    self.configuration.ephemeral.group_brew_control_state.mode = mode;
-                    if let Some(update) = values_update {
-                        self.apply_group_brew_values(update);
-                    }
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
+                let outcome = command::targets::set_group_brew_control_target(
+                    &mut self.configuration, group_index, mode, values_update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetGroupBrewControlTargetValues(group_index, update) => {
-                log_info!("Setting group brew control values for group {} to {:?}", group_index, update);
-                if group_index == 0 {
-                    self.apply_group_brew_values(update);
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
+                let outcome = command::targets::set_group_brew_control_target_values(
+                    &mut self.configuration, group_index, update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetGroupBrewLimit(group_index, limit, values_update) => {
-                log_info!("Setting group brew limit for group {} to {:?} with values {:?}", group_index, limit, values_update);
-                if group_index == 0 {
-                    self.configuration.ephemeral.group_brew_control_state.limit = limit;
-                    if let Some(update) = values_update {
-                        self.apply_group_brew_values(update);
-                    }
-                    // No `curve_start_time` handling, unlike the mode command: a limit is a
-                    // constant, and arming one must not restart the ramp a curve mode is
-                    // partway through.
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
+                let outcome = command::targets::set_group_brew_limit(
+                    &mut self.configuration, group_index, limit, values_update);
+                self.apply_target_outcome(outcome).await;
             }
             MachineCommand::SetPidParameters(target, params) => {
-                match target {
-                    PidParameterTarget::BoilerPressure(_) => {
-                        self.configuration.persistent.pid_parameters.boiler_pressure_params = params;
-                    }
-                    PidParameterTarget::BoilerTemperature(_) => {
-                        self.configuration.persistent.pid_parameters.boiler_temperature_params = params;
-                    }
-                    PidParameterTarget::GroupFlowRate(_) => {
-                        self.configuration.persistent.pid_parameters.pump_flow_rate_params = params;
-                    }
-                    PidParameterTarget::GroupPressure(_) => {
-                        self.configuration.persistent.pid_parameters.pump_pressure_params = params;
-                    }
-                    PidParameterTarget::GroupOutputFlowRate(_) => {
-                        self.configuration.persistent.pid_parameters.pump_output_flow_rate_params = params;
-                    }
-                }
-                // Save after updating PID parameters
-                self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+                let outcome = command::targets::set_pid_parameters(
+                    &mut self.configuration, target, params);
+                self.apply_target_outcome(outcome).await;
             }
             // The mode table is `crate::single_boiler_state`, which is host-tested. It used
             // to be two chains of `if`/`else if` here, and `PowerSave` had no arm returning
@@ -2353,7 +2267,7 @@ impl<
             self.configuration.persistent = saved_config.persistent;
             self.configuration.ephemeral = saved_config.ephemeral;
             // Save the restored persistent configuration
-            self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
+            self.save_persistent_configuration().await;
             self.curve_start_time = None;  // Reset curve start time when routine exits
 
             // **Never resume an active state.** The old ordering prevented this by accident:

@@ -37,6 +37,11 @@ pub mod single_boiler_state;
 pub mod pump_transfer;
 // And which loop owns the output when a limit is armed. Pure for the same reason.
 pub mod pump_limit;
+// One implementation of every command that means the same thing on any machine, and the
+// trait that lets the two configurations share it. Ungated, which is what makes the command
+// handlers testable at all -- see the module's docs for the rule that keeps both
+// controllers' dispatchers exhaustive.
+pub mod command;
 // The two machines' configuration types, ungated where the controllers that own them are
 // not. They are plain structs, their stored representation and their projection onto
 // `Configuration` -- no peripheral, no PAC -- and keeping them out here is what lets

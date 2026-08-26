@@ -22,9 +22,10 @@ use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_types::{
     BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues,
-    Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlState,
-    GroupBrewControlTargetValues, GroupBrewLimitMode, GroupConfiguration, KalmanParameters,
-    MachineMode, PidLimits, PidParameters, PidTerm, TankConfiguration,
+    BoilerIndex, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlState,
+    GroupBrewControlTargetValues, GroupBrewLimitMode, GroupConfiguration, GroupIndex,
+    KalmanParameters, MachineMode, PidLimits, PidParameterTarget, PidParameters, PidTerm,
+    TankConfiguration,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -219,6 +220,49 @@ impl Default for SingleBoilerSingleGroupConfiguration {
             persistent: SingleBoilerSingleGroupPersistentConfiguration::default(),
             ephemeral: SingleBoilerSingleGroupEphemeralConfiguration::default(),
         }
+    }
+}
+
+impl crate::command::ConfigurationAccess for SingleBoilerSingleGroupConfiguration {
+    fn boiler_control_state_mut(&mut self, index: BoilerIndex) -> Option<&mut BoilerControlState> {
+        match index {
+            0 => Some(&mut self.persistent.brew_boiler_control_state),
+            // Not a second boiler: this is what the one heating element does once the
+            // machine is in steam mode. See `crate::single_boiler_state`.
+            1 => Some(&mut self.persistent.steam_boiler_control_state),
+            _ => None,
+        }
+    }
+
+    fn group_brew_control_state_mut(
+        &mut self,
+        index: GroupIndex,
+    ) -> Option<&mut GroupBrewControlState> {
+        match index {
+            0 => Some(&mut self.ephemeral.group_brew_control_state),
+            _ => None,
+        }
+    }
+
+    /// **The boiler index is deliberately ignored, and that is load-bearing.**
+    ///
+    /// There is one heating element and one tuning, so both boiler indices resolve to the
+    /// same slot. Answering index 1 with a tuning of its own is not a harmless improvement:
+    /// the ESPHome bridge exposes kP/kI/kD as Home Assistant numbers for every boiler
+    /// declaring `TemperaturePid` -- which the virtual steam boiler does -- and writing one
+    /// reads back the *published* parameters, edits a single term and returns the whole
+    /// struct. With the tunings shared, that round-trips. With them split, nudging "Virtual
+    /// Steam kP" would write an all-zero PID over the real one and save it to flash, which
+    /// is a machine that stops heating. See the matching comment in the `From` impl below.
+    fn pid_parameters_mut(&mut self, target: PidParameterTarget) -> Option<&mut PidParameters> {
+        let params = &mut self.persistent.pid_parameters;
+        Some(match target {
+            PidParameterTarget::BoilerPressure(_) => &mut params.boiler_pressure_params,
+            PidParameterTarget::BoilerTemperature(_) => &mut params.boiler_temperature_params,
+            PidParameterTarget::GroupFlowRate(_) => &mut params.pump_flow_rate_params,
+            PidParameterTarget::GroupPressure(_) => &mut params.pump_pressure_params,
+            PidParameterTarget::GroupOutputFlowRate(_) => &mut params.pump_output_flow_rate_params,
+        })
     }
 }
 
