@@ -46,6 +46,24 @@ pub struct SingleBoilerSingleGroupPersistentConfiguration {
     pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
     pub pump_tacho_pulses_per_liter: Option<f32>,
     pub flow_sensor_pulses_per_liter: Option<f32>,
+    /// What `SetGroupPumpConfiguration` writes, and what `update_pump` clamps against.
+    ///
+    /// **Appended, and appending here reset this machine's stored configuration once.**
+    /// postcard is positional and this blob carries no version, so an older stored value is a
+    /// byte short of the new layout; `SettingsStorage::load_settings` maps that decode failure
+    /// to `Default`. Every setpoint, PID tuning, Kalman parameter and pulses-per-litre
+    /// calibration in this struct went back to its default on the flash that introduced this
+    /// field, and had to be re-entered.
+    ///
+    /// That was a deliberate trade rather than an oversight: exactly one machine runs this
+    /// firmware, so re-entering its settings once cost less than carrying a legacy decode path
+    /// for the life of the struct. **On a fleet the trade goes the other way** -- either give
+    /// the value a `settings::key` of its own, the way the timezone and the Bluetooth
+    /// associations are stored, or write the migration.
+    ///
+    /// If another field is ever wanted here, add it in the same flash as something else that
+    /// needs one: the migration surface is the cost, not the field.
+    pub pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -210,6 +228,8 @@ impl Default for SingleBoilerSingleGroupPersistentConfiguration {
             pressure_sensor_kalman_parameters: None,
             pump_tacho_pulses_per_liter: None,
             flow_sensor_pulses_per_liter: None,
+            // Unconfigured, which `command::pump::apply_pump_limits` treats as unclamped.
+            pump_configuration: None,
         }
     }
 }
@@ -324,7 +344,10 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
             brew_control_state: config.ephemeral.group_brew_control_state,
             max_brew_time_seconds: Some(300), // 5 minutes max brew time
             auto_tare_enabled: true,
-            pump_configuration: None,
+            // Published now rather than hard-coded `None`: the browser's pump settings page
+            // reads this, and a value the machine stores but never publishes is one the UI
+            // shows as unset however many times it is written.
+            pump_configuration: config.persistent.pump_configuration.clone(),
             pressure_sensor_kalman_parameters: None,
             flow_sensor_pulses_per_liter: None,
             supply_tank_index: None,

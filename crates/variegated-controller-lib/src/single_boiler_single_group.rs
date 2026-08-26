@@ -962,25 +962,38 @@ impl<
             }
         }
 
-        let output = if selection.binding {
+        // The configured range, applied to whatever the loops asked for. Unconfigured is
+        // unclamped, which is every machine that has never had one set. `!brewing` is what
+        // makes a configured *minimum* still stop the pump -- see `apply_pump_limits`.
+        let duty_cycle = command::pump::apply_pump_limits(
+            HexadecimalDutyCycleType::from_f32(selection.output),
+            !brewing,
+            self.configuration.persistent.pump_configuration.as_ref(),
+        );
+
+        // Reported as the *limited* duty, matching the dual-boiler: the status and the shot
+        // log should say what the pump was given, not what the controller asked for.
+        let output = if !brewing {
+            PumpOutput::Off
+        } else if selection.binding {
             // The limit loop is what is actually driving the pump, so report its terms
             // rather than the main loop's. `brew_limit.binding` in the status and the shot
             // log is what says which quantity they belong to.
-            PumpOutput::PidOutput(limit_pid_out.expect("binding implies a limit output"))
+            let limit_out = limit_pid_out.expect("binding implies a limit output");
+            PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..limit_out })
         } else if let Some(pump_pid_out) = pump_pid_out {
-            PumpOutput::PidOutput(pump_pid_out)
-        } else if brewing {
-            // `from_f32` saturates, where the bare `as u8` this replaced did not.
-            PumpOutput::FixedDutyCycle(HexadecimalDutyCycleType::from_f32(selection.output))
+            PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..pump_pid_out })
         } else {
-            PumpOutput::Off
+            PumpOutput::FixedDutyCycle(duty_cycle)
         };
 
         // One place drives the pump, from one number, whichever loop produced it.
-        self.group.set_brewing_state(brewing, output.hexadecimal_duty_cycle()).await;
+        self.group.set_brewing_state(brewing, duty_cycle).await;
 
-        // What the next `Engage` inherits, which is why it is recorded in every mode.
-        self.pump_pid_engagement.record_commanded_duty(output.hexadecimal_duty_cycle());
+        // What the next `Engage` inherits, which is why it is recorded in every mode -- and
+        // the *limited* duty rather than the commanded one, because inheriting a value the
+        // pump never actually ran at is what bumpless transfer exists to avoid.
+        self.pump_pid_engagement.record_commanded_duty(duty_cycle);
         output
     }
 
@@ -1845,10 +1858,14 @@ impl<
                 command::refuse("SetHeatingElementContentionStrategy", "this machine has one heating element")
             }
 
-            // Not permanent either: this machine has a group and a pump, but nowhere to store
-            // a pump configuration and nothing in `update_pump` that would read one.
-            MachineCommand::SetGroupPumpConfiguration(_, _) => {
-                command::refuse("SetGroupPumpConfiguration", "this machine stores no pump configuration")
+            MachineCommand::SetGroupPumpConfiguration(group_index, config) => {
+                if group_index == 0 {
+                    log_info!("Setting group pump configuration: {:?}", config);
+                    self.configuration.persistent.pump_configuration = Some(config);
+                    self.save_persistent_configuration().await;
+                } else {
+                    log_error!("Invalid group index for pump configuration: {}", group_index);
+                }
             }
         }
     }

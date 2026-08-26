@@ -44,6 +44,7 @@
 pub mod access;
 pub mod bluetooth;
 pub mod connectivity;
+pub mod pump;
 pub mod shot;
 pub mod stores;
 pub mod targets;

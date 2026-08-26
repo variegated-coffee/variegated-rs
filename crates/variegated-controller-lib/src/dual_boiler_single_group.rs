@@ -1186,29 +1186,11 @@ impl<
     /// on the scale the editor shows -- so they are converted to the pump's scale here
     /// rather than compared against it directly.
     fn apply_pump_configuration_limits(&self, duty_cycle: HexadecimalDutyCycleType, is_off: bool) -> HexadecimalDutyCycleType {
-        // If pump is off, always return 0 regardless of min_duty_cycle
-        if is_off {
-            return HexadecimalDutyCycleType::OFF;
-        }
-
-        // Apply pump configuration limits if configured
-        if let Some(ref config) = self.configuration.persistent.group.pump_configuration {
-            let mut limited_duty = duty_cycle;
-
-            // Apply minimum duty cycle limit
-            if let Some(min_duty) = config.min_duty_cycle {
-                limited_duty = limited_duty.max(min_duty.into());
-            }
-
-            // Apply maximum duty cycle limit
-            if let Some(max_duty) = config.max_duty_cycle {
-                limited_duty = limited_duty.min(max_duty.into());
-            }
-
-            limited_duty
-        } else {
-            duty_cycle
-        }
+        command::pump::apply_pump_limits(
+            duty_cycle,
+            is_off,
+            self.configuration.persistent.group.pump_configuration.as_ref(),
+        )
     }
 
     async fn update_group_pump(&mut self, delta_t: f32) -> PumpOutput {
@@ -1396,32 +1378,14 @@ impl<
         Some(self.limit_pid.step(PidIn::new(pv, delta_t)))
     }
 
-    /// The water tap's copy of [`Self::apply_pump_configuration_limits`], reading the tap's
-    /// own `pump_configuration`. Same percentage-to-raw conversion, same reason.
+    /// The water tap's counterpart to [`Self::apply_pump_configuration_limits`], reading the
+    /// tap's own `pump_configuration`. The clamp itself is shared; only the config differs.
     fn apply_water_tap_pump_configuration_limits(&self, duty_cycle: HexadecimalDutyCycleType, is_off: bool) -> HexadecimalDutyCycleType {
-        // If pump is off, always return 0 regardless of min_duty_cycle
-        if is_off {
-            return HexadecimalDutyCycleType::OFF;
-        }
-
-        // Apply pump configuration limits if configured
-        if let Some(ref config) = self.configuration.persistent.water_tap.pump_configuration {
-            let mut limited_duty = duty_cycle;
-
-            // Apply minimum duty cycle limit
-            if let Some(min_duty) = config.min_duty_cycle {
-                limited_duty = limited_duty.max(min_duty.into());
-            }
-
-            // Apply maximum duty cycle limit
-            if let Some(max_duty) = config.max_duty_cycle {
-                limited_duty = limited_duty.min(max_duty.into());
-            }
-
-            limited_duty
-        } else {
-            duty_cycle
-        }
+        command::pump::apply_pump_limits(
+            duty_cycle,
+            is_off,
+            self.configuration.persistent.water_tap.pump_configuration.as_ref(),
+        )
     }
 
     async fn update_water_tap(&mut self, _delta_t: f32) -> PumpOutput {

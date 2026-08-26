@@ -260,7 +260,10 @@ impl defmt::Format for Configuration {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Clone, Debug, Default, PartialEq)]
+// `Copy` because every field already is, and because the single-boiler machine stores one of
+// these inside a configuration that is itself `Copy`. Additive: nothing about the wire format
+// or the stored representation changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PumpConfiguration {
     pub tacho_pulses_per_liter: Option<f32>,
     pub max_duty_cycle: Option<DutyCycleType>,
