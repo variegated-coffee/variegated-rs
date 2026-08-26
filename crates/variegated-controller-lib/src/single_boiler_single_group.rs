@@ -25,7 +25,7 @@ use crate::settings::SettingsStorage;
 use crate::pump_transfer::{PumpPidEngagement, PumpPidTransfer};
 use crate::pump_limit::{self, LimitEngagement, LimitTransfer};
 use variegated_controller_types::bluetooth::{
-    BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
+    BluetoothAssociations, BluetoothScanStatus,
 };
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::timezone::TimezoneSetting;
@@ -1614,35 +1614,27 @@ impl<
                 }
             }
             MachineCommand::AssociateBluetoothPeripheral(association) => {
-                let id = association.id;
-                if self.bluetooth_associations.upsert(association) {
-                    log_info!("Associated Bluetooth peripheral 0x{:04X}", id);
+                if command::bluetooth::associate(&mut self.bluetooth_associations, association)
+                    .wanted()
+                {
                     self.save_bluetooth_associations().await;
-                } else {
-                    log_warn!("Cannot associate 0x{:04X}: no free Bluetooth peripheral slots", id);
                 }
             }
             MachineCommand::RemoveBluetoothPeripheral(id) => {
-                if self.bluetooth_associations.remove(id) {
-                    log_info!("Removed Bluetooth association 0x{:04X}", id);
+                if command::bluetooth::remove(&mut self.bluetooth_associations, id).wanted() {
                     self.save_bluetooth_associations().await;
-                } else {
-                    log_warn!("No Bluetooth association for 0x{:04X} to remove", id);
                 }
             }
             MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => {
-                if self.bluetooth_associations.set_enabled(id, enabled) {
-                    log_info!("Bluetooth association 0x{:04X} enabled={}", id, enabled);
+                if command::bluetooth::set_enabled(&mut self.bluetooth_associations, id, enabled)
+                    .wanted()
+                {
                     self.save_bluetooth_associations().await;
-                } else {
-                    log_warn!("No Bluetooth association for 0x{:04X} to enable/disable", id);
                 }
             }
             MachineCommand::ScanForBluetoothPeripherals => {
-                // A discovery scan monopolises a radio shared with Wi-Fi and with the live
-                // links to the peripherals themselves, and the ACAIA driver drops its
-                // connection if it misses a couple of heartbeats. Only this processor
-                // knows whether coffee is being made, so only it can refuse.
+                // What counts as busy is this machine's to decide, and is the only part of
+                // starting a scan that differs between the two controllers.
                 //
                 // `SteamModeIdle` is not busy -- despite the boiler being hot, nothing is
                 // flowing and no shot is at stake.
@@ -1652,75 +1644,20 @@ impl<
                         SingleBoilerSingleGroupControllerState::Brewing
                             | SingleBoilerSingleGroupControllerState::PumpingToWaterTap
                     );
-
-                if busy {
-                    log_warn!("Refusing Bluetooth scan: machine is busy");
-                    self.bluetooth_status.blocked = true;
-                } else if let Some(sender) = self.bluetooth_scan_sender {
-                    match sender.try_send(crate::BLUETOOTH_SCAN_DURATION_MS) {
-                        Ok(()) => {
-                            log_info!("Starting Bluetooth scan");
-                            self.bluetooth_status.blocked = false;
-                            self.bluetooth_status.scanning = true;
-                            self.bluetooth_status.reports_dropped = 0;
-                            // Cleared on start, not on finish: the user is about to pick
-                            // from this list, and last scan's devices may be gone.
-                            self.bluetooth_status.discovered.clear();
-                            self.bluetooth_scan_deadline = Some(
-                                Instant::now()
-                                    + embassy_time::Duration::from_millis(
-                                        crate::BLUETOOTH_SCAN_DURATION_MS as u64
-                                            + crate::BLUETOOTH_SCAN_SLACK_MS,
-                                    ),
-                            );
-                        }
-                        Err(_) => log_warn!("Failed to start Bluetooth scan: channel full"),
-                    }
-                } else {
-                    log_warn!("Refusing Bluetooth scan: no comms processor wired for it");
-                    self.bluetooth_status.blocked = true;
-                }
+                command::bluetooth::start_scan(
+                    &mut self.bluetooth_status,
+                    &mut self.bluetooth_scan_deadline,
+                    self.bluetooth_scan_sender,
+                    busy,
+                );
             }
-            MachineCommand::UpdateBluetoothScan(update) => match update {
-                BluetoothScanUpdate::Discovered(device) => {
-                    // Merged, not replaced -- a device's name and its service UUIDs
-                    // usually arrive in different advertising reports, and overwriting
-                    // would keep whichever came last. See the equivalent in
-                    // `dual_boiler_single_group`.
-                    match self
-                        .bluetooth_status
-                        .discovered
-                        .iter_mut()
-                        .find(|d| d.address == device.address)
-                    {
-                        Some(existing) => {
-                            if !device.name.is_empty() {
-                                existing.name = device.name;
-                            }
-                            if device.suggested_driver.is_some() {
-                                existing.suggested_driver = device.suggested_driver;
-                            }
-                        }
-                        None => {
-                            if self.bluetooth_status.discovered.push(device).is_err() {
-                                self.bluetooth_status.reports_dropped =
-                                    self.bluetooth_status.reports_dropped.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-                BluetoothScanUpdate::Finished { reports_dropped } => {
-                    log_info!(
-                        "Bluetooth scan finished: {} found, {} dropped by the comms processor",
-                        self.bluetooth_status.discovered.len(),
-                        reports_dropped
-                    );
-                    self.bluetooth_scan_deadline = None;
-                    self.bluetooth_status.scanning = false;
-                    self.bluetooth_status.reports_dropped =
-                        self.bluetooth_status.reports_dropped.saturating_add(reports_dropped);
-                }
-            },
+            MachineCommand::UpdateBluetoothScan(update) => {
+                command::bluetooth::apply_scan_update(
+                    &mut self.bluetooth_status,
+                    &mut self.bluetooth_scan_deadline,
+                    update,
+                );
+            }
             MachineCommand::SetPendingShotAnnotations(annotations) => {
                 self.pending_annotations = annotations;
                 log_debug!(

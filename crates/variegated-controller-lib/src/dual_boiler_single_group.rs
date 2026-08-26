@@ -31,9 +31,8 @@ use variegated_hal::scale::ScaleConfiguration;
 use variegated_timekeeping::TimeKeeper;
 use crate::schedule::ScheduleStore;
 use crate::settings::SettingsStorage;
-use crate::{BLUETOOTH_SCAN_DURATION_MS, BLUETOOTH_SCAN_SLACK_MS};
 use variegated_controller_types::bluetooth::{
-    BluetoothAssociations, BluetoothScanStatus, BluetoothScanUpdate,
+    BluetoothAssociations, BluetoothScanStatus,
 };
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::timezone::TimezoneSetting;
@@ -2173,125 +2172,48 @@ impl<
                 self.save_persistent_configuration().await;
             }
             MachineCommand::AssociateBluetoothPeripheral(association) => {
-                let id = association.id;
-                if self.bluetooth_associations.upsert(association) {
-                    log_info!("Associated Bluetooth peripheral 0x{:04X}", id);
+                if command::bluetooth::associate(&mut self.bluetooth_associations, association)
+                    .wanted()
+                {
                     self.save_bluetooth_associations().await;
-                } else {
-                    // Only reachable when the list is full *and* the id is new, since an
-                    // existing id replaces in place.
-                    log_warn!("Cannot associate 0x{:04X}: no free Bluetooth peripheral slots", id);
                 }
             }
             MachineCommand::RemoveBluetoothPeripheral(id) => {
-                if self.bluetooth_associations.remove(id) {
-                    log_info!("Removed Bluetooth association 0x{:04X}", id);
+                if command::bluetooth::remove(&mut self.bluetooth_associations, id).wanted() {
                     self.save_bluetooth_associations().await;
-                } else {
-                    log_warn!("No Bluetooth association for 0x{:04X} to remove", id);
                 }
             }
             MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => {
-                if self.bluetooth_associations.set_enabled(id, enabled) {
-                    log_info!("Bluetooth association 0x{:04X} enabled={}", id, enabled);
+                if command::bluetooth::set_enabled(&mut self.bluetooth_associations, id, enabled)
+                    .wanted()
+                {
                     self.save_bluetooth_associations().await;
-                } else {
-                    log_warn!("No Bluetooth association for 0x{:04X} to enable/disable", id);
                 }
             }
             MachineCommand::ScanForBluetoothPeripherals => {
-                // A discovery scan monopolises a radio that is shared with Wi-Fi and with
-                // the live links to the peripherals themselves. The ACAIA driver has to
-                // heartbeat every couple of seconds or the scale drops the connection, so
-                // a scan started mid-shot can cost brew-by-weight the shot it is
-                // weighing. The comms processor cannot see any of that -- this is the
-                // only processor that knows coffee is being made.
+                // What counts as busy is this machine's to decide, and is the only part of
+                // starting a scan that differs between the two controllers. This one has
+                // more ways to be occupied, including a steam wand when it has one.
                 let busy = self.group_brewing
                     || self.water_tap_dispensing
                     || self.current_routine.is_some();
                 #[cfg(feature = "pwm-steam-valve")]
                 let busy = busy || self.steam_wand.get_steaming_state();
 
-                if busy {
-                    log_warn!("Refusing Bluetooth scan: machine is busy");
-                    self.bluetooth_status.blocked = true;
-                } else if let Some(sender) = self.bluetooth_scan_sender {
-                    match sender.try_send(BLUETOOTH_SCAN_DURATION_MS) {
-                        Ok(()) => {
-                            log_info!("Starting Bluetooth scan");
-                            self.bluetooth_status.blocked = false;
-                            self.bluetooth_status.scanning = true;
-                            self.bluetooth_status.reports_dropped = 0;
-                            // Cleared on *start*, not on finish. The user is about to
-                            // pick from this list, and leaving the previous scan's
-                            // results visible underneath the new ones would offer them
-                            // devices that may no longer be there.
-                            self.bluetooth_status.discovered.clear();
-                            self.bluetooth_scan_deadline = Some(
-                                Instant::now()
-                                    + Duration::from_millis(
-                                        BLUETOOTH_SCAN_DURATION_MS as u64 + BLUETOOTH_SCAN_SLACK_MS,
-                                    ),
-                            );
-                        }
-                        Err(_) => log_warn!("Failed to start Bluetooth scan: channel full"),
-                    }
-                } else {
-                    log_warn!("Refusing Bluetooth scan: no comms processor wired for it");
-                    self.bluetooth_status.blocked = true;
-                }
+                command::bluetooth::start_scan(
+                    &mut self.bluetooth_status,
+                    &mut self.bluetooth_scan_deadline,
+                    self.bluetooth_scan_sender,
+                    busy,
+                );
             }
-            MachineCommand::UpdateBluetoothScan(update) => match update {
-                BluetoothScanUpdate::Discovered(device) => {
-                    // **Merged, not replaced.** The comms processor reports a device more
-                    // than once on purpose: a name and a set of service UUIDs usually
-                    // arrive in different advertising reports -- the name in the scan
-                    // response, the UUIDs in the advertisement -- and each is forwarded
-                    // when it adds something. Overwriting would keep whichever came last
-                    // and throw away the other half.
-                    match self
-                        .bluetooth_status
-                        .discovered
-                        .iter_mut()
-                        .find(|d| d.address == device.address)
-                    {
-                        Some(existing) => {
-                            if !device.name.is_empty() {
-                                existing.name = device.name;
-                            }
-                            if device.suggested_driver.is_some() {
-                                existing.suggested_driver = device.suggested_driver;
-                            }
-                            // `rssi` is deliberately left at the first sighting, matching
-                            // what the field claims. It ranks the list; it is not a
-                            // measurement, and re-reading it per report would make the
-                            // order jump around while the user is reading it.
-                        }
-                        None => {
-                            if self.bluetooth_status.discovered.push(device).is_err() {
-                                // Counted where the UI already looks for "results were
-                                // lost", rather than in a log nobody reads mid-scan.
-                                self.bluetooth_status.reports_dropped =
-                                    self.bluetooth_status.reports_dropped.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-                BluetoothScanUpdate::Finished { reports_dropped } => {
-                    log_info!(
-                        "Bluetooth scan finished: {} found, {} dropped by the comms processor",
-                        self.bluetooth_status.discovered.len(),
-                        reports_dropped
-                    );
-                    self.bluetooth_scan_deadline = None;
-                    self.bluetooth_status.scanning = false;
-                    // Added to, not overwritten: this processor drops reports of its own
-                    // when the list is full, and both losses are the same fact to a user
-                    // wondering where their scale went.
-                    self.bluetooth_status.reports_dropped =
-                        self.bluetooth_status.reports_dropped.saturating_add(reports_dropped);
-                }
-            },
+            MachineCommand::UpdateBluetoothScan(update) => {
+                command::bluetooth::apply_scan_update(
+                    &mut self.bluetooth_status,
+                    &mut self.bluetooth_scan_deadline,
+                    update,
+                );
+            }
             MachineCommand::SetPendingShotAnnotations(annotations) => {
                 self.pending_annotations = annotations;
                 log_debug!(

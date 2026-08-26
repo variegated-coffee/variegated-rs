@@ -42,6 +42,7 @@
 //!   persist and leaves the writing to the caller.
 
 pub mod access;
+pub mod bluetooth;
 pub mod stores;
 pub mod targets;
 
