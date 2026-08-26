@@ -2215,102 +2215,46 @@ impl<
                 );
             }
             MachineCommand::SetPendingShotAnnotations(annotations) => {
-                self.pending_annotations = annotations;
-                log_debug!(
-                    "Pending shot annotations set ({} entries)",
-                    self.pending_annotations.len()
-                );
+                command::shot::set_pending_annotations(&mut self.pending_annotations, annotations);
             }
             MachineCommand::TagDoseFromScale(scale) => {
                 self.tag_dose_from_scale(scale);
             }
             MachineCommand::SetWifiCredentials(credentials) => {
-                // Persisted without validation, and that is correct rather than lax: these
-                // arrive only from `WifiCredentialsProvisioned`, which the comms processor
-                // sends *after* its radio has associated using them. This processor has no
-                // radio and could not check anything anyway.
-                let stored = StoredWifiCredentials(Some(credentials));
-                if self.wifi_credentials != stored {
-                    self.wifi_credentials = stored;
+                if command::connectivity::set_wifi_credentials(
+                    &mut self.wifi_credentials, credentials).wanted()
+                {
                     self.save_wifi_credentials().await;
-                    log_info!("Stored new Wi-Fi credentials");
                 }
             }
             MachineCommand::SetShotUploadSettings(settings) => {
-                // The settings UI's edit. Merged rather than replacing, because the browser
-                // is never sent the token and so cannot send it back -- see
-                // `ShotUploadTokenUpdate`.
-                //
-                // The compare-before-save is doing real work here: the panel posts on every
-                // save, and a save that changed nothing would otherwise take the store lock
-                // and republish.
-                let mut updated = self.shot_upload_config.clone();
-                updated.apply(settings);
-                if self.shot_upload_config != updated {
-                    self.shot_upload_config = updated;
+                if command::connectivity::apply_shot_upload_settings(
+                    &mut self.shot_upload_config, settings).wanted()
+                {
                     self.save_shot_upload_config().await;
-                    log_info!(
-                        "Shot upload settings updated: endpoint {}, token {}, uploads {}",
-                        if self.shot_upload_config.endpoint.is_some() { "set" } else { "cleared" },
-                        if self.shot_upload_config.token.is_some() { "set" } else { "cleared" },
-                        if self.shot_upload_config.enabled { "enabled" } else { "disabled" }
-                    );
                 }
             }
             MachineCommand::SetShotUploadConfig(config) => {
-                // Persisted without validation, for a different reason than the Wi-Fi arm
-                // above: this processor *could* parse the URL, but it is not the one that
-                // uses it. The comms processor parses it at upload time and reports what it
-                // found, and duplicating that here would put two parsers on one string with
-                // no mechanism keeping them in agreement.
-                //
-                // The compare-before-save matters more than usual: `save_settings` short-
-                // circuits on an equal cached value, but reaching it at all takes the store
-                // lock, and this command can arrive on every reconnect.
-                if self.shot_upload_config != config {
-                    self.shot_upload_config = config;
+                if command::connectivity::set_shot_upload_config(
+                    &mut self.shot_upload_config, config).wanted()
+                {
                     self.save_shot_upload_config().await;
-                    // Never the token, and not even its length -- see the type's `Debug`.
-                    log_info!(
-                        "Stored shot upload config: endpoint {}, token {}",
-                        if self.shot_upload_config.endpoint.is_some() { "set" } else { "cleared" },
-                        if self.shot_upload_config.token.is_some() { "set" } else { "cleared" }
-                    );
                 }
             }
             MachineCommand::OpenWifiProvisioningWindow { duration_ms } => {
-                // Refused while the machine is busy, on the same grounds as a discovery
-                // scan and using the same predicate. Minutes of connectable advertising
-                // share one antenna with Wi-Fi and with the live links to the scales, and
-                // the ACAIA drops its connection if its heartbeat misses by a couple of
-                // seconds. This is the only processor that knows coffee is being made.
+                // The same busy predicate a discovery scan uses, and the only part of this
+                // that differs between the two machines.
                 let busy = self.group_brewing
                     || self.water_tap_dispensing
                     || self.current_routine.is_some();
                 #[cfg(feature = "pwm-steam-valve")]
                 let busy = busy || self.steam_wand.get_steaming_state();
 
-                if busy {
-                    log_warn!("Refusing to open the Wi-Fi provisioning window: machine is busy");
-                } else if let Some(sender) = self.wifi_provisioning_sender.as_ref() {
-                    if sender.try_send(duration_ms).is_err() {
-                        log_warn!("Failed to forward the provisioning window request: channel full");
-                    }
-                } else {
-                    // Refused out loud rather than dropped, so a machine that is not wired
-                    // for this says so instead of appearing to accept and then advertising
-                    // nothing.
-                    log_warn!("This machine has no Wi-Fi provisioning path");
-                }
+                command::connectivity::open_provisioning_window(
+                    self.wifi_provisioning_sender, duration_ms, busy);
             }
             MachineCommand::CloseWifiProvisioningWindow => {
-                if let Some(sender) = self.wifi_provisioning_sender.as_ref() {
-                    // Zero means close. One channel rather than two because the two
-                    // requests are mutually exclusive and ordering between them matters:
-                    // separate channels could deliver a close before the open it was meant
-                    // to cancel.
-                    let _ = sender.try_send(0);
-                }
+                command::connectivity::close_provisioning_window(self.wifi_provisioning_sender);
             }
             MachineCommand::IdentifyMachine => {
                 // Still logged as well as published: this is the far end of a round trip that
@@ -2321,24 +2265,13 @@ impl<
                     publisher.send(Instant::now());
                 }
             }
+            // Refused rather than stored when the name is unknown: this firmware's database is
+            // trimmed at build time, so "unknown" usually means "outside the region this build
+            // carries" rather than "misspelt" -- and either way the honest outcome is that the
+            // machine keeps the zone it had, and says so.
             MachineCommand::SetTimezone(setting) => {
-                match variegated_timekeeping::TimeZoneWrapper::from_iana_name(setting.as_str()) {
-                    Some(zone) => {
-                        // Applied before it is stored, so a `TimeKeeper` that refuses it does
-                        // not leave flash claiming a zone the scheduler is not using.
-                        if let Err(e) = TimeKeeper::set_timezone(zone) {
-                            log_warn!("Failed to apply timezone: {:?}", e);
-                        } else {
-                            log_info!("Timezone set to {}", setting.as_str());
-                            self.timezone = setting;
-                            self.save_timezone().await;
-                        }
-                    }
-                    // Refused, not stored. This firmware's database is trimmed at build time,
-                    // so "unknown" here usually means "outside the region this build carries"
-                    // rather than "misspelt" -- and either way the honest outcome is that the
-                    // machine keeps the zone it had, and says so.
-                    None => log_warn!("Refusing unknown timezone: {}", setting.as_str()),
+                if command::connectivity::set_timezone(&mut self.timezone, setting).wanted() {
+                    self.save_timezone().await;
                 }
             }
             MachineCommand::RequestConfiguration => {
@@ -2351,51 +2284,14 @@ impl<
                 log_info!("Configuration republish requested");
                 self.publish_general_configuration().await;
             }
+            // Editing or deleting a *stored* shot is a whole-file rewrite on the card, which
+            // happens on core 1. Both are handed across rather than performed here.
             MachineCommand::SetShotAnnotations(id, annotations) => {
-                // Editing a *stored* shot is a whole-file rewrite on the card, which
-                // happens on core 1. Handed across rather than performed here.
-                match self.shot_log_query_sender {
-                    // `try_send`, not `await`. This runs on the command-handling path of
-                    // the control loop, which must not block on a storage task that may
-                    // be mid-write; a depth-1 channel that is already full means a
-                    // request is in flight, and the right answer is to refuse this one
-                    // rather than to stall the machine behind it.
-                    Some(ref sender) => {
-                        let query = crate::shot_log_query::ShotLogQuery::SetAnnotations {
-                            id,
-                            annotations,
-                        };
-                        if sender.try_send(query).is_err() {
-                            log_warn!(
-                                "SetShotAnnotations({:?}) refused: a shot-log request is already in flight",
-                                id
-                            );
-                        }
-                    }
-                    None => log_warn!(
-                        "SetShotAnnotations({:?}) ignored: this machine has no shot-log storage",
-                        id
-                    ),
-                }
+                command::shot::set_shot_annotations(
+                    self.shot_log_query_sender.as_ref(), id, annotations);
             }
             MachineCommand::DeleteShotLog(id) => {
-                // Handed to core 1 like an annotation edit, and for the same reason: the
-                // card is not reachable from the control loop.
-                match self.shot_log_query_sender {
-                    Some(ref sender) => {
-                        let query = crate::shot_log_query::ShotLogQuery::Delete { id };
-                        if sender.try_send(query).is_err() {
-                            log_warn!(
-                                "DeleteShotLog({:?}) refused: a shot-log request is already in flight",
-                                id
-                            );
-                        }
-                    }
-                    None => log_warn!(
-                        "DeleteShotLog({:?}) ignored: this machine has no shot-log storage",
-                        id
-                    ),
-                }
+                command::shot::delete_shot_log(self.shot_log_query_sender.as_ref(), id);
             }
             #[cfg(not(feature = "pwm-steam-valve"))]
             MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
