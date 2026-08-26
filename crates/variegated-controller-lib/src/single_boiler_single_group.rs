@@ -18,7 +18,7 @@ use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
 use crate::command;
 use crate::command::pump::{PumpLoopContext, PumpQuantity};
-use crate::command::{MachineCommandContext, ScaleAction};
+use crate::command::MachineCommandContext;
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use crate::schedule::ScheduleStore;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
@@ -726,19 +726,6 @@ impl<
     ///
     /// The gains are the ones already tuned for controlling that quantity, because that is
     /// what this is: the same physical loop, holding a cap instead of a setpoint.
-    /// The loop itself is `crate::command::pump::PumpLoopContext`, shared with the dual-boiler
-    /// controller; only the engagement decision and the setpoint lookup are read here.
-    fn step_limit_loop(
-        &mut self,
-        state: &GroupBrewControlState,
-        commanded: f32,
-        delta_t: f32,
-    ) -> Option<PidOut<f32>> {
-        let transfer = self.limit_engagement.transfer_for(state.mode, state.limit);
-        let setpoint = pump_limit::limit_setpoint(state.limit, &state.values)?;
-        PumpLoopContext::step_limit_loop(self, transfer, state.limit, setpoint, commanded, delta_t)
-    }
-
     async fn update_pump(&mut self, actual_pump_control_state: GroupBrewControlState, delta_t: f32) -> PumpOutput {
         // Calculate elapsed time for curve evaluation if needed
         let elapsed_seconds = self.curve_start_time
@@ -846,7 +833,8 @@ impl<
         // The limit loop, and the selector. See `crate::pump_limit` for why this is a
         // min-select rather than a switch, and for what the two loops owe each other.
         let commanded = main_output.unwrap_or(0.0);
-        let limit_pid_out = self.step_limit_loop(&actual_pump_control_state, commanded, delta_t);
+        let limit_pid_out =
+            self.step_limit_loop_for(&actual_pump_control_state, commanded, delta_t);
         let selection = pump_limit::select(commanded, limit_pid_out.map(|out| out.out));
 
         // Remembered rather than recomputed: the status publisher runs on its own cadence and
@@ -1199,16 +1187,6 @@ impl<
         }
     }
 
-    /// The decision is `crate::command::interlocks`, which is pure and host-tested; this only
-    /// reads the tank for it.
-    fn should_block_water_operation(&mut self) -> bool {
-        let tank_empty = self.is_tank_empty();
-        command::interlocks::should_block_water_operation(
-            &self.machine_config,
-            tank_empty,
-            self.current_routine.is_some(),
-        )
-    }
 
     /// Tare or calibrate the group scale.
     ///
@@ -1216,29 +1194,6 @@ impl<
     /// called. The `Result` is discarded as it always was: a scale that is not attached, or
     /// that refuses, is a condition the user can see on the display rather than something
     /// this loop can act on.
-    async fn scale_action(&mut self, group_index: GroupIndex, action: ScaleAction) {
-        if group_index != 0 {
-            log_error!("Invalid group index for {} scale: {}", action.label(), group_index);
-            return;
-        }
-        log_info!("{} group scale", action.label());
-        let _ = match action {
-            ScaleAction::Tare => self.group.scale_tare().await,
-            ScaleAction::ZeroCalibrate => self.group.scale_zero_calibration().await,
-            ScaleAction::CalibrateWith100g => {
-                self.group.scale_reference_weight_calibration(100).await
-            }
-        };
-    }
-
-    /// The seeding is `crate::command::pump::PumpLoopContext`; only the index check is here.
-    fn seed_pump_integral(&mut self, group_index: GroupIndex, quantity: PumpQuantity, target: f32) {
-        if group_index != 0 {
-            log_error!("Invalid group index: {}", group_index);
-            return;
-        }
-        PumpLoopContext::seed_pump_integral(self, quantity, target);
-    }
 
     /// Write the persistent half of the configuration to its store.
     ///
@@ -1444,28 +1399,6 @@ impl<
     ///
     /// See the equivalent pair in `dual_boiler_single_group` for why the logger needs
     /// nothing a manual brew lacks, and why both guards are here.
-    // The three manual shot-log methods are `crate::command::shot`, shared with the
-    // dual-boiler controller: they were byte-identical, including the guard that keeps this
-    // path from closing a *routine's* log early.
-    fn start_manual_shot_log(&mut self) {
-        command::shot::start_manual_shot_log(
-            &mut self.shot_logger,
-            &self.pending_annotations,
-            &mut self.manual_shot_active,
-            self.current_routine.is_some(),
-            SingleGroup.as_index(),
-        );
-    }
-
-    fn finish_manual_shot_log(&mut self) {
-        command::shot::finish_manual_shot_log(
-            &mut self.shot_logger,
-            &mut self.pending_annotations,
-            &mut self.manual_shot_active,
-            self.shot_log_sender.as_ref(),
-        );
-    }
-
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
         if self.current_routine.is_some() {
@@ -1627,11 +1560,7 @@ impl<
             };
             self.transition_to_state(resume_state).await;
 
-            command::shot::finish_routine_shot_log(
-                &mut self.shot_logger,
-                &mut self.pending_annotations,
-                self.shot_log_sender.as_ref(),
-            );
+            MachineCommandContext::finish_routine_shot_log(self);
 
             self.previous_routine_step = None;
         } else {
@@ -1639,19 +1568,6 @@ impl<
         }
     }
 
-    /// Record what a scale currently reads as the dose for the next shot.
-    ///
-    /// The decision is `crate::command::shot`, shared with the dual-boiler controller; this
-    /// only reads this machine's scale for it.
-    fn tag_dose_from_scale(&mut self, scale: variegated_controller_types::ScaleSelector) {
-        let weight = self.group.get_output_weight();
-        command::shot::tag_dose_from_scale(
-            &mut self.pending_annotations,
-            scale,
-            SingleGroup.as_index(),
-            weight,
-        );
-    }
 }
 
 // `impl From<SingleBoilerSingleGroupConfiguration> for Configuration` now lives beside the
@@ -1713,6 +1629,10 @@ impl<
     fn pump_pid(&mut self) -> &mut PidCtrl<f32> {
         &mut self.pump_pid
     }
+
+    fn limit_engagement(&mut self) -> &mut LimitEngagement {
+        &mut self.limit_engagement
+    }
 }
 
 /// This machine's half of the shared command dispatcher.
@@ -1744,6 +1664,33 @@ impl<
     type ChannelM = ChannelM;
     type RoutineRepo = RoutineRepoT;
     type ScheduleStoreT = ScheduleStoreT;
+    type Group = Group<'a, M, N_WATCH>;
+
+    fn group(&mut self) -> &mut Self::Group {
+        &mut self.group
+    }
+
+    fn is_tank_empty(&mut self) -> bool {
+        SingleBoilerSingleGroupController::is_tank_empty(self)
+    }
+
+    fn machine_config(&self) -> &MachineConfiguration {
+        &self.machine_config
+    }
+
+    fn routine_running(&self) -> bool {
+        self.current_routine.is_some()
+    }
+
+    fn shot_logging(&mut self) -> (&mut crate::ShotLogger, &mut variegated_controller_types::ShotAnnotations, &mut bool) {
+        (&mut self.shot_logger, &mut self.pending_annotations, &mut self.manual_shot_active)
+    }
+
+    fn shot_log_sender(
+        &self,
+    ) -> Option<Sender<'a, Self::ChannelM, variegated_controller_types::ShotLog, 2>> {
+        self.shot_log_sender
+    }
 
     // ---- Shared state ----------------------------------------------------------------
 
@@ -1937,14 +1884,6 @@ impl<
         }
     }
 
-    async fn scale_action(&mut self, index: GroupIndex, action: ScaleAction) {
-        SingleBoilerSingleGroupController::scale_action(self, index, action).await
-    }
-
-    fn seed_pump_integral(&mut self, index: GroupIndex, quantity: PumpQuantity, target: f32) {
-        SingleBoilerSingleGroupController::seed_pump_integral(self, index, quantity, target)
-    }
-
     /// Run inline, unlike the range optimizations: this controller owns its configuration
     /// store by value, and this rewrites a single key rather than a whole range.
     async fn optimize_configuration_storage(&mut self) {
@@ -1966,10 +1905,6 @@ impl<
         log_info!("Configuration republish requested");
         let config = self.general_configuration(self.current_configuration()).await;
         self.configuration_channel_sender.publish_immediate(config);
-    }
-
-    fn tag_dose_from_scale(&mut self, scale: variegated_controller_types::ScaleSelector) {
-        SingleBoilerSingleGroupController::tag_dose_from_scale(self, scale)
     }
 
     /// Logged as well as published: this is the far end of a round trip that starts in a

@@ -50,6 +50,7 @@ pub mod access;
 pub mod bluetooth;
 pub mod connectivity;
 pub mod context;
+pub mod group;
 pub mod interlocks;
 pub mod pump;
 pub mod shot;

@@ -80,6 +80,25 @@ pub trait PumpLoopContext {
     /// The main pump PID.
     fn pump_pid(&mut self) -> &mut PidCtrl<f32>;
 
+    /// Whether the limit loop currently owns the output, and what changed this iteration.
+    fn limit_engagement(&mut self) -> &mut crate::pump_limit::LimitEngagement;
+
+    /// Step the limit loop for this iteration's control state, or `None` if no limit is
+    /// running.
+    ///
+    /// The whole of it: whether the loop engages, what it is capping, and the seeding. Both
+    /// controllers called an identical wrapper around this.
+    fn step_limit_loop_for(
+        &mut self,
+        state: &variegated_controller_types::GroupBrewControlState,
+        commanded: f32,
+        delta_t: f32,
+    ) -> Option<PidOut<f32>> {
+        let transfer = self.limit_engagement().transfer_for(state.mode, state.limit);
+        let setpoint = crate::pump_limit::limit_setpoint(state.limit, &state.values)?;
+        self.step_limit_loop(transfer, state.limit, setpoint, commanded, delta_t)
+    }
+
     /// Step the limit loop, or `None` if no limit is running this iteration.
     ///
     /// An engaging loop inherits the commanded output rather than starting from zero -- see
@@ -112,9 +131,10 @@ pub trait PumpLoopContext {
 
     /// Seed the main pump PID for whichever quantity is about to be controlled.
     ///
-    /// The three `InferGroup*Integral` commands, which were three twenty-line copies of this
-    /// per machine.
-    fn seed_pump_integral(&mut self, quantity: PumpQuantity, target: f32) {
+    /// Named `seed_integral` rather than `seed_pump_integral` so it does not collide with the
+    /// command-facing method of that name on `MachineCommandContext`, which adds the group
+    /// index check and then calls this.
+    fn seed_integral(&mut self, quantity: PumpQuantity, target: f32) {
         let duty_cycle = self.seeding_duty_cycle();
         let (parameters, measurement) = self.pump_loop_inputs(quantity);
         seed_pump_integral(self.pump_pid(), quantity, target, parameters, duty_cycle, measurement);

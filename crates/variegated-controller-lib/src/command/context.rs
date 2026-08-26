@@ -34,7 +34,7 @@ use variegated_controller_types::{
     MachineMode, PumpConfiguration, ScaleSelector, SteamWandIndex, StorageCommand, ValveOpenType,
     WaterDispersalPumpStrategy, WaterTapIndex,
 };
-use variegated_log::{log_info, log_warn};
+use variegated_log::{log_error, log_info, log_warn};
 
 use crate::routine::RoutineRepository;
 use crate::schedule::ScheduleStore;
@@ -42,6 +42,7 @@ use crate::settings::SettingsSink;
 use crate::shot_log_query::ShotLogQuery;
 
 use super::access::{ConfigurationAccess, TargetOutcome};
+use super::group::GroupAccess;
 use super::pump::PumpQuantity;
 use super::{bluetooth, connectivity, shot, stores, ScaleAction};
 
@@ -59,8 +60,10 @@ use super::{bluetooth, connectivity, shot, stores, ScaleAction};
 /// `Self: 'a` because the sender accessors return values carrying that lifetime, which only
 /// makes sense for a controller that lives at least as long as the channels it holds -- which
 /// both do, since the senders are its own fields.
+/// `PumpLoopContext` is a supertrait rather than a bound on the one method that needs it: a
+/// machine that handles commands has a pump, and the seeding command is one of them.
 #[allow(async_fn_in_trait)]
-pub trait MachineCommandContext<'a>: 'a {
+pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext {
     /// This machine's configuration, reachable through [`ConfigurationAccess`].
     type Configuration: ConfigurationAccess;
     /// The mutex kind guarding this machine's stores.
@@ -231,6 +234,70 @@ pub trait MachineCommandContext<'a>: 'a {
     /// Record what the comms processor last reported.
     fn set_comms_status(&mut self, status: CommsStatus);
 
+    // ---- Water interlocks -------------------------------------------------------------
+
+    /// Whether the tank is below its empty threshold, on a machine that has one.
+    ///
+    /// Machine-specific only because the tank is a `variegated_hal::Tank` parameterised
+    /// differently on each; the *policy* built on it is shared below.
+    fn is_tank_empty(&mut self) -> bool;
+
+    /// The machine-wide configuration the policy reads.
+    fn machine_config(&self) -> &variegated_controller_types::MachineConfiguration;
+
+    /// Whether a routine is executing.
+    fn routine_running(&self) -> bool;
+
+    /// Should a new water operation be refused?
+    ///
+    /// The decision is [`super::interlocks::should_block_water_operation`], which is pure and
+    /// host-tested; this only reads the tank for it.
+    fn should_block_water_operation(&mut self) -> bool {
+        let tank_empty = self.is_tank_empty();
+        let routine_running = self.routine_running();
+        super::interlocks::should_block_water_operation(
+            self.machine_config(),
+            tank_empty,
+            routine_running,
+        )
+    }
+
+    // ---- Manual shot logging ----------------------------------------------------------
+
+    /// The shot logger, the pending annotations and the manual-shot flag, together.
+    ///
+    /// One accessor because closing a manual log touches all three at once.
+    fn shot_logging(
+        &mut self,
+    ) -> (&mut crate::ShotLogger, &mut ShotAnnotations, &mut bool);
+
+    /// Where a finished shot is handed for storage, if this machine has somewhere to put it.
+    fn shot_log_sender(
+        &self,
+    ) -> Option<Sender<'a, Self::ChannelM, variegated_controller_types::ShotLog, 2>>;
+
+    /// Open a log for a shot the user started by hand.
+    fn start_manual_shot_log(&mut self) {
+        let routine_running = self.routine_running();
+        let group_index = Self::GROUP_INDEX;
+        let (logger, pending, manual_active) = self.shot_logging();
+        shot::start_manual_shot_log(logger, pending, manual_active, routine_running, group_index);
+    }
+
+    /// Close it and hand it to storage.
+    fn finish_manual_shot_log(&mut self) {
+        let sender = self.shot_log_sender();
+        let (logger, pending, manual_active) = self.shot_logging();
+        shot::finish_manual_shot_log(logger, pending, manual_active, sender.as_ref());
+    }
+
+    /// Close a *routine's* log and clear what it carried.
+    fn finish_routine_shot_log(&mut self) {
+        let sender = self.shot_log_sender();
+        let (logger, pending, _) = self.shot_logging();
+        shot::finish_routine_shot_log(logger, pending, sender.as_ref());
+    }
+
     /// Whether the machine is doing something a radio-heavy operation must not interrupt.
     ///
     /// **The one predicate the two machines genuinely disagree about.** One reads three flags
@@ -264,14 +331,52 @@ pub trait MachineCommandContext<'a>: 'a {
     /// `SetMachineMode`, including whatever has to stop when the machine goes off.
     async fn set_machine_mode(&mut self, mode: MachineMode);
 
+    /// This machine's brew group.
+    ///
+    /// Both machines have exactly one, which is what lets the group commands below be shared
+    /// rather than reimplemented per controller.
+    type Group: GroupAccess;
+
+    /// Access it.
+    fn group(&mut self) -> &mut Self::Group;
+
+    /// The index that names this machine's only group.
+    ///
+    /// A constant rather than a hard-coded `0` in the shared handlers, so a machine that grew a
+    /// second group would have somewhere to say so rather than silently answering for the
+    /// wrong one.
+    const GROUP_INDEX: GroupIndex = 0;
+
     /// The three scale commands.
-    async fn scale_action(&mut self, index: GroupIndex, action: ScaleAction);
+    ///
+    /// The `Result` is discarded as it always was: a scale that is not attached, or that
+    /// refuses, is a condition the user can see on the display rather than something this loop
+    /// can act on.
+    async fn scale_action(&mut self, index: GroupIndex, action: ScaleAction) {
+        if index != Self::GROUP_INDEX {
+            log_error!("Invalid group index for {} scale: {}", action.label(), index);
+            return;
+        }
+        log_info!("{} group scale", action.label());
+        match action {
+            ScaleAction::Tare => self.group().tare_scale().await,
+            ScaleAction::ZeroCalibrate => self.group().zero_calibrate_scale().await,
+            ScaleAction::CalibrateWith100g => self.group().calibrate_scale_with_100g().await,
+        }
+    }
 
     /// The three `InferGroup*Integral` commands.
     ///
-    /// Machine-specific only because the two disagree about which duty cycle to seed from --
-    /// see the implementations, and `pump_transfer::last_commanded_duty`.
-    fn seed_pump_integral(&mut self, index: GroupIndex, quantity: PumpQuantity, target: f32);
+    /// The index check is here; the seeding itself is
+    /// [`crate::command::pump::PumpLoopContext::seed_pump_integral`], which is where the two
+    /// machines' one genuine disagreement about it lives.
+    fn seed_pump_integral(&mut self, index: GroupIndex, quantity: PumpQuantity, target: f32) {
+        if index != Self::GROUP_INDEX {
+            log_error!("Invalid group index: {}", index);
+            return;
+        }
+        crate::command::pump::PumpLoopContext::seed_integral(self, quantity, target);
+    }
 
     /// `OptimizeConfigurationStorage`. Run inline where the store is owned, queued where it is
     /// not.
@@ -280,8 +385,12 @@ pub trait MachineCommandContext<'a>: 'a {
     /// `RequestConfiguration`.
     async fn request_configuration(&mut self);
 
-    /// `TagDoseFromScale`.
-    fn tag_dose_from_scale(&mut self, scale: ScaleSelector);
+    /// `TagDoseFromScale` -- read the scale now and record it as the next shot's dose.
+    fn tag_dose_from_scale(&mut self, scale: ScaleSelector) {
+        let group_index = Self::GROUP_INDEX;
+        let weight = self.group().output_weight();
+        shot::tag_dose_from_scale(self.pending_annotations_mut(), scale, group_index, weight);
+    }
 
     /// `IdentifyMachine`. What identifying means is the machine's to decide, and a machine
     /// with nothing to flash may do nothing at all.
