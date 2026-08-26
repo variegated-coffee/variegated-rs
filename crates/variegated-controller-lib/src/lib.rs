@@ -37,6 +37,12 @@ pub mod single_boiler_state;
 pub mod pump_transfer;
 // And which loop owns the output when a limit is armed. Pure for the same reason.
 pub mod pump_limit;
+// The two machines' configuration types, ungated where the controllers that own them are
+// not. They are plain structs, their stored representation and their projection onto
+// `Configuration` -- no peripheral, no PAC -- and keeping them out here is what lets
+// `command` be host-tested against real configuration values rather than a stand-in.
+pub mod single_boiler_config;
+pub mod dual_boiler_config;
 #[cfg(feature = "hardware")]
 pub mod single_boiler_single_group;
 #[cfg(feature = "hardware")]
