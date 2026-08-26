@@ -19,7 +19,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerIndex, BoilerStatus, SteamWandIndex, ValveOpenType, WaterTapIndex, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, GroupIndex, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerIndex, BoilerStatus, SteamWandIndex, ValveOpenType, WaterTapIndex, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, GroupIndex, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineIndex, Status, StorageCommand, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 // `ValveOpenType` is imported unconditionally above: the shared dispatcher names it in
 // `set_steam_valve_openness`, which exists in every build even on a machine whose steam
@@ -1304,15 +1304,11 @@ impl<
         };
 
         // Calculate extraction_rate first (needed for both GroupStatus and extracted_solids accumulation)
-        let extraction_rate = {
-            let ec = self.group.get_output_electrical_conductivity();
-            let flow = self.group.get_output_flow_rate()
-                .or_else(|| self.group.get_input_flow_rate());
-            match (ec, flow) {
-                (Some(ec), Some(flow)) => Some(ec * flow),
-                _ => None,
-            }
-        };
+        let extraction_rate = command::status::extraction_rate(
+            self.group.get_output_electrical_conductivity(),
+            self.group.get_output_flow_rate(),
+            self.group.get_input_flow_rate(),
+        );
 
         // Accumulate extracted_solids during brew
         if let (Some(accumulated), Some(last_time), Some(rate)) =
@@ -1389,59 +1385,21 @@ impl<
         };
 
         // Calculate current timestamp if we have comms_status
-        let (comms_status, comms_status_age) = if let (Some(status), Some(received_instant)) =
-            (&self.comms_status, self.comms_status_received_instant) {
+        // The reported peripheral map is carried through here, where the single-boiler
+        // publishes an empty one. See the note on the shared function.
+        let peripherals = self
+            .comms_status
+            .as_ref()
+            .map(|status| status.peripheral_connection_status.clone())
+            .unwrap_or_default();
+        let (comms_status, comms_status_age) = command::status::extrapolate_comms_status(
+            self.comms_status.as_ref(),
+            self.comms_status_received_instant,
+            peripherals,
+        );
 
-            // Calculate elapsed time since reception
-            let elapsed = Instant::now().saturating_duration_since(received_instant);
-            let current_timestamp = status.timestamp.map(|ts| ts + elapsed.as_secs());
-
-            (Some(CommsStatus {
-                timestamp: current_timestamp,
-                wifi_connected: status.wifi_connected,
-                wifi_rssi: status.wifi_rssi,
-                // Carried through unextrapolated, unlike the timestamp above. Provisioning
-                // state is a fact about the other processor's radio at the moment it last
-                // reported, and there is no way to advance it here -- a window this side
-                // guessed had expired would clear the display's indicator while the radio
-                // was still advertising.
-                improv: status.improv,
-                peripheral_connection_status: status.peripheral_connection_status.clone(),
-                // Carried through unchanged, like `improv` and unlike the timestamp: it
-                // counts syncs that happened on the other processor, and extrapolating a
-                // count would be inventing one.
-                sntp_sync_seq: status.sntp_sync_seq,
-                // Both carried through unchanged, for `improv`'s reason. Neither can be
-                // advanced from this side, and the staleness that makes a latched network
-                // name misleading is already reported as `comms_status_age`.
-                wifi_ssid: status.wifi_ssid.clone(),
-                wifi_ip: status.wifi_ip,
-            }),
-            // Published alongside, because everything above is extrapolated: the
-            // timestamp keeps advancing whether or not the comms processor is alive, so
-            // the age is the only thing in `Status` that can say it is not.
-            Some(core::time::Duration::from_millis(elapsed.as_millis())))
-        } else {
-            (self.comms_status.clone(), None)
-        };
-
-        let routine_execution = self.current_routine.as_ref().map(|rxc| {
-            let step_elapsed_time = rxc.step_start_time.map(|start| {
-                let elapsed = start.elapsed();
-                core::time::Duration::from_secs(elapsed.as_secs())
-            });
-            let total_elapsed_time = rxc.execution_start_time.map(|start| {
-                let elapsed = start.elapsed();
-                core::time::Duration::from_secs(elapsed.as_secs())
-            });
-            RoutineExecutionStatus {
-                routine_index: rxc.routine_index,
-                current_step: rxc.current_step.map(|s| s as u32),
-                step_elapsed_time,
-                total_elapsed_time,
-                resolved_parameters: rxc.parameters.clone(),
-            }
-        });
+        let routine_execution =
+            command::status::routine_execution_status(self.current_routine.as_ref());
 
         let water_tap_status = WaterTapStatus {
             is_dispensing: self.water_tap_dispensing,
@@ -1771,9 +1729,6 @@ impl<
         );
     }
 
-    fn send_latest_shot_log(&mut self) {
-        command::shot::send_latest_shot_log(&mut self.shot_logger, self.shot_log_sender.as_ref());
-    }
 
     async fn start_water_tap_dispensing(&mut self) {
         if !self.water_tap_dispensing {
@@ -1999,16 +1954,11 @@ impl<
             self.save_persistent_configuration().await;
             self.curve_start_time = None;
 
-            // Finish shot logging
-            use variegated_controller_types::ShotStatus;
-            self.shot_logger.finish_shot(ShotStatus::Completed);
-            self.send_latest_shot_log();
-
-            // Cleared in full, including beans and grind. Carrying any of them forward
-            // would label the next shot with this one's coffee whether or not the user
-            // changed it -- and an annotation nobody entered is indistinguishable from
-            // one they did.
-            self.pending_annotations.clear();
+            command::shot::finish_routine_shot_log(
+                &mut self.shot_logger,
+                &mut self.pending_annotations,
+                self.shot_log_sender.as_ref(),
+            );
 
             self.previous_routine_step = None;
         } else {

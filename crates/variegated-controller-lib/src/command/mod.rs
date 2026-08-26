@@ -53,6 +53,7 @@ pub mod context;
 pub mod interlocks;
 pub mod pump;
 pub mod shot;
+pub mod status;
 pub mod stores;
 pub mod targets;
 

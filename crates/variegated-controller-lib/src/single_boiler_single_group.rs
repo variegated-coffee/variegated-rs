@@ -15,7 +15,7 @@ use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
 use crate::command;
 use crate::command::pump::{PumpLoopContext, PumpQuantity};
 use crate::command::{MachineCommandContext, ScaleAction};
@@ -1058,16 +1058,12 @@ impl<
             control_state: self.configuration.persistent.steam_boiler_control_state,
         };
 
-        // Calculate extraction_rate first (needed for both GroupStatus and extracted_solids accumulation)
-        let extraction_rate = {
-            let ec = self.group.get_output_electrical_conductivity();
-            let flow = self.group.get_output_flow_rate()
-                .or_else(|| self.group.get_input_flow_rate());
-            match (ec, flow) {
-                (Some(ec), Some(flow)) => Some(ec * flow),
-                _ => None,
-            }
-        };
+        // Needed for both `GroupStatus` and the `extracted_solids` accumulation below.
+        let extraction_rate = command::status::extraction_rate(
+            self.group.get_output_electrical_conductivity(),
+            self.group.get_output_flow_rate(),
+            self.group.get_input_flow_rate(),
+        );
 
         // Accumulate extracted_solids during brew
         if let (Some(accumulated), Some(last_time), Some(rate)) =
@@ -1140,52 +1136,18 @@ impl<
             brew_limit: self.last_brew_limit,
         };
 
-        // Calculate current timestamp if we have comms_status
-        let (comms_status, comms_status_age) = if let (Some(status), Some(received_instant)) =
-            (&self.comms_status, self.comms_status_received_instant) {
+        // **Publishes an empty peripheral map, where the dual-boiler carries the reported one
+        // through.** That looks like an oversight rather than a decision -- this machine has a
+        // comms processor and can carry a Bluetooth scale like any other -- but it is a
+        // behaviour change to fix, so it is named at the shared function and left as it was.
+        let (comms_status, comms_status_age) = command::status::extrapolate_comms_status(
+            self.comms_status.as_ref(),
+            self.comms_status_received_instant,
+            FnvIndexMap::default(),
+        );
 
-            // Calculate elapsed time since reception
-            let elapsed = Instant::now().saturating_duration_since(received_instant);
-            let current_timestamp = status.timestamp.map(|ts| ts + elapsed.as_secs());
-
-            (Some(CommsStatus {
-                timestamp: current_timestamp,
-                wifi_connected: status.wifi_connected,
-                wifi_rssi: status.wifi_rssi,
-                // Carried through unextrapolated, unlike the timestamp above -- see the
-                // note on the dual-boiler controller's copy of this.
-                improv: status.improv,
-                peripheral_connection_status: FnvIndexMap::default(),
-                // Carried through unchanged -- see the note on the dual-boiler copy.
-                sntp_sync_seq: status.sntp_sync_seq,
-                wifi_ssid: status.wifi_ssid.clone(),
-                wifi_ip: status.wifi_ip,
-            }),
-            // Published alongside, because everything above is extrapolated: the
-            // timestamp keeps advancing whether or not the comms processor is alive, so
-            // the age is the only thing in `Status` that can say it is not.
-            Some(core::time::Duration::from_millis(elapsed.as_millis())))
-        } else {
-            (self.comms_status.clone(), None)
-        };
-
-        let routine_execution = self.current_routine.as_ref().map(|rxc| {
-            let step_elapsed_time = rxc.step_start_time.map(|start| {
-                let elapsed = start.elapsed();
-                core::time::Duration::from_secs(elapsed.as_secs())
-            });
-            let total_elapsed_time = rxc.execution_start_time.map(|start| {
-                let elapsed = start.elapsed();
-                core::time::Duration::from_secs(elapsed.as_secs())
-            });
-            RoutineExecutionStatus {
-                routine_index: rxc.routine_index,
-                current_step: rxc.current_step.map(|s| s as u32),
-                step_elapsed_time,
-                total_elapsed_time,
-                resolved_parameters: rxc.parameters.clone(),
-            }
-        });
+        let routine_execution =
+            command::status::routine_execution_status(self.current_routine.as_ref());
 
         // Create tank statuses map - only include tank if it exists
         let tank_statuses = if let Some(ref mut tank) = self.tank {
@@ -1504,9 +1466,6 @@ impl<
         );
     }
 
-    fn send_latest_shot_log(&mut self) {
-        command::shot::send_latest_shot_log(&mut self.shot_logger, self.shot_log_sender.as_ref());
-    }
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
         if self.current_routine.is_some() {
@@ -1668,16 +1627,11 @@ impl<
             };
             self.transition_to_state(resume_state).await;
 
-            // Finish shot logging
-            use variegated_controller_types::ShotStatus;
-            self.shot_logger.finish_shot(ShotStatus::Completed);
-            self.send_latest_shot_log();
-
-            // Cleared in full, including beans and grind. Carrying any of them forward
-            // would label the next shot with this one's coffee whether or not the user
-            // changed it -- and an annotation nobody entered is indistinguishable from
-            // one they did.
-            self.pending_annotations.clear();
+            command::shot::finish_routine_shot_log(
+                &mut self.shot_logger,
+                &mut self.pending_annotations,
+                self.shot_log_sender.as_ref(),
+            );
 
             self.previous_routine_step = None;
         } else {

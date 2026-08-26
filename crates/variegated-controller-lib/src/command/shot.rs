@@ -178,6 +178,27 @@ pub fn finish_manual_shot_log<M: RawMutex>(
     pending.clear();
 }
 
+/// Close a routine's shot log and clear what it carried.
+///
+/// The tail of `handle_routine_exit` on both machines, byte for byte. Everything before it --
+/// what to stop, what to restore, what state to resume -- genuinely differs and stays in the
+/// controllers, where the ordering hazards are documented.
+///
+/// **The annotations are cleared in full, including beans and grind.** Carrying any of them
+/// forward would label the next shot with this one's coffee whether or not the user changed it,
+/// and an annotation nobody entered is indistinguishable from one they did.
+pub fn finish_routine_shot_log<M: RawMutex>(
+    logger: &mut crate::ShotLogger,
+    pending: &mut ShotAnnotations,
+    sender: Option<&Sender<'_, M, variegated_controller_types::ShotLog, 2>>,
+) {
+    use variegated_controller_types::ShotStatus;
+
+    logger.finish_shot(ShotStatus::Completed);
+    send_latest_shot_log(logger, sender);
+    pending.clear();
+}
+
 /// Hand the most recently finished shot to the storage task, if there is one listening.
 ///
 /// `try_send` rather than `send`: this runs inside the control loop, and a storage task that
