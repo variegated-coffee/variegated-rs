@@ -75,8 +75,15 @@ pub struct SingleBoilerSingleGroupController<
     /// runs on its own cadence and cannot recompute it. See [`GroupStatus::brew_limit`].
     last_brew_limit: Option<BrewLimitStatus>,
     configuration_store: SettingsStoreT,
-    persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration,
-    ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration,
+    /// The machine's configuration, persistent and ephemeral halves together.
+    ///
+    /// One field rather than two, matching the dual-boiler. They were split here, and
+    /// `current_configuration` rebuilt the pair into a `SingleBoilerSingleGroupConfiguration`
+    /// -- cloning both halves -- every time the publish path wanted to compare against the
+    /// last one. Keeping the whole value means the command handlers in [`crate::command`]
+    /// can take it through one [`crate::command::ConfigurationAccess`] impl, which is what
+    /// lets the two machines share those handlers at all.
+    configuration: SingleBoilerSingleGroupConfiguration,
     machine_config: MachineConfiguration,
     tank_config: TankConfiguration,
     // No `group_config`. It was accepted as a constructor argument, stored, and never read:
@@ -224,10 +231,7 @@ impl<
     const N_CONFIG_SUBS: usize
 > SingleBoilerSingleGroupController<'a, ChannelM, M, StorageM, SettingsStoreT, RoutineRepoT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> SingleBoilerSingleGroupConfiguration {
-        SingleBoilerSingleGroupConfiguration {
-            persistent: self.persistent_configuration.clone(),
-            ephemeral: self.ephemeral_configuration.clone(),
-        }
+        self.configuration.clone()
     }
     pub fn new(
         command_channel_receiver: Receiver<'a, ChannelM, MachineCommand, N_CHANNEL>,
@@ -303,8 +307,7 @@ impl<
             limit_engagement: LimitEngagement::new(),
             last_brew_limit: None,
             configuration_store: settings_store,
-            persistent_configuration: SingleBoilerSingleGroupPersistentConfiguration::default(),
-            ephemeral_configuration: SingleBoilerSingleGroupEphemeralConfiguration::default(),
+            configuration: SingleBoilerSingleGroupConfiguration::default(),
             machine_config,
             tank_config,
             boiler_config,
@@ -470,7 +473,7 @@ impl<
             // cleared on the next tick rather than latching.
             let mut health = CheckinStatus::Good;
 
-            self.persistent_configuration = match self.configuration_store.load_settings().await {
+            self.configuration.persistent = match self.configuration_store.load_settings().await {
                 Ok(settings) => settings,
                 Err(_) => {
                     // Substituting a `Default` is this loop continuing to run on a
@@ -487,9 +490,9 @@ impl<
             // stop the heating. Applied to the loaded value rather than written back: it is
             // idempotent, and a machine whose owner sets a steam temperature stores
             // `Temperature` and stops needing it.
-            self.persistent_configuration.steam_boiler_control_state =
+            self.configuration.persistent.steam_boiler_control_state =
                 crate::single_boiler_state::steam_boiler_state_or_default(
-                    self.persistent_configuration.steam_boiler_control_state,
+                    self.configuration.persistent.steam_boiler_control_state,
                 );
 
             // Loaded on the first pass rather than in `new`, which is not async. Guarded
@@ -765,18 +768,18 @@ impl<
             GroupBrewLimitMode::Unlimited => return None,
             GroupBrewLimitMode::MaxPressure => (
                 self.group.get_pressure().unwrap_or(0.0) as f32,
-                self.persistent_configuration.pid_parameters.pump_pressure_params,
+                self.configuration.persistent.pid_parameters.pump_pressure_params,
             ),
             GroupBrewLimitMode::MaxGroupFlowRate => (
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32,
-                self.persistent_configuration.pid_parameters.pump_flow_rate_params,
+                self.configuration.persistent.pid_parameters.pump_flow_rate_params,
             ),
             // An absent scale reads as 0.0, permanently below any cap. Safe, but only
             // because of the seeding below and the tracking in `update_pump` -- see
             // `GroupBrewLimitMode::MaxOutputFlowRate`.
             GroupBrewLimitMode::MaxOutputFlowRate => (
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32,
-                self.persistent_configuration.pid_parameters.pump_output_flow_rate_params,
+                self.configuration.persistent.pid_parameters.pump_output_flow_rate_params,
             ),
         };
 
@@ -801,40 +804,40 @@ impl<
         let pump_pv = match actual_pump_control_state.mode {
             GroupBrewControlMode::GroupFlowRate => {
                 self.pump_pid.setpoint = actual_pump_control_state.values.flow_rate as f32;
-                self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_flow_rate_params);
+                self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_flow_rate_params);
 
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlMode::GroupFlowRateCurve => {
                 let target = actual_pump_control_state.values.flow_rate_curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_flow_rate_params);
+                self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_flow_rate_params);
 
                 self.group.get_input_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlMode::Pressure => {
                 self.pump_pid.setpoint = actual_pump_control_state.values.pressure as f32;
-                self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_pressure_params);
+                self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_pressure_params);
 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
             GroupBrewControlMode::PressureCurve => {
                 let target = actual_pump_control_state.values.pressure_curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_pressure_params);
+                self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_pressure_params);
 
                 self.group.get_pressure().unwrap_or(0.0) as f32
             },
             GroupBrewControlMode::OutputFlowRate => {
                 self.pump_pid.setpoint = actual_pump_control_state.values.output_flow_rate as f32;
-                self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_output_flow_rate_params);
+                self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_output_flow_rate_params);
 
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
             GroupBrewControlMode::OutputFlowRateCurve => {
                 let target = actual_pump_control_state.values.output_flow_rate_curve.evaluate(elapsed_seconds);
                 self.pump_pid.setpoint = target;
-                self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_output_flow_rate_params);
+                self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_output_flow_rate_params);
 
                 self.group.get_output_flow_rate().unwrap_or(0.0) as f32
             },
@@ -953,13 +956,13 @@ impl<
         let mut boiler_pv = match actual_boiler_control_state.mode {
             BoilerControlMode::Temperature => {
                 self.boiler_pid.setpoint = actual_boiler_control_state.values.target_temperature as f32;
-                self.boiler_pid.set_parameters(self.persistent_configuration.pid_parameters.boiler_temperature_params);
+                self.boiler_pid.set_parameters(self.configuration.persistent.pid_parameters.boiler_temperature_params);
 
                 self.boiler.get_temperature().unwrap_or(0.0) as f32
             }
             BoilerControlMode::Pressure => {
                 self.boiler_pid.setpoint = actual_boiler_control_state.values.target_pressure as f32;
-                self.boiler_pid.set_parameters(self.persistent_configuration.pid_parameters.boiler_pressure_params);
+                self.boiler_pid.set_parameters(self.configuration.persistent.pid_parameters.boiler_pressure_params);
 
                 self.boiler.get_pressure().unwrap_or(0.0) as f32
             }
@@ -1022,22 +1025,22 @@ impl<
     fn get_control_targets(&mut self) -> (BoilerControlState, GroupBrewControlState) {
         let (actual_boiler_control_state, actual_pump_control_state) = match self.state {
             SingleBoilerSingleGroupControllerState::Brewing => {
-                (self.persistent_configuration.brew_boiler_control_state, self.ephemeral_configuration.group_brew_control_state)
+                (self.configuration.persistent.brew_boiler_control_state, self.configuration.ephemeral.group_brew_control_state)
             }
             SingleBoilerSingleGroupControllerState::PumpingToWaterTap => {
-                let mut pump_state = self.ephemeral_configuration.group_brew_control_state;
+                let mut pump_state = self.configuration.ephemeral.group_brew_control_state;
                 pump_state.mode = GroupBrewControlMode::FullOn;
-                (self.persistent_configuration.brew_boiler_control_state, pump_state)
+                (self.configuration.persistent.brew_boiler_control_state, pump_state)
             },
             SingleBoilerSingleGroupControllerState::BrewModeIdle => {
-                let mut pump_state = self.ephemeral_configuration.group_brew_control_state;
+                let mut pump_state = self.configuration.ephemeral.group_brew_control_state;
                 pump_state.mode = GroupBrewControlMode::Off;
-                (self.persistent_configuration.brew_boiler_control_state, pump_state)
+                (self.configuration.persistent.brew_boiler_control_state, pump_state)
             }
             SingleBoilerSingleGroupControllerState::SteamModeIdle => {
-                let mut pump_state = self.ephemeral_configuration.group_brew_control_state;
+                let mut pump_state = self.configuration.ephemeral.group_brew_control_state;
                 pump_state.mode = GroupBrewControlMode::Off;
-                (self.persistent_configuration.steam_boiler_control_state, pump_state)
+                (self.configuration.persistent.steam_boiler_control_state, pump_state)
             }
             SingleBoilerSingleGroupControllerState::PowerSave => {
                 let mut boiler_state = BoilerControlState::default();
@@ -1063,7 +1066,7 @@ impl<
         let (mut actual_boiler_control_state, mut actual_pump_control_state) =
             (actual_boiler_control_state, actual_pump_control_state);
 
-        if self.ephemeral_configuration.mode != MachineMode::On {
+        if self.configuration.ephemeral.mode != MachineMode::On {
             actual_boiler_control_state.mode = BoilerControlMode::Off;
             actual_pump_control_state.mode = GroupBrewControlMode::Off;
         }
@@ -1084,7 +1087,7 @@ impl<
             pressure: self.boiler.get_pressure(),
             water_level: self.boiler.get_water_level(),
             output: brew_boiler_output,
-            control_state: self.persistent_configuration.brew_boiler_control_state,
+            control_state: self.configuration.persistent.brew_boiler_control_state,
         };
 
         let virtual_steam_boiler_status = BoilerStatus {
@@ -1092,7 +1095,7 @@ impl<
             pressure: self.boiler.get_pressure(),
             water_level: self.boiler.get_water_level(),
             output: steam_boiler_output,
-            control_state: self.persistent_configuration.steam_boiler_control_state,
+            control_state: self.configuration.persistent.steam_boiler_control_state,
         };
 
         // Calculate extraction_rate first (needed for both GroupStatus and extracted_solids accumulation)
@@ -1151,7 +1154,7 @@ impl<
             output_electrical_conductivity: self.group.get_output_electrical_conductivity(),
             extraction_rate,
             pump_output: pump_output.clone(),
-            control_state: self.ephemeral_configuration.group_brew_control_state,
+            control_state: self.configuration.ephemeral.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
             // `None` on every machine this controller currently runs, since no
             // single-boiler firmware passes a tacho receiver. Routed through the getter
@@ -1160,7 +1163,7 @@ impl<
             // The resolved setpoint -- see the dual-boiler controller's copy for why this
             // is taken from the PID rather than from `control_state.values` above.
             brew_control_target: {
-                let mode = self.ephemeral_configuration.group_brew_control_state.mode;
+                let mode = self.configuration.ephemeral.group_brew_control_state.mode;
                 // Same condition as `is_brewing` above -- this controller tracks brewing as a
                 // state rather than as a flag.
                 let brewing = self.state == SingleBoilerSingleGroupControllerState::Brewing;
@@ -1242,7 +1245,7 @@ impl<
             // The machine's own mode, not a placeholder. This was `Default::default()` --
             // which is `MachineMode::Off` -- so the machine reported itself off no matter
             // what, and there was no field to report from anyway.
-            mode: self.ephemeral_configuration.mode,
+            mode: self.configuration.ephemeral.mode,
             routine_execution,
             comms_status,
             comms_status_age,
@@ -1328,7 +1331,7 @@ impl<
     /// values command and the limit command — and three copies of eleven `if let`s is how one
     /// of them ends up silently missing a field.
     fn apply_group_brew_values(&mut self, update: GroupBrewControlTargetValuesUpdate) {
-        let values = &mut self.ephemeral_configuration.group_brew_control_state.values;
+        let values = &mut self.configuration.ephemeral.group_brew_control_state.values;
         if let Some(flow_rate) = update.flow_rate { values.flow_rate = flow_rate; }
         if let Some(curve) = update.flow_rate_curve { values.flow_rate_curve = curve; }
         if let Some(pressure) = update.pressure { values.pressure = pressure; }
@@ -1389,28 +1392,28 @@ impl<
                 log_info!("Setting boiler control mode for boiler {} to {:?} with values {:?}", boiler_index, mode, values_update);
                 match boiler_index {
                     0 => {
-                        self.persistent_configuration.brew_boiler_control_state.mode = mode;
+                        self.configuration.persistent.brew_boiler_control_state.mode = mode;
                         if let Some(update) = values_update {
                             if let Some(temp) = update.temperature {
-                                self.persistent_configuration.brew_boiler_control_state.values.target_temperature = temp;
+                                self.configuration.persistent.brew_boiler_control_state.values.target_temperature = temp;
                             }
                             if let Some(pressure) = update.pressure {
-                                self.persistent_configuration.brew_boiler_control_state.values.target_pressure = pressure;
+                                self.configuration.persistent.brew_boiler_control_state.values.target_pressure = pressure;
                             }
                         }
-                        self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
+                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
                     },
                     1 => {
-                        self.persistent_configuration.steam_boiler_control_state.mode = mode;
+                        self.configuration.persistent.steam_boiler_control_state.mode = mode;
                         if let Some(update) = values_update {
                             if let Some(temp) = update.temperature {
-                                self.persistent_configuration.steam_boiler_control_state.values.target_temperature = temp;
+                                self.configuration.persistent.steam_boiler_control_state.values.target_temperature = temp;
                             }
                             if let Some(pressure) = update.pressure {
-                                self.persistent_configuration.steam_boiler_control_state.values.target_pressure = pressure;
+                                self.configuration.persistent.steam_boiler_control_state.values.target_pressure = pressure;
                             }
                         }
-                        self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
+                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
                     },
                     _ => {
                         log_error!("Invalid boiler index: {}", boiler_index);
@@ -1422,21 +1425,21 @@ impl<
                 match boiler_index {
                     0 => {
                         if let Some(temp) = update.temperature {
-                            self.persistent_configuration.brew_boiler_control_state.values.target_temperature = temp;
+                            self.configuration.persistent.brew_boiler_control_state.values.target_temperature = temp;
                         }
                         if let Some(pressure) = update.pressure {
-                            self.persistent_configuration.brew_boiler_control_state.values.target_pressure = pressure;
+                            self.configuration.persistent.brew_boiler_control_state.values.target_pressure = pressure;
                         }
-                        self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
+                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
                     },
                     1 => {
                         if let Some(temp) = update.temperature {
-                            self.persistent_configuration.steam_boiler_control_state.values.target_temperature = temp;
+                            self.configuration.persistent.steam_boiler_control_state.values.target_temperature = temp;
                         }
                         if let Some(pressure) = update.pressure {
-                            self.persistent_configuration.steam_boiler_control_state.values.target_pressure = pressure;
+                            self.configuration.persistent.steam_boiler_control_state.values.target_pressure = pressure;
                         }
-                        self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
+                        self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
                     },
                     _ => {
                         log_error!("Invalid boiler index: {}", boiler_index);
@@ -1460,7 +1463,7 @@ impl<
                             self.curve_start_time = None;
                         }
                     }
-                    self.ephemeral_configuration.group_brew_control_state.mode = mode;
+                    self.configuration.ephemeral.group_brew_control_state.mode = mode;
                     if let Some(update) = values_update {
                         self.apply_group_brew_values(update);
                     }
@@ -1479,7 +1482,7 @@ impl<
             MachineCommand::SetGroupBrewLimit(group_index, limit, values_update) => {
                 log_info!("Setting group brew limit for group {} to {:?} with values {:?}", group_index, limit, values_update);
                 if group_index == 0 {
-                    self.ephemeral_configuration.group_brew_control_state.limit = limit;
+                    self.configuration.ephemeral.group_brew_control_state.limit = limit;
                     if let Some(update) = values_update {
                         self.apply_group_brew_values(update);
                     }
@@ -1493,23 +1496,23 @@ impl<
             MachineCommand::SetPidParameters(target, params) => {
                 match target {
                     PidParameterTarget::BoilerPressure(_) => {
-                        self.persistent_configuration.pid_parameters.boiler_pressure_params = params;
+                        self.configuration.persistent.pid_parameters.boiler_pressure_params = params;
                     }
                     PidParameterTarget::BoilerTemperature(_) => {
-                        self.persistent_configuration.pid_parameters.boiler_temperature_params = params;
+                        self.configuration.persistent.pid_parameters.boiler_temperature_params = params;
                     }
                     PidParameterTarget::GroupFlowRate(_) => {
-                        self.persistent_configuration.pid_parameters.pump_flow_rate_params = params;
+                        self.configuration.persistent.pid_parameters.pump_flow_rate_params = params;
                     }
                     PidParameterTarget::GroupPressure(_) => {
-                        self.persistent_configuration.pid_parameters.pump_pressure_params = params;
+                        self.configuration.persistent.pid_parameters.pump_pressure_params = params;
                     }
                     PidParameterTarget::GroupOutputFlowRate(_) => {
-                        self.persistent_configuration.pid_parameters.pump_output_flow_rate_params = params;
+                        self.configuration.persistent.pid_parameters.pump_output_flow_rate_params = params;
                     }
                 }
                 // Save after updating PID parameters
-                self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
+                self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
             }
             // The mode table is `crate::single_boiler_state`, which is host-tested. It used
             // to be two chains of `if`/`else if` here, and `PowerSave` had no arm returning
@@ -1562,7 +1565,7 @@ impl<
             // UI, the web interface and the debug link, with nothing anywhere saying so.
             MachineCommand::SetMachineMode(mode) => {
                 log_info!("Setting machine mode to {:?}", mode);
-                self.ephemeral_configuration.mode = mode;
+                self.configuration.ephemeral.mode = mode;
 
                 // Anything in flight stops with it. Leaving a brew running on a machine the
                 // user has just switched off would be the surprising reading of "off", and
@@ -1667,7 +1670,7 @@ impl<
 
                     // Set up PID for pressure control
                     self.pump_pid.setpoint = target_pressure as f32;
-                    self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_pressure_params);
+                    self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_pressure_params);
 
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_pressure as f32);
@@ -1689,7 +1692,7 @@ impl<
 
                     // Set up PID for flow rate control
                     self.pump_pid.setpoint = target_flow_rate as f32;
-                    self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_flow_rate_params);
+                    self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_flow_rate_params);
 
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_flow_rate as f32);
@@ -1711,7 +1714,7 @@ impl<
 
                     // Set up PID for output flow rate control
                     self.pump_pid.setpoint = target_output_flow_rate as f32;
-                    self.pump_pid.set_parameters(self.persistent_configuration.pid_parameters.pump_output_flow_rate_params);
+                    self.pump_pid.set_parameters(self.configuration.persistent.pid_parameters.pump_output_flow_rate_params);
 
                     // Infer and set the integral
                     self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_output_flow_rate as f32);
@@ -2347,10 +2350,10 @@ impl<
 
             // Restore saved configuration by splitting into persistent and ephemeral parts
             let saved_config = &routine.saved_configuration;
-            self.persistent_configuration = saved_config.persistent;
-            self.ephemeral_configuration = saved_config.ephemeral;
+            self.configuration.persistent = saved_config.persistent;
+            self.configuration.ephemeral = saved_config.ephemeral;
             // Save the restored persistent configuration
-            self.configuration_store.save_settings(&self.persistent_configuration).await.ok();
+            self.configuration_store.save_settings(&self.configuration.persistent).await.ok();
             self.curve_start_time = None;  // Reset curve start time when routine exits
 
             // **Never resume an active state.** The old ordering prevented this by accident:
