@@ -9,7 +9,7 @@
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Sender;
 use variegated_controller_types::shot_log::{ShotAnnotations, ShotLogId};
-use variegated_log::{log_debug, log_warn};
+use variegated_log::{log_debug, log_info, log_warn};
 
 use crate::shot_log_query::ShotLogQuery;
 
@@ -69,6 +69,131 @@ pub fn delete_shot_log<M: RawMutex>(
     id: ShotLogId,
 ) {
     dispatch(sender, ShotLogQuery::Delete { id }, "DeleteShotLog", id);
+}
+
+/// `TagDoseFromScale` -- record a scale's current reading as the dose for the next shot.
+///
+/// `weight` is what *this machine's* group scale reads; the selector is checked against
+/// `group_index` here, because both machines have exactly one group and the check was written
+/// twice.
+///
+/// **Refused rather than guessed when there is no reading.** A dose silently recorded from the
+/// wrong place is worse than no dose at all, because nothing downstream can tell it was wrong.
+pub fn tag_dose_from_scale(
+    pending: &mut ShotAnnotations,
+    scale: variegated_controller_types::ScaleSelector,
+    group_index: variegated_controller_types::GroupIndex,
+    weight: Option<variegated_controller_types::WeightType>,
+) {
+    use variegated_controller_types::{ScaleSelector, ShotAnnotationKey, ShotAnnotationValue};
+
+    match scale {
+        ScaleSelector::GroupScale(index) if index == group_index => {}
+        // A single-group machine has exactly one group scale. An index for any other group is
+        // a client bug, not a missing peripheral, so it is logged as such rather than folded
+        // into "the scale is not reporting".
+        ScaleSelector::GroupScale(index) => {
+            log_warn!("TagDoseFromScale: no group {} on this machine", index);
+            return;
+        }
+    }
+
+    let Some(grams) = weight else {
+        log_warn!("TagDoseFromScale: {:?} has no reading to take", scale);
+        return;
+    };
+
+    match pending.set(ShotAnnotationKey::DoseWeight, ShotAnnotationValue::Number(grams)) {
+        Ok(()) => log_info!("Dose tagged from {:?}: {} g", scale, grams),
+        // Only reachable with eight custom annotations already set and no dose among them.
+        // Reported, because the alternative is a dose the user asked for and did not get.
+        Err(_) => log_warn!(
+            "TagDoseFromScale: the annotation block is full ({} entries)",
+            pending.len()
+        ),
+    }
+}
+
+/// Open a shot log for a shot the user started by hand.
+///
+/// Refused while a routine is running or a log is already open: a routine keeps its own log,
+/// with its own metadata, and two open at once would mean the routine's was replaced by one
+/// that records none of what makes it a routine.
+///
+/// The pending annotations are **copied, not moved.** They are cleared when the shot finishes
+/// rather than when it starts, so that a shot abandoned halfway does not silently discard what
+/// the user typed for it.
+pub fn start_manual_shot_log(
+    logger: &mut crate::ShotLogger,
+    pending: &ShotAnnotations,
+    manual_shot_active: &mut bool,
+    routine_running: bool,
+    group_index: variegated_controller_types::GroupIndex,
+) {
+    use variegated_controller_types::{ShotLogMetadata, ShotStatus, ShotType};
+
+    if routine_running || logger.is_logging() {
+        return;
+    }
+
+    logger.start_shot(ShotLogMetadata {
+        annotations: pending.clone(),
+        shot_type: ShotType::Manual,
+        group_index,
+        // No routine, and that is the fact being recorded rather than a gap in one.
+        routine_metadata: None,
+        start_time_millis: embassy_time::Instant::now().as_millis(),
+        end_time_millis: None,
+        final_status: ShotStatus::Running,
+        recorded_at_unix_millis: None,
+    });
+    *manual_shot_active = true;
+    log_debug!("Started a manual shot log");
+}
+
+/// Close a manual shot log and hand it to storage.
+///
+/// **Guarded on `manual_shot_active` rather than on "is a log open".** `handle_routine_exit`
+/// stops brewing *before* it finishes its own log, so an unguarded version would close the
+/// routine's log early, from the wrong place, and the routine path would then find nothing to
+/// send.
+///
+/// The annotations are cleared here for the same reason the routine path clears them: one
+/// carried into the next shot is indistinguishable from one the user entered for it.
+pub fn finish_manual_shot_log<M: RawMutex>(
+    logger: &mut crate::ShotLogger,
+    pending: &mut ShotAnnotations,
+    manual_shot_active: &mut bool,
+    sender: Option<&Sender<'_, M, variegated_controller_types::ShotLog, 2>>,
+) {
+    use variegated_controller_types::ShotStatus;
+
+    if !*manual_shot_active {
+        return;
+    }
+    *manual_shot_active = false;
+
+    logger.finish_shot(ShotStatus::Completed);
+    send_latest_shot_log(logger, sender);
+    pending.clear();
+}
+
+/// Hand the most recently finished shot to the storage task, if there is one listening.
+///
+/// `try_send` rather than `send`: this runs inside the control loop, and a storage task that
+/// has fallen behind must cost a shot log rather than a boiler update.
+pub fn send_latest_shot_log<M: RawMutex>(
+    logger: &mut crate::ShotLogger,
+    sender: Option<&Sender<'_, M, variegated_controller_types::ShotLog, 2>>,
+) {
+    let Some(sender) = sender else { return };
+    let Some(shot_log) = logger.latest_log() else { return };
+
+    if sender.try_send(shot_log.clone()).is_err() {
+        log_warn!("Failed to send shot log for storage (channel full)");
+    } else {
+        log_debug!("Shot log sent for storage");
+    }
 }
 
 #[cfg(test)]

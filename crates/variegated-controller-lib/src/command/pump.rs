@@ -5,8 +5,10 @@
 //! setting nothing reads is a setting that silently does nothing. The dual-boiler controller
 //! carried two identical copies of this, one per pump.
 
-use variegated_control_algorithm::pid::PidCtrl;
-use variegated_controller_types::{HexadecimalDutyCycleType, PidParameters, PumpConfiguration};
+use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
+use variegated_controller_types::{
+    GroupBrewLimitMode, HexadecimalDutyCycleType, PidParameters, PumpConfiguration,
+};
 use variegated_log::log_info;
 
 /// Which quantity a pump loop is controlling.
@@ -32,6 +34,90 @@ impl PumpQuantity {
             Self::GroupFlowRate => "flow rate",
             Self::OutputFlowRate => "output flow rate",
         }
+    }
+}
+
+/// Which quantity a limit mode caps.
+///
+/// `None` for [`GroupBrewLimitMode::Unlimited`], which is the one mode that caps nothing.
+pub const fn limit_quantity(limit: GroupBrewLimitMode) -> Option<PumpQuantity> {
+    match limit {
+        GroupBrewLimitMode::Unlimited => None,
+        GroupBrewLimitMode::MaxPressure => Some(PumpQuantity::Pressure),
+        GroupBrewLimitMode::MaxGroupFlowRate => Some(PumpQuantity::GroupFlowRate),
+        GroupBrewLimitMode::MaxOutputFlowRate => Some(PumpQuantity::OutputFlowRate),
+    }
+}
+
+/// The pump loops, shared between the machines.
+///
+/// Both controllers ran the same two: the limit loop that caps the pump while a different
+/// quantity is being controlled, and the integral seeding that keeps a takeover bumpless. Both
+/// were written twice, and the *only* difference was where each machine keeps its PID gains and
+/// how it reads the quantity being controlled -- which is [`Self::pump_loop_inputs`], and
+/// nothing else.
+#[allow(async_fn_in_trait)]
+pub trait PumpLoopContext {
+    /// The gains for `quantity`, and its current measurement.
+    ///
+    /// The one machine-specific part of both loops below. An absent sensor reads as `0.0`,
+    /// which for a limit is permanently below any cap -- safe, but only because of the seeding
+    /// and the tracking that go with it.
+    fn pump_loop_inputs(&mut self, quantity: PumpQuantity) -> (PidParameters, f32);
+
+    /// The duty cycle an integral seed should start from.
+    ///
+    /// **The two machines genuinely disagree, and it is pre-existing.** The single-boiler reads
+    /// the duty the pump is actually running at; the dual-boiler reads the `FixedDutyCycle`
+    /// *target*, which is only the same thing when the transfer comes from duty-cycle mode. See
+    /// `crate::pump_transfer::last_commanded_duty`. Unifying them changes the dual-boiler's
+    /// pump behaviour, so it is left as a difference rather than quietly resolved.
+    fn seeding_duty_cycle(&self) -> HexadecimalDutyCycleType;
+
+    /// The limit loop's PID.
+    fn limit_pid(&mut self) -> &mut PidCtrl<f32>;
+
+    /// The main pump PID.
+    fn pump_pid(&mut self) -> &mut PidCtrl<f32>;
+
+    /// Step the limit loop, or `None` if no limit is running this iteration.
+    ///
+    /// An engaging loop inherits the commanded output rather than starting from zero -- see
+    /// [`crate::pump_limit::LimitTransfer`]. Without that, arming a limit mid-shot would drop
+    /// the pump to nothing and climb back.
+    fn step_limit_loop(
+        &mut self,
+        transfer: crate::pump_limit::LimitTransfer,
+        limit: GroupBrewLimitMode,
+        setpoint: f32,
+        commanded: f32,
+        delta_t: f32,
+    ) -> Option<PidOut<f32>> {
+        if transfer == crate::pump_limit::LimitTransfer::Hold {
+            return None;
+        }
+
+        let quantity = limit_quantity(limit)?;
+        let (parameters, pv) = self.pump_loop_inputs(quantity);
+
+        let pid = self.limit_pid();
+        pid.setpoint = setpoint;
+        pid.set_parameters(parameters);
+        if transfer == crate::pump_limit::LimitTransfer::Engage {
+            pid.infer_and_set_integral(commanded, pv);
+        }
+
+        Some(pid.step(PidIn::new(pv, delta_t)))
+    }
+
+    /// Seed the main pump PID for whichever quantity is about to be controlled.
+    ///
+    /// The three `InferGroup*Integral` commands, which were three twenty-line copies of this
+    /// per machine.
+    fn seed_pump_integral(&mut self, quantity: PumpQuantity, target: f32) {
+        let duty_cycle = self.seeding_duty_cycle();
+        let (parameters, measurement) = self.pump_loop_inputs(quantity);
+        seed_pump_integral(self.pump_pid(), quantity, target, parameters, duty_cycle, measurement);
     }
 }
 

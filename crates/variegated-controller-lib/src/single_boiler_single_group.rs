@@ -1,6 +1,6 @@
 extern crate alloc;
 
-use variegated_log::{log_debug, log_error, log_info, log_warn};
+use variegated_log::{log_error, log_info, log_warn};
 use variegated_controller_types::debug::{name, CheckinDetail, CheckinStatus, DebugEvent};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Receiver, Sender};
@@ -15,9 +15,9 @@ use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
 use crate::command;
-use crate::command::pump::PumpQuantity;
+use crate::command::pump::{PumpLoopContext, PumpQuantity};
 use crate::command::{MachineCommandContext, ScaleAction};
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use crate::schedule::ScheduleStore;
@@ -27,7 +27,7 @@ use variegated_hal::scale::ScaleConfiguration;
 use variegated_timekeeping::TimeKeeper;
 use crate::settings::SettingsStorage;
 use crate::pump_transfer::{PumpPidEngagement, PumpPidTransfer};
-use crate::pump_limit::{self, LimitEngagement, LimitTransfer};
+use crate::pump_limit::{self, LimitEngagement};
 use variegated_controller_types::bluetooth::{
     BluetoothAssociations, BluetoothScanStatus,
 };
@@ -726,6 +726,8 @@ impl<
     ///
     /// The gains are the ones already tuned for controlling that quantity, because that is
     /// what this is: the same physical loop, holding a cap instead of a setpoint.
+    /// The loop itself is `crate::command::pump::PumpLoopContext`, shared with the dual-boiler
+    /// controller; only the engagement decision and the setpoint lookup are read here.
     fn step_limit_loop(
         &mut self,
         state: &GroupBrewControlState,
@@ -733,38 +735,8 @@ impl<
         delta_t: f32,
     ) -> Option<PidOut<f32>> {
         let transfer = self.limit_engagement.transfer_for(state.mode, state.limit);
-        if transfer == LimitTransfer::Hold {
-            return None;
-        }
-
         let setpoint = pump_limit::limit_setpoint(state.limit, &state.values)?;
-        let (pv, params) = match state.limit {
-            // `limit_setpoint` already returned `None` for this.
-            GroupBrewLimitMode::Unlimited => return None,
-            GroupBrewLimitMode::MaxPressure => (
-                self.group.get_pressure().unwrap_or(0.0) as f32,
-                self.configuration.persistent.pid_parameters.pump_pressure_params,
-            ),
-            GroupBrewLimitMode::MaxGroupFlowRate => (
-                self.group.get_input_flow_rate().unwrap_or(0.0) as f32,
-                self.configuration.persistent.pid_parameters.pump_flow_rate_params,
-            ),
-            // An absent scale reads as 0.0, permanently below any cap. Safe, but only
-            // because of the seeding below and the tracking in `update_pump` -- see
-            // `GroupBrewLimitMode::MaxOutputFlowRate`.
-            GroupBrewLimitMode::MaxOutputFlowRate => (
-                self.group.get_output_flow_rate().unwrap_or(0.0) as f32,
-                self.configuration.persistent.pid_parameters.pump_output_flow_rate_params,
-            ),
-        };
-
-        self.limit_pid.setpoint = setpoint;
-        self.limit_pid.set_parameters(params);
-        if transfer == LimitTransfer::Engage {
-            self.limit_pid.infer_and_set_integral(commanded, pv);
-        }
-
-        Some(self.limit_pid.step(PidIn::new(pv, delta_t)))
+        PumpLoopContext::step_limit_loop(self, transfer, state.limit, setpoint, commanded, delta_t)
     }
 
     async fn update_pump(&mut self, actual_pump_control_state: GroupBrewControlState, delta_t: f32) -> PumpOutput {
@@ -1297,40 +1269,13 @@ impl<
         };
     }
 
-    /// Seed the pump PID for whichever quantity is about to be controlled.
-    ///
-    /// The three `InferGroup*Integral` commands were three twenty-line copies of this,
-    /// differing only in the measurement read and the gains loaded.
-    ///
-    /// **The duty cycle is the one the pump is actually running at**, not the
-    /// `FixedDutyCycle` target -- see `pump_transfer::last_commanded_duty` for why those are
-    /// not interchangeable. The dual-boiler still reads the target; that difference is
-    /// pre-existing and deliberate to leave alone here.
+    /// The seeding is `crate::command::pump::PumpLoopContext`; only the index check is here.
     fn seed_pump_integral(&mut self, group_index: GroupIndex, quantity: PumpQuantity, target: f32) {
         if group_index != 0 {
             log_error!("Invalid group index: {}", group_index);
             return;
         }
-
-        let params = &self.configuration.persistent.pid_parameters;
-        let (parameters, measurement) = match quantity {
-            PumpQuantity::Pressure => (
-                params.pump_pressure_params,
-                self.group.get_pressure().unwrap_or(0.0) as f32,
-            ),
-            PumpQuantity::GroupFlowRate => (
-                params.pump_flow_rate_params,
-                self.group.get_input_flow_rate().unwrap_or(0.0) as f32,
-            ),
-            PumpQuantity::OutputFlowRate => (
-                params.pump_output_flow_rate_params,
-                self.group.get_output_flow_rate().unwrap_or(0.0) as f32,
-            ),
-        };
-        let duty_cycle = self.pump_pid_engagement.last_commanded_duty();
-
-        command::pump::seed_pump_integral(
-            &mut self.pump_pid, quantity, target, parameters, duty_cycle, measurement);
+        PumpLoopContext::seed_pump_integral(self, quantity, target);
     }
 
     /// Write the persistent half of the configuration to its store.
@@ -1537,55 +1482,30 @@ impl<
     ///
     /// See the equivalent pair in `dual_boiler_single_group` for why the logger needs
     /// nothing a manual brew lacks, and why both guards are here.
+    // The three manual shot-log methods are `crate::command::shot`, shared with the
+    // dual-boiler controller: they were byte-identical, including the guard that keeps this
+    // path from closing a *routine's* log early.
     fn start_manual_shot_log(&mut self) {
-        use variegated_controller_types::{ShotLogMetadata, ShotStatus, ShotType};
-
-        if self.current_routine.is_some() || self.shot_logger.is_logging() {
-            return;
-        }
-
-        self.shot_logger.start_shot(ShotLogMetadata {
-            annotations: self.pending_annotations.clone(),
-            shot_type: ShotType::Manual,
-            group_index: SingleGroup.as_index(),
-            routine_metadata: None,
-            start_time_millis: Instant::now().as_millis(),
-            end_time_millis: None,
-            final_status: ShotStatus::Running,
-            recorded_at_unix_millis: None,
-        });
-        self.manual_shot_active = true;
-        log_debug!("Started a manual shot log");
+        command::shot::start_manual_shot_log(
+            &mut self.shot_logger,
+            &self.pending_annotations,
+            &mut self.manual_shot_active,
+            self.current_routine.is_some(),
+            SingleGroup.as_index(),
+        );
     }
 
-    /// Close a manual shot log and hand it to storage.
-    ///
-    /// Guarded on `manual_shot_active` because `handle_routine_exit` stops brewing before
-    /// it finishes its own log -- see the note on the dual-boiler version.
     fn finish_manual_shot_log(&mut self) {
-        use variegated_controller_types::ShotStatus;
-
-        if !self.manual_shot_active {
-            return;
-        }
-        self.manual_shot_active = false;
-
-        self.shot_logger.finish_shot(ShotStatus::Completed);
-        self.send_latest_shot_log();
-        self.pending_annotations.clear();
+        command::shot::finish_manual_shot_log(
+            &mut self.shot_logger,
+            &mut self.pending_annotations,
+            &mut self.manual_shot_active,
+            self.shot_log_sender.as_ref(),
+        );
     }
 
-    /// Hand the most recently finished shot to the storage task, if there is one listening.
     fn send_latest_shot_log(&mut self) {
-        if let Some(ref sender) = self.shot_log_sender {
-            if let Some(shot_log) = self.shot_logger.latest_log() {
-                if let Err(_) = sender.try_send(shot_log.clone()) {
-                    log_warn!("Failed to send shot log for storage (channel full)");
-                } else {
-                    log_debug!("Shot log sent for storage");
-                }
-            }
-        }
+        command::shot::send_latest_shot_log(&mut self.shot_logger, self.shot_log_sender.as_ref());
     }
 
     async fn handle_routine_start(&mut self, routine_index: RoutineIndex, runtime_params: Option<RoutineParameters>) {
@@ -1767,43 +1687,79 @@ impl<
 
     /// Record what a scale currently reads as the dose for the next shot.
     ///
-    /// See the equivalent method in `dual_boiler_single_group` for why this refuses
-    /// rather than substituting a zero, and why it does not tare.
+    /// The decision is `crate::command::shot`, shared with the dual-boiler controller; this
+    /// only reads this machine's scale for it.
     fn tag_dose_from_scale(&mut self, scale: variegated_controller_types::ScaleSelector) {
-        use variegated_controller_types::{
-            ScaleSelector, ShotAnnotationKey, ShotAnnotationValue,
-        };
-
-        let weight = match scale {
-            ScaleSelector::GroupScale(index) if index == SingleGroup.as_index() => {
-                self.group.get_output_weight()
-            }
-            ScaleSelector::GroupScale(index) => {
-                log_warn!("TagDoseFromScale: no group {} on this machine", index);
-                return;
-            }
-        };
-
-        let Some(grams) = weight else {
-            log_warn!("TagDoseFromScale: {:?} has no reading to take", scale);
-            return;
-        };
-
-        match self.pending_annotations.set(
-            ShotAnnotationKey::DoseWeight,
-            ShotAnnotationValue::Number(grams),
-        ) {
-            Ok(()) => log_info!("Dose tagged from {:?}: {} g", scale, grams),
-            Err(_) => log_warn!(
-                "TagDoseFromScale: the annotation block is full ({} entries)",
-                self.pending_annotations.len()
-            ),
-        }
+        let weight = self.group.get_output_weight();
+        command::shot::tag_dose_from_scale(
+            &mut self.pending_annotations,
+            scale,
+            SingleGroup.as_index(),
+            weight,
+        );
     }
 }
 
 // `impl From<SingleBoilerSingleGroupConfiguration> for Configuration` now lives beside the
 // type it converts, in `crate::single_boiler_config`.
+
+/// This machine's half of the shared pump loops.
+///
+/// Four accessors, and the limit loop and integral seeding come with them. See
+/// [`crate::command::pump::PumpLoopContext`].
+impl<
+    'a,
+    ChannelM: RawMutex,
+    M: RawMutex,
+    StorageM: RawMutex + 'static,
+    SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
+    RoutineRepoT: RoutineRepository + 'static,
+    ScheduleStoreT: ScheduleStore + 'static,
+    BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
+    WifiStoreT: SettingsStorage<StoredWifiCredentials>,
+    UploadStoreT: SettingsStorage<ShotUploadConfig>,
+    TimezoneStoreT: SettingsStorage<TimezoneSetting>,
+    const N_CHANNEL: usize,
+    const N_WATCH: usize,
+    const N_SUBS: usize,
+    const N_CONFIG_SUBS: usize
+> command::pump::PumpLoopContext
+    for SingleBoilerSingleGroupController<'a, ChannelM, M, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS>
+{
+    /// One heating element and one pump, so all three tunings live in one flat struct.
+    fn pump_loop_inputs(&mut self, quantity: PumpQuantity) -> (PidParameters, f32) {
+        let params = &self.configuration.persistent.pid_parameters;
+        match quantity {
+            PumpQuantity::Pressure => (
+                params.pump_pressure_params,
+                self.group.get_pressure().unwrap_or(0.0) as f32,
+            ),
+            PumpQuantity::GroupFlowRate => (
+                params.pump_flow_rate_params,
+                self.group.get_input_flow_rate().unwrap_or(0.0) as f32,
+            ),
+            PumpQuantity::OutputFlowRate => (
+                params.pump_output_flow_rate_params,
+                self.group.get_output_flow_rate().unwrap_or(0.0) as f32,
+            ),
+        }
+    }
+
+    /// The duty the pump is **actually running at**, not the `FixedDutyCycle` target -- see
+    /// [`crate::pump_transfer::PumpPidEngagement::last_commanded_duty`]. The dual-boiler still
+    /// reads the target; that difference is pre-existing and deliberately left alone.
+    fn seeding_duty_cycle(&self) -> HexadecimalDutyCycleType {
+        self.pump_pid_engagement.last_commanded_duty()
+    }
+
+    fn limit_pid(&mut self) -> &mut PidCtrl<f32> {
+        &mut self.limit_pid
+    }
+
+    fn pump_pid(&mut self) -> &mut PidCtrl<f32> {
+        &mut self.pump_pid
+    }
+}
 
 /// This machine's half of the shared command dispatcher.
 ///
