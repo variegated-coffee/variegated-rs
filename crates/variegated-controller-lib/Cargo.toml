@@ -179,4 +179,19 @@ single_group = ["variegated-controller-types/single_group"]
 # `routine.rs` and `schedule.rs` name `embassy_time::Instant`, which resolves a time driver
 # at *link* time even in a test that never reads the clock. `mock-driver` is that provider;
 # without it the test binary fails with an undefined `_embassy_time_now`.
-embassy-time = { workspace = true, features = ["mock-driver"] }
+#
+# `generic-queue-8` is a second, separate provider, and `mock-driver` does not imply it: it
+# brings `embassy-time-queue-utils` in as a dependency but enables no queue *implementation*.
+# Anything constructing a `Timer` needs one -- which `command::stores` does, because every
+# store access there is wrapped in `with_timeout`. Without it the failure is an undefined
+# `__embassy_time_queue_item_from_waker` at link time, which names neither the timer nor the
+# feature that supplies it.
+#
+# Dev-only, so it cannot reach a firmware: on target the queue comes from `embassy-rp`, and
+# two providers in one binary is a duplicate-symbol error rather than a silent choice.
+embassy-time = { workspace = true, features = ["mock-driver", "generic-queue-8"] }
+# The generic queue locks with `critical-section`, which is another link-time provider and
+# another undefined symbol without one -- `__critical_section_1_0_acquire`. On target it comes
+# from embassy-rp's `critical-section-impl`; on a host it comes from here. Same shape and same
+# reason as `variegated-timekeeping` and `variegated-shot-upload`, which both already do this.
+critical-section = { version = "1", features = ["std"] }

@@ -7,7 +7,9 @@ use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_rp::watchdog::Watchdog;
-use embassy_time::{Duration, Instant, Timer, with_timeout};
+// No `with_timeout` here any more: every timed store access this controller made now lives
+// in `crate::command::stores`, which owns the lock and the timeout together.
+use embassy_time::{Instant, Timer};
 use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
@@ -1514,40 +1516,13 @@ impl<
             // `update_routine` raise `ROUTINES_CHANGED` themselves, and the transceiver
             // pushes a fresh summary list off the back of it.
             MachineCommand::AddRoutine(routine) => {
-                log_info!("Adding new routine");
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => match repo.add_routine(routine).await {
-                        Ok(index) => log_info!("Added routine at index {:?}", index),
-                        Err(e) => log_warn!("Failed to add routine: {}", e),
-                    },
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
-                }
+                command::stores::add_routine(self.routine_repository, routine).await;
             }
             MachineCommand::RemoveRoutine(idx) => {
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => {
-                        match repo.remove_routine(idx).await {
-                            Ok(Some(_)) => {}
-                            // Two different problems, and they used to be the same answer:
-                            // a client naming an index that is not there, versus a flash
-                            // write that failed.
-                            Ok(None) => log_warn!("No routine at index {:?} to remove", idx),
-                            Err(e) => log_warn!("Failed to remove routine at index {:?}: {}", idx, e),
-                        }
-                    }
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
-                }
+                command::stores::remove_routine(self.routine_repository, idx).await;
             }
             MachineCommand::UpdateRoutine(idx, routine) => {
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => {
-                        let res = repo.update_routine(idx, routine).await;
-                        if let Err(e) = res {
-                            log_warn!("Failed to update routine at index {:?}: {}", idx, e);
-                        }
-                    }
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
-                }
+                command::stores::update_routine(self.routine_repository, idx, routine).await;
             }
             // Handed off rather than run here, which it used to be. On a flash-backed
             // repository `optimize_storage` erases the whole range and rewrites every

@@ -1981,77 +1981,29 @@ impl<
                 defmt::warn!("Ignoring unsupported command in finally block: {:?}", command);
             }
             MachineCommand::RemoveScheduleItem(idx) => {
-                log_info!("Removing schedule item at index {}", idx);
-                match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => match store.remove_schedule(idx as usize).await {
-                        Ok(Some(_)) => self.configuration_publish_pending = true,
-                        // Distinguished from the arm below, because they are different
-                        // problems: this one is a client naming an index that is not there,
-                        // that one is a flash write that failed.
-                        Ok(None) => log_warn!("No schedule at index {} to remove", idx),
-                        Err(e) => log_warn!("Failed to remove schedule at index {}: {}", idx, e),
-                    },
-                    Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
-                }
+                let publish = command::stores::remove_schedule(self.schedule_store, idx).await;
+                self.configuration_publish_pending |= publish.wanted();
             }
             MachineCommand::AddScheduleItem(item) => {
-                log_info!("Adding new schedule item");
-                match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => match store.add_schedule(item).await {
-                        Ok(index) => {
-                            log_info!("Added schedule at index {}", index);
-                            self.configuration_publish_pending = true;
-                        }
-                        Err(e) => log_warn!("Failed to add schedule: {}", e),
-                    },
-                    Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
-                }
+                let publish = command::stores::add_schedule(self.schedule_store, item).await;
+                self.configuration_publish_pending |= publish.wanted();
             }
             MachineCommand::UpdateScheduleItem(idx, item) => {
-                log_info!("Updating schedule item at index {}", idx);
-                match with_timeout(Duration::from_millis(100), self.schedule_store.lock()).await {
-                    Ok(mut store) => match store.update_schedule(idx as usize, item).await {
-                        Ok(()) => self.configuration_publish_pending = true,
-                        Err(e) => log_warn!("Failed to update schedule at index {}: {}", idx, e),
-                    },
-                    Err(_) => log_warn!("Failed to acquire schedule_store lock (timeout)"),
-                }
+                let publish = command::stores::update_schedule(self.schedule_store, idx, item).await;
+                self.configuration_publish_pending |= publish.wanted();
             }
             MachineCommand::AddRoutine(routine) => {
-                log_info!("Adding new routine");
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => match repo.add_routine(routine).await {
-                        Ok(index) => log_info!("Added routine at index {:?}", index),
-                        Err(e) => log_warn!("Failed to add routine: {}", e),
-                    },
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
-                }
+                command::stores::add_routine(self.routine_repository, routine).await;
             }
             MachineCommand::RemoveRoutine(idx) => {
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => {
-                        match repo.remove_routine(idx).await {
-                            Ok(Some(_)) => {}
-                            // Two different problems, and they used to be the same answer:
-                            // a client naming an index that is not there, versus a flash
-                            // write that failed.
-                            Ok(None) => log_warn!("No routine at index {} to remove", idx),
-                            Err(e) => log_warn!("Failed to remove routine at index {}: {}", idx, e),
-                        }
-                    }
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
-                }
+                command::stores::remove_routine(self.routine_repository, idx).await;
             }
+            // Note one thing this fixed rather than merely moved: the failure here used to be
+            // logged as "index out of bounds", which was a guess -- the real error was in
+            // hand and thrown away. The shared handler reports what actually happened, as the
+            // single-boiler controller already did.
             MachineCommand::UpdateRoutine(idx, routine) => {
-                match with_timeout(Duration::from_millis(100), self.routine_repository.lock()).await {
-                    Ok(mut repo) => {
-                        let res = repo.update_routine(idx, routine).await;
-                        if res.is_err() {
-                            log_warn!("Failed to update routine at index {}: index out of bounds", idx);
-                        }
-                    }
-                    Err(_) => log_warn!("Failed to acquire routine_repository lock (timeout)"),
-                }
+                command::stores::update_routine(self.routine_repository, idx, routine).await;
             }
             MachineCommand::SetMachineMode(mode) => {
                 log_info!("Setting machine mode to {:?}", mode);

@@ -5194,6 +5194,7 @@ dependencies = [
  "cfg-if",
  "chrono",
  "crc",
+ "critical-section",
  "defmt 1.1.1",
  "embassy-embedded-hal",
  "embassy-futures",

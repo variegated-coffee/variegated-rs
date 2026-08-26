@@ -42,6 +42,8 @@
 //!   persist and leaves the writing to the caller.
 
 pub mod access;
+pub mod stores;
 pub mod targets;
 
 pub use access::{ConfigurationAccess, CurveAction, TargetOutcome};
+pub use stores::Publish;
