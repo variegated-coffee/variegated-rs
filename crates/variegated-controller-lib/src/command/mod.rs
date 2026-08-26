@@ -9,22 +9,27 @@
 //! that add and edit schedules, which the web UI, the Plantlet uplink and the comms
 //! processor's HTTP handler all send to *any* machine.
 //!
-//! # The rule that keeps the dispatchers honest
+//! # One dispatcher, and the rule the handlers still follow
 //!
-//! **No function in this module takes a `MachineCommand`.** Every one takes the payload
-//! already destructured.
+//! [`context::MachineCommandContext::handle_machine_command`] is the **only** `match` over
+//! `MachineCommand` in this crate. The two controllers implement that trait and no longer
+//! dispatch at all.
 //!
-//! That is deliberate and load-bearing. It leaves each controller's `match` as the only place
-//! the enum is consumed, so both matches stay exhaustive and a variant added to
-//! `MachineCommand` is a compile error on both machines. The tempting alternative -- a shared
-//! `handle_common(cmd) -> Option<MachineCommand>` returning what it did not handle -- reads
-//! better and destroys exactly that property: it needs a `_ =>` arm of its own, and a new
-//! variant would fall through it in silence on both machines. That silence is how this drift
-//! happened in the first place.
+//! That was not the first shape. Sharing only the command *bodies* left both controllers with
+//! their own exhaustive match, which kept the compile-time guarantee but meant roughly two
+//! thirds of the arms were byte-identical one-liners in two files -- three identical copies of
+//! "call the shared handler, then note the publish" is still three copies. The trait removes
+//! the second match without giving the guarantee up: a variant added to the enum is a compile
+//! error in the dispatcher, and if the answer is "the machines differ", the new required
+//! method is a compile error in both implementations.
 //!
-//! Adding a variant already means updating `MachineCommand::label`, its `defmt::Format` impl
-//! and `variegated-schema-export`'s fixtures. Two controller matches makes it five places, and
-//! all five fail to compile rather than mis-behaving at runtime.
+//! **No function in the sibling modules takes a `MachineCommand`.** They take payloads already
+//! destructured, which is what keeps them pure, host-testable, and unable to quietly grow a
+//! `_ =>` arm of their own.
+//!
+//! Adding a variant means updating `MachineCommand::label`, its `defmt::Format` impl,
+//! `variegated-schema-export`'s fixtures, and the dispatcher. All of them fail to compile
+//! rather than mis-behaving at runtime.
 //!
 //! # What is deliberately *not* here
 //!
@@ -44,13 +49,40 @@
 pub mod access;
 pub mod bluetooth;
 pub mod connectivity;
+pub mod context;
 pub mod pump;
 pub mod shot;
 pub mod stores;
 pub mod targets;
 
 pub use access::{ConfigurationAccess, CurveAction, TargetOutcome};
+pub use context::MachineCommandContext;
 pub use stores::Publish;
+
+/// Which of the three calibration actions a scale command asks for.
+///
+/// The three arms differed only in the method called and the noun logged, on both machines --
+/// twelve near-identical lines per machine for what is one action with three values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleAction {
+    /// Zero the reading against whatever is on the scale now.
+    Tare,
+    /// Record the zero point, with nothing on the scale.
+    ZeroCalibrate,
+    /// Record the span, against a known 100 g mass.
+    CalibrateWith100g,
+}
+
+impl ScaleAction {
+    /// What this action is called in logs.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tare => "taring",
+            Self::ZeroCalibrate => "zero calibrating",
+            Self::CalibrateWith100g => "100g calibrating",
+        }
+    }
+}
 
 /// Say that this machine does not carry out a command, and why.
 ///

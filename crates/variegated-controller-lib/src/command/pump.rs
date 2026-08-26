@@ -5,7 +5,69 @@
 //! setting nothing reads is a setting that silently does nothing. The dual-boiler controller
 //! carried two identical copies of this, one per pump.
 
-use variegated_controller_types::{HexadecimalDutyCycleType, PumpConfiguration};
+use variegated_control_algorithm::pid::PidCtrl;
+use variegated_controller_types::{HexadecimalDutyCycleType, PidParameters, PumpConfiguration};
+use variegated_log::log_info;
+
+/// Which quantity a pump loop is controlling.
+///
+/// Exists so the three `InferGroup*Integral` commands are one function instead of three
+/// twenty-line copies per machine. The copies differed only in the measurement they read, the
+/// gains they loaded and the noun in their log lines -- and each machine had its own set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PumpQuantity {
+    /// Pressure at the group.
+    Pressure,
+    /// Flow *into* the group, as the pump measures it.
+    GroupFlowRate,
+    /// Flow *out of* the group, as the scale measures it.
+    OutputFlowRate,
+}
+
+impl PumpQuantity {
+    /// The noun this quantity is called in logs.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pressure => "pressure",
+            Self::GroupFlowRate => "flow rate",
+            Self::OutputFlowRate => "output flow rate",
+        }
+    }
+}
+
+/// Seed the pump PID's integral so a takeover starts from what the pump is already doing.
+///
+/// This is bumpless transfer: without it the loop takes over from a standing start, and the
+/// pump drops to zero and climbs back. See [`crate::pump_transfer`] for the same idea on the
+/// engagement path.
+///
+/// The caller supplies the duty cycle because **the two machines disagree about which one to
+/// read**, and that disagreement is pre-existing rather than something this function should
+/// paper over: the single-boiler controller reads the duty the pump is actually running at,
+/// while the dual-boiler reads the `FixedDutyCycle` *target*, which is only the same thing
+/// when the transfer comes from duty-cycle mode. Unifying them is a change to the dual-boiler's
+/// pump behaviour, not a refactor, so it is left for its own commit.
+pub fn seed_pump_integral(
+    pid: &mut PidCtrl<f32>,
+    quantity: PumpQuantity,
+    target: f32,
+    parameters: PidParameters,
+    duty_cycle: HexadecimalDutyCycleType,
+    measurement: f32,
+) {
+    log_info!("Inferring group {} integral for target: {}", quantity.label(), target);
+
+    pid.setpoint = target;
+    pid.set_parameters(parameters);
+    pid.infer_and_set_integral(duty_cycle.value() as f32, measurement);
+
+    log_info!(
+        "Set {} integral based on duty cycle {}/255 and measurement {}",
+        quantity.label(),
+        duty_cycle.value(),
+        measurement
+    );
+}
 
 /// Clamp a commanded duty cycle to the pump's configured range.
 ///

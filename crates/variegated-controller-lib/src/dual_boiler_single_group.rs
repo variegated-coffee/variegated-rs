@@ -19,11 +19,16 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerIndex, BoilerStatus, SteamWandIndex, ValveOpenType, WaterTapIndex, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, GroupIndex, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineExecutionStatus, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
+// `ValveOpenType` is imported unconditionally above: the shared dispatcher names it in
+// `set_steam_valve_openness`, which exists in every build even on a machine whose steam
+// commands are a refusal.
 #[cfg(feature = "pwm-steam-valve")]
-use variegated_controller_types::{SteamWandStatus, ValveOpenType};
+use variegated_controller_types::SteamWandStatus;
 use crate::command;
+use crate::command::pump::PumpQuantity;
+use crate::command::{MachineCommandContext, ScaleAction};
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
 use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBoiler, SteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -1723,6 +1728,66 @@ impl<
     /// Handles commands eligible for routine "finally" blocks (cleanup commands).
     /// This is the main command executor for all non-routine-lifecycle commands,
     /// whether from external sources or routine steps.
+    /// Tare or calibrate the group scale.
+    ///
+    /// The single-boiler controller's twin. One method for the three commands, which differed
+    /// only in which scale method they called.
+    async fn scale_action(&mut self, group_index: GroupIndex, action: ScaleAction) {
+        if group_index != 0 {
+            log_error!("Invalid group index for {} scale: {}", action.label(), group_index);
+            return;
+        }
+        log_info!("{} group scale", action.label());
+        let _ = match action {
+            ScaleAction::Tare => self.group.scale_tare().await,
+            ScaleAction::ZeroCalibrate => self.group.scale_zero_calibration().await,
+            ScaleAction::CalibrateWith100g => {
+                self.group.scale_reference_weight_calibration(100).await
+            }
+        };
+    }
+
+    /// Seed the pump PID for whichever quantity is about to be controlled.
+    ///
+    /// The three `InferGroup*Integral` commands were three twenty-line copies of this.
+    ///
+    /// **The duty cycle read here is the `FixedDutyCycle` *target*, not what the pump is
+    /// actually running at.** That is only the same thing when the transfer comes from
+    /// duty-cycle mode -- see `pump_transfer::last_commanded_duty`, and note the single-boiler
+    /// controller reads the actual duty. Pre-existing, and left alone deliberately: changing
+    /// it is a change to this machine's pump behaviour rather than a refactor.
+    ///
+    /// The conversion matters too. The stored value is a percentage and the PID's integral is
+    /// in the pump's 0-255 units, so seeding it directly would start the pump at 1/2.55 of
+    /// the intended output.
+    fn seed_pump_integral(&mut self, group_index: GroupIndex, quantity: PumpQuantity, target: f32) {
+        if group_index != 0 {
+            log_error!("Invalid group index: {}", group_index);
+            return;
+        }
+
+        let group = &self.configuration.persistent.group;
+        let (parameters, measurement) = match quantity {
+            PumpQuantity::Pressure => (
+                group.pressure_pid_parameters,
+                self.group.get_pressure().unwrap_or(0.0) as f32,
+            ),
+            PumpQuantity::GroupFlowRate => (
+                group.flow_rate_pid_parameters,
+                self.group.get_input_flow_rate().unwrap_or(0.0) as f32,
+            ),
+            PumpQuantity::OutputFlowRate => (
+                group.output_flow_rate_pid_parameters,
+                self.group.get_output_flow_rate().unwrap_or(0.0) as f32,
+            ),
+        };
+        let duty_cycle: HexadecimalDutyCycleType =
+            self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
+
+        command::pump::seed_pump_integral(
+            &mut self.pump_pid, quantity, target, parameters, duty_cycle, measurement);
+    }
+
     /// Write the persistent half of the configuration to its store.
     ///
     /// One method, because it was this same eight-line block copied at eleven call sites.
@@ -1752,519 +1817,15 @@ impl<
         }
     }
 
+    /// Handles commands eligible for routine "finally" blocks.
+    ///
+    /// The dispatch is [`crate::command::MachineCommandContext::handle_machine_command`],
+    /// shared with the single-boiler controller; this machine's half of it is the trait impl
+    /// at the end of this file. Kept as a named method because routine `finally` blocks call
+    /// it directly, and going through here rather than `handle_command` is what stops a
+    /// routine starting another routine.
     async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
-        match command {
-            MachineCommand::StartBrewing(_) => {
-                if self.configuration.ephemeral.mode != MachineMode::On {
-                    log_warn!("Cannot start brewing while not in On mode");
-                    return;
-                }
-
-                // Validate tank status before starting brewing
-                if self.should_block_water_operation() {
-                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tank_low") });
-                    return;
-                }
-
-                // Unconditional, unlike the steam exclusion below. `allow_simultaneous_operations`
-                // is about running the two boilers at once -- brewing while steaming -- and the
-                // tap is not a boiler: it shares the pump and the same body of brew water with
-                // the group. There is no configuration under which starting a shot into a
-                // running tap is what the user meant.
-                if self.water_tap_dispensing {
-                    log_warn!("Cannot start brewing while dispensing water");
-                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("start_brewing_water_tap_active") });
-                    return;
-                }
-
-                self.start_brewing().await;
-            }
-            MachineCommand::StopBrewing(_) => {
-                self.stop_brewing().await;
-            }
-            MachineCommand::StartPumpingToWaterTap(_) => {
-                if self.configuration.ephemeral.mode != MachineMode::On {
-                    log_warn!("Cannot start pumping while not in On mode");
-                    return;
-                }
-
-                // Validate tank status before starting water dispensing
-                if self.should_block_water_operation() {
-                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_water_tank_low") });
-                    return;
-                }
-
-                // The other half of the brew/tap exclusion above, and unconditional for the same
-                // reason.
-                if self.group_brewing {
-                    log_warn!("Cannot start water tap while brewing");
-                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_brewing_active") });
-                    return;
-                }
-
-                // Steam blocks the tap but the tap does not block steam, and the asymmetry is
-                // deliberate. Steam is a valve the user is holding a jug under; refusing to open
-                // it leaves the panel button doing nothing, and the GS3's steam button carries
-                // its own three-position `steam_valve_state` (gs3-firmware/src/buttons.rs) which
-                // is not derived from `Status` and would silently desync from the machine if a
-                // `StartSteaming` were dropped here. Refusing the tap has neither problem: its
-                // button reads `is_dispensing` back out of `Status` every cycle.
-                #[cfg(feature = "pwm-steam-valve")]
-                if self.steam_wand.get_steaming_state() {
-                    log_warn!("Cannot start water tap while steaming");
-                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("water_tap_steaming_active") });
-                    return;
-                }
-
-                self.start_water_tap_dispensing().await;
-            }
-            MachineCommand::StopPumpingToWaterTap(_) => {
-                self.stop_water_tap_dispensing().await;
-            }
-            #[cfg(feature = "pwm-steam-valve")]
-            MachineCommand::StartSteaming(_) => {
-                if self.configuration.ephemeral.mode != MachineMode::On {
-                    log_warn!("Cannot start steaming while not in On mode");
-                    return;
-                }
-
-                // The one thing `allow_simultaneous_operations` actually names: both boilers
-                // working at once. Inert at the default, which is `true` on every configuration
-                // in this tree -- brewing and steaming together is the point of a dual boiler.
-                if !self.configuration.persistent.allow_simultaneous_operations && self.group_brewing {
-                    log_warn!("Cannot start steaming while brewing (simultaneous operations disabled)");
-                    variegated_log::emit_event(DebugEvent::InterlockTripped { interlock: name("steam_brewing_active") });
-                    return;
-                }
-
-                self.start_steaming().await;
-            }
-            #[cfg(feature = "pwm-steam-valve")]
-            MachineCommand::StopSteaming(_) => {
-                self.stop_steaming().await;
-            }
-            #[cfg(feature = "pwm-steam-valve")]
-            MachineCommand::SetSteamValveOpenness(_, openness) => {
-                self.set_steam_valve_openness(openness).await;
-            }
-            // The six target commands are `crate::command::targets`, shared with the
-            // single-boiler controller and host-tested there. What is left here is the half
-            // that genuinely differs between the machines: which store the result goes to,
-            // and the curve clock it is measured against.
-            MachineCommand::SetBoilerControlTarget(boiler_index, mode, values_update) => {
-                let outcome = command::targets::set_boiler_control_target(
-                    &mut self.configuration, boiler_index, mode, values_update);
-                self.apply_target_outcome(outcome).await;
-            }
-            MachineCommand::SetBoilerControlTargetValues(boiler_index, update) => {
-                let outcome = command::targets::set_boiler_control_target_values(
-                    &mut self.configuration, boiler_index, update);
-                self.apply_target_outcome(outcome).await;
-            }
-            MachineCommand::SetGroupBrewControlTarget(group_index, mode, values_update) => {
-                let outcome = command::targets::set_group_brew_control_target(
-                    &mut self.configuration, group_index, mode, values_update);
-                self.apply_target_outcome(outcome).await;
-            }
-            MachineCommand::SetGroupBrewControlTargetValues(group_index, update) => {
-                let outcome = command::targets::set_group_brew_control_target_values(
-                    &mut self.configuration, group_index, update);
-                self.apply_target_outcome(outcome).await;
-            }
-            MachineCommand::SetGroupBrewLimit(group_index, limit, values_update) => {
-                let outcome = command::targets::set_group_brew_limit(
-                    &mut self.configuration, group_index, limit, values_update);
-                self.apply_target_outcome(outcome).await;
-            }
-            MachineCommand::SetPidParameters(target, params) => {
-                let outcome = command::targets::set_pid_parameters(
-                    &mut self.configuration, target, params);
-                self.apply_target_outcome(outcome).await;
-            }
-            MachineCommand::EnableBoiler(boiler_index) => {
-                match boiler_index {
-                    0 => {
-                        log_info!("Enabling brew boiler");
-                        self.brew_boiler_enabled = true;
-                    }
-                    1 => {
-                        log_info!("Enabling steam boiler");
-                        self.steam_boiler_enabled = true;
-                    }
-                    _ => {
-                        log_warn!("Invalid boiler index: {}", boiler_index);
-                    }
-                }
-            }
-            MachineCommand::DisableBoiler(boiler_index) => {
-                match boiler_index {
-                    0 => {
-                        log_info!("Disabling brew boiler");
-                        self.brew_boiler_enabled = false;
-                    }
-                    1 => {
-                        log_info!("Disabling steam boiler");
-                        self.steam_boiler_enabled = false;
-                    }
-                    _ => {
-                        log_warn!("Invalid boiler index: {}", boiler_index);
-                    }
-                }
-            }
-            MachineCommand::TareGroupScale(group_index) => {
-                if group_index == 0 {
-                    log_info!("Taring group scale");
-                    let _ = self.group.scale_tare().await;
-                } else {
-                    log_error!("Invalid group index for taring scale: {}", group_index);
-                }
-            }
-            MachineCommand::ZeroCalibrateGroupScale(group_index) => {
-                if group_index == 0 {
-                    log_info!("Zero calibrating group scale");
-                    let _ = self.group.scale_zero_calibration().await;
-                } else {
-                    log_error!("Invalid group index for zero calibrating scale: {}", group_index);
-                }
-            }
-            MachineCommand::CalibrateGroupScale100g(group_index) => {
-                if group_index == 0 {
-                    log_info!("Calibrating group scale with 100g");
-                    let _ = self.group.scale_reference_weight_calibration(100).await;
-                } else {
-                    log_error!("Invalid group index for 100g calibrating scale: {}", group_index);
-                }
-            }
-            MachineCommand::UpdateCommsStatus(status) => {
-                //log_info!("Updating comms status: wifi={}, timestamp={:?}", status.wifi_connected, status.timestamp);
-                self.comms_status = Some(status);
-                self.comms_status_received_instant = Some(Instant::now());
-            }
-            MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
-                // `label()` through `log_warn!` rather than `defmt::warn!` with `{:?}`, so this
-                // reaches the debug bus and the host's Events pane rather than only a probe.
-                // The single-boiler controller's twin says the same.
-                log_warn!("Ignoring routine lifecycle command in finally block: {}", command.label());
-            }
-            MachineCommand::RemoveScheduleItem(idx) => {
-                let publish = command::stores::remove_schedule(self.schedule_store, idx).await;
-                self.configuration_publish_pending |= publish.wanted();
-            }
-            MachineCommand::AddScheduleItem(item) => {
-                let publish = command::stores::add_schedule(self.schedule_store, item).await;
-                self.configuration_publish_pending |= publish.wanted();
-            }
-            MachineCommand::UpdateScheduleItem(idx, item) => {
-                let publish = command::stores::update_schedule(self.schedule_store, idx, item).await;
-                self.configuration_publish_pending |= publish.wanted();
-            }
-            MachineCommand::AddRoutine(routine) => {
-                command::stores::add_routine(self.routine_repository, routine).await;
-            }
-            MachineCommand::RemoveRoutine(idx) => {
-                command::stores::remove_routine(self.routine_repository, idx).await;
-            }
-            // Note one thing this fixed rather than merely moved: the failure here used to be
-            // logged as "index out of bounds", which was a guess -- the real error was in
-            // hand and thrown away. The shared handler reports what actually happened, as the
-            // single-boiler controller already did.
-            MachineCommand::UpdateRoutine(idx, routine) => {
-                command::stores::update_routine(self.routine_repository, idx, routine).await;
-            }
-            MachineCommand::SetMachineMode(mode) => {
-                log_info!("Setting machine mode to {:?}", mode);
-                self.configuration.ephemeral.mode = mode;
-                if mode != MachineMode::On {
-                    // Stop brewing and water tap dispensing if not in On mode
-                    if self.group_brewing {
-                        self.stop_brewing().await;
-                    }
-                    if self.water_tap_dispensing {
-                        self.stop_water_tap_dispensing().await;
-                    }
-                }
-            }
-            MachineCommand::OptimizeConfigurationStorage => {
-                log_info!("Sending OptimizeConfiguration to storage task");
-                if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeConfiguration) {
-                    log_warn!("Failed to send OptimizeConfiguration command: channel full");
-                }
-            }
-            MachineCommand::OptimizeRoutineStorage => {
-                log_info!("Sending OptimizeRoutines to storage task");
-                if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeRoutines) {
-                    log_warn!("Failed to send OptimizeRoutines command: channel full");
-                }
-            }
-            // **No `configuration_publish_pending`, deliberately.** The compaction happens
-            // later and in `storage_task`, not here, so a flag set now would advertise a
-            // change that has not happened yet. And it would advertise nothing anyway:
-            // `Configuration.schedules` is a `Vec<ScheduleItem>` carrying no indices, so
-            // renumbering is invisible to a browser.
-            //
-            // @todo It is *not* invisible to the GS3 panel, whose menu resolves a schedule by
-            // storage index. Optimizing while a schedule screen is open can leave that screen
-            // pointing at a different schedule. Pre-existing, and out of scope here.
-            MachineCommand::OptimizeScheduleStorage => {
-                log_info!("Sending OptimizeSchedules to storage task");
-                if let Err(_) = self.storage_command_sender.try_send(StorageCommand::OptimizeSchedules) {
-                    log_warn!("Failed to send OptimizeSchedules command: channel full");
-                }
-            }
-            MachineCommand::SetGroupPumpConfiguration(group_index, config) => {
-                if group_index == 0 {
-                    log_info!("Setting group pump configuration: {:?}", config);
-                    self.configuration.persistent.group.pump_configuration = Some(config);
-                    self.save_persistent_configuration().await;
-                } else {
-                    log_error!("Invalid group index for pump configuration: {}", group_index);
-                }
-            }
-            MachineCommand::SetWaterTapPumpConfiguration(water_tap_index, config) => {
-                if water_tap_index == 0 {
-                    log_info!("Setting water tap pump configuration: {:?}", config);
-                    self.configuration.persistent.water_tap.pump_configuration = Some(config);
-                    self.save_persistent_configuration().await;
-                } else {
-                    log_error!("Invalid water tap index for pump configuration: {}", water_tap_index);
-                }
-            }
-            MachineCommand::SetFillPumpConfiguration(boiler_index, config) => {
-                // For dual boiler, we only support fill pump configuration for the steam/service boiler (index 1)
-                if boiler_index == 1 {
-                    log_info!("Setting fill pump configuration: {:?}", config);
-                    // Update the pump_configuration within the FillConfiguration
-                    if let Some(ref mut fill_config) = self.configuration.persistent.steam_boiler.fill_config {
-                        fill_config.pump_configuration = Some(config);
-                    } else {
-                        // Create new FillConfiguration with the pump config
-                        self.configuration.persistent.steam_boiler.fill_config = Some(FillConfiguration {
-                            fill_threshold: None, // Keep existing or use None
-                            pump_configuration: Some(config),
-                        });
-                    }
-                    self.save_persistent_configuration().await;
-                } else {
-                    log_error!("Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)", boiler_index);
-                }
-            }
-            MachineCommand::InferGroupPressureIntegral(group_index, target_pressure) => {
-                if group_index == 0 {
-                    log_info!("Inferring group pressure integral for target pressure: {} bar", target_pressure);
-
-                    // Get current duty cycle from the control state configuration. This is a
-                    // percentage, and the PID's integral is in the pump's 0-255 units, so it
-                    // has to be converted rather than passed through -- seeding a 0-255 loop
-                    // with a percentage would start the pump at 1/2.55 of the intended output.
-                    //
-                    // Note this reads the `FixedDutyCycle` *target* rather than the duty the
-                    // pump is actually running at, which `pump_transfer::last_commanded_duty`
-                    // explains is only right when the transfer comes from duty-cycle mode.
-                    // Pre-existing, and the single-boiler controller no longer does it.
-                    let current_duty_cycle: HexadecimalDutyCycleType =
-                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
-                    let current_pressure = self.group.get_pressure().unwrap_or(0.0);
-
-                    // Set up PID for pressure control
-                    self.pump_pid.setpoint = target_pressure as f32;
-                    self.pump_pid.set_parameters(self.configuration.persistent.group.pressure_pid_parameters);
-
-                    // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_pressure as f32);
-
-                    log_info!("Set pressure integral based on duty cycle {}/255 and pressure {}", current_duty_cycle.value(), current_pressure);
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
-            }
-            MachineCommand::InferGroupFlowRateIntegral(group_index, target_flow_rate) => {
-                if group_index == 0 {
-                    log_info!("Inferring group flow rate integral for target flow rate: {} ml/s", target_flow_rate);
-
-                    // A percentage, converted to the PID's 0-255 units. See the pressure
-                    // case above for both this and the target-versus-actual caveat.
-                    let current_duty_cycle: HexadecimalDutyCycleType =
-                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
-                    let current_flow_rate = self.group.get_input_flow_rate().unwrap_or(0.0);
-
-                    // Set up PID for flow rate control
-                    self.pump_pid.setpoint = target_flow_rate as f32;
-                    self.pump_pid.set_parameters(self.configuration.persistent.group.flow_rate_pid_parameters);
-
-                    // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_flow_rate as f32);
-
-                    log_info!("Set flow rate integral based on duty cycle {}/255 and flow rate {}", current_duty_cycle.value(), current_flow_rate);
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
-            }
-            MachineCommand::InferGroupOutputFlowRateIntegral(group_index, target_output_flow_rate) => {
-                if group_index == 0 {
-                    log_info!("Inferring group output flow rate integral for target: {} ml/s", target_output_flow_rate);
-
-                    // A percentage, converted to the PID's 0-255 units. See the pressure
-                    // case above for both this and the target-versus-actual caveat.
-                    let current_duty_cycle: HexadecimalDutyCycleType =
-                        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into();
-                    let current_output_flow_rate = self.group.get_output_flow_rate().unwrap_or(0.0);
-
-                    // Set up PID for output flow rate control
-                    self.pump_pid.setpoint = target_output_flow_rate as f32;
-                    self.pump_pid.set_parameters(self.configuration.persistent.group.output_flow_rate_pid_parameters);
-
-                    // Infer and set the integral
-                    self.pump_pid.infer_and_set_integral(current_duty_cycle.value() as f32, current_output_flow_rate as f32);
-
-                    log_info!("Set output flow rate integral based on duty cycle {}/255 and output flow rate {}", current_duty_cycle.value(), current_output_flow_rate);
-                } else {
-                    log_error!("Invalid group index: {}", group_index);
-                }
-            }
-            MachineCommand::SetHeatingElementInterlock(enabled) => {
-                log_info!("Setting heating element interlock: {}", enabled);
-                self.configuration.persistent.machine.heating_element_interlock = enabled;
-                self.interlock_enabled_signal.signal(enabled);
-                self.save_persistent_configuration().await;
-            }
-            MachineCommand::SetHeatingElementContentionStrategy(strategy) => {
-                log_info!("Setting heating element contention strategy: {:?}", strategy);
-                self.configuration.persistent.heating_element_contention_strategy = strategy;
-                self.contention_strategy_signal.signal(strategy);
-                self.save_persistent_configuration().await;
-            }
-            MachineCommand::SetWaterDispersalPumpStrategy(index, strategy) => {
-                log_info!("Setting water dispersal pump strategy for water tap {}: {:?}", index, strategy);
-                self.configuration.persistent.water_tap.pump_strategy = strategy;
-                self.save_persistent_configuration().await;
-            }
-            MachineCommand::AssociateBluetoothPeripheral(association) => {
-                if command::bluetooth::associate(&mut self.bluetooth_associations, association)
-                    .wanted()
-                {
-                    self.save_bluetooth_associations().await;
-                }
-            }
-            MachineCommand::RemoveBluetoothPeripheral(id) => {
-                if command::bluetooth::remove(&mut self.bluetooth_associations, id).wanted() {
-                    self.save_bluetooth_associations().await;
-                }
-            }
-            MachineCommand::SetBluetoothPeripheralEnabled(id, enabled) => {
-                if command::bluetooth::set_enabled(&mut self.bluetooth_associations, id, enabled)
-                    .wanted()
-                {
-                    self.save_bluetooth_associations().await;
-                }
-            }
-            MachineCommand::ScanForBluetoothPeripherals => {
-                // What counts as busy is this machine's to decide, and is the only part of
-                // starting a scan that differs between the two controllers. This one has
-                // more ways to be occupied, including a steam wand when it has one.
-                let busy = self.group_brewing
-                    || self.water_tap_dispensing
-                    || self.current_routine.is_some();
-                #[cfg(feature = "pwm-steam-valve")]
-                let busy = busy || self.steam_wand.get_steaming_state();
-
-                command::bluetooth::start_scan(
-                    &mut self.bluetooth_status,
-                    &mut self.bluetooth_scan_deadline,
-                    self.bluetooth_scan_sender,
-                    busy,
-                );
-            }
-            MachineCommand::UpdateBluetoothScan(update) => {
-                command::bluetooth::apply_scan_update(
-                    &mut self.bluetooth_status,
-                    &mut self.bluetooth_scan_deadline,
-                    update,
-                );
-            }
-            MachineCommand::SetPendingShotAnnotations(annotations) => {
-                command::shot::set_pending_annotations(&mut self.pending_annotations, annotations);
-            }
-            MachineCommand::TagDoseFromScale(scale) => {
-                self.tag_dose_from_scale(scale);
-            }
-            MachineCommand::SetWifiCredentials(credentials) => {
-                if command::connectivity::set_wifi_credentials(
-                    &mut self.wifi_credentials, credentials).wanted()
-                {
-                    self.save_wifi_credentials().await;
-                }
-            }
-            MachineCommand::SetShotUploadSettings(settings) => {
-                if command::connectivity::apply_shot_upload_settings(
-                    &mut self.shot_upload_config, settings).wanted()
-                {
-                    self.save_shot_upload_config().await;
-                }
-            }
-            MachineCommand::SetShotUploadConfig(config) => {
-                if command::connectivity::set_shot_upload_config(
-                    &mut self.shot_upload_config, config).wanted()
-                {
-                    self.save_shot_upload_config().await;
-                }
-            }
-            MachineCommand::OpenWifiProvisioningWindow { duration_ms } => {
-                // The same busy predicate a discovery scan uses, and the only part of this
-                // that differs between the two machines.
-                let busy = self.group_brewing
-                    || self.water_tap_dispensing
-                    || self.current_routine.is_some();
-                #[cfg(feature = "pwm-steam-valve")]
-                let busy = busy || self.steam_wand.get_steaming_state();
-
-                command::connectivity::open_provisioning_window(
-                    self.wifi_provisioning_sender, duration_ms, busy);
-            }
-            MachineCommand::CloseWifiProvisioningWindow => {
-                command::connectivity::close_provisioning_window(self.wifi_provisioning_sender);
-            }
-            MachineCommand::IdentifyMachine => {
-                // Still logged as well as published: this is the far end of a round trip that
-                // starts in a browser, and the log is the only place both ends are visible at
-                // once.
-                log_info!("Identify requested");
-                if let Some(publisher) = self.identify_publisher.as_ref() {
-                    publisher.send(Instant::now());
-                }
-            }
-            // Refused rather than stored when the name is unknown: this firmware's database is
-            // trimmed at build time, so "unknown" usually means "outside the region this build
-            // carries" rather than "misspelt" -- and either way the honest outcome is that the
-            // machine keeps the zone it had, and says so.
-            MachineCommand::SetTimezone(setting) => {
-                if command::connectivity::set_timezone(&mut self.timezone, setting).wanted() {
-                    self.save_timezone().await;
-                }
-            }
-            MachineCommand::RequestConfiguration => {
-                // This board already republishes every 10 seconds, so the command is not
-                // load-bearing here the way it is on a single-boiler machine -- but it is
-                // implemented all the same, because a consumer that has just come up
-                // should not have to wait out someone else's timer, and because a command
-                // that works on one controller and is dropped by the other is exactly the
-                // sort of divergence that makes the two firmwares need separate handling.
-                log_info!("Configuration republish requested");
-                self.publish_general_configuration().await;
-            }
-            // Editing or deleting a *stored* shot is a whole-file rewrite on the card, which
-            // happens on core 1. Both are handed across rather than performed here.
-            MachineCommand::SetShotAnnotations(id, annotations) => {
-                command::shot::set_shot_annotations(
-                    self.shot_log_query_sender.as_ref(), id, annotations);
-            }
-            MachineCommand::DeleteShotLog(id) => {
-                command::shot::delete_shot_log(self.shot_log_query_sender.as_ref(), id);
-            }
-            #[cfg(not(feature = "pwm-steam-valve"))]
-            MachineCommand::StartSteaming(_) | MachineCommand::StopSteaming(_) | MachineCommand::SetSteamValveOpenness(_, _) => {
-                log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
-            }
-        }
+        self.handle_machine_command(command).await;
     }
 
     async fn start_brewing(&mut self) {
@@ -2703,5 +2264,419 @@ impl<
         } else {
             log_warn!("No routine to exit");
         }
+    }
+}
+
+/// This machine's half of the shared command dispatcher.
+///
+/// The accessors hand the shared handlers a field; the behaviours below are the ones two
+/// boilers, a steam wand and a plumbed tap genuinely do differently. See
+/// [`crate::command::context`] for why the dispatch itself is not here.
+impl<
+    'a,
+    ChannelM: RawMutex,
+    BoilerM: RawMutex,
+    GroupM: RawMutex,
+    WaterTapM: RawMutex,
+    TankM: RawMutex,
+    FillM: RawMutex,
+    StorageM: RawMutex + 'static,
+    SettingsStoreT: SettingsStorage<DualBoilerSingleGroupPersistentConfiguration> + 'a,
+    RoutineRepoT: RoutineRepository + 'a,
+    ScheduleStoreT: ScheduleStore + 'a,
+    BluetoothStoreT: SettingsStorage<BluetoothAssociations> + 'a,
+    WifiStoreT: SettingsStorage<StoredWifiCredentials> + 'a,
+    UploadStoreT: SettingsStorage<ShotUploadConfig> + 'a,
+    TimezoneStoreT: SettingsStorage<TimezoneSetting> + 'a,
+    const N_CHANNEL: usize,
+    const N_WATCH: usize,
+    const N_SUBS: usize,
+    const N_CONFIG_SUBS: usize
+> command::MachineCommandContext<'a>
+    for DualBoilerSingleGroupController<'a, ChannelM, BoilerM, GroupM, WaterTapM, TankM, FillM, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS>
+{
+    type Configuration = DualBoilerSingleGroupConfiguration;
+    type StorageM = StorageM;
+    type ChannelM = ChannelM;
+    type RoutineRepo = RoutineRepoT;
+    type ScheduleStoreT = ScheduleStoreT;
+
+    // ---- Shared state ----------------------------------------------------------------
+
+    fn configuration_mut(&mut self) -> &mut Self::Configuration {
+        &mut self.configuration
+    }
+
+    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
+        DualBoilerSingleGroupController::apply_target_outcome(self, outcome).await
+    }
+
+    fn routine_repository(&self) -> &'static Mutex<Self::StorageM, Self::RoutineRepo> {
+        self.routine_repository
+    }
+
+    fn schedule_store(&self) -> &'static Mutex<Self::StorageM, Self::ScheduleStoreT> {
+        self.schedule_store
+    }
+
+    fn note_configuration_publish(&mut self, publish: command::Publish) {
+        self.configuration_publish_pending |= publish.wanted();
+    }
+
+    fn storage_command_sender(&self) -> Sender<'a, Self::ChannelM, StorageCommand, 4> {
+        self.storage_command_sender
+    }
+
+    fn bluetooth(
+        &mut self,
+    ) -> (&mut BluetoothAssociations, &mut BluetoothScanStatus, &mut Option<Instant>) {
+        (
+            &mut self.bluetooth_associations,
+            &mut self.bluetooth_status,
+            &mut self.bluetooth_scan_deadline,
+        )
+    }
+
+    fn bluetooth_scan_sender(&self) -> Option<Sender<'a, Self::ChannelM, u16, 2>> {
+        self.bluetooth_scan_sender
+    }
+
+    async fn save_bluetooth_associations(&mut self) {
+        DualBoilerSingleGroupController::save_bluetooth_associations(self).await
+    }
+
+    fn wifi_credentials_mut(&mut self) -> &mut StoredWifiCredentials {
+        &mut self.wifi_credentials
+    }
+
+    async fn save_wifi_credentials(&mut self) {
+        DualBoilerSingleGroupController::save_wifi_credentials(self).await
+    }
+
+    fn wifi_provisioning_sender(&self) -> Option<Sender<'a, Self::ChannelM, u32, 2>> {
+        self.wifi_provisioning_sender
+    }
+
+    fn shot_upload_config_mut(&mut self) -> &mut ShotUploadConfig {
+        &mut self.shot_upload_config
+    }
+
+    async fn save_shot_upload_config(&mut self) {
+        DualBoilerSingleGroupController::save_shot_upload_config(self).await
+    }
+
+    fn timezone_mut(&mut self) -> &mut TimezoneSetting {
+        &mut self.timezone
+    }
+
+    async fn save_timezone(&mut self) {
+        DualBoilerSingleGroupController::save_timezone(self).await
+    }
+
+    fn pending_annotations_mut(&mut self) -> &mut variegated_controller_types::ShotAnnotations {
+        &mut self.pending_annotations
+    }
+
+    fn shot_log_query_sender(
+        &self,
+    ) -> Option<Sender<'a, Self::ChannelM, crate::shot_log_query::ShotLogQuery, 1>> {
+        self.shot_log_query_sender
+    }
+
+    fn set_comms_status(&mut self, status: CommsStatus) {
+        self.comms_status = Some(status);
+        self.comms_status_received_instant = Some(Instant::now());
+    }
+
+    /// This machine has more ways to be occupied than the single-boiler one, including a steam
+    /// wand when it has one.
+    fn is_busy(&self) -> bool {
+        let busy =
+            self.group_brewing || self.water_tap_dispensing || self.current_routine.is_some();
+        #[cfg(feature = "pwm-steam-valve")]
+        let busy = busy || self.steam_wand.get_steaming_state();
+        busy
+    }
+
+    // ---- Machine-specific behaviour --------------------------------------------------
+
+    async fn start_brewing(&mut self) {
+        if self.configuration.ephemeral.mode != MachineMode::On {
+            log_warn!("Cannot start brewing while not in On mode");
+            return;
+        }
+
+        if self.should_block_water_operation() {
+            variegated_log::emit_event(DebugEvent::InterlockTripped {
+                interlock: name("start_brewing_water_tank_low"),
+            });
+            return;
+        }
+
+        // Unconditional, unlike the steam exclusion below. `allow_simultaneous_operations` is
+        // about running the two boilers at once -- brewing while steaming -- and the tap is not
+        // a boiler: it shares the pump and the same body of brew water with the group. There is
+        // no configuration under which starting a shot into a running tap is what the user
+        // meant.
+        if self.water_tap_dispensing {
+            log_warn!("Cannot start brewing while dispensing water");
+            variegated_log::emit_event(DebugEvent::InterlockTripped {
+                interlock: name("start_brewing_water_tap_active"),
+            });
+            return;
+        }
+
+        DualBoilerSingleGroupController::start_brewing(self).await;
+    }
+
+    async fn stop_brewing(&mut self) {
+        DualBoilerSingleGroupController::stop_brewing(self).await;
+    }
+
+    async fn start_water_tap(&mut self) {
+        if self.configuration.ephemeral.mode != MachineMode::On {
+            log_warn!("Cannot start pumping while not in On mode");
+            return;
+        }
+
+        if self.should_block_water_operation() {
+            variegated_log::emit_event(DebugEvent::InterlockTripped {
+                interlock: name("water_tap_water_tank_low"),
+            });
+            return;
+        }
+
+        // The other half of the brew/tap exclusion above, and unconditional for the same reason.
+        if self.group_brewing {
+            log_warn!("Cannot start water tap while brewing");
+            variegated_log::emit_event(DebugEvent::InterlockTripped {
+                interlock: name("water_tap_brewing_active"),
+            });
+            return;
+        }
+
+        // Steam blocks the tap but the tap does not block steam, and the asymmetry is
+        // deliberate. Steam is a valve the user is holding a jug under; refusing to open it
+        // leaves the panel button doing nothing, and the GS3's steam button carries its own
+        // three-position `steam_valve_state` (gs3-firmware/src/buttons.rs) which is not derived
+        // from `Status` and would silently desync from the machine if a `StartSteaming` were
+        // dropped here. Refusing the tap has neither problem: its button reads `is_dispensing`
+        // back out of `Status` every cycle.
+        #[cfg(feature = "pwm-steam-valve")]
+        if self.steam_wand.get_steaming_state() {
+            log_warn!("Cannot start water tap while steaming");
+            variegated_log::emit_event(DebugEvent::InterlockTripped {
+                interlock: name("water_tap_steaming_active"),
+            });
+            return;
+        }
+
+        self.start_water_tap_dispensing().await;
+    }
+
+    async fn stop_water_tap(&mut self) {
+        self.stop_water_tap_dispensing().await;
+    }
+
+    async fn start_steaming(&mut self, _index: SteamWandIndex) {
+        #[cfg(not(feature = "pwm-steam-valve"))]
+        {
+            log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
+        }
+        #[cfg(feature = "pwm-steam-valve")]
+        {
+            if self.configuration.ephemeral.mode != MachineMode::On {
+                log_warn!("Cannot start steaming while not in On mode");
+                return;
+            }
+
+            // The one thing `allow_simultaneous_operations` actually names: both boilers working
+            // at once. Inert at the default, which is `true` on every configuration in this tree
+            // -- brewing and steaming together is the point of a dual boiler.
+            if !self.configuration.persistent.allow_simultaneous_operations && self.group_brewing {
+                log_warn!("Cannot start steaming while brewing (simultaneous operations disabled)");
+                variegated_log::emit_event(DebugEvent::InterlockTripped {
+                    interlock: name("steam_brewing_active"),
+                });
+                return;
+            }
+
+            DualBoilerSingleGroupController::start_steaming(self).await;
+        }
+    }
+
+    async fn stop_steaming(&mut self, _index: SteamWandIndex) {
+        #[cfg(not(feature = "pwm-steam-valve"))]
+        {
+            log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
+        }
+        #[cfg(feature = "pwm-steam-valve")]
+        {
+            DualBoilerSingleGroupController::stop_steaming(self).await;
+        }
+    }
+
+    async fn set_steam_valve_openness(&mut self, _index: SteamWandIndex, openness: ValveOpenType) {
+        #[cfg(not(feature = "pwm-steam-valve"))]
+        {
+            let _ = openness;
+            log_warn!("Steam wand commands are not supported without the pwm-steam-valve feature");
+        }
+        #[cfg(feature = "pwm-steam-valve")]
+        {
+            DualBoilerSingleGroupController::set_steam_valve_openness(self, openness).await;
+        }
+    }
+
+    /// Two flags, where the single-boiler machine runs a mode table: this one has two elements
+    /// and enabling one says nothing about the other.
+    async fn set_boiler_enabled(&mut self, enable: bool, index: BoilerIndex) {
+        let verb = if enable { "Enabling" } else { "Disabling" };
+        match index {
+            0 => {
+                log_info!("{} brew boiler", verb);
+                self.brew_boiler_enabled = enable;
+            }
+            1 => {
+                log_info!("{} steam boiler", verb);
+                self.steam_boiler_enabled = enable;
+            }
+            _ => log_warn!("Invalid boiler index: {}", index),
+        }
+    }
+
+    async fn set_machine_mode(&mut self, mode: MachineMode) {
+        log_info!("Setting machine mode to {:?}", mode);
+        self.configuration.ephemeral.mode = mode;
+        if mode != MachineMode::On {
+            // Stop brewing and water tap dispensing if not in On mode
+            if self.group_brewing {
+                DualBoilerSingleGroupController::stop_brewing(self).await;
+            }
+            if self.water_tap_dispensing {
+                self.stop_water_tap_dispensing().await;
+            }
+        }
+    }
+
+    async fn scale_action(&mut self, index: GroupIndex, action: ScaleAction) {
+        DualBoilerSingleGroupController::scale_action(self, index, action).await
+    }
+
+    fn seed_pump_integral(&mut self, index: GroupIndex, quantity: PumpQuantity, target: f32) {
+        DualBoilerSingleGroupController::seed_pump_integral(self, index, quantity, target)
+    }
+
+    /// Queued, unlike the single-boiler machine's, which runs it inline: this controller
+    /// reaches its configuration store through a mutex the storage task also holds.
+    async fn optimize_configuration_storage(&mut self) {
+        log_info!("Sending OptimizeConfiguration to storage task");
+        if self
+            .storage_command_sender
+            .try_send(StorageCommand::OptimizeConfiguration)
+            .is_err()
+        {
+            log_warn!("Failed to send OptimizeConfiguration command: channel full");
+        }
+    }
+
+    /// This board already republishes every 10 seconds, so the command is not load-bearing here
+    /// the way it is on a single-boiler machine -- but it is implemented all the same, because
+    /// a consumer that has just come up should not have to wait out someone else's timer.
+    async fn request_configuration(&mut self) {
+        log_info!("Configuration republish requested");
+        self.publish_general_configuration().await;
+    }
+
+    fn tag_dose_from_scale(&mut self, scale: variegated_controller_types::ScaleSelector) {
+        DualBoilerSingleGroupController::tag_dose_from_scale(self, scale)
+    }
+
+    fn identify(&mut self) {
+        log_info!("Identify requested");
+        if let Some(publisher) = self.identify_publisher.as_ref() {
+            publisher.send(Instant::now());
+        }
+    }
+
+    async fn set_group_pump_configuration(
+        &mut self,
+        index: GroupIndex,
+        config: variegated_controller_types::PumpConfiguration,
+    ) {
+        if index != 0 {
+            log_error!("Invalid group index for pump configuration: {}", index);
+            return;
+        }
+        log_info!("Setting group pump configuration: {:?}", config);
+        self.configuration.persistent.group.pump_configuration = Some(config);
+        self.save_persistent_configuration().await;
+    }
+
+    async fn set_water_tap_pump_configuration(
+        &mut self,
+        index: WaterTapIndex,
+        config: variegated_controller_types::PumpConfiguration,
+    ) {
+        if index != 0 {
+            log_error!("Invalid water tap index for pump configuration: {}", index);
+            return;
+        }
+        log_info!("Setting water tap pump configuration: {:?}", config);
+        self.configuration.persistent.water_tap.pump_configuration = Some(config);
+        self.save_persistent_configuration().await;
+    }
+
+    /// Only the steam/service boiler fills, so only index 1 is meaningful here.
+    async fn set_fill_pump_configuration(
+        &mut self,
+        index: BoilerIndex,
+        config: variegated_controller_types::PumpConfiguration,
+    ) {
+        if index != 1 {
+            log_error!(
+                "Invalid boiler index for fill pump configuration: {} (only boiler 1 supports filling)",
+                index
+            );
+            return;
+        }
+        log_info!("Setting fill pump configuration: {:?}", config);
+        match self.configuration.persistent.steam_boiler.fill_config {
+            Some(ref mut fill_config) => fill_config.pump_configuration = Some(config),
+            None => {
+                self.configuration.persistent.steam_boiler.fill_config = Some(FillConfiguration {
+                    fill_threshold: None,
+                    pump_configuration: Some(config),
+                })
+            }
+        }
+        self.save_persistent_configuration().await;
+    }
+
+    async fn set_heating_element_interlock(&mut self, enabled: bool) {
+        log_info!("Setting heating element interlock: {}", enabled);
+        self.configuration.persistent.machine.heating_element_interlock = enabled;
+        self.interlock_enabled_signal.signal(enabled);
+        self.save_persistent_configuration().await;
+    }
+
+    async fn set_heating_element_contention_strategy(
+        &mut self,
+        strategy: variegated_controller_types::HeatingElementContentionStrategy,
+    ) {
+        log_info!("Setting heating element contention strategy: {:?}", strategy);
+        self.configuration.persistent.heating_element_contention_strategy = strategy;
+        self.contention_strategy_signal.signal(strategy);
+        self.save_persistent_configuration().await;
+    }
+
+    async fn set_water_dispersal_pump_strategy(
+        &mut self,
+        index: WaterTapIndex,
+        strategy: WaterDispersalPumpStrategy,
+    ) {
+        log_info!("Setting water dispersal pump strategy for water tap {}: {:?}", index, strategy);
+        self.configuration.persistent.water_tap.pump_strategy = strategy;
+        self.save_persistent_configuration().await;
     }
 }
