@@ -39,9 +39,11 @@ use embassy_sync::pubsub::WaitResult;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
 use variegated_comms_api_types::uplink_types::{
-    shot_log_prefix, UplinkMessage, MAX_UPLINK_CLIENT_RECORD_LEN,
+    shot_log_prefix, status_interval_secs, UplinkMessage, MAX_UPLINK_CLIENT_RECORD_LEN,
+    STATUS_INTERVAL_ACTIVE_SECS,
 };
 use variegated_comms_api_types::ws_types::{ClientQuery, QueryOutcome};
+use variegated_shot_upload::pending::Pending;
 use variegated_controller_types::RoutineSummaryList;
 use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_log::{log_info, log_warn};
@@ -56,16 +58,48 @@ use variegated_shot_upload::{parse_url, Scheme};
 // keeps current. See `send_status` for why reading a subscriber here was wrong.
 use crate::channels;
 
-/// How often a status goes up unprompted.
+/// How long until the next unprompted status, for the machine's current mode.
 ///
-/// A minute. The server's connected window is eleven minutes wide, so this is well inside it
-/// even if several in a row are lost -- and it is what makes the machines page tell the truth
-/// about a machine that was switched off a moment ago rather than ten minutes ago.
+/// A minute while the machine is on, ten while it is off or in standby. The decision itself is
+/// [`status_interval_secs`], in `variegated-comms-api-types`, because this crate sets
+/// `harness = false` and runs no tests -- a rule kept here would be one nothing could check.
 ///
-/// The cost is one record a minute per machine, and a record does wake the hibernating Durable
-/// Object where a keepalive ping does not. That is the trade being made deliberately: sixty
-/// wakeups an hour per machine, against a status that is up to ten minutes stale.
-const STATUS_INTERVAL: Duration = Duration::from_secs(60);
+/// Read from [`channels::STATUS_CACHE`] rather than from a subscriber, for the reason
+/// `send_status` gives: a subscriber this task both drained and read raced with itself.
+///
+/// The empty-cache case is decided by [`status_interval_secs`] rather than here, so that it is
+/// covered by a test -- see that function on why an unknown mode must not become `Off`.
+///
+/// **Compute this into a variable, never inside a `select` argument list.** A future built there
+/// would hold the cache's guard for the whole of the select, against a lock `cache_update_task`
+/// takes on every status.
+/// The closest together two unprompted statuses may be sent.
+///
+/// A floor on the mode-change path, which is the only send here driven by a value the
+/// application processor produces rather than by a clock or a byte comparison. Five seconds is
+/// far longer than any real sequence of mode changes and far shorter than either interval, so it
+/// cannot delay a change anyone is watching -- while a controller that flapped would cost one
+/// record every five seconds instead of one per flap.
+///
+/// It also collapses the pair a `SetMachineMode` command produces: the command's own settle-send
+/// (`COMMAND_SETTLE`) and the mode change it causes are two events about one thing.
+const MIN_STATUS_GAP: Duration = Duration::from_secs(5);
+
+const _: () = assert!(
+    MIN_STATUS_GAP.as_secs() < STATUS_INTERVAL_ACTIVE_SECS,
+    "the floor must not throttle the ordinary cadence"
+);
+
+async fn next_status_deadline() -> Instant {
+    let mode = {
+        // `MachineMode` is `Copy`, so the guard is released at the end of this block rather than
+        // held across the await below -- and the 2.4 kB `Status` is never cloned.
+        let guard = channels::STATUS_CACHE.lock().await;
+        guard.as_ref().map(|status| status.mode)
+    };
+
+    Instant::now() + Duration::from_secs(status_interval_secs(mode))
+}
 
 /// How long to let a command take effect before reporting a status about it.
 ///
@@ -82,13 +116,16 @@ const COMMAND_SETTLE: Duration = Duration::from_secs(2);
 
 /// How long the socket may be idle before a keepalive ping.
 ///
-/// For NAT and intermediary timeouts, not for liveness -- liveness is the status above.
+/// **This is what liveness rests on, not the status.** Plantlet calls a machine connected while
+/// its socket is up; the status carries what the machine is *doing*, and on an idle machine it
+/// arrives only every ten minutes. So the ping is the thing that must not stop.
 ///
 /// **Twenty seconds, because these are genuinely free.** A protocol-level ping is answered by
 /// Cloudflare's runtime without waking the hibernating Durable Object, so the server spends no
 /// wall-clock time on one however often it arrives -- which is the whole reason the keepalive
-/// is a WebSocket ping rather than an application message. What it costs is a handful of bytes
-/// on a link that is otherwise silent for ten minutes at a time.
+/// is a WebSocket ping rather than an application message, and the whole reason the status
+/// interval can be lengthened without the link noticing. What it costs is a handful of bytes on
+/// a link that is otherwise silent for ten minutes at a time.
 ///
 /// Frequent pings also make [`SOCKET_TIMEOUT`] a sharper instrument: several missed ones are
 /// what tells a machine its link has been black-holed rather than merely quiet.
@@ -112,7 +149,8 @@ const SHOT_LOG_TIMEOUT: Duration = Duration::from_secs(5);
 /// **This is a failsafe and must never fire on a working link, which means it has to be
 /// longer than [`KEEPALIVE_INTERVAL`].** `set_timeout` is an *idle* timeout: smoltcp aborts a
 /// connection that has seen no traffic for this long, and an uplink is deliberately silent
-/// between a status every ten minutes and a ping every two.
+/// between a status -- as rarely as every ten minutes, on an idle machine -- and a ping every
+/// twenty seconds. The ping is what this has to be measured against; the status is not.
 ///
 /// It was 30 s, copied from the upload path where a socket is open for one request and
 /// silence really is a stall. Here it meant every session died at exactly thirty seconds --
@@ -329,9 +367,24 @@ async fn session(
     let (handshake, message_one) = UplinkHandshake::begin(&keys, Ephemeral::from_bytes(seed), &hello)
         .map_err(|_| AttemptEnd::BadKeys)?;
 
+    // One buffer for the life of the session, like the record scratch below. It is where the
+    // response head is read, and it keeps whatever arrived behind the head -- which is the
+    // server's first frame whenever it had one queued. Held here rather than inside `open` so
+    // those bytes outlive the handshake and reach the frame reader.
+    let mut pending = Pending::new();
+
     let session = with_timeout(
         CONNECT_TIMEOUT,
-        open(&mut socket, addr, url.port, url.path, url.host, &message_one, handshake),
+        open(
+            &mut socket,
+            &mut pending,
+            addr,
+            url.port,
+            url.path,
+            url.host,
+            &message_one,
+            handshake,
+        ),
     )
     .await
     .map_err(|_| AttemptEnd::Network)?
@@ -345,6 +398,7 @@ async fn session(
     channels::UPLINK_SESSION_UP.store(true, core::sync::atomic::Ordering::Relaxed);
     let outcome = run(
         &mut socket,
+        &mut pending,
         session,
         routines,
         configuration,
@@ -362,6 +416,7 @@ async fn session(
 /// request or the response is the same failure from this task's point of view.
 async fn open(
     socket: &mut TcpSocket<'_>,
+    pending: &mut Pending,
     addr: embassy_net::IpAddress,
     port: u16,
     path: &str,
@@ -372,7 +427,7 @@ async fn open(
     socket.connect((addr, port)).await.map_err(|_| ())?;
 
     let mut message_two = [0u8; IK_MSG2_LEN];
-    crate::uplink::http::upgrade(socket, path, host, message_one, &mut message_two)
+    crate::uplink::http::upgrade(socket, pending, path, host, message_one, &mut message_two)
         .await
         .map_err(|_| ())?;
 
@@ -382,6 +437,7 @@ async fn open(
 /// Run a live session until something ends it.
 async fn run(
     socket: &mut TcpSocket<'_>,
+    pending: &mut Pending,
     mut session: UplinkSession,
     routines: &mut channels::ApplicationRoutineSubscriber,
     configuration: &mut channels::ApplicationConfigurationSubscriber,
@@ -409,13 +465,19 @@ async fn run(
     // routines, and the connected indicator should not queue behind it.
     // **A deadline, not a delay.** `select` drops the arms that did not win, so a `Timer::after`
     // built inside the loop restarts its countdown every time *any* other arm fires -- and the
-    // keepalive read times out every `KEEPALIVE_INTERVAL`, which is shorter than
-    // `STATUS_INTERVAL`. The status timer could therefore never reach its interval: one went
-    // up on connect and then never again, on a link that was working perfectly.
+    // keepalive read times out every `KEEPALIVE_INTERVAL`, which is shorter than either status
+    // interval. The status timer could therefore never reach its interval: one went up on
+    // connect and then never again, on a link that was working perfectly.
     //
     // An `Instant` does not move when the loop restarts, so the deadline survives being
     // rebuilt however often the loop goes round.
-    let mut next_status_at = Instant::now() + STATUS_INTERVAL;
+    // Dropped rather than acted on. `Signal` is latching and nobody waits on it between
+    // sessions, so a mode change during a reconnect would otherwise fire on this session's first
+    // loop turn -- immediately after the status below, which already carries that mode.
+    channels::MACHINE_MODE_CHANGED.reset();
+
+    let mut next_status_at = next_status_deadline().await;
+    let mut last_status_sent_at = Instant::now();
     send_status(socket, &mut session).await?;
 
     // And the routine list, once, at the top of the session.
@@ -445,8 +507,15 @@ async fn run(
         checkin.good();
 
         match select4(
-            Timer::at(next_status_at),
-            with_timeout(KEEPALIVE_INTERVAL, http::read_record(socket, &mut scratch)),
+            // The deadline and the mode change are paired because they mean the same thing --
+            // "send a status now" -- and share a handler. Pairing them here rather than adding a
+            // fifth arm also keeps the recompute below on the single path that recomputes it,
+            // so a machine that has just come on picks up the shorter interval immediately.
+            select(Timer::at(next_status_at), channels::MACHINE_MODE_CHANGED.wait()),
+            with_timeout(
+                KEEPALIVE_INTERVAL,
+                http::read_record(socket, pending, &mut scratch),
+            ),
             // The two "something the machine holds has changed" arms, paired into one rather
             // than growing this to a `select5`. They are the same kind of event and neither
             // is hot: the application processor compares before publishing either.
@@ -455,11 +524,31 @@ async fn run(
         )
         .await
         {
-            Either4::First(()) => {
-                send_status(socket, &mut session).await?;
-                // From now, not from the deadline that just passed: a status delayed by a
-                // query does not make the next one early to compensate.
-                next_status_at = Instant::now() + STATUS_INTERVAL;
+            Either4::First(_) => {
+                // Either the interval elapsed or the machine changed mode. Both are "send a
+                // status", and the recompute below picks up whichever interval now applies.
+                //
+                // Floored, because a mode change is the one send on this link driven by a value
+                // the *controller* produces rather than by a clock or a byte comparison. A
+                // controller that flapped between modes would otherwise put one sealed record,
+                // one Durable Object wake and one row written per flap onto someone's home
+                // internet connection, with nothing here to stop it.
+                if last_status_sent_at.elapsed() >= MIN_STATUS_GAP {
+                    send_status(socket, &mut session).await?;
+                    last_status_sent_at = Instant::now();
+
+                    // From now, not from the deadline that just passed: a status delayed by a
+                    // query does not make the next one early to compensate.
+                    //
+                    // Sampled here rather than once per session, so a machine switched on keeps
+                    // to the minute from its next status onward without waiting for a reconnect.
+                    next_status_at = next_status_deadline().await;
+                } else {
+                    // Suppressed by the floor. Come back when it lifts rather than recomputing a
+                    // full interval -- a machine that has just gone *off* would otherwise have
+                    // its change swallowed and report it ten minutes later.
+                    next_status_at = last_status_sent_at + MIN_STATUS_GAP;
+                }
             }
             Either4::Second(Ok(Ok(len))) => {
                 handle(
@@ -746,10 +835,11 @@ impl Downlink {
 ///
 /// The `Query` arm awaits the application processor — up to `ROUTINE_WRITE_TIMEOUT`, which is
 /// ten seconds. For that time this task is not reading the socket and not sending a status.
-/// Both are fine and neither is an accident: the keepalive interval is two minutes, so a
-/// query cannot starve it, and a status delayed by ten seconds is invisible against an
-/// interval of ten minutes. `await_query` is what keeps the check-in row honest meanwhile,
-/// which is the part that would otherwise raise a false alarm.
+/// Both are fine and neither is an accident: ten seconds is a fraction of the shortest status
+/// interval, so a delayed status is invisible either way, and the socket is kept alive by the
+/// keepalive rather than by the status -- so a query cannot starve the thing that matters.
+/// `await_query` is what keeps the check-in row honest meanwhile, which is the part that would
+/// otherwise raise a false alarm.
 async fn handle(
     session: &mut UplinkSession,
     record: &[u8],
@@ -1042,9 +1132,10 @@ async fn send_shot(
 /// get as far as a status or a shot. A dropped message leaves the server's view stale, which
 /// is a much smaller thing to be wrong about than a machine that has gone silent.
 ///
-/// Every message this can drop is one the server recovers from on its own: a status comes
-/// again in ten minutes, a routine list on the next change or refresh, and a query reply is
-/// re-asked because the slot it was about still has no CRC recorded.
+/// Every message this can drop is one the server recovers from on its own: a status comes again
+/// within the interval the machine's current mode sets, a routine list on the next change or
+/// refresh, and a query reply is re-asked because the slot it was about still has no CRC
+/// recorded.
 async fn send_message(
     socket: &mut TcpSocket<'_>,
     session: &mut UplinkSession,

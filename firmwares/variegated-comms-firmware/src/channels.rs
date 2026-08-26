@@ -116,6 +116,25 @@ pub static ROUTINE_CHANNEL: StaticCell<ApplicationRoutineChannel> = StaticCell::
 // Status Cache - cached status for HTTP server
 pub static STATUS_CACHE: Mutex<CriticalSectionRawMutex, Option<Status>> = Mutex::new(None);
 
+/// The machine changed between on, off and standby.
+///
+/// Raised by `http::cache_update_task` -- which already subscribes to the status stream to fill
+/// [`STATUS_CACHE`], so this **adds no subscriber** and [`APPLICATION_STATUS_RECEIVERS`] stays
+/// four. That matters: the fifth `subscriber()` call returns `None`, and the `unwrap()` beside
+/// it panics inside `main` before the watchdog is fed, which reaches the console as a bare
+/// `TG1_WDT_HPSYS` reboot loop naming nothing.
+///
+/// Consumed by `uplink::run`, which sends a status at once rather than letting a machine that
+/// has just been switched on go unreported for the ten minutes an idle machine is allowed.
+/// Edge-triggered: `cache_update_task` compares against the previous mode and raises this only
+/// on a real change, because a status arrives about once a second and a level would wake the
+/// uplink's `select` at that rate.
+///
+/// Exactly one consumer, as `Signal` requires. Latest-wins is right here for the reason it is
+/// right for the reconnect requests below: two changes before the uplink looks means one status,
+/// carrying the mode it ended on.
+pub static MACHINE_MODE_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
 /// Whether the uplink currently holds a live session.
 ///
 /// Read by the shot uploader to decide whether offering it a small shot is worth trying at

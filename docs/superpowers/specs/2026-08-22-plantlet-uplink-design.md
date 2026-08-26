@@ -213,9 +213,14 @@ buy. The socket's receiver hibernates; that is where they earn their place.
 
 ### 1.7 Keepalive
 
-The machine sends an RFC 6455 ping with a fixed cleartext payload every 120 s when otherwise
-idle. This is for NAT and intermediary timeouts, not liveness — liveness is the status
-schedule — so it carries nothing and leaks nothing.
+The machine sends an RFC 6455 ping with an empty payload every 20 s when otherwise idle. It
+carries nothing and leaks nothing.
+
+As shipped this is *both* the NAT keepalive and what liveness rests on. Cloudflare's runtime
+answers a protocol-level ping without waking the hibernating Durable Object, so one costs the
+server nothing however often it arrives — which is what lets an idle machine's status interval
+grow to ten minutes without the link noticing, and what lets §4.4 read connectedness off the
+socket rather than off the status schedule.
 
 **A protocol-level ping does not wake a hibernated object**, which is what makes this free.
 Cloudflare's documentation states it in as many words: incoming ping frames receive automatic
@@ -344,6 +349,10 @@ That POST is the fallback for *everything*, not just shots, is what makes a mach
 proxy that blocks WebSocket upgrades still fully functional: it reports status on schedule,
 pushes routine lists, and shows as connected. It simply cannot be asked anything.
 
+This survived the amendment to §4.4. A status renews the connected lease whichever transport
+carried it, so a POST-only machine is connected on the same terms as one holding a socket — it
+just never gets the prompt disconnect a close provides, because it has no socket to close.
+
 ---
 
 ## 4. Plantlet
@@ -383,12 +392,20 @@ why the dispatcher is one function rather than two.
 
 ### 4.2 Hibernation
 
-Hibernation is required for cost: a machine sends one status every ten minutes and is otherwise
-silent, and a DO billed for wall-clock residency between those would cost more than the service.
+Hibernation is required for cost: a machine sends one status a minute while it is on and one
+every ten minutes while it is off, and is otherwise silent — a DO billed for wall-clock residency
+between those would cost more than the service. Statuses are most of what the service costs at
+all: each is one D1 row written, one DO row written and one DO request, which is why the cadence
+follows the machine rather than a fixed clock.
 
-What must survive hibernation is small — two 32-byte keys and two counters — and lives in the
-DO's storage rather than in `serializeAttachment`, so that the counter write in §1.6 is an
+What must survive hibernation is *almost* all small — two 32-byte keys and two counters — and
+lives in the DO's storage rather than in `serializeAttachment`, so that the counter write in §1.6 is an
 ordinary durable write with ordinary ordering guarantees.
+
+The one exception is the session sequence §4.4 relies on, which *is* an attachment. It has to be:
+it identifies the socket rather than the object, and the question it answers — "is the socket
+handing me this close the one I currently hold?" — cannot be answered by anything stored per
+object. It is a single integer, written once when the socket is accepted and never again.
 
 `alarm()` does two jobs: expiring routine pushes past their window, and continuing a deferred
 routine-definition walk (§7). It is set only when there is something to do, so an idle machine's
@@ -417,12 +434,15 @@ exercise the same eviction behaviour as production rather than a resident approx
 ```sql
 CREATE TABLE machine_uplink (
   machine_id        TEXT PRIMARY KEY REFERENCES machine(id) ON DELETE CASCADE,
-  -- Server clock, ms since epoch, stamped where the status is decoded. The whole of the
-  -- connected rule (§4.4). Never taken from the machine's own clock.
+  -- Server clock, ms since epoch, stamped where the status is decoded. What the page shows as
+  -- "last reported". Never taken from the machine's own clock.
   last_status_at    INTEGER,
   last_status       BLOB,        -- postcard Status, latest only
-  -- Diagnostics only. Deliberately not part of the connected rule -- see §4.4.
-  session_opened_at INTEGER
+  -- Diagnostics only. Not itself the connected rule -- see §4.4.
+  session_opened_at INTEGER,
+  -- The whole of the connected rule (§4.4). Renewed by any status and by a session opening;
+  -- set to now when the current socket closes. Added in migration 0014.
+  connected_until   INTEGER
 );
 
 CREATE TABLE machine_routine (
@@ -465,35 +485,83 @@ back.
 
 ### 4.4 Connected
 
+> **Amended.** This section originally specified a rule with no socket flag in it, and gave three
+> reasons. The status cadence has since become adaptive — a minute while the machine is on, ten
+> while it is off or in standby — and a subtraction sized for that would have had to reach about
+> twenty-five minutes, which meant a machine switched off showing as connected for nearly half an
+> hour. The rule below replaces it. The original text and its reasoning are kept beneath, because
+> one of the three reasons was given up deliberately and should not be re-discovered as a
+> surprise.
+
 ```sql
-connected := last_status_at IS NOT NULL
-             AND (server_now - last_status_at) < 11 minutes
+connected := connected_until IS NOT NULL
+             AND server_now < connected_until
 ```
 
-One input, and it is the **server's** clock at the moment the status was received — not
-`Status::current_local_time`, and not anything else the machine says about time. The machine's
-clock is `Option<NaiveDateTime>` and stays `None` until the comms processor has associated, taken
-a lease and completed SNTP, so a freshly booted machine reporting perfectly well has no time to
-offer. A rule keyed on the machine's clock would call that machine disconnected, and would call a
-machine with a badly wrong clock connected forever.
+One column, holding the moment a machine stops counting as connected unless something renews it:
 
-**There is no socket flag in the rule.** An earlier draft had `webSocketClose` clear a `connected`
-column so a clean disconnect showed at once; that is gone. Three things follow, and all of them
-are improvements:
+| event | writes |
+|---|---|
+| a status is decoded, over the socket **or** by POST | `connected_until = now + 25 minutes` |
+| the session opens | `connected_until = now + 25 minutes` |
+| `webSocketClose`, for the socket the object currently holds | `connected_until = now` |
 
-* No compatibility-flag change to close-frame handling can affect connectedness. Whether
-  `webSocketClose` fires, and when, is now irrelevant to what the listing shows.
-* Connectedness means **"reporting"**, not "holds an open socket". A machine behind a proxy that
-  blocks WebSocket upgrades, reporting status by POST (§3), is connected — which is the truthful
-  answer, since Plantlet is hearing from it on schedule.
-* The cost is bounded and known: a machine switched off cleanly keeps showing as connected for up
-  to eleven minutes. That is the tolerance the requirement itself already specifies.
+The clock is still the **server's**, for the reason it always was — see the paragraph below on
+`Status::current_local_time`, which is unchanged.
 
-`session_opened_at` is kept for diagnostics — "is there a socket, and since when" is a useful
-thing to see when a machine is misbehaving — and is deliberately not consulted here.
+Why a lease rather than the obvious `socket_open OR recent_status`: that disjunction does not
+give a prompt disconnect. After a clean close, a status from three minutes ago still satisfies
+the second half, so the machine keeps showing as connected for the rest of the window — which is
+the thing the change was for.
 
-The machine sends a `Status` immediately after the handshake, so the window is meaningful from
-the first second instead of inheriting a stale timestamp from a previous session.
+The session opening renews the lease, and that is load-bearing rather than tidy. A machine that
+has just booted may have nothing to report yet: `send_status` finds its cache empty and sends
+nothing. Waiting for a status would leave a machine whose socket is plainly open reading as
+disconnected for a whole interval.
+
+Of the three properties the original rule bought, two survive and one is spent:
+
+* **Spent.** Close-frame handling now affects what the listing shows. This is guarded rather than
+  accepted: each socket is stamped with a session sequence, and `webSocketClose` ignores a close
+  belonging to a session that has already been replaced. Without that guard a reconnect's late
+  close tore down the session that replaced it — which was a live bug independently of this
+  change, since it also deleted the new session's Noise counters.
+* **Kept.** Connectedness still means "reporting". A machine behind a proxy that blocks WebSocket
+  upgrades, reporting by POST (§3), renews its lease on exactly the same terms and is connected.
+* **Kept, and better.** The cost is still bounded and known. A machine switched off cleanly now
+  drops off at once rather than after eleven minutes. What is *worse* is the ungraceful case: a
+  black-holed link has no server-side probe behind it — Cloudflare answers the machine's keepalive
+  pings but never sends its own — so the lease is the only thing that notices, and that takes up
+  to twenty-five minutes rather than eleven.
+
+Twenty-five minutes is two and a half of the ten-minute interval an idle machine reports on, so
+it cannot fire on a working machine. Note that statuses are not silently lost while a socket is
+up: TCP means one either arrives or the socket breaks and we hear about it.
+
+`session_opened_at` is still kept for diagnostics — "is there a socket, and since when" — and is
+still not itself consulted by the rule; the lease is what the listing reads.
+
+The machine sends a `Status` immediately after the handshake, so the lease is meaningful from the
+first second instead of inheriting a stale one from a previous session.
+
+### 4.4.1 The original rule, superseded
+
+Retained for its reasoning, which still explains why the clock is the server's:
+
+> ```sql
+> connected := last_status_at IS NOT NULL
+>              AND (server_now - last_status_at) < 11 minutes
+> ```
+>
+> One input, and it is the **server's** clock at the moment the status was received — not
+> `Status::current_local_time`, and not anything else the machine says about time. The machine's
+> clock is `Option<NaiveDateTime>` and stays `None` until the comms processor has associated,
+> taken a lease and completed SNTP, so a freshly booted machine reporting perfectly well has no
+> time to offer. A rule keyed on the machine's clock would call that machine disconnected, and
+> would call a machine with a badly wrong clock connected forever.
+>
+> **There is no socket flag in the rule.** An earlier draft had `webSocketClose` clear a
+> `connected` column so a clean disconnect showed at once; that is gone.
 
 ### 4.5 Routes
 

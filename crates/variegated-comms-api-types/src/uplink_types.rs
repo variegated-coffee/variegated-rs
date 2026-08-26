@@ -26,7 +26,7 @@
 //! [`MachineCommand`]: variegated_controller_types::MachineCommand
 
 use serde::{Deserialize, Serialize};
-use variegated_controller_types::{RoutineIndex, Status};
+use variegated_controller_types::{MachineMode, RoutineIndex, Status};
 
 use crate::api_types::RoutineSummaryStorage;
 use crate::ws_types::{EncodedPayload, QueryOutcome};
@@ -70,6 +70,49 @@ pub const MAX_UPLINK_CLIENT_RECORD_LEN: usize = crate::ws_types::MAX_CLIENT_FRAM
 
 const _: () = assert!(MAX_UPLINK_CLIENT_RECORD_LEN <= MAX_UPLINK_RECORD_LEN);
 
+/// How often an unprompted status goes up while the machine is on.
+pub const STATUS_INTERVAL_ACTIVE_SECS: u64 = 60;
+
+/// How often one goes up while it is off or in power save.
+pub const STATUS_INTERVAL_IDLE_SECS: u64 = 600;
+
+/// How long until the next unprompted status, given what the machine is doing.
+///
+/// A status is the one thing on this link that is *not* free: a record wakes the hibernating
+/// Durable Object and costs a row written in two places, where a keepalive ping is answered by
+/// Cloudflare's runtime without waking anything. Watching a switched-off machine once a minute
+/// is most of what Plantlet costs to run, and it buys nothing — the machine is not doing
+/// anything, and whether it is *reachable* is answered by the socket rather than by this.
+///
+/// So the cadence follows the machine: a minute while someone might be watching a temperature
+/// climb, ten minutes while it sits there off.
+///
+/// **This lives here, and not in the firmware's uplink loop, because it is a pure function of a
+/// `Copy` enum and the firmware crate runs no tests** — it sets `harness = false`, so a
+/// `#[test]` beside the loop would neither run nor say it had not. Here it is covered.
+///
+/// Exhaustive on purpose: a fourth [`MachineMode`] should stop the build and be given an
+/// interval deliberately, rather than defaulting into ten-minute silence.
+///
+/// **`None` means the mode is not known yet, and gets the active interval** — not the default
+/// one. `MachineMode::default()` is `Off`, so anything that reached for a default here would
+/// put a machine that has just booted, and may well be on, into ten minutes of silence. The
+/// caller passes the `Option` through rather than resolving it precisely so that this case is
+/// decided here, where it can be tested.
+pub fn status_interval_secs(mode: Option<MachineMode>) -> u64 {
+    match mode {
+        Some(MachineMode::On) => STATUS_INTERVAL_ACTIVE_SECS,
+        // Standby is not distinguished from off anywhere in the controllers, and there is
+        // nothing to watch in either: the boilers are cold and the machine is waiting to be
+        // asked for something.
+        Some(MachineMode::Off | MachineMode::PowerSaveStandby) => STATUS_INTERVAL_IDLE_SECS,
+        // Only in the seconds between the socket opening and the first status arriving from
+        // the application processor. Reporting too often for a moment is the harmless
+        // direction to be wrong in.
+        None => STATUS_INTERVAL_ACTIVE_SECS,
+    }
+}
+
 /// Which way a message is allowed to travel.
 ///
 /// See [`UplinkMessage::direction`] for why this exists as a type rather than as a rule
@@ -88,7 +131,8 @@ pub enum Direction {
 pub enum UplinkMessage {
     /// The machine's state, whole and unprojected.
     ///
-    /// Sent on connect, every ten minutes, and in answer to [`Self::RequestStatus`]. Plantlet
+    /// Sent on connect, on the interval [`status_interval_secs`] gives for the machine's current
+    /// mode, whenever that mode changes, and in answer to [`Self::RequestStatus`]. Plantlet
     /// stores the bytes and derives what it displays from them, so a field added here reaches
     /// the server without a server change.
     Status(Status),
@@ -435,6 +479,70 @@ mod tests {
     use variegated_controller_types::RoutineWriteError;
 
     use crate::ws_types::{QueryError, QueryOk};
+
+    /// The whole point of the adaptive cadence: an idle machine costs a tenth as much.
+    #[test]
+    fn an_idle_machine_reports_a_tenth_as_often() {
+        assert_eq!(status_interval_secs(Some(MachineMode::On)), 60);
+        assert_eq!(status_interval_secs(Some(MachineMode::Off)), 600);
+    }
+
+    /// Standby is idle, not active.
+    ///
+    /// Worth its own assertion because `PowerSaveStandby` is the mode a machine reaches *on its
+    /// own*, from a schedule, with nobody watching — so it is both the one most likely to be
+    /// overlooked here and the one that spends the most hours in a real day.
+    #[test]
+    fn standby_reports_as_rarely_as_off() {
+        assert_eq!(
+            status_interval_secs(Some(MachineMode::PowerSaveStandby)),
+            status_interval_secs(Some(MachineMode::Off))
+        );
+    }
+
+    /// A machine that has not said what it is doing yet reports *often*, not rarely.
+    ///
+    /// The trap this pins: [`MachineMode::default()`] is `Off`, so any resolution of the unknown
+    /// case that reaches for a default puts a freshly booted machine — which may well be on, and
+    /// whose owner is watching the page — into ten minutes of silence. This is the only reason
+    /// the function takes an `Option` instead of the caller resolving it.
+    #[test]
+    fn a_machine_that_has_not_reported_yet_uses_the_active_interval() {
+        assert_eq!(status_interval_secs(None), STATUS_INTERVAL_ACTIVE_SECS);
+        assert_ne!(
+            status_interval_secs(None),
+            status_interval_secs(Some(MachineMode::default()))
+        );
+    }
+
+    /// Every mode maps to one of the two intervals, and nothing invents a third.
+    #[test]
+    fn every_mode_maps_to_one_of_the_two_intervals() {
+        for mode in [
+            MachineMode::On,
+            MachineMode::Off,
+            MachineMode::PowerSaveStandby,
+        ] {
+            let interval = status_interval_secs(Some(mode));
+            assert!(
+                interval == STATUS_INTERVAL_ACTIVE_SECS || interval == STATUS_INTERVAL_IDLE_SECS,
+                "{mode:?} mapped to {interval}"
+            );
+        }
+    }
+
+    /// Two idle intervals have to fit inside the server's lease, with room to spare.
+    ///
+    /// The server calls a machine connected until `CONNECTED_LEASE_MS` after its last status
+    /// (`variegated-plantlet-ts/apps/worker/src/uplink.ts`). If that lease ever fell below this
+    /// interval, every idle machine would drop off the listing between statuses while being
+    /// perfectly healthy. The two constants live in different languages and cannot share a
+    /// `const` assert, so this test is the joint.
+    #[test]
+    fn the_idle_interval_leaves_room_inside_the_server_lease() {
+        const SERVER_LEASE_SECS: u64 = 25 * 60;
+        assert!(STATUS_INTERVAL_IDLE_SECS * 2 < SERVER_LEASE_SECS);
+    }
 
     /// Pins the discriminant of every variant.
     ///

@@ -17,7 +17,9 @@ use edge_ws::{FrameHeader, FrameType};
 use embassy_net::tcp::TcpSocket;
 use embedded_io_async::{Read, Write};
 use esp_hal::rng::Rng;
+use variegated_log::log_warn;
 
+use variegated_shot_upload::pending::{Pending, HEAD_LEN};
 use variegated_shot_upload::uplink::{IK_MSG1_LEN, IK_MSG2_LEN};
 
 /// Enough for the request line, `Host`, the fixed headers and the base64url handshake.
@@ -66,6 +68,7 @@ fn from_base64_url(text: &str, out: &mut [u8]) -> Result<usize, ()> {
 /// Checking the echo as well would imply a guarantee it does not carry.
 pub async fn upgrade(
     socket: &mut TcpSocket<'_>,
+    pending: &mut Pending,
     path: &str,
     host: &str,
     message_one: &[u8; IK_MSG1_LEN],
@@ -94,42 +97,88 @@ pub async fn upgrade(
 
     socket.write_all(request.as_bytes()).await.map_err(|_| ())?;
 
-    // The response head, read into a buffer bounded by what a 101 can carry. A server that
-    // sends more than this is not one this machine can talk to anyway.
-    let mut head = [0u8; 512];
+    // The response head is read into `pending`, which keeps whatever followed it. See
+    // [`Pending`] for why that matters: the server arms an alarm the moment the socket opens and
+    // drains any queued routine push from it, so its first frame is routinely coalesced with the
+    // 101, and a reader that went back to the socket for frames would lose it.
     let mut filled = 0;
-    loop {
-        if filled == head.len() {
+    let end = loop {
+        if filled == HEAD_LEN {
+            // Named, because the failure this hides is indistinguishable from a network fault
+            // at the call site and cost a Cloudflare log trawl to tell apart once already.
+            log_warn!(
+                "Uplink: the response head did not fit in {} bytes; no handshake",
+                HEAD_LEN
+            );
             return Err(());
         }
-        let n = socket.read(&mut head[filled..]).await.map_err(|_| ())?;
+        let n = socket
+            .read(&mut pending.spare()[filled..])
+            .await
+            .map_err(|_| ())?;
         if n == 0 {
             return Err(());
         }
         filled += n;
-        if head[..filled].windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
+        if let Some(at) = pending
+            .filled(filled)
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+        {
+            break at + 4;
         }
-    }
+    };
 
-    let text = core::str::from_utf8(&head[..filled]).map_err(|_| ())?;
+    // **Only the head is text.** A frame sharing this read is binary and would fail UTF-8
+    // validation, which is how the dropped-leftover bug presented before it was understood: not
+    // as a lost push, but as a handshake that failed whenever the server had something to say.
+    let text = core::str::from_utf8(pending.filled(end)).map_err(|_| ())?;
     if !text.starts_with("HTTP/1.1 101") {
+        // The status line alone, not the whole head: enough to tell a 4xx from a proxy's error
+        // page, without putting the handshake header in the log.
+        log_warn!(
+            "Uplink: expected a 101, got {:?}",
+            text.lines().next().unwrap_or("")
+        );
         return Err(());
     }
 
     // Header names are case-insensitive, and a proxy may well have rewritten the case of one
     // it forwarded -- so this looks for the name rather than for the exact bytes sent.
-    let value = text
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("x-variegated-noise").then(|| value.trim())
-        })
-        .ok_or(())?;
+    let Some(value) = text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("x-variegated-noise").then(|| value.trim())
+    }) else {
+        // A 101 without it means the upgrade succeeded and the handshake did not -- a proxy
+        // that dropped the header, or a deployment older than this firmware.
+        log_warn!("Uplink: the 101 carried no x-variegated-noise header");
+        return Err(());
+    };
 
     let len = from_base64_url(value, message_two)?;
     if len != IK_MSG2_LEN {
         return Err(());
+    }
+
+    // Everything past the head belongs to the frame reader. Last, so the borrow `text` holds on
+    // the buffer has ended.
+    pending.keep(end, filled);
+    Ok(())
+}
+
+/// Fill `out`, from what is waiting before what is on the wire.
+///
+/// The two are one stream; the split only exists because the head had to be read in whole
+/// segments. A caller must not reach past this to the socket, or it will read frames out of
+/// order with whatever is still buffered.
+async fn read_exact_buffered(
+    socket: &mut TcpSocket<'_>,
+    pending: &mut Pending,
+    out: &mut [u8],
+) -> Result<(), ()> {
+    let taken = pending.take(out);
+    if taken < out.len() {
+        socket.read_exact(&mut out[taken..]).await.map_err(|_| ())?;
     }
     Ok(())
 }
@@ -256,11 +305,15 @@ pub async fn ping(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
 /// Returns the payload length. A close frame, a frame larger than `out`, or a protocol error
 /// is `Err` -- all of which the caller turns into "reconnect", because a session whose framing
 /// is in doubt is not one to keep using.
-pub async fn read_record(socket: &mut TcpSocket<'_>, out: &mut [u8]) -> Result<usize, ()> {
+pub async fn read_record(
+    socket: &mut TcpSocket<'_>,
+    pending: &mut Pending,
+    out: &mut [u8],
+) -> Result<usize, ()> {
     loop {
         let mut header_bytes = [0u8; MAX_FRAME_HEADER];
         // Two bytes are enough to learn how many more the header needs.
-        socket.read_exact(&mut header_bytes[..2]).await.map_err(|_| ())?;
+        read_exact_buffered(socket, pending, &mut header_bytes[..2]).await?;
 
         // Derived from the two bytes in hand, the way `websocket.rs` does it: the length
         // indicator says how many more length bytes follow, and the mask bit says whether
@@ -273,10 +326,7 @@ pub async fn read_record(socket: &mut TcpSocket<'_>, out: &mut [u8]) -> Result<u
         } + if header_bytes[1] & 0x80 != 0 { 4 } else { 0 };
 
         if extra > 2 {
-            socket
-                .read_exact(&mut header_bytes[2..extra])
-                .await
-                .map_err(|_| ())?;
+            read_exact_buffered(socket, pending, &mut header_bytes[2..extra]).await?;
         }
         let (header, _) = FrameHeader::deserialize(&header_bytes[..extra]).map_err(|_| ())?;
 
@@ -289,7 +339,7 @@ pub async fn read_record(socket: &mut TcpSocket<'_>, out: &mut [u8]) -> Result<u
                     // to keep a session with.
                     return Err(());
                 }
-                socket.read_exact(&mut out[..len]).await.map_err(|_| ())?;
+                read_exact_buffered(socket, pending, &mut out[..len]).await?;
                 // A server never masks, so nothing to unmask here -- and if one did,
                 // `mask_key` would be `Some` and the payload would be gibberish, which the
                 // record's own tag catches.
@@ -300,7 +350,7 @@ pub async fn read_record(socket: &mut TcpSocket<'_>, out: &mut [u8]) -> Result<u
                 if len > payload.len() {
                     return Err(());
                 }
-                socket.read_exact(&mut payload[..len]).await.map_err(|_| ())?;
+                read_exact_buffered(socket, pending, &mut payload[..len]).await?;
                 // A pong echoes the ping's payload, per RFC 6455.
                 let pong = FrameHeader {
                     frame_type: FrameType::Pong,
@@ -321,7 +371,7 @@ pub async fn read_record(socket: &mut TcpSocket<'_>, out: &mut [u8]) -> Result<u
                 if len > discard.len() {
                     return Err(());
                 }
-                socket.read_exact(&mut discard[..len]).await.map_err(|_| ())?;
+                read_exact_buffered(socket, pending, &mut discard[..len]).await?;
             }
             FrameType::Text(_) | FrameType::Close => return Err(()),
         }

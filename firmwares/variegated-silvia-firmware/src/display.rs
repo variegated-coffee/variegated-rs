@@ -596,6 +596,36 @@ impl DisplayController {
                 .draw(&mut self.display)
                 .unwrap();
 
+            // Volume drawn this shot, in the gap on the y=32 row between the quantity at
+            // (0, 32) and the duty cycle right-aligned at (128, 32).
+            //
+            // The brew's volume rather than the group's `input_volume`: that one is the
+            // meter's total since boot, which is a sensor-health number and means nothing to
+            // someone watching a shot. It is on the debug screen instead. This also matches
+            // what the GS3 puts on its panel.
+            //
+            // Right-aligned so a longer reading grows towards the free middle of the row
+            // rather than into the duty cycle. Copied out of `self.status` first so that
+            // borrow ends before the draw below takes `&mut self.display`.
+            let brew_volume = self
+                .status
+                .get_group_status(SingleGroup.as_index())
+                .and_then(|g| g.current_brew.as_ref().and_then(|b| b.brew_input_volume));
+
+            if let Some(volume) = brew_volume {
+                Text::with_text_style(
+                    format!("{:.0}ml", volume).as_str(),
+                    Point::new(100, 34),
+                    self.text_style_small,
+                    TextStyleBuilder::new()
+                        .alignment(Alignment::Right)
+                        .baseline(Baseline::Top)
+                        .build()
+                )
+                    .draw(&mut self.display)
+                    .unwrap();
+            }
+
             if let PidOutput(pid) = boiler_status.output {
                 Text::with_text_style(
                     format!("P {:.0} I {:.0} D {:.0}", pid.p, pid.i, pid.d).as_str(),
@@ -882,6 +912,12 @@ impl DisplayController {
 
             if let Some(pressure) = group_status.pressure {
                 line1_parts.push(format!("{:.1}bar", pressure));
+            }
+
+            // Volume on line 1, not line 2: line 2 already carries both flow rates and comes
+            // within a few pixels of the right-aligned pump duty cycle below.
+            if let Some(volume) = group_status.current_brew.as_ref().and_then(|b| b.brew_input_volume) {
+                line1_parts.push(format!("{:.0}ml", volume));
             }
 
             if !line1_parts.is_empty() {
@@ -1361,6 +1397,16 @@ impl DisplayController {
                     .unwrap();
             }
             _ => {}
+        }
+
+        // The flow meter's running total since boot, on the free y=42 row. This is the
+        // sensor-health reading -- it answers "is the meter counting at all", which the rate
+        // above cannot when the pump is idle -- so it belongs here and not on a brewing
+        // screen. The per-shot figure is on the idle screen.
+        if let Some(volume) = group_status.input_volume {
+            Text::with_baseline(format!("Vol: {:.0} ml", volume).as_str(), Point::new(0, 42), self.text_style_small, Baseline::Top)
+                .draw(&mut self.display)
+                .unwrap();
         }
 
         if let Some(routine_execution) = &self.status.routine_execution {

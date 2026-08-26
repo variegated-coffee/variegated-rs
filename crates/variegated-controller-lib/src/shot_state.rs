@@ -412,6 +412,33 @@ mod tests {
         assert_eq!(last, Some(ShotState::PostFirstDrop));
     }
 
+    /// With neither a conductivity probe nor a scale, a shot still saturates and then stops
+    /// there.
+    ///
+    /// This is a real machine configuration, not a hypothetical: the Silvia has no EC probe
+    /// at all, and its scale is a Bluetooth one that reports nothing until it connects. Both
+    /// halves matter. Saturation must still be detected, because it is what the pressure and
+    /// flow signals alone can support and what a routine's `ShotStateReached` step waits on;
+    /// and the shot must not advance past it, because nothing left can observe the first
+    /// drop. Parking at `Saturation` is the intended degradation.
+    #[test]
+    fn a_shot_with_no_scale_and_no_conductivity_sensor_stops_at_saturation() {
+        let mut tracker = ShotStateTracker::new();
+        tracker.start();
+        for &(t, flow, pressure, _weight, _ec) in RECORDED_SIX_BAR {
+            tracker.update(
+                t,
+                ShotStateInputs {
+                    input_flow_rate: Some(flow),
+                    pressure: Some(pressure),
+                    output_weight: None,
+                    output_electrical_conductivity: None,
+                },
+            );
+        }
+        assert_eq!(tracker.state(), Some(ShotState::Saturation));
+    }
+
     /// A scale that has not finished taring cannot skip the shot straight to the first drop.
     ///
     /// The reading here is a cup left on the scale from the last shot: 36 g, well over the

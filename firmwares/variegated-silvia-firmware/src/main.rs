@@ -55,7 +55,7 @@ use w25q32jv::W25q32jv;
 // scope to call `optimize_storage`.
 use variegated_controller_lib::routine::{SequentialStorageRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::settings::SettingsStorage;
-use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, MachineCommand, MachineConfiguration, MachineDefinition, PressureType, RPMType, Status, StorageCommand, TankConfiguration, TemperatureType, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
+use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PressureType, RPMType, Status, StorageCommand, TankConfiguration, TemperatureType, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_gravity_driver::{Gravity, Channel as GravityChannel};
 use variegated_hal::gpio::gpio_command_sender::{GpioCommandSender, GpioStatusLambdaCommandSender};
@@ -347,6 +347,23 @@ const CONFIGURATION_RECEIVERS: usize = 4;
 type ConfigurationChannel = PubSubChannel<NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 type ConfigurationSubscriber = Subscriber<'static, NoopRawMutex, Configuration, 1, CONFIGURATION_RECEIVERS, 1>;
 
+/// Millilitres of water per flow-meter pulse, for this machine's meter.
+///
+/// Lifted verbatim from the flow-rate transformer this firmware has always used, so the
+/// reported rate is unchanged to the bit. What the three factors individually stand for is
+/// not recorded anywhere; they are left as a product rather than folded into one literal so
+/// that whoever does know can still recognise them. Recalibrating means replacing the whole
+/// product with a measured value.
+///
+/// About 0.0255 ml/pulse, i.e. ~39200 pulses per litre. That is a far finer meter than the
+/// GS3's ~2790 pulses per litre, so this constant is not transferable between the two
+/// firmwares.
+///
+/// Both the input flow rate and the total input volume are derived from the same pulse
+/// stream and so must use this one value; see where the counter is constructed in
+/// `main_task`.
+const ML_PER_PULSE: f32 = 0.043 * 0.6667 * 0.89;
+
 
 
 // Performance Counters - Track events by incrementing
@@ -471,6 +488,9 @@ static OUTPUT_FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRate
 static HE_SIGNAL: StaticCell<Signal<CriticalSectionRawMutex, DutyCycleType>> = StaticCell::new();
 static PUMP_RPM_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<RPMType>, 3>> = StaticCell::new();
 static FLOW_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<FlowRateType>, 3>> = StaticCell::new();
+/// The flow meter's accumulated total, in millilitres since boot. Same pulse stream as
+/// `FLOW_SIGNAL` -- the counter derives both -- so the two share `ML_PER_PULSE`.
+static INPUT_VOLUME_SIGNAL: StaticCell<Watch<NoopRawMutex, SensorReading<InputVolumeType>, 3>> = StaticCell::new();
 static GRAVITY_CONNECTED_SIGNAL: StaticCell<Signal<NoopRawMutex, bool>> = StaticCell::new();
 static GRAVITY_STATUS_PROVIDER: StaticCell<GravityStatusProvider> = StaticCell::new();
 static MECHANISM_MUTEX: StaticCell<Mutex<CriticalSectionRawMutex, SingleBoilerMechanism>> = StaticCell::new();
@@ -836,7 +856,18 @@ async fn main_task(spawner: Spawner) -> ! {
     let flow_meter_input = pwm::Pwm::new_input(flow_meter_p.pwm_flow_meter, flow_meter_p.pin_flow_meter, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let flow_meter_sig: &'static Watch<_, _, 3> = FLOW_SIGNAL.init(Watch::new());
-    let mut flow_meter = GpioTransformingFrequencyCounter::new(flow_meter_input, flow_meter_sig.sender(), None, |v| (v * 0.043) * 0.6667 * 0.89 as FlowRateType, |v| v);
+    let input_volume_sig: &'static Watch<_, _, 3> = INPUT_VOLUME_SIGNAL.init(Watch::new());
+    // The counter hands the rate transformer a frequency in Hz and the total transformer a
+    // pulse count, so `ML_PER_PULSE` is the correct factor for both: Hz * ml/pulse = ml/s,
+    // pulses * ml/pulse = ml. Sharing the one constant is what stops the rate and the total
+    // from drifting apart when the meter is recalibrated.
+    let mut flow_meter = GpioTransformingFrequencyCounter::new(
+        flow_meter_input,
+        flow_meter_sig.sender(),
+        Some(input_volume_sig.sender()),
+        |hz| (hz * ML_PER_PULSE) as FlowRateType,
+        |pulses| (pulses as f32 * ML_PER_PULSE) as InputVolumeType,
+    );
 
     let group = Group::new(
         Some(Box::new(brew_mechanism)),
@@ -845,7 +876,7 @@ async fn main_task(spawner: Spawner) -> ! {
         None,
         Some(prs_sig.receiver().unwrap()),
         Some(flow_meter_sig.receiver().unwrap()),
-        None, // input_volume_sensor
+        Some(input_volume_sig.receiver().unwrap()),
         None, // output_flow_sig has different raw type (i32) than flow_meter_sig (f32)
         Some(output_weight_sig.receiver().unwrap()),
         None, // output_temperature_sensor

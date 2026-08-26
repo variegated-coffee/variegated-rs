@@ -26,6 +26,7 @@ pub mod crockford;
 pub mod noise;
 #[cfg(feature = "noise")]
 pub mod uplink;
+pub mod pending;
 pub mod roots;
 #[cfg(feature = "tls")]
 pub mod session;

@@ -312,6 +312,13 @@ pub struct SingleBoilerSingleGroupController<
     last_extraction_time: Option<Instant>,
     previous_brew: Option<crate::PreviousBrewInfo>,
     curve_start_time: Option<Instant>,
+    /// Which phase of the shot the machine is in. Driven by `update_shot_state` below.
+    ///
+    /// This machine has no conductivity probe, so the first drop can only be seen by weight
+    /// and only once the puck has saturated; without a scale paired the state legitimately
+    /// stops at `Saturation`. See `crate::shot_state` for why a missing signal removes a
+    /// transition rather than defaulting to a number.
+    shot_state: crate::ShotStateTracker,
     comms_status: Option<CommsStatus>,
     comms_status_received_instant: Option<Instant>,
     peripheral_registry: &'a PeripheralRegistry<'a>,
@@ -507,6 +514,7 @@ impl<
             last_extraction_time: None,
             previous_brew: None,
             curve_start_time: None,
+            shot_state: crate::ShotStateTracker::new(),
             comms_status: None,
             comms_status_received_instant: None,
             peripheral_registry,
@@ -870,6 +878,8 @@ impl<
 
             let boiler_pid_out = self.update_boiler(actual_boiler_control_target, delta_t).await;
             let pump_pid_out = self.update_pump(actual_pump_control_target, delta_t).await;
+
+            self.update_shot_state();
 
             self.send_status(boiler_pid_out, pump_pid_out).await;
 
@@ -1299,13 +1309,17 @@ impl<
                 (Some(start_volume), Some(current_volume)) => Some(current_volume - start_volume),
                 _ => None,
             };
-            // Calculate output_volume from output_weight (assuming density ~1 g/ml)
-            // Shot state tracking not implemented for single boiler, so no input-volume-based fallback
+            // Calculate output_volume from output_weight (assuming density ~1 g/ml).
+            //
+            // Deliberately scale-weight only, so this stays a *measured* quantity and is
+            // `None` without a scale. `dual_boiler_single_group` falls back to the input
+            // volume accumulated since the first drop; that is an estimate, and this machine
+            // does not make it.
             let output_volume = self.group.get_output_weight().map(|w| w as OutputVolumeType);
             BrewStatus {
                 brew_time: start.elapsed().into(),
                 brew_input_volume,
-                shot_state: None, // Not yet implemented for single boiler controller
+                shot_state: self.shot_state.state(),
                 extracted_solids: self.accumulated_extracted_solids,
                 output_volume,
             }
@@ -2237,12 +2251,53 @@ impl<
         }
     }
 
+    /// Advance the shot-phase state machine from the current sensor readings.
+    ///
+    /// Called every control-loop tick; the tracker rate-limits itself to its own sample
+    /// interval, so calling it more often than that costs nothing.
+    fn update_shot_state(&mut self) {
+        if self.state != SingleBoilerSingleGroupControllerState::Brewing {
+            return;
+        }
+
+        if self.shot_state.state().is_none() {
+            log_warn!("Shot state is None while brewing - restarting shot state tracking");
+            self.shot_state.start();
+        }
+
+        let inputs = crate::ShotStateInputs {
+            input_flow_rate: self.group.get_input_flow_rate(),
+            pressure: self.group.get_pressure(),
+            output_weight: self.group.get_output_weight(),
+            // Always `None` on this machine -- there is no conductivity probe -- which
+            // leaves the weight path, and that one only counts once the puck has saturated.
+            output_electrical_conductivity: self.group.get_output_electrical_conductivity(),
+        };
+
+        let Some(new_state) = self.shot_state.update(Instant::now().as_millis(), inputs) else {
+            return;
+        };
+
+        // The only externally visible sign that detection fired: this machine's display
+        // carries no shot-phase readout, so a tuning pass would start from these lines.
+        log_info!(
+            "Shot state transition: -> {:?} (flow: {:?}, pressure: {:?}, weight: {:?})",
+            new_state,
+            inputs.input_flow_rate,
+            inputs.pressure,
+            inputs.output_weight
+        );
+    }
+
     async fn started_brewing(&mut self) {
         self.start_manual_shot_log();
         self.brew_start_time = Some(Instant::now());
         self.brew_start_input_volume = self.group.get_input_volume();
         self.accumulated_extracted_solids = Some(0.0);
         self.last_extraction_time = Some(Instant::now());
+        // Belongs with the resets rather than beside the tare below: `start` discards
+        // everything from the previous shot, including its peak flow and pressure trough.
+        self.shot_state.start();
         self.boiler_pid.ki.accumulate += 50.0; // Initial accumulation to compensate for initial temperature drop
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(false),
@@ -2275,6 +2330,7 @@ impl<
         self.accumulated_extracted_solids = None;
         self.last_extraction_time = None;
         self.curve_start_time = None;  // Reset curve start time when brewing stops
+        self.shot_state.stop();
 
         self.finish_manual_shot_log();
 

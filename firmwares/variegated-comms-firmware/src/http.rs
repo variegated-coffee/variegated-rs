@@ -87,13 +87,13 @@ use embassy_futures::select::{select, Either};
 // No routine types at all any more. A routine definition does not pass through this server
 // in either direction -- reads, writes and the summary listing are all `WsMessage` now -- so
 // the only stored-data types left here are the shot-log ones the download needs.
-use variegated_controller_types::{MachineCommand, ScheduleItem};
+use variegated_controller_types::{MachineCommand, MachineMode, ScheduleItem};
 use variegated_controller_types::shot_log::{ShotLogId, ShotLogStorageError};
 
 use crate::channels::{
     shot_log_request, ApplicationConfigurationSubscriber, ApplicationStatusSubscriber,
     MachineCommandSender, ShotLogReply, ShotLogRequest, CONFIG_CACHE, MACHINE_DEFINITION,
-    STATUS_CACHE,
+    MACHINE_MODE_CHANGED, STATUS_CACHE,
 };
 
 /// HTTP request handler
@@ -734,6 +734,12 @@ pub async fn cache_update_task(
     log_info!("Cache update task started");
     let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::CacheUpdate);
 
+    // The mode the last status carried, for the edge the uplink cares about. Held here rather
+    // than compared against the cache, because the cache has already been overwritten by the
+    // time anyone else could look -- and because this task is the only reader of the status
+    // stream that is not already busy with something else.
+    let mut previous_mode: Option<MachineMode> = None;
+
     loop {
         checkin.good();
 
@@ -744,6 +750,14 @@ pub async fn cache_update_task(
         .await
         {
             Either::First(status) => {
+                let mode = status.mode;
+                // Only on a real change, and never on the first status of all: the uplink sends
+                // one the moment its session opens, so signalling here would only duplicate it.
+                if previous_mode.is_some_and(|was| was != mode) {
+                    MACHINE_MODE_CHANGED.signal(());
+                }
+                previous_mode = Some(mode);
+
                 let mut cache = STATUS_CACHE.lock().await;
                 *cache = Some(status);
             }
