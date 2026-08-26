@@ -1941,7 +1941,10 @@ impl<
                 self.comms_status_received_instant = Some(Instant::now());
             }
             MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
-                defmt::warn!("Ignoring unsupported command in finally block: {:?}", command);
+                // `label()` through `log_warn!` rather than `defmt::warn!` with `{:?}`, so this
+                // reaches the debug bus and the host's Events pane rather than only a probe.
+                // The single-boiler controller's twin says the same.
+                log_warn!("Ignoring routine lifecycle command in finally block: {}", command.label());
             }
             MachineCommand::RemoveScheduleItem(idx) => {
                 let publish = command::stores::remove_schedule(self.schedule_store, idx).await;

@@ -1398,6 +1398,21 @@ impl<
     async fn handle_command(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::RunRoutine(index, params) => {
+                // Refused unless the machine is on, matching the dual-boiler.
+                //
+                // **A behaviour change on this machine, and a deliberate one.** A routine
+                // drives the boiler and the pump; starting one on a machine the user believes
+                // is off means it heats and pumps without having been switched on. The
+                // dual-boiler has always refused this and the single-boiler always allowed
+                // it, which is precisely the kind of divergence this module exists to remove.
+                //
+                // Note the asymmetry with `CancelRoutine` below, which is *not* gated: being
+                // unable to stop something already running is never the safer answer.
+                if self.configuration.ephemeral.mode != MachineMode::On {
+                    log_warn!("Cannot start routine while not in On mode");
+                    return;
+                }
+
                 log_info!("Running routine {} with {} parameters", index, params.as_ref().map(|p| p.len()).unwrap_or(0));
                 self.handle_routine_start(index, params).await;
             }
@@ -1515,8 +1530,14 @@ impl<
                 self.comms_status = Some(status);
                 self.comms_status_received_instant = Some(Instant::now());
             }
+            // Routine lifecycle commands are handled by `handle_command`, never from inside a
+            // routine's own `finally` block -- a routine must not be able to start another.
+            //
+            // `label()` through `log_warn!` rather than `defmt::warn!` with `{:?}`, so this
+            // reaches the debug bus and the host's Events pane rather than only a probe.
+            // `MachineCommand` has no `Debug`, which is what `label()` exists for.
             MachineCommand::RunRoutine(_, _) | MachineCommand::CancelRoutine => {
-                defmt::warn!("Ignoring unsupported command in finally block: {:?}", command);
+                log_warn!("Ignoring routine lifecycle command in finally block: {}", command.label());
             }
             // Turning the machine on and off. This had no arm at all, so it fell into the
             // catch-all below and vanished -- which is why it failed identically from the
