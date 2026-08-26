@@ -65,6 +65,25 @@ pub const SETTINGS_RANGE: Range<u32> = 0x0000_0000..0x0008_0000;
 /// [`variegated_controller_types::RoutineIndex`] -- and not one value under one key.
 pub const ROUTINES_RANGE: Range<u32> = 0x0008_0000..0x0010_0000;
 
+/// The flash range the schedule store lives in, on every board that has one.
+///
+/// **These addresses are a fact about deployed flash, not a choice.** The dual-boiler
+/// firmware wrote this literal into its own `main.rs` and has been keeping schedules there;
+/// moving it loses every stored schedule on any machine that takes the update. It is written
+/// down here for the reason [`ROUTINES_RANGE`] is -- a range recorded next to the code that
+/// reads it is a range the next allocation cannot see -- and the single-boiler firmware now
+/// uses the same constant rather than a second literal.
+///
+/// The map, in full, on the 8 MiB part both boards carry:
+///
+/// | range | holds |
+/// |---|---|
+/// | `0x0000_0000..0x0008_0000` | [`SETTINGS_RANGE`], keyed by [`key`] |
+/// | `0x0008_0000..0x0010_0000` | [`ROUTINES_RANGE`] |
+/// | `0x0010_0000..0x0012_0000` | abandoned; was the Bluetooth associations |
+/// | `0x0040_0000..0x0042_0000` | this |
+pub const SCHEDULES_RANGE: Range<u32> = 0x0040_0000..0x0042_0000;
+
 /// The five stores every machine keeps, over one flash range.
 ///
 /// Returned rather than boxed into a struct because each has a different `SettingsT` and
@@ -306,5 +325,56 @@ impl<'a, M: RawMutex, T: MultiwriteNorFlash, SettingsT: for<'b> Value<'b> + Defa
 
         log_info!("Configuration storage optimization complete");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flash map is deployed data, not a layout decision that can be revised.
+    ///
+    /// Machines in the field have settings, routines and schedules at these addresses. A
+    /// commit that "tidies" one of these ranges compiles, passes everything else, and is
+    /// discovered when a machine comes back from a firmware update having forgotten its
+    /// setpoints, its routines or its schedules -- with nothing to point at the cause.
+    ///
+    /// If you are here because this test failed: the constant is not what is wrong.
+    #[test]
+    fn the_flash_map_matches_what_is_deployed() {
+        assert_eq!(SETTINGS_RANGE, 0x0000_0000..0x0008_0000, "moving this loses stored settings");
+        assert_eq!(ROUTINES_RANGE, 0x0008_0000..0x0010_0000, "moving this loses stored routines");
+        assert_eq!(SCHEDULES_RANGE, 0x0040_0000..0x0042_0000, "moving this loses stored schedules");
+    }
+
+    /// No two ranges overlap, and all of them fit the 8 MiB part both boards carry.
+    ///
+    /// The check the map's prose cannot make: an overlap would corrupt two stores at once,
+    /// and a range past the end of the chip fails as an I/O error at run time on hardware
+    /// rather than at compile time here.
+    #[test]
+    fn the_flash_ranges_are_disjoint_and_fit_the_chip() {
+        /// `w25q32jv` with `megabits64`, which is what both firmwares select.
+        const CAPACITY: u32 = 8 * 1024 * 1024;
+
+        let ranges = [
+            ("settings", SETTINGS_RANGE),
+            ("routines", ROUTINES_RANGE),
+            ("schedules", SCHEDULES_RANGE),
+        ];
+
+        for (name, range) in &ranges {
+            assert!(range.start < range.end, "{name} is empty or inverted");
+            assert!(range.end <= CAPACITY, "{name} runs past the end of the chip");
+        }
+
+        for (i, (a_name, a)) in ranges.iter().enumerate() {
+            for (b_name, b) in &ranges[i + 1..] {
+                assert!(
+                    a.end <= b.start || b.end <= a.start,
+                    "{a_name} and {b_name} overlap"
+                );
+            }
+        }
     }
 }

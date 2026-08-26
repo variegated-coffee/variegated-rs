@@ -2594,22 +2594,21 @@ async fn main_task(
     // Make routine repository reference available globally for display task (cross-core safe via CriticalSectionRawMutex)
     *ROUTINE_REPOSITORY_REF.lock().await = Some(routine_repository_ref);
 
+    // The range is `variegated_controller_lib::settings::SCHEDULES_RANGE` rather than the
+    // literal that used to be here, so the flash map lives in one place with the settings and
+    // routine ranges. The addresses are unchanged, deliberately: they are where this machine's
+    // schedules already are.
     let mut schedule_store: ScheduleStoreType = SequentialStorageScheduleStore::new(
         flash,
-        0x0040_0000..0x0042_0000
+        variegated_controller_lib::settings::SCHEDULES_RANGE,
     );
-/*    schedule_store.add_schedule(ScheduleItem {
-        trigger_at: ScheduleTrigger {
-            on_hour: 10,
-            on_minute: 30,
-            on_days: None,
-            on_date: None,
-            once: false,
-            enabled: true
-        },
-        commands: vec![MachineCommand::CancelRoutine]
-    }).await;*/
-    schedule_store.load_from_flash().await.unwrap();
+    // Logged rather than `unwrap()`ed. A machine that cannot read its schedules can still make
+    // coffee, so a boot panic is the wrong failure -- it takes out the control loop, the
+    // display and the debug link over a feature the user may not even be using. The store
+    // comes up empty and says so.
+    if let Err(e) = schedule_store.load_from_flash().await {
+        log_warn!("Failed to load schedules from flash, starting empty: {}", e);
+    }
     let schedule_store_ref = SCHEDULE_STORE.init(Mutex::new(schedule_store));
 
     // Make schedule store reference available globally for display task (cross-core safe via CriticalSectionRawMutex)

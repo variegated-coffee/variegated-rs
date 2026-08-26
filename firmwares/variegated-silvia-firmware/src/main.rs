@@ -54,6 +54,9 @@ use w25q32jv::W25q32jv;
 // which is what the rest of this firmware passes around. `storage_task` needs the trait in
 // scope to call `optimize_storage`.
 use variegated_controller_lib::routine::{SequentialStorageRoutineRepository, RoutineRepository as RoutineRepositoryTrait};
+// `ScheduleStore` is the trait; the alias below shadows nothing, but it is imported under its
+// own name here to match how `RoutineRepository` is handled directly above.
+use variegated_controller_lib::schedule::{run_schedule, ScheduleStore as ScheduleStoreTrait, SequentialStorageScheduleStore};
 use variegated_controller_lib::settings::SettingsStorage;
 use variegated_controller_types::{BoilerConfiguration, Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineConfiguration, MachineDefinition, PressureType, RPMType, Status, StorageCommand, TankConfiguration, TemperatureType, WeightType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
@@ -325,10 +328,16 @@ type QwiicI2CBus = Mutex<NoopRawMutex, i2c::I2c<'static, QwiicI2cBusPeripheralsI
 /// transceiver task follow a change of implementation without being touched.
 type RoutineRepositoryType = SequentialStorageRoutineRepository<'static, NoopRawMutex, SettingsFlashType>;
 type RoutineRepository = Mutex<NoopRawMutex, RoutineRepositoryType>;
+/// The schedule store, and the mutex the controller and the scheduler share it through.
+///
+/// `NoopRawMutex` like everything else on this board: one executor, one core.
+type ScheduleStoreType = SequentialStorageScheduleStore<'static, NoopRawMutex, SettingsFlashType>;
+type ScheduleStoreMutex = Mutex<NoopRawMutex, ScheduleStoreType>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 type GravityMutex = Mutex<NoopRawMutex, Gravity<I2cDevice<'static, NoopRawMutex, I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>>>;
-/// The external SPI NOR chip, named once because three things now sit on it: the settings
-/// stores, the routine repository, and the flash mutex itself.
+/// The external SPI NOR chip, named once because four things now sit on it: the settings
+/// stores, the routine repository, the schedule store, and the flash mutex itself. The map of
+/// which range is which is `variegated_controller_lib::settings`.
 type SettingsFlashType = W25q32jv<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, NoopOutputPin, NoopOutputPin>;
 type SettingsFlashMutex = Mutex<NoopRawMutex, SettingsFlashType>;
 /// Where `OptimizeRoutineStorage` goes, so the erase-and-rewrite does not run in the
@@ -451,6 +460,14 @@ variegated_checkin::define_checkins! {
         /// only on work could not tell an idle machine from one wedged on the flash mutex
         /// partway through an erase, which is the single thing that would hang this task.
         Storage = 17 => 15_000,
+        /// The schedule runner. Wakes five seconds past each minute, so it reports well
+        /// inside this window whether or not anything is scheduled.
+        ///
+        /// Reports `PreconditionUnmet` until the clock is set, which on this board means
+        /// until Wi-Fi and SNTP have landed -- unlike the dual-boiler, this machine has no
+        /// battery-backed RTC, so schedules cannot fire on a machine that boots offline.
+        /// That row saying `Warning` on a machine with no network is correct, not a fault.
+        Scheduler = 18 => 90_000,
     }
 }
 
@@ -473,6 +490,7 @@ static QWIIC_I2C_BUS: StaticCell<QwiicI2CBus> = StaticCell::new();
 static ADS: StaticCell<AdsMutex> = StaticCell::new();
 static GRAVITY: StaticCell<GravityMutex> = StaticCell::new();
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepository> = StaticCell::new();
+static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
 static STORAGE_COMMAND_CHANNEL: StaticCell<StorageCommandChannel> = StaticCell::new();
 /// The machine definition, for the rotary menu.
 ///
@@ -915,6 +933,25 @@ async fn main_task(spawner: Spawner) -> ! {
         ),
     ));
 
+    // The fourth thing on the flash chip, over `SCHEDULES_RANGE` -- the same range the
+    // dual-boiler has been using, named in `settings` so the map lives in one place.
+    //
+    // Into the cell first and loaded through the reference, for the same reason as the
+    // repository above: this store carries a deserialization buffer of its own, and a local
+    // would leave a copy of it in `main_task`'s future forever.
+    //
+    // Loaded rather than seeded. A machine's schedules are what its user put there.
+    let schedule_store_ref = SCHEDULE_STORE.init(Mutex::new(ScheduleStoreType::new(
+        flash,
+        variegated_controller_lib::settings::SCHEDULES_RANGE,
+    )));
+    // Logged rather than `unwrap()`ed, matching the dual-boiler: a machine that cannot read
+    // its schedules can still make coffee, so a boot panic is the wrong failure. The store
+    // comes up empty and says so.
+    if let Err(e) = schedule_store_ref.lock().await.load_from_flash().await {
+        warn!("Failed to load schedules from flash, starting empty: {}", e);
+    }
+
     // Create the MachineDefinition for a single boiler single group machine
     let mut machine_definition = MachineDefinition {
         name: heapless::String::try_from("Silvia").unwrap(),
@@ -1113,6 +1150,7 @@ async fn main_task(spawner: Spawner) -> ! {
         TankConfiguration::default(),     // Tank configuration
         BoilerConfiguration::default(),   // Boiler configuration
         routine_repository_ref,
+        schedule_store_ref,
         storage_command_channel.sender(),
         &peripheral_registry,
         machine_definition,
@@ -1223,6 +1261,7 @@ async fn main_task(spawner: Spawner) -> ! {
     spawner.spawn(storage_task(
         storage_command_channel.receiver(),
         routine_repository_ref,
+        schedule_store_ref,
     ).unwrap());
 
     info!("Creating esp transceiver task");
@@ -1290,6 +1329,15 @@ async fn main_task(spawner: Spawner) -> ! {
     // `watch` reports poll-liveness only. When one of these grows a handle of its own and
     // starts saying *why*, its wrapper here comes off -- the two are alternatives for a
     // slot, not layers.
+    //
+    // The scheduler dispatches onto the same command channel the transceiver and the panel
+    // use, so a schedule fires exactly as if someone had pressed the button.
+    let scheduler = run_schedule(
+        schedule_store_ref,
+        command_channel.sender(),
+        MONITOR.claim(CheckinId::Scheduler),
+    );
+
     let mut futures: Vec<Pin<Box<dyn Future<Output = ()>>>> =
         vec![
             // The two ADS sensors report for themselves -- `with_checkin` above -- so they
@@ -1311,6 +1359,10 @@ async fn main_task(spawner: Spawner) -> ! {
             // and one writer per slot means a `watch` here would stamp `Good` on every
             // poll and erase the `Degraded` it had just published.
             Box::pin(controller.task()),
+            // Likewise not wrapped: `run_schedule` reports for itself, and a `watch` here
+            // would stamp `Good` over the `PreconditionUnmet` it publishes while the clock
+            // is unset.
+            Box::pin(scheduler),
         ];
 
     if let Some(ref mut g) = gravity_device {
@@ -1548,15 +1600,19 @@ async fn debug_command_task(
 /// hundreds of milliseconds at least, and the controller's loop is the one holding the
 /// boiler -- so the controller queues the request here and goes back to its interlocks.
 ///
-/// Only `OptimizeRoutines` can arrive. The controller answers `OptimizeScheduleStorage`
-/// itself (this machine has no schedule store) and runs `OptimizeConfigurationStorage`
-/// inline, because it owns the configuration store by value and that one rewrites a single
-/// key rather than a whole range. The other two arms are still answered rather than
-/// ignored: if one ever does arrive, silence would be the worst way to find out.
+/// `OptimizeRoutines` and `OptimizeSchedules` both arrive here, because both erase a whole
+/// flash range and rewrite it -- hundreds of milliseconds to seconds, which is far too long
+/// to spend in the loop that runs the PID and the interlocks.
+///
+/// `OptimizeConfiguration` does not: the controller runs that one inline, because it owns the
+/// configuration store by value and that optimization rewrites a single key rather than a
+/// whole range. Its arm here is still answered rather than ignored -- if it ever does arrive,
+/// silence would be the worst way to find out.
 #[embassy_executor::task]
 async fn storage_task(
     storage_command_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, StorageCommand, 4>,
     routine_repository: &'static RoutineRepository,
+    schedule_store: &'static ScheduleStoreMutex,
 ) {
     info!("Storage task started");
 
@@ -1587,7 +1643,11 @@ async fn storage_task(
                 }
             }
             StorageCommand::OptimizeSchedules => {
-                warn!("Schedule storage optimization requested, but this machine has no schedule store");
+                info!("Starting schedule storage optimization");
+                match schedule_store.lock().await.optimize_storage().await {
+                    Ok(_) => info!("Schedule storage optimization complete"),
+                    Err(e) => warn!("Schedule storage optimization failed: {}", e),
+                }
             }
             StorageCommand::OptimizeConfiguration => {
                 warn!("Configuration storage optimization requested, but the controller runs that itself");

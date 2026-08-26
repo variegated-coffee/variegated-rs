@@ -7,9 +7,10 @@ use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::Publisher;
 use embassy_rp::watchdog::Watchdog;
-// No `with_timeout` here any more: every timed store access this controller made now lives
-// in `crate::command::stores`, which owns the lock and the timeout together.
-use embassy_time::{Instant, Timer};
+// The only `with_timeout` left here guards the schedule read on the configuration publish
+// path; every timed store access a *command* makes now lives in `crate::command::stores`,
+// which owns the lock and the timeout together.
+use embassy_time::{Instant, Timer, with_timeout};
 use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
@@ -17,6 +18,7 @@ use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
 use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, GroupBrewLimitMode, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, RoutineExecutionStatus, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType, StorageCommand};
 use crate::command;
 use crate::routine::{RoutineExecutionContext, RoutineRepository};
+use crate::schedule::ScheduleStore;
 use variegated_controller_types::SingleBoilerSingleGroupControllerBoilers::{BrewBoiler, VirtualSteamBoiler};
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_hal::scale::ScaleConfiguration;
@@ -48,6 +50,7 @@ pub struct SingleBoilerSingleGroupController<
     StorageM: RawMutex + 'static,
     SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
     RoutineRepoT: RoutineRepository + 'static,
+    ScheduleStoreT: ScheduleStore + 'static,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     UploadStoreT: SettingsStorage<ShotUploadConfig>,
@@ -97,6 +100,12 @@ pub struct SingleBoilerSingleGroupController<
     // so nothing observable changes.
     boiler_config: BoilerConfiguration,
     routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
+    /// Where this machine's schedules live.
+    ///
+    /// Behind a `&'static Mutex` rather than owned, matching the routine repository and the
+    /// dual-boiler's twin: the scheduler task holds the same store and needs it for the whole
+    /// life of the program. See `crate::schedule::run_schedule`, which is the other holder.
+    schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
     /// Where an optimization request goes, rather than being run here.
     ///
     /// See the `OptimizeRoutineStorage` arm: on a flash-backed repository that call erases
@@ -224,6 +233,7 @@ impl<
     StorageM: RawMutex + 'static,
     SettingsStoreT: SettingsStorage<SingleBoilerSingleGroupPersistentConfiguration>,
     RoutineRepoT: RoutineRepository + 'static,
+    ScheduleStoreT: ScheduleStore + 'static,
     BluetoothStoreT: SettingsStorage<BluetoothAssociations>,
     WifiStoreT: SettingsStorage<StoredWifiCredentials>,
     UploadStoreT: SettingsStorage<ShotUploadConfig>,
@@ -232,7 +242,7 @@ impl<
     const N_WATCH: usize,
     const N_SUBS: usize,
     const N_CONFIG_SUBS: usize
-> SingleBoilerSingleGroupController<'a, ChannelM, M, StorageM, SettingsStoreT, RoutineRepoT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
+> SingleBoilerSingleGroupController<'a, ChannelM, M, StorageM, SettingsStoreT, RoutineRepoT, ScheduleStoreT, BluetoothStoreT, WifiStoreT, UploadStoreT, TimezoneStoreT, N_CHANNEL, N_WATCH, N_SUBS, N_CONFIG_SUBS> {
     fn current_configuration(&self) -> SingleBoilerSingleGroupConfiguration {
         self.configuration.clone()
     }
@@ -248,6 +258,7 @@ impl<
         tank_config: TankConfiguration,
         boiler_config: BoilerConfiguration,
         routine_repository: &'static Mutex<StorageM, RoutineRepoT>,
+        schedule_store: &'static Mutex<StorageM, ScheduleStoreT>,
         storage_command_sender: Sender<'a, ChannelM, StorageCommand, 4>,
         peripheral_registry: &'a PeripheralRegistry<'a>,
         machine_definition: &'a MachineDefinition,
@@ -315,6 +326,7 @@ impl<
             tank_config,
             boiler_config,
             routine_repository,
+            schedule_store,
             storage_command_sender,
             current_routine: None,
             shot_logger: crate::shot_log::ShotLogger::new(),
@@ -381,14 +393,31 @@ impl<
     ///
     /// Exists so the association list is folded in at every publish site rather than at
     /// the two that happened to be written first -- the browser reads its list out of
-    /// `Configuration`, and a publish that omitted it would blank the Bluetooth page.
-    fn general_configuration(&self, current: SingleBoilerSingleGroupConfiguration) -> Configuration {
+    /// `Configuration`, and a publish that omitted it would blank the Bluetooth page. The
+    /// schedule list is folded in here for exactly the same reason.
+    ///
+    /// `async` because of that schedule read, which takes the store's lock. The timeout, and
+    /// the empty list it falls back to, are the dual-boiler's: on a timeout the browser is
+    /// told this machine has no schedules, which is wrong but self-correcting on the next
+    /// publish, where blocking the control loop on a flash erase would not be. See
+    /// `run_schedule`, which drops this lock before sending for the same reason.
+    async fn general_configuration(&self, current: SingleBoilerSingleGroupConfiguration) -> Configuration {
         let mut configuration: Configuration = current.into();
         configuration.bluetooth_peripherals = self.bluetooth_associations.0.clone();
         // The `From` is where the token gets dropped -- it reduces to `token_set: bool`, so
         // no path from here to the browser carries the secret.
         configuration.shot_upload = (&self.shot_upload_config).into();
         configuration.timezone = self.timezone.clone();
+        configuration.schedules = match with_timeout(
+            embassy_time::Duration::from_millis(100),
+            self.schedule_store.lock(),
+        ).await {
+            Ok(mut store) => store.get_schedules().await.cloned().collect(),
+            Err(_) => {
+                log_warn!("Failed to acquire schedule_store lock for configuration (timeout)");
+                alloc::vec::Vec::new()
+            }
+        };
         configuration
     }
 
@@ -586,7 +615,7 @@ impl<
             let current_config = self.current_configuration();
             if current_config != last_configuration || self.configuration_publish_pending {
                 self.configuration_publish_pending = false;
-                let config = self.general_configuration(current_config.clone());
+                let config = self.general_configuration(current_config.clone()).await;
                 self.configuration_channel_sender.publish_immediate(config);
                 last_configuration = current_config;
             }
@@ -607,7 +636,7 @@ impl<
                     let current_config = self.current_configuration();
                     if current_config != last_configuration || self.configuration_publish_pending {
                         self.configuration_publish_pending = false;
-                        let config = self.general_configuration(current_config.clone());
+                        let config = self.general_configuration(current_config.clone()).await;
                         self.configuration_channel_sender.publish_immediate(config);
                         last_configuration = current_config;
                     }
@@ -726,7 +755,7 @@ impl<
             let now = Instant::now();
             if now.saturating_duration_since(last_configuration_publish).as_secs() >= 10 {
                 let current_config = self.current_configuration();
-                let config = self.general_configuration(current_config.clone());
+                let config = self.general_configuration(current_config.clone()).await;
                 self.configuration_channel_sender.publish_immediate(config);
                 last_configuration_publish = now;
                 last_configuration = current_config;
@@ -1544,10 +1573,30 @@ impl<
                     log_warn!("Storage command channel full, dropping OptimizeRoutines");
                 }
             }
-            // Refused for the same reason as the three schedule commands below, and in the
-            // same words. Not permanent -- see the note on those.
+            // Handed off rather than run here, for the reason `OptimizeRoutineStorage` is:
+            // on a flash-backed store this erases the whole range and rewrites every
+            // schedule, and this is the loop that runs the PID and the interlocks.
             MachineCommand::OptimizeScheduleStorage => {
-                command::refuse("OptimizeScheduleStorage", "this machine has no schedule store")
+                log_info!("Queueing schedule storage optimization");
+                if self.storage_command_sender.try_send(StorageCommand::OptimizeSchedules).is_err() {
+                    log_warn!("Storage command channel full, dropping OptimizeSchedules");
+                }
+            }
+            // The three schedule commands this machine used to drop on the floor. The
+            // handlers are `crate::command::stores`, shared with the dual-boiler controller
+            // and host-tested there; all that was ever missing here was somewhere to put a
+            // schedule.
+            MachineCommand::AddScheduleItem(item) => {
+                let publish = command::stores::add_schedule(self.schedule_store, item).await;
+                self.configuration_publish_pending |= publish.wanted();
+            }
+            MachineCommand::RemoveScheduleItem(idx) => {
+                let publish = command::stores::remove_schedule(self.schedule_store, idx).await;
+                self.configuration_publish_pending |= publish.wanted();
+            }
+            MachineCommand::UpdateScheduleItem(idx, item) => {
+                let publish = command::stores::update_schedule(self.schedule_store, idx, item).await;
+                self.configuration_publish_pending |= publish.wanted();
             }
             MachineCommand::InferGroupPressureIntegral(group_index, target_pressure) => {
                 if group_index == 0 {
@@ -1728,7 +1777,7 @@ impl<
                 // no change and does not publish again -- whereas resetting it would make
                 // the *next* genuine change invisible.
                 log_info!("Configuration republish requested");
-                let config = self.general_configuration(self.current_configuration());
+                let config = self.general_configuration(self.current_configuration()).await;
                 self.configuration_channel_sender.publish_immediate(config);
             }
             MachineCommand::SetShotAnnotations(id, annotations) => {
@@ -1794,21 +1843,6 @@ impl<
             }
             MachineCommand::SetHeatingElementContentionStrategy(_) => {
                 command::refuse("SetHeatingElementContentionStrategy", "this machine has one heating element")
-            }
-
-            // Not permanent: this machine has no schedule store yet. The handlers themselves
-            // are already shared and tested in `crate::command::stores`; what is missing is
-            // the store, the flash range and the scheduler task. Until then these are refused
-            // *out loud*, which is already an improvement -- a schedule POSTed from the web UI
-            // used to be accepted and silently discarded.
-            MachineCommand::AddScheduleItem(_) => {
-                command::refuse("AddScheduleItem", "this machine has no schedule store")
-            }
-            MachineCommand::RemoveScheduleItem(_) => {
-                command::refuse("RemoveScheduleItem", "this machine has no schedule store")
-            }
-            MachineCommand::UpdateScheduleItem(_, _) => {
-                command::refuse("UpdateScheduleItem", "this machine has no schedule store")
             }
 
             // Not permanent either: this machine has a group and a pump, but nowhere to store
