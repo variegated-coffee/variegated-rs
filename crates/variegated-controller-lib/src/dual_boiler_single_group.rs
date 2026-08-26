@@ -19,7 +19,7 @@ use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
 use variegated_hal::machine_mechanism::dual_boiler_mechanism::DualBoilerFillMechanism;
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerIndex, BoilerStatus, SteamWandIndex, ValveOpenType, WaterTapIndex, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, PidParameters, GroupIndex, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineIndex, Status, StorageCommand, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerIndex, BoilerStatus, SteamWandIndex, ValveOpenType, WaterTapIndex, BrewStatus, CommsStatus, Configuration, DutyCycleType, FillConfiguration, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, PidParameters, GroupIndex, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, Output, PumpOutput, RoutineIndex, Status, StorageCommand, WaterLevelType, WaterDispersalPumpStrategy, WaterTapStatus, TankConfiguration, TankStatus, RoutineParameters, MachineMode, OutputVolumeType};
 use variegated_controller_types::MachineDefinition;
 // `ValveOpenType` is imported unconditionally above: the shared dispatcher names it in
 // `set_steam_valve_openness`, which exists in every build even on a machine whose steam
@@ -1424,17 +1424,6 @@ impl<
 
     /// Determines if tank is empty based on configuration.
     /// Returns false (not empty) if no tank, no sensor, no threshold, or level is above threshold.
-    fn is_tank_empty(&mut self) -> bool {
-        match (&mut self.tank, &self.tank_config.empty_threshold) {
-            (Some(tank), Some(threshold)) => {
-                match tank.get_water_level() {
-                    Some(level) => level < *threshold,
-                    None => false, // No sensor reading = assume OK
-                }
-            }
-            _ => false, // No tank or no threshold = assume OK (mains water supply)
-        }
-    }
 
 
     async fn handle_command(&mut self, command: MachineCommand) {
@@ -1455,7 +1444,7 @@ impl<
             }
             _ => {
                 // All other commands delegate to the finally handler
-                self.handle_routine_finally_commands(command).await;
+                self.handle_machine_command(command).await;
             }
         }
     }
@@ -1486,27 +1475,6 @@ impl<
     /// The decision is `crate::command::targets`, which is pure and host-tested; this is the
     /// half that needs a clock and a store. `CurveAction::Leave` is deliberately not
     /// `Clear` — see [`crate::command::CurveAction`].
-    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
-        match outcome.curve {
-            command::CurveAction::Start => self.curve_start_time = Some(Instant::now()),
-            command::CurveAction::Clear => self.curve_start_time = None,
-            command::CurveAction::Leave => {}
-        }
-        if outcome.persist {
-            self.save_persistent_configuration().await;
-        }
-    }
-
-    /// Handles commands eligible for routine "finally" blocks.
-    ///
-    /// The dispatch is [`crate::command::MachineCommandContext::handle_machine_command`],
-    /// shared with the single-boiler controller; this machine's half of it is the trait impl
-    /// at the end of this file. Kept as a named method because routine `finally` blocks call
-    /// it directly, and going through here rather than `handle_command` is what stops a
-    /// routine starting another routine.
-    async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
-        self.handle_machine_command(command).await;
-    }
 
     async fn start_brewing(&mut self) {
         if !self.group_brewing {
@@ -1858,7 +1826,7 @@ impl<
             // stub passed at `RoutineExecutionContext::new`, and the explicit stops above are
             // what leave the machine idle.
             for cmd in finally_commands {
-                self.handle_routine_finally_commands(cmd).await;
+                self.handle_machine_command(cmd).await;
             }
 
             self.configuration = routine.saved_configuration.clone();
@@ -1985,8 +1953,26 @@ impl<
         &mut self.group
     }
 
-    fn is_tank_empty(&mut self) -> bool {
-        DualBoilerSingleGroupController::is_tank_empty(self)
+    fn tank_water_level(&mut self) -> Option<WaterLevelType> {
+        self.tank.as_mut().and_then(|tank| tank.get_water_level())
+    }
+
+    fn tank_empty_threshold(&self) -> Option<WaterLevelType> {
+        self.tank_config.empty_threshold
+    }
+
+    fn curve_start_time_mut(&mut self) -> &mut Option<Instant> {
+        &mut self.curve_start_time
+    }
+
+    async fn save_persistent_configuration(&mut self) {
+        DualBoilerSingleGroupController::save_persistent_configuration(self).await
+    }
+
+    fn identify_publisher(
+        &self,
+    ) -> Option<&embassy_sync::watch::Sender<'a, Self::ChannelM, Instant, 2>> {
+        self.identify_publisher.as_ref()
     }
 
     fn machine_config(&self) -> &MachineConfiguration {
@@ -2011,10 +1997,6 @@ impl<
 
     fn configuration_mut(&mut self) -> &mut Self::Configuration {
         &mut self.configuration
-    }
-
-    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
-        DualBoilerSingleGroupController::apply_target_outcome(self, outcome).await
     }
 
     fn routine_repository(&self) -> &'static Mutex<Self::StorageM, Self::RoutineRepo> {
@@ -2301,13 +2283,6 @@ impl<
     async fn request_configuration(&mut self) {
         log_info!("Configuration republish requested");
         self.publish_general_configuration().await;
-    }
-
-    fn identify(&mut self) {
-        log_info!("Identify requested");
-        if let Some(publisher) = self.identify_publisher.as_ref() {
-            publisher.send(Instant::now());
-        }
     }
 
     async fn set_group_pump_configuration(

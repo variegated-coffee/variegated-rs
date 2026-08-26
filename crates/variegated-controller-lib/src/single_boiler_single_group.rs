@@ -15,7 +15,7 @@ use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use variegated_hal::{Boiler, Group, Tank, PeripheralRegistry};
-use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, RoutineParameters, OutputVolumeType, StorageCommand};
+use variegated_controller_types::{BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerIndex, BoilerStatus, BrewStatus, CommsStatus, Configuration, DutyCycleType, GroupIndex, HexadecimalDutyCycleType, InputVolumeType, GroupBrewControlMode, GroupBrewControlState, PidParameters, BrewLimitStatus, GroupStatus, MachineCommand, MachineConfiguration, MachineMode, Output, PumpOutput, SteamWandIndex, ValveOpenType, WaterTapIndex, WaterDispersalPumpStrategy, RoutineIndex, SingleBoilerSingleGroupControllerState, Status, MachineDefinition, TankConfiguration, TankStatus, WaterLevelType, RoutineParameters, OutputVolumeType, StorageCommand};
 use crate::command;
 use crate::command::pump::{PumpLoopContext, PumpQuantity};
 use crate::command::MachineCommandContext;
@@ -1175,17 +1175,6 @@ impl<
 
     /// Determines if tank is empty based on configuration.
     /// Returns false (not empty) if no tank, no sensor, no threshold, or level is above threshold.
-    fn is_tank_empty(&mut self) -> bool {
-        match (&mut self.tank, &self.tank_config.empty_threshold) {
-            (Some(tank), Some(threshold)) => {
-                match tank.get_water_level() {
-                    Some(level) => level < *threshold,
-                    None => false, // No sensor reading = assume OK
-                }
-            }
-            _ => false, // No tank or no threshold = assume OK (mains water supply)
-        }
-    }
 
 
     /// Tare or calibrate the group scale.
@@ -1209,17 +1198,6 @@ impl<
     /// The decision is `crate::command::targets`, which is pure and host-tested; this is the
     /// half that needs a clock and a store. `CurveAction::Leave` is deliberately not
     /// `Clear` — see [`crate::command::CurveAction`].
-    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
-        match outcome.curve {
-            command::CurveAction::Start => self.curve_start_time = Some(Instant::now()),
-            command::CurveAction::Clear => self.curve_start_time = None,
-            command::CurveAction::Leave => {}
-        }
-        if outcome.persist {
-            self.save_persistent_configuration().await;
-        }
-    }
-
     async fn handle_command(&mut self, command: MachineCommand) {
         match command {
             MachineCommand::RunRoutine(index, params) => {
@@ -1246,20 +1224,9 @@ impl<
             }
             _ => {
                 // All other commands delegate to the finally handler
-                self.handle_routine_finally_commands(command).await;
+                self.handle_machine_command(command).await;
             }
         }
-    }
-
-    /// Handles commands eligible for routine "finally" blocks (cleanup commands).
-    ///
-    /// The dispatch is [`crate::command::MachineCommandContext::handle_machine_command`],
-    /// shared with the dual-boiler controller; this machine's half of it is the trait impl
-    /// further down. Kept as a named method because routine `finally` blocks call it directly,
-    /// and going through here rather than `handle_command` is what stops a routine starting
-    /// another routine.
-    async fn handle_routine_finally_commands(&mut self, command: MachineCommand) {
-        self.handle_machine_command(command).await;
     }
 
     /// Apply an `EnableBoiler`/`DisableBoiler` against the mode table.
@@ -1535,7 +1502,7 @@ impl<
             // It used to run last, which made `finally` the one hole in that rule: a
             // `SetGroupPressure` there survived the routine and nothing said so.
             for cmd in finally_commands {
-                self.handle_routine_finally_commands(cmd).await;
+                self.handle_machine_command(cmd).await;
             }
 
             // Restore saved configuration by splitting into persistent and ephemeral parts
@@ -1670,8 +1637,26 @@ impl<
         &mut self.group
     }
 
-    fn is_tank_empty(&mut self) -> bool {
-        SingleBoilerSingleGroupController::is_tank_empty(self)
+    fn tank_water_level(&mut self) -> Option<WaterLevelType> {
+        self.tank.as_mut().and_then(|tank| tank.get_water_level())
+    }
+
+    fn tank_empty_threshold(&self) -> Option<WaterLevelType> {
+        self.tank_config.empty_threshold
+    }
+
+    fn curve_start_time_mut(&mut self) -> &mut Option<Instant> {
+        &mut self.curve_start_time
+    }
+
+    async fn save_persistent_configuration(&mut self) {
+        SingleBoilerSingleGroupController::save_persistent_configuration(self).await
+    }
+
+    fn identify_publisher(
+        &self,
+    ) -> Option<&embassy_sync::watch::Sender<'a, Self::ChannelM, Instant, 2>> {
+        self.identify_publisher.as_ref()
     }
 
     fn machine_config(&self) -> &MachineConfiguration {
@@ -1696,10 +1681,6 @@ impl<
 
     fn configuration_mut(&mut self) -> &mut Self::Configuration {
         &mut self.configuration
-    }
-
-    async fn apply_target_outcome(&mut self, outcome: command::TargetOutcome) {
-        SingleBoilerSingleGroupController::apply_target_outcome(self, outcome).await
     }
 
     fn routine_repository(&self) -> &'static Mutex<Self::StorageM, Self::RoutineRepo> {
@@ -1905,15 +1886,6 @@ impl<
         log_info!("Configuration republish requested");
         let config = self.general_configuration(self.current_configuration()).await;
         self.configuration_channel_sender.publish_immediate(config);
-    }
-
-    /// Logged as well as published: this is the far end of a round trip that starts in a
-    /// browser, and the log is the only place both ends are visible at once.
-    fn identify(&mut self) {
-        log_info!("Identify requested");
-        if let Some(publisher) = self.identify_publisher.as_ref() {
-            publisher.send(Instant::now());
-        }
     }
 
     async fn set_group_pump_configuration(

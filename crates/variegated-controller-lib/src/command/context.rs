@@ -80,8 +80,31 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
     /// The configuration the target commands edit.
     fn configuration_mut(&mut self) -> &mut Self::Configuration;
 
+    /// When the current control curve started, if one is running.
+    fn curve_start_time_mut(&mut self) -> &mut Option<Instant>;
+
+    /// Write the persistent half of the configuration to its store.
+    ///
+    /// Machine-specific because one owns its settings store by value and the other reaches it
+    /// through a mutex under a timeout.
+    async fn save_persistent_configuration(&mut self);
+
     /// Carry out what a target command decided: the curve clock, and the store if asked.
-    async fn apply_target_outcome(&mut self, outcome: TargetOutcome);
+    ///
+    /// `CurveAction::Leave` is deliberately not `Clear` -- arming a limit mid-shot must not
+    /// restart or cancel a curve that is partway through. See [`super::access::CurveAction`].
+    async fn apply_target_outcome(&mut self, outcome: TargetOutcome) {
+        match outcome.curve {
+            super::access::CurveAction::Start => {
+                *self.curve_start_time_mut() = Some(Instant::now())
+            }
+            super::access::CurveAction::Clear => *self.curve_start_time_mut() = None,
+            super::access::CurveAction::Leave => {}
+        }
+        if outcome.persist {
+            self.save_persistent_configuration().await;
+        }
+    }
 
     /// Where routines live.
     fn routine_repository(&self) -> &'static Mutex<Self::StorageM, Self::RoutineRepo>;
@@ -236,11 +259,26 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
 
     // ---- Water interlocks -------------------------------------------------------------
 
-    /// Whether the tank is below its empty threshold, on a machine that has one.
+    /// What the supply tank reads, or `None` when there is no tank or it is not reporting.
     ///
-    /// Machine-specific only because the tank is a `variegated_hal::Tank` parameterised
-    /// differently on each; the *policy* built on it is shared below.
-    fn is_tank_empty(&mut self) -> bool;
+    /// The two cases collapse deliberately: both mean "no reason to think the tank is empty",
+    /// which is what a machine plumbed to mains needs and what a missing sensor should not
+    /// escalate into a refusal.
+    fn tank_water_level(&mut self) -> Option<variegated_controller_types::WaterLevelType>;
+
+    /// The level below which the tank counts as empty, if one is configured.
+    fn tank_empty_threshold(&self) -> Option<variegated_controller_types::WaterLevelType>;
+
+    /// Whether the tank is below its empty threshold.
+    fn is_tank_empty(&mut self) -> bool {
+        let Some(threshold) = self.tank_empty_threshold() else {
+            return false;
+        };
+        match self.tank_water_level() {
+            Some(level) => level < threshold,
+            None => false,
+        }
+    }
 
     /// The machine-wide configuration the policy reads.
     fn machine_config(&self) -> &variegated_controller_types::MachineConfiguration;
@@ -392,9 +430,25 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
         shot::tag_dose_from_scale(self.pending_annotations_mut(), scale, group_index, weight);
     }
 
-    /// `IdentifyMachine`. What identifying means is the machine's to decide, and a machine
-    /// with nothing to flash may do nothing at all.
-    fn identify(&mut self);
+    /// Where an Identify request goes, on a machine with something to flash.
+    ///
+    /// A `Watch` rather than a channel: only the latest request matters, and a second Identify
+    /// arriving mid-flash should extend it rather than queue behind it. `None` on a machine
+    /// with no display, in which case Identify does nothing -- which the Improv spec allows.
+    fn identify_publisher(
+        &self,
+    ) -> Option<&embassy_sync::watch::Sender<'a, Self::ChannelM, Instant, 2>>;
+
+    /// `IdentifyMachine`.
+    ///
+    /// Logged as well as published: this is the far end of a round trip that starts in a
+    /// browser, and the log is the only place both ends are visible at once.
+    fn identify(&mut self) {
+        log_info!("Identify requested");
+        if let Some(publisher) = self.identify_publisher() {
+            publisher.send(Instant::now());
+        }
+    }
 
     /// `SetGroupPumpConfiguration`.
     async fn set_group_pump_configuration(&mut self, index: GroupIndex, config: PumpConfiguration);
