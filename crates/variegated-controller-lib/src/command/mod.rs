@@ -50,3 +50,23 @@ pub mod targets;
 
 pub use access::{ConfigurationAccess, CurveAction, TargetOutcome};
 pub use stores::Publish;
+
+/// Say that this machine does not carry out a command, and why.
+///
+/// One format for every refusal, so the debug bus reads consistently and so a machine that
+/// declines something is never confused with one that accepted it and did nothing -- which is
+/// exactly what a silent `_ => {}` arm looks like from outside, and how `SetMachineMode` came
+/// to be reported as "the machine is always Off and cannot be turned on, from the UI, the web
+/// interface *or* the debug link". All three were accepting the command and throwing it away.
+///
+/// `&'static str` rather than the command itself: `MachineCommand` has no `Debug`, only a
+/// hand-written `defmt::Format`, and a `&'static str` goes through *both* halves of
+/// `variegated_log`'s macros -- so this reaches the debug bus and the host's Events pane, not
+/// only a probe. `MachineCommand::label()` exists for the same reason and is what callers
+/// should pass.
+///
+/// **A refusal is not an error.** These are commands a machine is not built to carry out, so
+/// they are logged at warning level and the machine carries on.
+pub fn refuse(command: &'static str, reason: &'static str) {
+    variegated_log::log_warn!("{} not supported on this machine: {}", command, reason);
+}

@@ -1544,8 +1544,10 @@ impl<
                     log_warn!("Storage command channel full, dropping OptimizeRoutines");
                 }
             }
+            // Refused for the same reason as the three schedule commands below, and in the
+            // same words. Not permanent -- see the note on those.
             MachineCommand::OptimizeScheduleStorage => {
-                log_warn!("OptimizeScheduleStorage not supported for single boiler controller (no schedule store)");
+                command::refuse("OptimizeScheduleStorage", "this machine has no schedule store")
             }
             MachineCommand::InferGroupPressureIntegral(group_index, target_pressure) => {
                 if group_index == 0 {
@@ -1736,24 +1738,84 @@ impl<
             MachineCommand::DeleteShotLog(id) => {
                 command::shot::delete_shot_log(self.shot_log_query_sender.as_ref(), id);
             }
-            // Everything this controller does not implement, named rather than dropped.
+            // ---- Refusals -----------------------------------------------------------------
             //
-            // This arm was `_ => {}`. Sixteen of the fifty-one `MachineCommand` variants
-            // land here, and while they were silent a command that did nothing was
-            // indistinguishable from one that worked -- which is exactly how
-            // `SetMachineMode` came to be reported as "the machine is always Off and cannot
-            // be turned on, from the UI, the web interface *or* the debug link". All three
-            // were accepting the command and throwing it away.
+            // **This match is exhaustive, and that is the point.** It used to end in
+            // `other => log_warn!("Unhandled MachineCommand: {}", other.label())`, which
+            // meant a variant added to `MachineCommand` compiled here and did nothing --
+            // and twelve of them had accumulated that way, including the three that add and
+            // edit schedules, which the web UI, the Plantlet uplink and the comms
+            // processor's HTTP handler all send to *any* machine. The dual-boiler
+            // controller has always been exhaustive; that asymmetry is the whole reason the
+            // gap went unnoticed.
             //
-            // `label()` rather than `{:?}`: `MachineCommand` has no `Debug`, and this needs
-            // to reach the `log` half of `log_warn!` -- and so the debug bus and the host's
-            // Events pane -- not only a probe.
+            // Each refusal below says *why*, because the reasons are not the same kind of
+            // thing. Some are permanent facts about a one-boiler, one-element machine.
+            // Others are missing infrastructure that later commits supply.
             //
-            // Some of these are genuinely inapplicable to a one-boiler, one-element machine
-            // and always will be; others are unimplemented and tracked in
-            // `SINGLE_BOILER_GAPS.md`. From here the two look the same, which is why this
-            // says "does not handle" rather than guessing at a reason.
-            other => log_warn!("Unhandled MachineCommand: {}", other.label()),
+            // Adding a variant to `MachineCommand` is now a compile error in five places:
+            // both controllers, `label()`, its `defmt::Format` impl, and
+            // `variegated-schema-export`'s fixtures. All five fail loudly rather than one
+            // of them mis-behaving in the field.
+
+            // Permanent: this machine has one heating element and no steam valve. Steam is a
+            // *mode* of the single boiler here -- `EnableBoiler(1)` against the mode table in
+            // `crate::single_boiler_state` -- not a wand with a valve to open.
+            MachineCommand::StartSteaming(_) => {
+                command::refuse("StartSteaming", "steam is a boiler mode here, not a wand")
+            }
+            MachineCommand::StopSteaming(_) => {
+                command::refuse("StopSteaming", "steam is a boiler mode here, not a wand")
+            }
+            MachineCommand::SetSteamValveOpenness(_, _) => {
+                command::refuse("SetSteamValveOpenness", "this machine has no steam valve")
+            }
+
+            // Permanent: the tap is the group pump into a different path rather than a tap
+            // with hardware of its own, so there is no `WaterTapConfiguration` to write.
+            // `StartPumpingToWaterTap` is handled -- it is the *dispensing* that exists here,
+            // not the configuration.
+            MachineCommand::SetWaterTapPumpConfiguration(_, _) => {
+                command::refuse("SetWaterTapPumpConfiguration", "this machine has no separately configured water tap")
+            }
+            MachineCommand::SetWaterDispersalPumpStrategy(_, _) => {
+                command::refuse("SetWaterDispersalPumpStrategy", "this machine has no separately configured water tap")
+            }
+
+            // Permanent: no autofill. The boiler is filled from the tank by the group pump.
+            MachineCommand::SetFillPumpConfiguration(_, _) => {
+                command::refuse("SetFillPumpConfiguration", "this machine has no fill mechanism")
+            }
+
+            // Permanent: one element cannot contend with itself. Both of these exist to keep
+            // two heating elements from drawing at once.
+            MachineCommand::SetHeatingElementInterlock(_) => {
+                command::refuse("SetHeatingElementInterlock", "this machine has one heating element")
+            }
+            MachineCommand::SetHeatingElementContentionStrategy(_) => {
+                command::refuse("SetHeatingElementContentionStrategy", "this machine has one heating element")
+            }
+
+            // Not permanent: this machine has no schedule store yet. The handlers themselves
+            // are already shared and tested in `crate::command::stores`; what is missing is
+            // the store, the flash range and the scheduler task. Until then these are refused
+            // *out loud*, which is already an improvement -- a schedule POSTed from the web UI
+            // used to be accepted and silently discarded.
+            MachineCommand::AddScheduleItem(_) => {
+                command::refuse("AddScheduleItem", "this machine has no schedule store")
+            }
+            MachineCommand::RemoveScheduleItem(_) => {
+                command::refuse("RemoveScheduleItem", "this machine has no schedule store")
+            }
+            MachineCommand::UpdateScheduleItem(_, _) => {
+                command::refuse("UpdateScheduleItem", "this machine has no schedule store")
+            }
+
+            // Not permanent either: this machine has a group and a pump, but nowhere to store
+            // a pump configuration and nothing in `update_pump` that would read one.
+            MachineCommand::SetGroupPumpConfiguration(_, _) => {
+                command::refuse("SetGroupPumpConfiguration", "this machine stores no pump configuration")
+            }
         }
     }
 
