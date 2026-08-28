@@ -792,7 +792,28 @@ pub enum ShotLogEvent {
 ///   `None` there, so its bytes are identical under 8 and 9 and nothing but the version
 ///   varint distinguishes them. That is the reason the version check matters here as much as
 ///   it did for 6, 7 and 8, not less.
-pub const SHOT_LOG_FORMAT_VERSION: u32 = 9;
+/// - **10** — `ShotLogMetadata` gained `final_weight_grams` and `final_volume_ml`: what was
+///   actually in the cup, read a couple of seconds *after* the pump stopped.
+///
+///   This is the first field in the file that is not a reading taken during the shot. The
+///   last sample's `output_weight` was always available and a reader could always take it,
+///   but it is systematically short: the final drops have not landed when the pump stops,
+///   and a Bluetooth scale is a further ~80 ms of notify interval behind whatever has.
+///   `SETTLE_MILLIS` in `variegated-controller-lib` is the wait that closes that gap, and
+///   these two fields are where its answer comes to rest. A consumer that derives the yield
+///   from the sample series instead gets a number that is wrong by the drips, every time,
+///   in the same direction.
+///
+///   Positionally this is the mildest bump yet, and unlike 9 it is mild for *every* shot
+///   rather than only routine ones. Both fields are `Option`s appended to the end of
+///   `metadata`, which is followed by the sample vector's length — so a version 9 file read
+///   as 10 consumes that length as the first option tag and desynchronises immediately,
+///   rather than parsing cleanly into something untrue. `annotations` is still metadata's
+///   first field, so the 1 kB prefix read that listings depend on is untouched.
+///
+///   Both are `None` on a machine with no scale and no volume measurement, which is an
+///   ordinary shot rather than a broken one — see the note on the fields themselves.
+pub const SHOT_LOG_FORMAT_VERSION: u32 = 10;
 
 /// Complete runtime log for a single shot execution (routine or manual)
 ///
@@ -898,6 +919,29 @@ pub struct ShotLogMetadata {
     /// date in the middle of every file for no gain, and the TypeScript side already models
     /// time as a number of milliseconds.
     pub recorded_at_unix_millis: Option<i64>,
+    /// What the scale read once the shot had finished dripping, in grams.
+    ///
+    /// **Not the last sample's `output_weight`, and that is the whole point.** The samples
+    /// stop when the pump does, at which moment the last of the shot is still in the puck,
+    /// in the spout, or in flight — and a Bluetooth scale has not yet transmitted what has
+    /// landed. This is taken `SETTLE_MILLIS` later, and is larger than the final sample by
+    /// however much that was worth.
+    ///
+    /// `None` when the machine has no scale, when the settle read found nothing, or when a
+    /// second shot began inside the settle window and the log was flushed early. All three
+    /// are ordinary; a consumer should fall back to the sample series rather than treating a
+    /// missing value as an error.
+    pub final_weight_grams: Option<WeightType>,
+    /// What came out of the group once the shot had finished dripping, in millilitres.
+    ///
+    /// Read at the same instant as [`Self::final_weight_grams`] and subject to the same
+    /// caveats. On a machine whose volume is derived from the scale at ~1 g/mL this is
+    /// numerically the same figure in different units, and on one measuring volume directly
+    /// it is independent evidence — which is exactly why both are recorded rather than one
+    /// being computed from the other on read.
+    ///
+    /// `None` on a machine that measures neither weight nor volume. A shot is still a shot.
+    pub final_volume_ml: Option<OutputVolumeType>,
 }
 
 /// Type of shot execution
@@ -1451,6 +1495,13 @@ mod shot_log_sample_tests {
             // shifted the field produces something obviously wrong rather than zero:
             // 2026-08-11T06:29:11.930Z.
             recorded_at_unix_millis: Some(1_786_429_751_930),
+            // Version 10's pair, the settle read. Exact in f32 and distinct from
+            // everything else here, like the rest of this fixture -- and deliberately
+            // *above* the sample's `output_weight` (36.25) and `output_volume` (38.5),
+            // because a settled figure that equalled the last sample would not
+            // distinguish a decoder reading these fields from one deriving them.
+            final_weight_grams: Some(37.375),
+            final_volume_ml: Some(39.625),
         });
         shot.samples.push(ShotLogSample {
             timestamp_millis: 1_500,
@@ -1744,6 +1795,11 @@ mod shot_log_sample_tests {
             end_time_millis: Some(31_234),
             final_status: ShotStatus::Completed,
             recorded_at_unix_millis: Some(1_786_429_751_930),
+            // Version 10's pair. Different values from `canonical_shot`'s, so a golden
+            // built from the wrong fixture is visible in the bytes rather than only in
+            // which test failed.
+            final_weight_grams: Some(41.125),
+            final_volume_ml: Some(42.875),
         })
     }
 
@@ -1762,12 +1818,58 @@ mod shot_log_sample_tests {
         0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x00, 0x00,
     ];
 
-    /// The routine metadata block has not moved under version 9.
+    /// The same shot under version 10.
+    ///
+    /// **Not byte-identical to [`GOLDEN_V9`], and unlike the 8-to-9 pair that is true for a
+    /// *manual* shot too.** Version 10 appended `final_weight_grams` and `final_volume_ml` to
+    /// `ShotLogMetadata` itself rather than to a block a manual shot omits, so every shot
+    /// gains ten bytes: `0x01 0x00 0x80 0x15 0x42` (`Some(37.375)`) and
+    /// `0x01 0x00 0x80 0x1e 0x42` (`Some(39.625)`), sitting immediately after
+    /// `recorded_at_unix_millis` and immediately before the sample vector's length.
+    ///
+    /// That position is what makes the bump safe to fail on. In [`GOLDEN_V9`] the byte after
+    /// `recorded_at_unix_millis` is `0x02` — the sample count. A version 9 file read as
+    /// version 10 takes that `0x02` as the first option tag, and 2 is neither `None` nor
+    /// `Some`, so postcard refuses it outright rather than desynchronising into a plausible
+    /// shot. The version check still runs first; this is what happens if it ever does not.
+    const GOLDEN_V10: &[u8] = &[
+        0x0a, 0x00, 0x01, 0x26, 0x42, 0x65, 0x72, 0x67, 0x61, 0x6d, 0x6f, 0x74,
+        0x2c, 0x20, 0x72, 0x65, 0x64, 0x20, 0x61, 0x70, 0x70, 0x6c, 0x65, 0x2c,
+        0x20, 0x6c, 0x6f, 0x6e, 0x67, 0x20, 0x63, 0x6f, 0x63, 0x6f, 0x61, 0x20,
+        0x66, 0x69, 0x6e, 0x69, 0x73, 0x68, 0x01, 0x01, 0x00, 0x88, 0x27, 0x01,
+        0x9c, 0xc7, 0x01, 0x01, 0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x01,
+        0x00, 0x80, 0x15, 0x42, 0x01, 0x00, 0x80, 0x1e, 0x42, 0x02, 0xdc, 0x0b,
+        0x00, 0x01, 0x01, 0x01, 0x01, 0x19, 0x80, 0xca, 0xb5, 0xee, 0x01, 0x01,
+        0x00, 0x00, 0x26, 0x42, 0x01, 0x00, 0x00, 0x10, 0x40, 0x01, 0x00, 0x00,
+        0x2c, 0x42, 0x01, 0x00, 0x00, 0xe0, 0x3f, 0x01, 0x00, 0x00, 0x11, 0x42,
+        0x01, 0x00, 0x00, 0x08, 0x41, 0x01, 0x00, 0x00, 0xbb, 0x42, 0x01, 0x00,
+        0x80, 0xae, 0x42, 0x01, 0x00, 0x00, 0x20, 0x3f, 0x01, 0x00, 0x00, 0x90,
+        0x3f, 0x01, 0x48, 0x01, 0x02, 0x01, 0x00, 0x00, 0xf8, 0x40, 0x01, 0x00,
+        0x00, 0x1a, 0x42, 0x01, 0x00, 0x30, 0xf2, 0x44, 0x01, 0x03, 0x00, 0x00,
+        0x14, 0x41, 0x01, 0x02, 0x00, 0x00, 0x30, 0x40, 0x01, 0x01, 0x02, 0x01,
+        0xc0, 0x0c, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// [`canonical_routine_shot`] frozen under version 10.
+    ///
+    /// The settled pair here is `Some(41.125)` / `Some(42.875)` —
+    /// `0x01 0x00 0x80 0x24 0x42` and `0x01 0x00 0x80 0x2b 0x42` — deliberately different
+    /// values from [`GOLDEN_V10`]'s, so a golden accidentally rebuilt from the other fixture
+    /// shows up as wrong bytes rather than only as a failing assertion elsewhere.
+    const GOLDEN_V10_ROUTINE: &[u8] = &[
+        0x0a, 0x00, 0x00, 0x00, 0x01, 0x01, 0x02, 0x03, 0x08, 0x45, 0x73, 0x70,
+        0x72, 0x65, 0x73, 0x73, 0x6f, 0x01, 0x01, 0x00, 0x00, 0x00, 0x90, 0x41,
+        0xef, 0xfd, 0xb6, 0xf5, 0x0d, 0xd2, 0x09, 0x01, 0x82, 0xf4, 0x01, 0x01,
+        0x01, 0xf4, 0x89, 0x96, 0xf8, 0xfd, 0x67, 0x01, 0x00, 0x80, 0x24, 0x42,
+        0x01, 0x00, 0x80, 0x2b, 0x42, 0x00, 0x00,
+    ];
+
+    /// The routine metadata block has not moved under version 10.
     ///
     /// The companion to `the_encoding_has_not_moved_under_this_version`, covering the half of
     /// the format that test cannot reach: `canonical_shot` is a manual shot, so
     /// `routine_metadata` is `None` there and every byte of `RoutineExecutionMetadata` is
-    /// absent from [`GOLDEN_V9`].
+    /// absent from [`GOLDEN_V10`].
     ///
     /// If this fails, read the doc comment on that test first — the response is the same, and
     /// it is almost never to paste in new bytes.
@@ -1776,12 +1878,12 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_routine_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V9_ROUTINE,
+            GOLDEN_V10_ROUTINE,
             "the encoding of RoutineExecutionMetadata changed without \
              SHOT_LOG_FORMAT_VERSION changing"
         );
 
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V9_ROUTINE).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V10_ROUTINE).unwrap();
         let routine = decoded
             .metadata
             .routine_metadata
@@ -1789,6 +1891,35 @@ mod shot_log_sample_tests {
         assert_eq!(routine.routine_crc, 0xDEAD_BEEF);
         assert_eq!(routine.routine_name, "Espresso");
         assert_eq!(routine.resolved_parameters.get(&0), Some(&18.0));
+        // The settled pair survives the round trip, and is not confused with the other.
+        assert_eq!(decoded.metadata.final_weight_grams, Some(41.125));
+        assert_eq!(decoded.metadata.final_volume_ml, Some(42.875));
+    }
+
+    /// A version 9 file is refused on its version.
+    ///
+    /// Milder than its siblings, and worth saying why. Version 10 appended to
+    /// `ShotLogMetadata` rather than to an `Option` a manual shot omits, so *every* version 9
+    /// file differs from a version 10 one in more than the leading varint — there is no
+    /// byte-identical case here of the kind versions 6/7 and 8/9 both had.
+    ///
+    /// It goes further than the others can: a version 9 file read as version 10 does not
+    /// merely desynchronise, it fails to parse at all, because the sample-vector length lands
+    /// where an option tag is expected and is neither 0 nor 1. The assertion below is
+    /// deliberately still the weak one the siblings use — what is guaranteed is the version
+    /// check, not postcard's good luck.
+    #[test]
+    fn a_version_9_file_is_refused_by_its_version() {
+        let (version, _rest) = postcard::take_from_bytes::<u32>(GOLDEN_V9).unwrap();
+        assert_eq!(version, 9, "GOLDEN_V9 must stay the version 9 file it was");
+        assert_ne!(
+            version, SHOT_LOG_FORMAT_VERSION,
+            "an old file must be distinguishable from a current one by its first byte"
+        );
+
+        if let Ok(decoded) = postcard::from_bytes::<ShotLog>(GOLDEN_V9) {
+            assert!(!decoded.version_supported());
+        }
     }
 
     /// A version 8 file is refused on its version.
@@ -1946,7 +2077,7 @@ mod shot_log_sample_tests {
         let encoded = postcard::to_allocvec(&canonical_shot()).unwrap();
         assert_eq!(
             encoded.as_slice(),
-            GOLDEN_V9,
+            GOLDEN_V10,
             "the encoding of ShotLog changed without SHOT_LOG_FORMAT_VERSION changing -- \
              see this test's doc comment before touching the golden array"
         );
@@ -1954,9 +2085,14 @@ mod shot_log_sample_tests {
         // Decoding the frozen bytes as well as comparing them: the assertion above proves
         // the writer has not moved, this proves the reader still understands what an
         // earlier build wrote.
-        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V9).unwrap();
+        let decoded: ShotLog = postcard::from_bytes(GOLDEN_V10).unwrap();
         assert_eq!(decoded.version, SHOT_LOG_FORMAT_VERSION);
         assert_eq!(decoded.metadata.recorded_at_unix_millis, Some(1_786_429_751_930));
+        // The version 10 pair, and both halves: they are adjacent `Option<f32>`s of the same
+        // shape, so a decoder that read them in the wrong order would still produce two
+        // plausible numbers. Asserting both distinct values is what catches that.
+        assert_eq!(decoded.metadata.final_weight_grams, Some(37.375));
+        assert_eq!(decoded.metadata.final_volume_ml, Some(39.625));
         assert_eq!(
             decoded.metadata.annotations.tasting_notes.as_deref(),
             Some("Bergamot, red apple, long cocoa finish")
@@ -2026,6 +2162,12 @@ mod shot_log_prefix_tests {
             end_time_millis: Some(31_234),
             final_status: ShotStatus::Completed,
             recorded_at_unix_millis: Some(1_786_429_751_930),
+            // `None`, which is also the shape of a machine with neither a scale nor a
+            // volume measurement -- so this test covers that encoding too. What it is
+            // actually about is that `annotations` stays reachable from a 1 kB prefix
+            // however much is appended after it.
+            final_weight_grams: None,
+            final_volume_ml: None,
         });
         // Enough samples that the encoding is far longer than the prefix, so the test
         // proves a prefix decode rather than a whole-file one.
@@ -2071,6 +2213,10 @@ mod shot_log_prefix_tests {
             end_time_millis: None,
             final_status: ShotStatus::Running,
             recorded_at_unix_millis: None,
+            // A shot that is still running has not been settled yet, so `None` is what a
+            // log looks like at this moment rather than merely what compiles.
+            final_weight_grams: None,
+            final_volume_ml: None,
         });
 
         let encoded = postcard::to_allocvec(&shot).unwrap();

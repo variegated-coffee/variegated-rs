@@ -120,6 +120,9 @@ pub struct SingleBoilerSingleGroupController<
     /// Whether the currently open shot log was opened by `started_brewing` rather than by a
     /// routine. Only that kind is closed by `stopped_brewing`; see `finish_manual_shot_log`.
     manual_shot_active: bool,
+    /// When the finished shot's yield may be read, if one is waiting. See the equivalent
+    /// field in `dual_boiler_single_group` and [`crate::shot_log::SETTLE_MILLIS`].
+    pending_settle: Option<Instant>,
     /// Annotations waiting to be stamped onto the next shot. See the equivalent field in
     /// `dual_boiler_single_group` for why this is RAM-only and cleared in full.
     pending_annotations: variegated_controller_types::ShotAnnotations,
@@ -339,6 +342,7 @@ impl<
             previous_routine_step: None,
             shot_log_sender,
             manual_shot_active: false,
+            pending_settle: None,
             pending_annotations: variegated_controller_types::ShotAnnotations::new(),
             shot_log_query_sender,
             sd_card_present,
@@ -591,6 +595,11 @@ impl<
             if let Some(status) = self.previous_status.as_ref() {
                 self.shot_logger.record_sample(status);
             }
+
+            // Read a finished shot's yield once the drips have landed, then send the log.
+            // Polled here rather than awaited in `stopped_brewing` -- see the equivalent
+            // note in `dual_boiler_single_group`.
+            self.complete_pending_settle(false).await;
 
             // A running routine whose prerequisites have gone away; debounced, and checked
             // before the step so it does not advance on stale readings. See the equivalent
@@ -1312,7 +1321,7 @@ impl<
     }
 
     async fn started_brewing(&mut self) {
-        self.start_manual_shot_log();
+        self.start_manual_shot_log().await;
         self.brew_start_time = Some(Instant::now());
         self.brew_start_input_volume = self.group.get_input_volume();
         self.accumulated_extracted_solids = Some(0.0);
@@ -1356,10 +1365,11 @@ impl<
 
         self.finish_manual_shot_log();
 
-        let _ = self.group.scale_set_configuration(ScaleConfiguration {
-            zero_tracking: Some(true),
-            smoothing: Some(false)
-        }).await;
+        // The scale's idle configuration is restored by `take_settled_output`, after the
+        // settle read, rather than here -- see the equivalent note in
+        // `dual_boiler_single_group::stop_brewing`. Re-enabling zero tracking now would give
+        // the scale two seconds to walk a full cup back toward zero, which is precisely the
+        // reading the settle exists to capture.
     }
 
     /// Open a shot log for a brew nobody scripted.
@@ -1460,7 +1470,15 @@ impl<
                 // Filled in by `finish_shot` -- see the equivalent block in
                 // `dual_boiler_single_group`.
                 recorded_at_unix_millis: None,
+                // Filled in by the settle read -- likewise.
+                final_weight_grams: None,
+                final_volume_ml: None,
             };
+            // Any shot still waiting for its drips is resolved before this one takes the
+            // slot the settle read writes to -- see the equivalent line in
+            // `dual_boiler_single_group`.
+            self.complete_pending_settle(true).await;
+
             // A manual brew already in progress hands its log over here -- see the note on
             // the equivalent line in `dual_boiler_single_group`.
             self.manual_shot_active = false;
@@ -1675,6 +1693,40 @@ impl<
         &self,
     ) -> Option<Sender<'a, Self::ChannelM, variegated_controller_types::ShotLog, 2>> {
         self.shot_log_sender
+    }
+
+    fn pending_settle(&mut self) -> &mut Option<Instant> {
+        &mut self.pending_settle
+    }
+
+    /// Read the yield, then give the scale its idle configuration back.
+    ///
+    /// **Scale weight only, and volume derived from it at ~1 g/mL** — the same rule the live
+    /// `output_volume` follows on this machine, and for the same reason: the GS3 falls back to
+    /// the input volume accrued since first drop, which is an estimate, and this machine does
+    /// not make it. So a Silvia with no scale records `(None, None)`, which is an accurate
+    /// account of what it measured.
+    ///
+    /// The reconfiguration comes after the read. See the GS3's equivalent for what happens if
+    /// it comes before.
+    async fn take_settled_output(
+        &mut self,
+    ) -> (
+        Option<variegated_controller_types::WeightType>,
+        Option<OutputVolumeType>,
+    ) {
+        let weight = self.group.get_output_weight();
+        let volume = weight.map(|w| w as OutputVolumeType);
+
+        let _ = self
+            .group
+            .scale_set_configuration(ScaleConfiguration {
+                zero_tracking: Some(true),
+                smoothing: Some(false),
+            })
+            .await;
+
+        (weight, volume)
     }
 
     // ---- Shared state ----------------------------------------------------------------

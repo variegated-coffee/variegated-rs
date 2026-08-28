@@ -314,26 +314,93 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
         &self,
     ) -> Option<Sender<'a, Self::ChannelM, variegated_controller_types::ShotLog, 2>>;
 
+    /// Where this machine keeps the settle deadline, if it is waiting for one.
+    ///
+    /// `Some(deadline)` means a shot has finished, its log is closed and unsent, and the
+    /// machine is waiting for the drips before reading the yield. See
+    /// [`crate::shot_log::SETTLE_MILLIS`].
+    fn pending_settle(&mut self) -> &mut Option<Instant>;
+
+    /// Read the shot's yield now, and undo whatever brew-stop deferred until this moment.
+    ///
+    /// **Machine-specific for two reasons, and the second is the subtle one.** The two
+    /// controllers reach different scales and derive output volume differently — which alone
+    /// would be enough. But both also re-enable the scale's zero tracking when brewing stops,
+    /// and that has to be deferred to *here*: a scale left to auto-zero for two seconds with a
+    /// full cup on it drifts toward zero, so a settle read taken after the reconfiguration
+    /// would report a yield of roughly nothing. The reconfiguration is part of this method's
+    /// job, after the read.
+    ///
+    /// Returning `(None, None)` is a real answer — a machine with neither a scale nor a volume
+    /// measurement — and is recorded as one rather than treated as a failure.
+    async fn take_settled_output(
+        &mut self,
+    ) -> (
+        Option<variegated_controller_types::WeightType>,
+        Option<variegated_controller_types::OutputVolumeType>,
+    );
+
     /// Open a log for a shot the user started by hand.
-    fn start_manual_shot_log(&mut self) {
+    ///
+    /// Any settle still pending is completed first. A second shot inside the settle window is
+    /// rare but not impossible, and `set_settled_output` writes to the back of the history —
+    /// so leaving one armed would stamp this shot's yield onto the previous shot's log, or
+    /// worse, onto this one after it is aborted. Flushing early costs the previous shot its
+    /// drips; not flushing costs it the truth.
+    async fn start_manual_shot_log(&mut self) {
+        self.complete_pending_settle(true).await;
         let routine_running = self.routine_running();
         let group_index = Self::GROUP_INDEX;
         let (logger, pending, manual_active) = self.shot_logging();
         shot::start_manual_shot_log(logger, pending, manual_active, routine_running, group_index);
     }
 
-    /// Close it and hand it to storage.
+    /// Close it, and wait for the drips before sending it.
     fn finish_manual_shot_log(&mut self) {
-        let sender = self.shot_log_sender();
         let (logger, pending, manual_active) = self.shot_logging();
-        shot::finish_manual_shot_log(logger, pending, manual_active, sender.as_ref());
+        if shot::finish_manual_shot_log(logger, pending, manual_active) {
+            self.arm_settle();
+        }
     }
 
-    /// Close a *routine's* log and clear what it carried.
+    /// Close a *routine's* log and clear what it carried, then wait for the drips.
     fn finish_routine_shot_log(&mut self) {
-        let sender = self.shot_log_sender();
         let (logger, pending, _) = self.shot_logging();
-        shot::finish_routine_shot_log(logger, pending, sender.as_ref());
+        shot::finish_routine_shot_log(logger, pending);
+        self.arm_settle();
+    }
+
+    /// Start the clock on the settle read.
+    fn arm_settle(&mut self) {
+        *self.pending_settle() =
+            Some(Instant::now() + embassy_time::Duration::from_millis(crate::shot_log::SETTLE_MILLIS));
+    }
+
+    /// If a settle is due, take the read, stamp it onto the log and send the log.
+    ///
+    /// **Called from the controller's own loop, not awaited from brew-stop.** That loop is the
+    /// only thing feeding the watchdog on either board, so parking two seconds inside
+    /// `stop_brewing` would freeze the PID for twenty passes and blow the controller's
+    /// check-in period. Polling a deadline at 10 Hz costs nothing and gets 100 ms granularity
+    /// on a two-second wait, which is far finer than the drips warrant.
+    ///
+    /// `force` completes a settle that has not come due yet — used when a new shot is starting
+    /// and the pending one has to be resolved before its slot in the history is taken.
+    async fn complete_pending_settle(&mut self, force: bool) {
+        let Some(deadline) = *self.pending_settle() else {
+            return;
+        };
+        if !force && Instant::now() < deadline {
+            return;
+        }
+        // Cleared *before* the read, so a `take_settled_output` that somehow failed cannot
+        // leave a deadline armed forever and re-fire on every tick from here on.
+        *self.pending_settle() = None;
+
+        let (weight, volume) = self.take_settled_output().await;
+        let sender = self.shot_log_sender();
+        let (logger, _, _) = self.shot_logging();
+        shot::complete_settle_and_send(logger, weight, volume, sender.as_ref());
     }
 
     /// Whether the machine is doing something a radio-heavy operation must not interrupt.

@@ -312,6 +312,21 @@ pub struct DualBoilerSingleGroupController<
     /// routine. Only that kind is closed by `stop_brewing`; see `finish_manual_shot_log`.
     manual_shot_active: bool,
 
+    /// When the finished shot's yield may be read, if one is waiting.
+    ///
+    /// Armed at brew stop and checked on every pass of the loop. See
+    /// [`crate::shot_log::SETTLE_MILLIS`] for why the wait exists and
+    /// `MachineCommandContext::complete_pending_settle` for why it is polled rather than
+    /// awaited.
+    pending_settle: Option<Instant>,
+
+    /// `input_volume_at_first_drop` as it stood when brewing stopped.
+    ///
+    /// The live field is cleared at brew stop, but the settle read happens two seconds later
+    /// and needs it: on a machine with no scale, output volume is the input volume accrued
+    /// since first drop, and that is the only thing left to compute it from.
+    settle_input_volume_at_first_drop: Option<InputVolumeType>,
+
     /// Where this loop reports its own health. See [`Self::with_checkin`].
     checkin: variegated_checkin::CheckinHandle,
 }
@@ -515,6 +530,8 @@ impl<
             shot_state: crate::ShotStateTracker::new(),
             input_volume_at_first_drop: None,
             manual_shot_active: false,
+            pending_settle: None,
+            settle_input_volume_at_first_drop: None,
             checkin: variegated_checkin::CheckinHandle::none(),
         }
     }
@@ -745,6 +762,14 @@ impl<
             if let Some(status) = self.previous_status.as_ref() {
                 self.shot_logger.record_sample(status);
             }
+
+            // The second half of finishing a shot: read the yield once the drips have
+            // landed, stamp it on the log and send it.
+            //
+            // Here rather than in `stop_brewing` because this loop is the only thing feeding
+            // the watchdog, and a two-second await inside brew-stop would freeze the PID for
+            // twenty passes. A no-op on every tick but the one where a settle comes due.
+            self.complete_pending_settle(false).await;
 
             // A running routine whose prerequisites have gone away.
             //
@@ -1490,7 +1515,7 @@ impl<
             self.shot_state.start();
             self.input_volume_at_first_drop = None; // Will be set when transitioning to PostFirstDrop
 
-            self.start_manual_shot_log();
+            self.start_manual_shot_log().await;
 
             self.group.set_brewing_state(true, HexadecimalDutyCycleType::OFF).await;
 
@@ -1538,6 +1563,12 @@ impl<
             self.last_extraction_time = None;
             self.curve_start_time = None;
 
+            // Kept for the settle read, which happens two seconds from now and after the
+            // line below has cleared the live value. Without it a machine with no scale --
+            // where output volume is the input volume since first drop -- would have no
+            // volume to record, which is the one case that field exists for.
+            self.settle_input_volume_at_first_drop = self.input_volume_at_first_drop;
+
             // Clear shot state tracking
             self.shot_state.stop();
             self.input_volume_at_first_drop = None;
@@ -1546,10 +1577,11 @@ impl<
 
             self.group.set_brewing_state(false, HexadecimalDutyCycleType::OFF).await;
 
-            let _ = self.group.scale_set_configuration(ScaleConfiguration {
-                zero_tracking: Some(true),
-                smoothing: Some(false)
-            }).await;
+            // The scale's zero tracking is deliberately *not* re-enabled here. It used to
+            // be, and with a settle read two seconds out that is actively wrong: a scale
+            // auto-zeroing under a full cup walks the reading toward nothing, so the yield
+            // this shot is about would be read as roughly zero. `take_settled_output`
+            // restores it, after the read.
         }
     }
 
@@ -1768,7 +1800,17 @@ impl<
                 // shot that begins before the clock syncs still gets a real start time if
                 // the clock arrives before the shot ends.
                 recorded_at_unix_millis: None,
+                // Filled in by the settle read, `SETTLE_MILLIS` after the pump stops. See
+                // `complete_pending_settle`.
+                final_weight_grams: None,
+                final_volume_ml: None,
             };
+            // Any shot still waiting for its drips is resolved before this one takes the
+            // slot at the back of the history that the settle read writes to. This path
+            // calls `start_shot` directly rather than through `start_manual_shot_log`, so
+            // it does not inherit that method's flush and has to do it here.
+            self.complete_pending_settle(true).await;
+
             // A manual brew already in progress hands its log over here rather than
             // keeping it: `start_shot` closes the open one as `Aborted`, and clearing the
             // flag is what stops the eventual `stop_brewing` from closing *this* log in its
@@ -1991,6 +2033,51 @@ impl<
         &self,
     ) -> Option<Sender<'a, Self::ChannelM, variegated_controller_types::ShotLog, 2>> {
         self.shot_log_sender
+    }
+
+    fn pending_settle(&mut self) -> &mut Option<Instant> {
+        &mut self.pending_settle
+    }
+
+    /// Read the yield, then give the scale its idle configuration back.
+    ///
+    /// The volume derivation mirrors the live one in `send_status`, and deliberately so: a
+    /// settled volume computed by a different rule from the series it terminates would make
+    /// the last sample and the final figure disagree for reasons no reader could see. Weight
+    /// at ~1 g/mL first, the input volume since first drop second — the difference being that
+    /// both inputs here are the ones captured at brew stop, because the live ones are gone.
+    ///
+    /// **The reconfiguration goes after the read, and that ordering is the whole point.**
+    /// `stop_brewing` used to re-enable zero tracking immediately; two seconds of a scale
+    /// auto-zeroing under a full cup is exactly how a 36 g shot comes to be recorded as 0.
+    async fn take_settled_output(
+        &mut self,
+    ) -> (
+        Option<variegated_controller_types::WeightType>,
+        Option<OutputVolumeType>,
+    ) {
+        let weight = self.group.get_output_weight();
+        let volume = if let Some(weight) = weight {
+            Some(weight as OutputVolumeType)
+        } else if let (Some(first_drop_vol), Some(current_vol)) = (
+            self.settle_input_volume_at_first_drop,
+            self.group.get_input_volume(),
+        ) {
+            Some(current_vol - first_drop_vol)
+        } else {
+            None
+        };
+        self.settle_input_volume_at_first_drop = None;
+
+        let _ = self
+            .group
+            .scale_set_configuration(ScaleConfiguration {
+                zero_tracking: Some(true),
+                smoothing: Some(false),
+            })
+            .await;
+
+        (weight, volume)
     }
 
     // ---- Shared state ----------------------------------------------------------------

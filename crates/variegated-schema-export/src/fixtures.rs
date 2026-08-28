@@ -895,6 +895,22 @@ pub fn canonical_shot() -> ShotLog {
             // decoder that lost or shifted it renders something obviously wrong instead
             // of a plausible epoch.
             recorded_at_unix_millis: Some(1_786_429_751_930),
+            // The two fields version 10 added: the settle read, taken after the pump
+            // stopped. Both are deliberately *larger* than the last sample's
+            // `output_weight` (21.5) and `output_volume` (24.0), because that difference
+            // is the entire reason these fields exist -- a fixture where the settled
+            // value equalled the final sample could not tell a decoder reading the
+            // stored field from one that had quietly fallen back to the series.
+            //
+            // They also differ from each other, for the reason the sample pair does: on
+            // this fixture's machine volume is not simply weight in other units, so a
+            // decoder that crossed the two is caught.
+            //
+            // Exact in f32, like every other value in this fixture: the generator emits a
+            // `.json` beside the bytes, and 22.4 would render there as
+            // 22.399999618530273 and read as a decoder fault rather than as the fixture.
+            final_weight_grams: Some(22.375),
+            final_volume_ml: Some(24.75),
         },
         samples: vec![
             sample_at(0, false, 1.0, 0.0),

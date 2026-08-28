@@ -10,6 +10,26 @@ use variegated_controller_types::{
 // Runtime shot logger
 // ============================================================================
 
+/// How long after the pump stops to wait before reading the shot's final weight.
+///
+/// Two seconds, and every part of that is the physical world rather than the software.
+/// When the pump stops the shot is not over: liquid is still draining out of the puck and
+/// falling down the spout, and a Bluetooth scale publishes on roughly an 80 ms notify
+/// interval, so even what *has* landed has not necessarily been transmitted. Reading the
+/// weight at the instant brewing ends therefore reports a number that is short, every time,
+/// in the same direction — which is worse than a number that is merely noisy, because a
+/// consistent bias looks like data.
+///
+/// **This is an operational delay, not a failsafe timeout.** It is meant to elapse on every
+/// single shot, so it is sized to the drips rather than to any bound on how long something
+/// might take. Two seconds is comfortably past a spout finishing and comfortably short of
+/// the gap before anyone pulls another shot.
+///
+/// It is *not* awaited on the control path. The controllers arm a deadline and complete the
+/// read on a later pass of their 10 Hz loop, because that loop is the only thing feeding the
+/// watchdog — see `complete_pending_settle` on either controller.
+pub const SETTLE_MILLIS: u64 = 2_000;
+
 /// Configuration for the shot logger
 #[derive(Clone, Copy, Debug)]
 pub struct ShotLoggerConfig {
@@ -233,6 +253,33 @@ impl ShotLogger {
         }
 
         self.shot_start_time = None;
+    }
+
+    /// Stamp the settle read onto the shot that most recently finished.
+    ///
+    /// The one way a finished log is amended. `finish_shot` closes a shot the moment the pump
+    /// stops — which is what keeps `end_time_millis` an honest shot time — and this fills in
+    /// the two things that were not knowable yet, [`SETTLE_MILLIS`] later.
+    ///
+    /// **Call this before the log is sent, and before any new shot starts.** It writes to the
+    /// back of the history, which is the most recently *finished* shot; if a second shot has
+    /// begun and been aborted in between, the back is that shot instead and this would label
+    /// it with the previous one's yield. The controllers avoid that by flushing a pending
+    /// settle before `start_shot`, and `send_latest_shot_log` reads the same slot, so the
+    /// ordering is "settle, then send".
+    ///
+    /// Passing `None` for either is meaningful and is left as written: it says this machine
+    /// had nothing to read, which is a fact about the shot rather than a missing value.
+    pub fn set_settled_output(
+        &mut self,
+        weight: Option<variegated_controller_types::WeightType>,
+        volume: Option<variegated_controller_types::OutputVolumeType>,
+    ) {
+        let Some(log) = self.history.back_mut() else {
+            return;
+        };
+        log.metadata.final_weight_grams = weight;
+        log.metadata.final_volume_ml = volume;
     }
 
     /// Get the current active log (if any)
