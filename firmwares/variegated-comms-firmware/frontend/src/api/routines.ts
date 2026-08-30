@@ -1,6 +1,7 @@
 import { serialize, deserialize } from '@variegated-coffee/serde-postcard-ts';
 import { ClientQuery, QueryOk, Routine, RoutineIndex, RoutineSchema } from '../schemas/schemas';
 import { RoutineIdentifier, indexFromIdentifier } from '../utils/routineHelpers';
+import { CRC_TRAILER_BYTES, crc32c, readU32LE } from '../utils/crc32c';
 import { getWebSocketService } from '../services/websocket';
 
 /**
@@ -27,6 +28,11 @@ import { getWebSocketService } from '../services/websocket';
  *
  * A routine travels as opaque postcard bytes in both directions, so the machine never decodes
  * one. See `EncodedPayload` in `ws_types.rs`.
+ *
+ * A *served* definition carries the CRC-32C trailer flash carries, and `fetchRoutine` checks
+ * it. Writes go up bare: `store_routine` decodes them with `postcard::from_bytes`, which
+ * ignores trailing bytes, and re-frames the routine itself on the way to flash — so a
+ * trailer here would be neither read nor stored.
  */
 
 /**
@@ -140,7 +146,28 @@ export function fetchRoutine(
     // The machine returns the routine still postcard-encoded, so it never has to decode one
     // itself — see `EncodedPayload` in `ws_types.rs`. `seq(u8)` decodes to a number array,
     // hence the conversion; the bytes are the same either way.
-    return deserialize(RoutineSchema, new Uint8Array(result.value)).value;
+    const bytes = new Uint8Array(result.value);
+
+    // The trailer is checked, not skipped. postcard is positional and non-self-describing,
+    // so a definition that lost or repeated bytes on the way here does not fail to decode —
+    // it decodes into a *different routine*, which then renders as though it were the one
+    // that was asked for. The definition crosses two hops to reach this point, and the
+    // application processor computes this checksum before either of them.
+    if (bytes.length <= CRC_TRAILER_BYTES) {
+      throw new Error('The machine sent too few bytes to be a routine');
+    }
+    const body = bytes.subarray(0, bytes.length - CRC_TRAILER_BYTES);
+    const expected = readU32LE(bytes, bytes.length - CRC_TRAILER_BYTES);
+    const actual = crc32c(body);
+    if (actual !== expected) {
+      throw new Error(
+        `The machine sent a damaged routine: its checksum says ` +
+          `${expected.toString(16).padStart(8, '0')}, but the ${body.length} bytes before ` +
+          `it hash to ${actual.toString(16).padStart(8, '0')}`
+      );
+    }
+
+    return deserialize(RoutineSchema, body).value;
   });
 }
 

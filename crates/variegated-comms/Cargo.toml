@@ -17,7 +17,15 @@ chrono.workspace = true
 # Serialization
 # NOTE: postcard's default feature is `heapless-cas` (no-std safe), and every
 # sibling crate depends on postcard with defaults on, so they unify anyway.
-postcard = { workspace = true, features = ["alloc"] }
+#
+# `use-crc` is for the CRC-32C trailer a served routine definition carries, so the
+# fetch path frames a routine the same way flash does. `variegated-controller-types`
+# already enables it, so resolver 2 would unify it in regardless -- named here anyway,
+# because a served routine's framing must not depend on which other crates happen to be
+# in the graph.
+postcard = { workspace = true, features = ["alloc", "use-crc"] }
+# The same CRC-32/ISCSI that `Routine`'s `Value` impl stores with.
+crc.workspace = true
 serde.workspace = true
 # For the fixed-capacity byte vectors the chunked wire variants carry. Building a
 # `RoutineChunk` means naming its `heapless::Vec` payload, so this crate has to see the

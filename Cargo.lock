@@ -5094,6 +5094,7 @@ name = "variegated-comms"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "crc",
  "defmt 1.1.1",
  "embassy-executor",
  "embassy-futures",

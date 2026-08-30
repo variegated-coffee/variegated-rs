@@ -40,6 +40,7 @@ use std::path::Path;
 
 use std::collections::BTreeMap;
 
+use crc::{Crc, CRC_32_ISCSI};
 use heapless::index_map::FnvIndexMap;
 use serde::Serialize;
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
@@ -937,8 +938,13 @@ pub fn canonical_shot() -> ShotLog {
 /// the TypeScript encoder can be tested against what the machine will actually accept rather
 /// than against what TypeScript believes it will.
 pub fn canonical_uplink_messages() -> Vec<(&'static str, UplinkMessage)> {
-    let routine_bytes =
-        postcard::to_allocvec(&routine()).expect("the canonical routine must serialize");
+    // `to_allocvec_crc32`, not `to_allocvec`. A served routine definition carries the same
+    // CRC-32C trailer flash does, and this fixture is the only Rust-produced copy of one --
+    // so encoding it bare here does not merely under-test the framing, it asserts the wrong
+    // framing, which is how the missing trailer survived on the wire for as long as it did.
+    let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+    let routine_bytes = postcard::to_allocvec_crc32(&routine(), crc.digest())
+        .expect("the canonical routine must serialize");
 
     vec![
         // The message that actually flows: every ten minutes, and the most deeply nested
@@ -1034,8 +1040,12 @@ pub fn all() -> Vec<Fixture> {
             "WsMessageSchema",
             &WsMessage::QueryReply {
                 id: 7,
+                // CRC-framed, like the uplink's copy and like flash: the LAN socket and the
+                // uplink are served by one `serve_query`, so there is only one wire form to
+                // have a fixture for.
                 outcome: QueryOutcome::Ok(QueryOk::RoutineDefinition(
-                    postcard::to_allocvec(&routine()).expect("the fixture routine encodes"),
+                    postcard::to_allocvec_crc32(&routine(), Crc::<u32>::new(&CRC_32_ISCSI).digest())
+                        .expect("the fixture routine encodes"),
                 )),
             },
         ),

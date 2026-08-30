@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use alloc::boxed::Box;
 use core::cell::RefCell;
 use chrono::{DateTime, Utc};
+use crc::{Crc, CRC_32_ISCSI};
 use defmt::{error, info};
 use embassy_futures::join::{join, join4, join5};
 use embassy_rp::uart::{UartRx, UartTx};
@@ -935,7 +936,23 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                         let mut repo_locked = routine_repository.lock().await;
                                         match repo_locked.get_routine(index).await {
                                             Some(routine) => {
-                                                match postcard::to_slice(routine, &mut routine_tx_scratch) {
+                                                // Framed with the CRC-32C trailer, exactly as flash
+                                                // frames it -- see `Routine`'s `Value` impl in
+                                                // `routines/core.rs`. A served definition is the one
+                                                // copy of a routine that used to travel bare, which
+                                                // left every reader either trusting the two hops
+                                                // below or, in Plantlet's case, slicing four bytes of
+                                                // real postcard off the end and calling them a
+                                                // checksum.
+                                                //
+                                                // The trailer is computed here, on the application
+                                                // processor, so it covers the chunking *and* the
+                                                // reassembly on the comms processor -- which is the
+                                                // splice `serve_query` documents having already
+                                                // shipped once, and which nothing else on this path
+                                                // can detect.
+                                                let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+                                                match postcard::to_slice_crc32(routine, &mut routine_tx_scratch, crc.digest()) {
                                                     Ok(encoded) => routine_chunk(index, offset, encoded),
                                                     Err(_) => {
                                                         // Storable but not encodable into
