@@ -1,6 +1,15 @@
 import { memo } from 'preact/compat';
 import { useState } from 'preact/hooks';
-import { Alert, Badge, Button, EmptyState, tokens, useDialogs } from '@variegated-coffee/ui';
+import {
+  Alert,
+  Badge,
+  Button,
+  EmptyState,
+  tokens,
+  tokensFor,
+  useDialogs,
+  type Theme,
+} from '@variegated-coffee/ui';
 import {
   BluetoothPeripheralAssociation,
   BluetoothScanStatus,
@@ -25,26 +34,38 @@ type EditorTarget =
   | { mode: 'new'; device: DiscoveredBluetoothPeripheral }
   | { mode: 'edit'; association: BluetoothPeripheralAssociation };
 
+/*
+ * These two were captures: built once at module-init from `tokens.color`, so a component
+ * reading either got a copy and could not follow a palette however the palette was set.
+ *
+ * Now they are functions of a theme. Nothing in this frontend threads a scheme yet, so the
+ * component below calls them with the light one and renders exactly as it did -- the point
+ * of the change is that the value is read per render rather than once at import.
+ */
+
 /** One row in either list, so the two agree on their padding and border. */
-const rowStyle = {
+const rowStyleFor = (t: Theme) => ({
   display: 'flex',
   alignItems: 'center',
-  gap: tokens.space.sm,
-  padding: tokens.space.sm,
-  marginBottom: tokens.space.sm,
-  border: `1px solid ${tokens.color.border}`,
-  borderRadius: tokens.radius.sm,
+  gap: t.space.sm,
+  padding: t.space.sm,
+  marginBottom: t.space.sm,
+  border: `1px solid ${t.color.border}`,
+  borderRadius: t.radius.sm,
   flexWrap: 'wrap' as const,
-};
+});
 
 /** The MAC, which is read character by character when two devices share a name. */
-const addressStyle = {
+const addressStyleFor = (t: Theme) => ({
   fontSize: '0.75rem',
-  color: tokens.color.inkMuted,
-  fontFamily: tokens.font.mono,
-};
+  color: t.color.inkMuted,
+  fontFamily: t.font.mono,
+});
 
 const BluetoothPanelComponent = ({ associations, scan, connected }: BluetoothPanelProps) => {
+  const theme = tokensFor('light');
+  const rowStyle = rowStyleFor(theme);
+  const addressStyle = addressStyleFor(theme);
   const { getCommsPeripheralEntries } = useMachine();
   const { confirm } = useDialogs();
   const [editing, setEditing] = useState<EditorTarget | null>(null);
