@@ -8,7 +8,6 @@ description = "A flexible PID controller"
 readme = "README.md"
 
 [lib]
-test = false
 bench = false
 
 [dependencies]

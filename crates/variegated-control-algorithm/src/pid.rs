@@ -293,26 +293,56 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
         self
     }
 
-    /// Force the integral so that this controller's output *would have been* `selected`.
+    /// Relax the integral toward the value that would have produced `selected`.
     ///
     /// External reset feedback, for a min-select override: two controllers run against the
-    /// same actuator, a selector takes one of their outputs, and the loser must be held at
-    /// the selected value rather than left to integrate against an error it is not driving.
-    /// Without this the deselected controller winds up, and takes over with a step when the
-    /// selector next picks it -- the same failure `pump_transfer` describes for open-to-
-    /// closed-loop transfer, in a place that recurs every iteration instead of once.
+    /// same actuator, a selector takes one of their outputs, and the loser must be anchored
+    /// to the selected value rather than left to integrate against an error it is not
+    /// driving. Without it the deselected controller winds up, and takes over with a step
+    /// when the selector next picks it -- the same failure `pump_transfer` describes for
+    /// open-to-closed-loop transfer, in a place that recurs every iteration instead of once.
+    ///
+    /// # The loser's proportional term has to survive
+    ///
+    /// **This used to assign `selected - p - d` outright, and that was a bug.** Snapping the
+    /// *whole output* to `selected` is more than anchoring: it erases the loser's proportional
+    /// term, so a loop with real headroom proposes exactly what the loop in control proposes
+    /// instead of `kp * error` above it. Two consequences, both observed on a real shot
+    /// (`v2hfh1e26wta5jvehdwfaxp8g8`, pressure held 0.6 bar under a 7 bar cap for 38 seconds):
+    ///
+    /// - **The selector loses its input.** Which loop wins stops being a question about
+    ///   whether the limit is near binding and becomes one about ordinary signal variation,
+    ///   because the two proposals differ only by their `p` terms' *change* since last tick.
+    /// - **Neither loop can advance.** Each is pinned to the pair's last agreed output every
+    ///   iteration, so `min` of two mutually-slaved proposals ratchets downward. The main
+    ///   loop in that shot accumulated +8.6 duty counts where its gains predicted +36.1.
+    ///
+    /// So the integral *relaxes* toward that target over the loop's own integral time
+    /// `Ti = kp/ki`, rather than snapping to it. The loser's own integration continues
+    /// underneath -- the caller steps both loops before selecting -- and the two compose to
+    /// `i -> selected - d`, leaving the proposal at `selected + p`: anchored, but still
+    /// carrying the offset that says how much room this loop thinks it has. It therefore
+    /// wins only as its own error approaches zero, which is the "wide, soft region of action"
+    /// a min-select override is supposed to have, with its width set by `kp`.
+    ///
+    /// `alpha == 1` recovers the old assignment exactly, so the snap is the degenerate case
+    /// of this rule: it is what a loop with no proportional term (`Ti == 0`) still gets.
     ///
     /// # Why this is not [`Self::infer_and_set_integral`]
     ///
     /// That one is a *one-shot transfer* primitive and is wrong as a per-tick tracker in two
     /// ways. It assumes `D` is zero, which is only true at a handover; and it zeroes the
     /// derivative by assigning `kd.prev_measurement`, which called every tick would suppress
-    /// the deselected controller's D term entirely. This subtracts the D contribution
-    /// instead and leaves `prev_measurement` alone, so the loser keeps a live derivative and
+    /// the deselected controller's D term entirely. This keeps the D contribution out of the
+    /// target and leaves `prev_measurement` alone, so the loser keeps a live derivative and
     /// is ready to take over.
     ///
-    /// Takes the [`PidOut`] just produced by [`Self::step`] rather than recomputing: `p` and
-    /// `d` are already known, and re-stepping `kd` would advance its state a second time.
+    /// Takes the [`PidOut`] just produced by [`Self::step`] rather than recomputing: `p`, `d`
+    /// and the gains that were actually in force are already known, and re-stepping `kd`
+    /// would advance its state a second time. Reading the gains off `last` rather than off
+    /// `self` is what makes an asymmetric `kp` track at the rate of the direction it is
+    /// acting in -- the pump's pressure loop is 20.4 rising and 30.6 falling, so its `Ti` is
+    /// 2.0 s one way and 3.0 s the other.
     ///
     /// # The clamp still applies
     ///
@@ -320,8 +350,19 @@ impl<T: FloatCore + core::default::Default> PidCtrl<T>
     /// the next iteration. A controller tracking an output beyond that bound cannot reach it
     /// and will take over low. That is a tuning question about `ki.limits`, not a bug here --
     /// see `pump_transfer`'s note on the same ceiling.
-    pub fn track_to(&mut self, selected: T, last: &PidOut<T>) -> &mut Self {
-        self.ki.accumulate = selected - last.p - last.d;
+    pub fn track_to(&mut self, selected: T, last: &PidOut<T>, tdelta: T) -> &mut Self {
+        // dt/Ti, where Ti = kp/ki. Clamped to 1 so a long tick degrades to the snap rather
+        // than overshooting the target and oscillating around it.
+        let alpha = if last.acting_kp > T::zero() {
+            let alpha = last.acting_ki * tdelta / last.acting_kp;
+            if alpha > T::one() { T::one() } else { alpha }
+        } else {
+            // No proportional term is Ti == 0: there is no offset to preserve, so snap.
+            T::one()
+        };
+
+        let target = selected - last.p - last.d;
+        self.ki.accumulate = self.ki.accumulate + (target - self.ki.accumulate) * alpha;
         self
     }
 
@@ -394,7 +435,7 @@ mod tests {
         let kpterm = kp * (setpoint - measurement);
 
         let inp = super::PidIn::new(measurement, 1.0);
-        assert_eq!(pid.step(inp), super::PidOut::new(kpterm, 0.0, 0.0, kpterm));
+        assert_eq!(pid.step(inp), super::PidOut::new(kpterm, 0.0, 0.0, kpterm, kp, 0.0, 0.0));
     }
 
     #[test]
@@ -412,11 +453,11 @@ mod tests {
 
         kiterm += ki * (setpoint - measurement) * td;
         let inp = super::PidIn::new(measurement, td);
-        assert_eq!(pid.step(inp), super::PidOut::new(0.0, kiterm, 0.0, kiterm));
+        assert_eq!(pid.step(inp), super::PidOut::new(0.0, kiterm, 0.0, kiterm, 0.0, ki, 0.0));
 
         kiterm += ki * (setpoint - measurement) * td;
         let inp = super::PidIn::new(measurement, td);
-        assert_eq!(pid.step(inp), super::PidOut::new(0.0, kiterm, 0.0, kiterm));
+        assert_eq!(pid.step(inp), super::PidOut::new(0.0, kiterm, 0.0, kiterm, 0.0, ki, 0.0));
     }
 
     #[test]
@@ -435,10 +476,70 @@ mod tests {
         let mut kdterm = kd * (measurement - prev) / td;
         prev = measurement;
         let inp = super::PidIn::new(measurement, td);
-        assert_eq!(pid.step(inp), super::PidOut::new(0.0, 0.0, kdterm, kdterm));
+        assert_eq!(pid.step(inp), super::PidOut::new(0.0, 0.0, kdterm, kdterm, 0.0, 0.0, kd));
 
         kdterm = kd * (measurement - prev) / td;
         let inp = super::PidIn::new(measurement, td);
-        assert_eq!(pid.step(inp), super::PidOut::new(0.0, 0.0, kdterm, kdterm));
+        assert_eq!(pid.step(inp), super::PidOut::new(0.0, 0.0, kdterm, kdterm, 0.0, 0.0, kd));
+    }
+
+    /// A tracked loop is anchored to the selected output, not flattened onto it.
+    ///
+    /// This is the property the min-select override in `variegated-controller-lib`'s
+    /// `pump_limit` is built on: a deselected loop still has to say how much room it thinks
+    /// it has, and it says so by proposing `kp * error` *above* the output that won. A
+    /// version of `track_to` that assigns `selected - p - d` outright converges here to
+    /// `selected` itself, which is a loop that has been silenced rather than held -- see that
+    /// method's documentation for what it cost on a real shot.
+    ///
+    /// The fixture is the pump's pressure limit loop with 0.6 bar of headroom under its cap,
+    /// which is the case that went wrong: comfortably below the limit, and so obliged to stay
+    /// out of the main loop's way.
+    #[test]
+    fn a_tracked_loop_still_proposes_its_own_proportional_offset() {
+        const SELECTED: f32 = 100.0;
+        const CAP: f32 = 7.0;
+        const PRESSURE: f32 = 6.4;
+        const TDELTA: f32 = 107.0;
+
+        let mut pid = super::PidCtrl::<f32>::new_with_pid(20.4, 0.0102, 0.0);
+        pid.setpoint = CAP;
+        pid.infer_and_set_integral(SELECTED, PRESSURE);
+
+        // Long enough to converge: Ti is kp/ki = 2000 ms, so ~19 iterations per time
+        // constant at this tick.
+        let mut out = pid.step(super::PidIn::new(PRESSURE, TDELTA));
+        for _ in 0..100 {
+            pid.track_to(SELECTED, &out, TDELTA);
+            out = pid.step(super::PidIn::new(PRESSURE, TDELTA));
+        }
+
+        let offset = 20.4 * (CAP - PRESSURE);
+        assert!(
+            (out.out - (SELECTED + offset)).abs() < 0.1,
+            "a loop {} bar under its cap settled at {}, not the {} that leaves it \
+             {offset} of headroom above the selected output",
+            CAP - PRESSURE,
+            out.out,
+            SELECTED + offset
+        );
+    }
+
+    /// The degenerate case, stated so it cannot be broken silently: with no proportional term
+    /// there is no offset to preserve, `Ti` is zero, and tracking is the outright assignment
+    /// it always used to be.
+    #[test]
+    fn a_loop_with_no_proportional_term_still_snaps() {
+        let mut pid = super::PidCtrl::<f32>::new_with_pid(0.0, 1.0, 0.0);
+        pid.setpoint = 9.0;
+
+        let out = pid.step(super::PidIn::new(0.0, 1.0));
+        pid.track_to(40.0, &out, 1.0);
+
+        assert!(
+            (pid.ki.accumulate - 40.0).abs() < 0.001,
+            "expected the integral to land on 40 in one call, got {}",
+            pid.ki.accumulate
+        );
     }
 }

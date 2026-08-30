@@ -104,6 +104,15 @@ run "variegated-instrumentation" -p variegated-instrumentation --features instru
 # everything it has. The time driver and `critical_section::Impl` its test binary needs to
 # link are dev-dependencies of the crate rather than flags here.
 run "variegated-checkin" -p variegated-checkin "$@"
+# No feature flags: this crate's `default` set is empty and its `defmt` is opt-in, so the
+# plain invocation compiles what it has.
+#
+# It was absent from this list, and its `[lib]` carried `test = false`, so its four PID unit
+# tests had never been compiled -- long enough that they had drifted to calling `PidOut::new`
+# with three arguments too few. Both were fixed when `track_to` gained its external reset
+# relaxation, because a change to the arithmetic underneath every control loop in the machine
+# should not be landing on a suite nothing runs.
+run "variegated-control-algorithm" -p variegated-control-algorithm "$@"
 # `--no-default-features` turns `hardware` and `defmt` off, which compiles code none of the
 # five on-target gate configurations sees. CLAUDE.md's "Zero warnings" section calls this
 # the configuration people forget.

@@ -1197,9 +1197,9 @@ impl<
         // regardless.
         if let Some(limit_out) = limit_pid_out {
             if selection.binding {
-                self.pump_pid.track_to(selection.output, &pump_pid_out);
+                self.pump_pid.track_to(selection.output, &pump_pid_out, delta_t);
             } else {
-                self.limit_pid.track_to(selection.output, &limit_out);
+                self.limit_pid.track_to(selection.output, &limit_out, delta_t);
             }
         }
 
