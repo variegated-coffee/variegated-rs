@@ -598,7 +598,9 @@ where
                         // encoding being positional and unversioned -- so the table lives in
                         // `variegated-machine-menu` and is keyed on the unit.
                         //
-                        // A parameter with no declared unit keeps exactly the old behaviour.
+                        // A parameter with no declared unit is still unbounded, but its step
+                        // is a choice of that table's rather than the old constant -- see
+                        // `parameter_bounds`.
                         let (min, max, step) = parameter_bounds(*param_unit);
                         let mut a = Adjustable::new(*current_value, min, max, step);
                         match direction {

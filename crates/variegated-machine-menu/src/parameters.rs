@@ -165,9 +165,13 @@ pub fn parameter_row(row: usize, param_count: usize, chrome: ParameterListChrome
 /// `(0.0, f32::INFINITY, 0.5)` for every parameter of every routine -- a comment at that site
 /// asked for exactly this and called it "a separate change".
 ///
-/// `None` reproduces that behaviour unchanged, because a parameter with no declared unit is
-/// a quantity this crate genuinely knows nothing about, and inventing a ceiling for it would
-/// be worse than having none.
+/// `None` keeps that range: a parameter with no declared unit is a quantity this crate
+/// genuinely knows nothing about, and inventing a ceiling for it would be worse than having
+/// none. Its **step** is a choice rather than an inheritance, and it is 0.1 rather than the
+/// historical 0.5. `ParameterUnit` has no ratio, so a brew ratio is authored unitless and
+/// lands here -- and a ratio lives between about 1.5 and 3.0, which 0.5 crosses in three
+/// presses. Small dimensionless numbers are what reaches this arm in practice; anything
+/// coarser than they need has a unit to say so.
 pub const fn parameter_bounds(unit: Option<ParameterUnit>) -> (f32, f32, f32) {
     match unit {
         Some(ParameterUnit::Seconds) => (0.0, 600.0, 0.5),
@@ -188,7 +192,7 @@ pub const fn parameter_bounds(unit: Option<ParameterUnit>) -> (f32, f32, f32) {
         Some(ParameterUnit::ExtractionRate) => (0.0, 50.0, 0.1),
         // The integral of the above over a shot, so larger again.
         Some(ParameterUnit::ExtractedSolids) => (0.0, 500.0, 0.5),
-        None => (0.0, f32::INFINITY, 0.5),
+        None => (0.0, f32::INFINITY, 0.1),
     }
 }
 
@@ -327,9 +331,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unspecified_unit_keeps_the_behaviour_it_replaced() {
-        // The Silvia used exactly this for every parameter of every routine.
-        assert_eq!(parameter_bounds(None), (0.0, f32::INFINITY, 0.5));
+    fn an_unspecified_unit_is_unbounded_and_steps_finely() {
+        // Two different decisions, and only the first is inherited. The Silvia used
+        // `(0.0, f32::INFINITY, 0.5)` for every parameter of every routine; the *range* is
+        // kept because this crate knows nothing about the quantity, but the step is 0.1
+        // because a brew ratio has no unit to be declared with and 0.5 spans its whole
+        // useful width. Restoring the 0.5 would make ratios unadjustable again.
+        assert_eq!(parameter_bounds(None), (0.0, f32::INFINITY, 0.1));
     }
 
     #[test]

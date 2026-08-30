@@ -26,11 +26,23 @@
 //!
 //! # What the caller still has to do
 //!
-//! The deselected loop **must be tracked** to the selected output every iteration — see
+//! The deselected loop **must be tracked** toward the selected output every iteration — see
 //! [`variegated_control_algorithm::pid::PidCtrl::track_to`]. Without it the loser integrates
 //! against an error it is not driving, winds up, and takes over with a step. That is the
 //! same failure [`crate::pump_transfer`] describes for open-to-closed-loop transfer, except
 //! it recurs every iteration instead of once.
+//!
+//! **Tracking anchors the loser; it must not silence it.** What is held is the *integral*,
+//! which relaxes toward the selected output over the loop's own `Ti`. The loser's `kp * error`
+//! stays on top of that, so its proposal sits `kp * error` above the output that won, and
+//! that offset is the whole input to the next iteration's selection: it is how a loop says
+//! how much room it still has. Forcing the loser's *total output* onto the selected value
+//! instead — which is what `track_to` used to do — erases the offset, and the first bullet
+//! above stops being true. Both loops are then pinned to whatever the pair last agreed on,
+//! neither can advance, and `min` of two mutually-slaved proposals ratchets downward while
+//! the limited quantity sits well short of its cap. That is not hypothetical; it is what
+//! shot `v2hfh1e26wta5jvehdwfaxp8g8` did for 38 seconds, and
+//! `a_limit_with_headroom_does_not_hold_the_main_loop_down` below is that shot in miniature.
 //!
 //! This module is pure, and lives here rather than in either controller for the reason
 //! [`crate::pump_transfer`] gives: the controllers are behind the `hardware` feature and
@@ -385,7 +397,7 @@ mod tests {
             );
             assert_eq!(selection.output, MAIN);
 
-            limit_pid.track_to(selection.output, &out);
+            limit_pid.track_to(selection.output, &out, 100.0);
         }
     }
 
@@ -405,11 +417,15 @@ mod tests {
     }
 
     /// External reset feedback, which is the half of min-select that is easy to leave out.
-    /// The deselected loop is forced to the selected output, so it neither winds up nor
+    /// The deselected loop is anchored to the selected output, so it neither winds up nor
     /// takes over with a step.
+    ///
+    /// The fixture is pure-integral, so anything the integral does shows up undiluted — and
+    /// so `Ti` is zero and the anchoring is a single assignment. A loop that *has* a
+    /// proportional term settles `kp * error` above the selected output instead; see
+    /// `a_limit_with_headroom_does_not_hold_the_main_loop_down` for why that matters.
     #[test]
     fn tracking_holds_the_deselected_loop_at_the_selected_output() {
-        // A pure-integral controller, so anything the integral does shows up undiluted.
         let mut main = PidCtrl::<f32>::new_with_pid(0.0, 1.0, 0.0);
         main.setpoint = 9.0;
 
@@ -421,7 +437,7 @@ mod tests {
         assert!(last.out > 9.0, "the fixture must actually wind up, or this proves nothing");
 
         // The limit has been winning all along at 40.
-        main.track_to(40.0, &last);
+        main.track_to(40.0, &last, 1.0);
         let after = main.step(PidIn::new(0.0, 1.0));
 
         // Back at the selected output, plus the one iteration of integration it just did --
@@ -433,17 +449,25 @@ mod tests {
         );
     }
 
-    /// `track_to` subtracts the D contribution, where `infer_and_set_integral` assumes it is
-    /// zero. With a live derivative the two disagree by exactly that term, and only one of
-    /// them leaves the controller where it was asked to be.
+    /// `track_to` keeps the D contribution out of the value it drives the integral toward,
+    /// where `infer_and_set_integral` assumes it is zero. With a live derivative the two
+    /// disagree by exactly that term, and only one of them leaves the controller where it was
+    /// asked to be.
     ///
     /// Stated as the invariant at the *instant* of tracking -- `p + i + d == selected` --
     /// rather than by stepping again afterwards. Stepping moves both the integral and the
     /// derivative, so an assertion on the next output is really an assertion about those
     /// movements and says very little about the thing under test.
+    ///
+    /// The gains are chosen so that `ki * tdelta / kp` is at least 1, which puts the tracking
+    /// in its snap case and lets the integral reach that target in this one call. That is
+    /// deliberate: this test is about *which* value is tracked toward, and the rate at which
+    /// a longer `Ti` approaches it is a separate question, covered by
+    /// `a_limit_with_headroom_does_not_hold_the_main_loop_down` and by the pid crate's
+    /// `a_tracked_loop_still_proposes_its_own_proportional_offset`.
     #[test]
     fn tracking_accounts_for_the_derivative() {
-        let mut pid = PidCtrl::<f32>::new_with_pid(2.0, 1.0, 1.0);
+        let mut pid = PidCtrl::<f32>::new_with_pid(1.0, 2.0, 1.0);
         pid.setpoint = 10.0;
 
         // Move the measurement between steps so the D term is live.
@@ -451,7 +475,7 @@ mod tests {
         let last = pid.step(PidIn::new(4.0, 1.0));
         assert!(last.d != 0.0, "the fixture needs a live derivative to be about anything");
 
-        pid.track_to(50.0, &last);
+        pid.track_to(50.0, &last, 1.0);
         let reconstructed = last.p + pid.ki.accumulate + last.d;
         assert!(
             (reconstructed - 50.0).abs() < 0.001,
@@ -466,6 +490,144 @@ mod tests {
             (naive - (50.0 + last.d)).abs() < 0.001,
             "expected infer_and_set_integral to be off by the D term ({}), got {naive}",
             last.d
+        );
+    }
+
+    /// The whole selector, both loops live, over a shot's worth of iterations.
+    ///
+    /// **This is the one test here that runs a real main loop against a real limit loop.**
+    /// Everything above either pins one of them to a constant or exercises the pieces
+    /// separately, and that is exactly how the defect this reproduces survived: every part
+    /// behaves correctly on its own.
+    ///
+    /// The fixture is shot `v2hfh1e26wta5jvehdwfaxp8g8` in miniature — a profile asking for
+    /// 1.6 ml/s under a 7 bar cap, on a puck too tight to give that flow at that pressure.
+    /// The correct outcome is therefore *the limit doing its job*: pressure pinned at the cap,
+    /// flow wherever the puck leaves it. What happened instead was pressure 0.6 bar under the
+    /// cap and a pump that never moved, because tracking had flattened both loops onto one
+    /// output and `min` of two mutually-slaved proposals only ever ratchets down.
+    ///
+    /// Three details are load-bearing:
+    ///
+    /// - **The disturbance.** Without variation on the main loop's measurement both the
+    ///   correct and the broken rule converge on the cap, and this test passes either way.
+    ///   Scale-derived flow is the noisy, stale signal in this system, so a ripple on it is
+    ///   what the real machine has. It is a square wave rather than anything sampled so the
+    ///   test stays deterministic and needs no float trig.
+    /// - **The lag.** Pressure responds to duty through a first-order lag. With an
+    ///   instantaneous plant the limit loop's gain of 20.4 against 0.0655 bar/count is a loop
+    ///   gain of 1.34, which oscillates on any one-tick delay — an artifact of the fixture,
+    ///   not of the machine, and one that would make this test about the wrong thing.
+    /// - **The falling permeability.** The puck opens up across the shot, as measured. It is
+    ///   what makes the flow setpoint reachable by the end and unreachable at the start,
+    ///   which is the situation a limit exists for.
+    #[test]
+    fn a_limit_with_headroom_does_not_hold_the_main_loop_down() {
+        // Plant, from the shot: bar per duty count, and the pressure lag.
+        const DUTY_TO_PRESSURE: f32 = 0.0655;
+        const TAU_MS: f32 = 400.0;
+        const TDELTA: f32 = 107.0;
+        const CAP: f32 = 7.0;
+
+        let mut main = PidCtrl::<f32>::new_with_pid(12.0, 0.003, 0.0);
+        main.setpoint = 1.6; // ml/s out of the group
+
+        let mut limit = PidCtrl::<f32>::new_with_pid(20.4, 0.0102, 0.0);
+        limit.kp.set_asymmetric_scale(20.4, 30.6);
+        limit.setpoint = CAP;
+
+        let mut duty = 89.0f32;
+        let mut pressure = DUTY_TO_PRESSURE * duty;
+        main.infer_and_set_integral(duty, 0.17 * pressure);
+        limit.infer_and_set_integral(duty, pressure);
+
+        let mut settled_peak = f32::MIN;
+        for n in 0..358 {
+            // The puck loosens through the shot: 1.6 ml/s needs 9.4 bar at the start and
+            // 7.0 by the end.
+            let permeability = 0.17 + 0.057 * (n as f32) / 358.0;
+            pressure += (DUTY_TO_PRESSURE * duty - pressure) * TDELTA / TAU_MS;
+            let flow = permeability * pressure;
+
+            // What the scale reports, which is not quite what the group is doing.
+            let ripple = if n % 9 < 5 { 0.18 } else { -0.18 };
+
+            let main_out = main.step(PidIn::new(flow + ripple, TDELTA));
+            let limit_out = limit.step(PidIn::new(pressure, TDELTA));
+
+            let selection = select(main_out.out, Some(limit_out.out));
+            duty = selection.output.clamp(0.0, 255.0);
+
+            if selection.binding {
+                main.track_to(selection.output, &main_out, TDELTA);
+            } else {
+                limit.track_to(selection.output, &limit_out, TDELTA);
+            }
+
+            if n >= 308 {
+                settled_peak = settled_peak.max(pressure);
+            }
+        }
+
+        // The limit has to actually be reached. The broken rule ends this run at 4.56 bar
+        // with the pump backed down to 72 counts, having given up on both setpoints at once.
+        assert!(
+            pressure > 6.5,
+            "the pump settled at {duty} counts and {pressure} bar, well under its {CAP} bar \
+             cap, with the flow loop still asking for more -- neither loop was in control"
+        );
+
+        // And not blown through: a limit that overshoots is not a limit.
+        assert!(
+            settled_peak < CAP + 0.2,
+            "pressure reached {settled_peak} bar against a {CAP} bar cap"
+        );
+    }
+
+    /// The companion to the test above, and the reason it needs its disturbance: on a clean
+    /// signal the selector converges on the cap regardless, so this pins the quiet case
+    /// rather than proving anything about tracking. Its value is as a tripwire — if this ever
+    /// starts failing, the fix above has broken the ordinary path.
+    #[test]
+    fn a_limit_settles_on_its_cap_when_the_signal_is_quiet() {
+        const DUTY_TO_PRESSURE: f32 = 0.0655;
+        const TAU_MS: f32 = 400.0;
+        const TDELTA: f32 = 107.0;
+        const CAP: f32 = 7.0;
+
+        let mut main = PidCtrl::<f32>::new_with_pid(12.0, 0.003, 0.0);
+        main.setpoint = 1.6;
+
+        let mut limit = PidCtrl::<f32>::new_with_pid(20.4, 0.0102, 0.0);
+        limit.kp.set_asymmetric_scale(20.4, 30.6);
+        limit.setpoint = CAP;
+
+        let mut duty = 89.0f32;
+        let mut pressure = DUTY_TO_PRESSURE * duty;
+        main.infer_and_set_integral(duty, 0.17 * pressure);
+        limit.infer_and_set_integral(duty, pressure);
+
+        for _ in 0..1500 {
+            pressure += (DUTY_TO_PRESSURE * duty - pressure) * TDELTA / TAU_MS;
+            let flow = 0.17 * pressure;
+
+            let main_out = main.step(PidIn::new(flow, TDELTA));
+            let limit_out = limit.step(PidIn::new(pressure, TDELTA));
+
+            let selection = select(main_out.out, Some(limit_out.out));
+            duty = selection.output.clamp(0.0, 255.0);
+
+            if selection.binding {
+                main.track_to(selection.output, &main_out, TDELTA);
+            } else {
+                limit.track_to(selection.output, &limit_out, TDELTA);
+            }
+        }
+
+        assert!(
+            (pressure - CAP).abs() < 0.01,
+            "a puck this tight cannot reach 1.6 ml/s, so the limit should own the pump and \
+             hold {CAP} bar exactly; it held {pressure}"
         );
     }
 }

@@ -867,10 +867,10 @@ impl<
         if let Some(limit_out) = limit_pid_out {
             if selection.binding {
                 if let Some(main_out) = pump_pid_out {
-                    self.pump_pid.track_to(selection.output, &main_out);
+                    self.pump_pid.track_to(selection.output, &main_out, delta_t);
                 }
             } else {
-                self.limit_pid.track_to(selection.output, &limit_out);
+                self.limit_pid.track_to(selection.output, &limit_out, delta_t);
             }
         }
 
