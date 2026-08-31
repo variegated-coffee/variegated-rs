@@ -14,7 +14,7 @@ use embedded_graphics::primitives::Rectangle;
 use u8g2_fonts::types::{HorizontalAlignment, VerticalPosition};
 
 use crate::draw;
-use crate::geometry::{PAD_LEFT, at, hairline_v};
+use crate::geometry::{PAD_LEFT, Window, hairline_v};
 use crate::marks;
 use crate::palette;
 use crate::type_scale;
@@ -110,15 +110,15 @@ fn scale_of(command: Command) -> (Scale, f32) {
     }
 }
 
-pub(crate) fn draw<D>(view: &FreeBrewView, target: &mut D) -> Result<(), D::Error>
+pub(crate) fn draw<D>(view: &FreeBrewView, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let (scale, commanded) = scale_of(view.command);
-    header(&scale, target)?;
-    command_row(view, &scale, commanded, target)?;
-    rail(view, &scale, commanded, target)?;
-    bottom_row(view, target)?;
+    header(&scale, w, target)?;
+    command_row(view, &scale, commanded, w, target)?;
+    rail(view, &scale, commanded, w, target)?;
+    bottom_row(view, w, target)?;
     Ok(())
 }
 
@@ -126,22 +126,23 @@ where
 /// [`crate::render`] because this is the only state whose strip is horizontal.
 pub(crate) fn header_marks<D>(
     states: &[MarkState; 5],
+    w: Window,
     target: &mut D,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    marks::draw_row(states, at(CONTENT_RIGHT_DX, 0).x, at(0, MARKS_DY).y, target)
+    marks::draw_row(states, w.at(CONTENT_RIGHT_DX, 0).x, w.at(0, MARKS_DY).y, target)
 }
 
-fn header<D>(scale: &Scale, target: &mut D) -> Result<(), D::Error>
+fn header<D>(scale: &Scale, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let after = draw::run(
         &type_scale::STATE_WORD,
         format_args!("FREE BREW"),
-        at(CONTENT_LEFT_DX, HEADER_BASELINE),
+        w.at(CONTENT_LEFT_DX, HEADER_BASELINE),
         VerticalPosition::Baseline,
         palette::INK,
         target,
@@ -152,7 +153,7 @@ where
         format_args!("{}", scale.word),
         scale.pen,
         scale.fill,
-        Point::new(after + 7, at(0, HEADER_BASELINE - 10).y),
+        Point::new(after + 7, w.at(0, HEADER_BASELINE - 10).y),
         target,
     )?;
     Ok(())
@@ -162,12 +163,13 @@ fn command_row<D>(
     view: &FreeBrewView,
     scale: &Scale,
     commanded: f32,
+    w: Window,
     target: &mut D,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let baseline = at(CONTENT_LEFT_DX, COMMAND_ROW_DY);
+    let baseline = w.at(CONTENT_LEFT_DX, COMMAND_ROW_DY);
 
     let after = draw::run(
         &type_scale::LABEL,
@@ -198,7 +200,7 @@ where
     // measured slot is empty and both consequences go in the bottom row instead.
     if let Some(measured) = view.measured {
         let unit_width = draw::width(&type_scale::LABEL, format_args!("{} in", scale.unit));
-        let right = at(CONTENT_RIGHT_DX, 0).x;
+        let right = w.at(CONTENT_RIGHT_DX, 0).x;
         draw::aligned(
             &type_scale::LABEL,
             format_args!("{} in", scale.unit),
@@ -226,13 +228,14 @@ fn rail<D>(
     view: &FreeBrewView,
     scale: &Scale,
     commanded: f32,
+    w: Window,
     target: &mut D,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let area = Rectangle::new(
-        at(CONTENT_LEFT_DX, RAIL_DY),
+        w.at(CONTENT_LEFT_DX, RAIL_DY),
         Size::new(CONTENT_WIDTH as u32, widgets::RAIL_HEIGHT),
     );
 
@@ -253,7 +256,7 @@ where
     // number to compare it against.
     let last = scale.ticks.len().saturating_sub(1).max(1) as i32;
     for (i, tick) in scale.ticks.iter().enumerate() {
-        let x = at(CONTENT_LEFT_DX, 0).x + CONTENT_WIDTH * i as i32 / last;
+        let x = w.at(CONTENT_LEFT_DX, 0).x + CONTENT_WIDTH * i as i32 / last;
         let align = if i == 0 {
             HorizontalAlignment::Left
         } else if i as i32 == last {
@@ -264,7 +267,7 @@ where
         draw::aligned(
             &type_scale::LABEL,
             format_args!("{tick}"),
-            Point::new(x, at(0, TICKS_DY).y),
+            Point::new(x, w.at(0, TICKS_DY).y),
             VerticalPosition::Top,
             align,
             palette::INK_FAINT,
@@ -275,7 +278,7 @@ where
     Ok(())
 }
 
-fn bottom_row<D>(view: &FreeBrewView, target: &mut D) -> Result<(), D::Error>
+fn bottom_row<D>(view: &FreeBrewView, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -308,12 +311,12 @@ where
 
     let cell_width = CONTENT_WIDTH / 4;
     for (i, (label, value, decimals, unit, pen)) in cells.iter().enumerate() {
-        let left = at(CONTENT_LEFT_DX + cell_width * i as i32, 0).x;
+        let left = w.at(CONTENT_LEFT_DX + cell_width * i as i32, 0).x;
         // A hairline between cells, not around them: the panel's only decoration is a
         // divider, and a box round each figure would be four more.
         if i > 0 {
             hairline_v(
-                Point::new(left - 9, at(0, CELLS_LABEL_DY - 4).y),
+                Point::new(left - 9, w.at(0, CELLS_LABEL_DY - 4).y),
                 (CELLS_VALUE_DY - CELLS_LABEL_DY + 6) as u32,
                 target,
             )?;
@@ -321,12 +324,12 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("{label}"),
-            Point::new(left, at(0, CELLS_LABEL_DY).y),
+            Point::new(left, w.at(0, CELLS_LABEL_DY).y),
             VerticalPosition::Top,
             palette::INK_MUTED,
             target,
         );
-        let baseline = Point::new(left, at(0, CELLS_VALUE_DY).y);
+        let baseline = Point::new(left, w.at(0, CELLS_VALUE_DY).y);
         let after = widgets::value(
             &type_scale::SECONDARY_19,
             *value,

@@ -127,6 +127,8 @@ pub struct DisplayState {
     /// `None` until the first `Configuration` arrives. The controller republishes every ten
     /// seconds whether or not anything changed, so the gap after boot is bounded.
     menu_config: Option<crate::menu::MenuConfig>,
+    /// Where the panel's content sits. See [`Self::panel_origin`].
+    panel_origin: variegated_controller_types::panel::PanelOrigin,
     /// The Bluetooth associations, for the Bluetooth submenu.
     ///
     /// Cloned out of the published `Configuration` rather than borrowed from it: this task
@@ -158,6 +160,7 @@ impl DisplayState {
             dose_tracking_initialized: false,
             dose_popup_until: None,
             menu_config: None,
+            panel_origin: variegated_controller_types::panel::PanelOrigin::DEFAULT,
             bluetooth: None,
             schedules: None,
         }
@@ -166,8 +169,19 @@ impl DisplayState {
     /// Take what the menu needs from a freshly published projection.
     pub fn update_menu_config(&mut self, snapshot: crate::menu::MenuConfigSnapshot) {
         self.menu_config = Some(snapshot.config);
+        self.panel_origin = snapshot.panel_origin;
         self.bluetooth = Some(snapshot.bluetooth);
         self.schedules = Some(snapshot.schedules);
+    }
+
+    /// Where the panel's content sits inside the bezel's aperture.
+    ///
+    /// Non-`Option`, unlike everything else that arrives on this watch: the trim always has a
+    /// value, because the shipped default is one. Before the button task has published, this
+    /// is that default -- which is what the firmware has always drawn at, so a machine that
+    /// has never been trimmed does not move on the first frame after boot.
+    pub fn panel_origin(&self) -> variegated_controller_types::panel::PanelOrigin {
+        self.panel_origin
     }
 
     /// The configuration projection, or its `Default` before the first one arrives.

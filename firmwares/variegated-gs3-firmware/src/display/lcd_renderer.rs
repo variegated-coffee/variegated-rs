@@ -426,6 +426,11 @@ impl LcdDisplayState {
             &self.shared_state.status,
             self.shared_state.menu.wifi_pending,
             self.shared_state.menu_config(),
+            // The two trim rows appear in this panel's Settings list too, showing their
+            // numbers. It cannot draw the outline the TFT does -- it has no pixels -- but a
+            // row that vanished on one of the two panels would be worse than one that can
+            // only be read there.
+            self.shared_state.panel_origin(),
         );
 
         // An editor frame has no rows: its title names the quantity and the value is the

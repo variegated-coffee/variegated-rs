@@ -23,8 +23,8 @@ use std::path::Path;
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use variegated_gs3_panel::geometry::{PANEL_SIZE, WINDOW_ORIGIN, WINDOW_SIZE};
-use variegated_gs3_panel::{fixtures, render};
+use variegated_gs3_panel::geometry::{PANEL_SIZE, WINDOW_SIZE};
+use variegated_gs3_panel::{Window, fixtures, render};
 
 const WIDTH: usize = PANEL_SIZE.width as usize;
 const HEIGHT: usize = PANEL_SIZE.height as usize;
@@ -102,7 +102,7 @@ fn save_1x(fb: &Framebuffer, path: &Path) {
 }
 
 /// The 3x image, with the visible window outlined so the bezel's edge is obvious.
-fn save_3x(fb: &Framebuffer, path: &Path) {
+fn save_3x(fb: &Framebuffer, window: Window, path: &Path) {
     let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
     let mut data = vec![0u8; w * h * 3];
     for y in 0..h {
@@ -115,7 +115,8 @@ fn save_3x(fb: &Framebuffer, path: &Path) {
 
     // A dashed outline of the window, in the hairline colour, drawn only here.
     let outline = [0x40u8, 0x50, 0x58];
-    let (ox, oy) = (WINDOW_ORIGIN.x as usize * SCALE, WINDOW_ORIGIN.y as usize * SCALE);
+    let origin = window.origin();
+    let (ox, oy) = (origin.x as usize * SCALE, origin.y as usize * SCALE);
     let (ww, wh) = (
         WINDOW_SIZE.width as usize * SCALE,
         WINDOW_SIZE.height as usize * SCALE,
@@ -146,11 +147,16 @@ fn main() {
     let aborted = fixtures::lever_like_trace_to(12.4);
     let mut count = 0;
 
+    // The default window. A trimmed machine draws the same panels somewhere else, and
+    // `shifting_the_window_shifts_every_pixel_with_it` is what asserts that; there is nothing
+    // to see in a second set of images of the same content moved seven pixels.
+    let window = Window::DEFAULT;
+
     let emit = |name: &str, view: &variegated_gs3_panel::PanelView<'_>| {
         let mut fb = Framebuffer::new();
-        render(view, &mut fb).expect("render");
+        render(view, window, &mut fb).expect("render");
         save_1x(&fb, &out.join(format!("{name}.png")));
-        save_3x(&fb, &out.join(format!("{name}@3x.png")));
+        save_3x(&fb, window, &out.join(format!("{name}@3x.png")));
     };
 
     for (name, view) in fixtures::all(&trace, &aborted) {

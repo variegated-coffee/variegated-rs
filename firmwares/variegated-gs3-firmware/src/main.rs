@@ -56,6 +56,7 @@ use variegated_controller_types::SteamWandDefinition;
 use variegated_hal::gpio::gpio_pwm_solenoid_valve::GpioPwmSolenoidValve;
 use variegated_controller_types::bluetooth::BluetoothAssociations;
 use variegated_controller_types::shot_upload::ShotUploadConfig;
+use variegated_controller_types::panel::PanelOrigin;
 use variegated_controller_types::timezone::TimezoneSetting;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_fdc1004::{OutputRate, SuccessfulMeasurement, FDC1004};
@@ -491,6 +492,18 @@ type ShotUploadStoreType = SequentialStorageSettingsStorage<'static, SyncSendRaw
 /// again; only the payload type and the key differ.
 type TimezoneStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, TimezoneSetting>;
 
+/// Where the panel's content sits inside the bezel's aperture, in the same settings range
+/// under a key of its own.
+///
+/// **Built here rather than by `settings::machine_stores`**, which returns the five stores
+/// *both* machines keep. This is one machine's physical alignment: the Silvia drives a
+/// 128x64 mono OLED with no bezel and no analogue of it.
+///
+/// The button task owns it, not the controller. Nothing outside this firmware's panel and
+/// menu has any use for the value, so it never becomes a `MachineCommand` and never enters
+/// `Configuration` -- see `variegated_controller_types::panel::PanelOrigin`.
+type PanelOriginStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, PanelOrigin>;
+
 type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
 type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
 type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
@@ -498,6 +511,9 @@ type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
 type WifiStoreMutex = Mutex<SyncSendRawMutex, WifiStoreType>;
 type ShotUploadStoreMutex = Mutex<SyncSendRawMutex, ShotUploadStoreType>;
 type TimezoneStoreMutex = Mutex<SyncSendRawMutex, TimezoneStoreType>;
+/// See [`PanelOriginStoreType`]. Behind a mutex like the rest, though only the button task
+/// takes it.
+pub type PanelOriginStoreMutex = Mutex<SyncSendRawMutex, PanelOriginStoreType>;
 type StorageCommandChannel = Channel<SyncSendRawMutex, StorageCommand, 4>;
 
 /// Core 1's stack.
@@ -1156,6 +1172,7 @@ static CONFIGURATION_CHANNEL: StaticCell<ConfigurationChannel> = StaticCell::new
 static ROUTINE_REPOSITORY: StaticCell<RoutineRepositoryMutex> = StaticCell::new();
 static SCHEDULE_STORE: StaticCell<ScheduleStoreMutex> = StaticCell::new();
 static SETTINGS_STORAGE: StaticCell<SettingsStorageMutex> = StaticCell::new();
+static PANEL_ORIGIN_STORE: StaticCell<PanelOriginStoreMutex> = StaticCell::new();
 static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
 /// Accepted scan requests, carrying the duration in milliseconds. The controller sends
 /// and `esp_transceiver_main` drains, so this crosses cores the same way
@@ -2576,6 +2593,17 @@ async fn main_task(
         >(flash);
     let settings_storage_ref = SETTINGS_STORAGE.init(Mutex::new(settings_storage));
 
+    // The panel's trim, beside the five stores above rather than among them: see
+    // `PanelOriginStoreType`. `new_with_key` is the same public constructor
+    // `machine_stores` uses for the four keyed stores it returns.
+    let panel_origin_store_ref = PANEL_ORIGIN_STORE.init(Mutex::new(
+        SequentialStorageSettingsStorage::new_with_key(
+            flash,
+            variegated_controller_lib::settings::SETTINGS_RANGE,
+            variegated_controller_lib::settings::key::PANEL_ORIGIN,
+        ),
+    ));
+
     // Load initial configuration
     let _configuration = settings_storage_ref.lock().await.load_settings().await.unwrap_or_default();
 
@@ -3284,7 +3312,7 @@ async fn main_task(
     let button_command_sender = command_channel.sender();
 
     // Spawn the button controller task
-    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, schedule_store_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender(), MENU_CONFIG_WATCH.sender())));
+    spawner.spawn(unwrap!(button_controller_task(btn_mcp23017, button_interrupt, button_command_sender, button_status_receiver, button_configuration_receiver, routine_repository_ref, schedule_store_ref, panel_origin_store_ref, MONITOR.claim(CheckinId::ButtonController), MENU_WATCH.sender(), MENU_CONFIG_WATCH.sender())));
 
     // Create status subscriber for LED controller and spawn the task.
     //

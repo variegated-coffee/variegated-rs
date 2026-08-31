@@ -9,7 +9,7 @@ use embedded_graphics::prelude::*;
 use u8g2_fonts::types::VerticalPosition;
 
 use crate::draw;
-use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, at, body_right, hairline_v};
+use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, Window, hairline_v};
 use crate::palette;
 use crate::type_scale;
 use crate::view::OffView;
@@ -37,26 +37,26 @@ const RESIDUAL_BASELINE: i32 = 105;
 /// Content bottom, relative to the window top.
 const BOTTOM: i32 = crate::geometry::WINDOW_SIZE.height as i32 - PAD_BOTTOM;
 
-pub(crate) fn draw<D>(view: &OffView<'_>, target: &mut D) -> Result<(), D::Error>
+pub(crate) fn draw<D>(view: &OffView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let right_left = body_right() - RIGHT_WIDTH;
+    let right_left = w.body_right() - RIGHT_WIDTH;
     let divider_x = right_left - 10;
 
-    left_column(view, target)?;
+    left_column(view, w, target)?;
 
     hairline_v(
-        Point::new(divider_x, at(0, PAD_TOP).y),
+        Point::new(divider_x, w.at(0, PAD_TOP).y),
         (BOTTOM - PAD_TOP) as u32,
         target,
     )?;
 
-    right_column(view, right_left, target)?;
+    right_column(view, w, right_left, target)?;
     Ok(())
 }
 
-fn left_column<D>(view: &OffView<'_>, target: &mut D) -> Result<(), D::Error>
+fn left_column<D>(view: &OffView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -64,7 +64,7 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("{date}"),
-            at(PAD_LEFT, PAD_TOP),
+            w.at(PAD_LEFT, PAD_TOP),
             VerticalPosition::Top,
             palette::INK_MUTED,
             target,
@@ -74,7 +74,7 @@ where
     // The hero, and the seconds beside it in the word face at a fifth the size. Seconds on
     // an off machine are not a value anyone acts on; they are what makes the clock read as
     // running rather than as stopped.
-    let baseline = at(PAD_LEFT, CLOCK_BASELINE);
+    let baseline = w.at(PAD_LEFT, CLOCK_BASELINE);
     if let Some(clock) = view.clock {
         let after = draw::run(
             &type_scale::HERO,
@@ -100,7 +100,7 @@ where
         draw::run(
             &type_scale::STATE_WORD,
             format_args!("STANDBY"),
-            at(PAD_LEFT, BOTTOM),
+            w.at(PAD_LEFT, BOTTOM),
             VerticalPosition::Bottom,
             palette::WARN,
             target,
@@ -109,7 +109,7 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("OFF SINCE {:02}:{:02}", since.hour, since.minute),
-            at(PAD_LEFT, BOTTOM),
+            w.at(PAD_LEFT, BOTTOM),
             VerticalPosition::Bottom,
             palette::INK_FAINT,
             target,
@@ -119,11 +119,11 @@ where
     Ok(())
 }
 
-fn right_column<D>(view: &OffView<'_>, left: i32, target: &mut D) -> Result<(), D::Error>
+fn right_column<D>(view: &OffView<'_>, w: Window, left: i32, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let top = at(0, PAD_TOP).y;
+    let top = w.at(0, PAD_TOP).y;
 
     if let Some(next) = view.next {
         let after = draw::run(
@@ -152,7 +152,7 @@ where
         draw::run(
             &type_scale::PRIMARY_30,
             format_args!("{:02}:{:02}", next.at.hour, next.at.minute),
-            Point::new(left, at(0, NEXT_TIME_TOP).y),
+            Point::new(left, w.at(0, NEXT_TIME_TOP).y),
             VerticalPosition::Top,
             palette::INK,
             target,
@@ -161,7 +161,7 @@ where
         let mut x = draw::run(
             &type_scale::LABEL,
             format_args!("{}", next.day),
-            Point::new(left, at(0, NEXT_WAIT_TOP).y),
+            Point::new(left, w.at(0, NEXT_WAIT_TOP).y),
             VerticalPosition::Top,
             palette::INK_FAINT,
             target,
@@ -169,11 +169,11 @@ where
         if let Some(minutes) = next.wait_minutes {
             // The separator is drawn rather than typed; see `type_scale`.
             x += type_scale::separator(
-                Point::new(x, at(0, NEXT_WAIT_TOP).y + 6),
+                Point::new(x, w.at(0, NEXT_WAIT_TOP).y + 6),
                 palette::INK_FAINT,
                 target,
             )? as i32;
-            let point = Point::new(x, at(0, NEXT_WAIT_TOP).y);
+            let point = Point::new(x, w.at(0, NEXT_WAIT_TOP).y);
             if minutes >= 60 {
                 draw::run(
                     &type_scale::LABEL,
@@ -199,7 +199,7 @@ where
     // Residual temperatures, hue-coded per boiler, with the word that says why they are
     // here: a machine that is off but still at 58 degrees is not a machine that needs
     // twenty minutes to be usable.
-    let baseline = at(0, RESIDUAL_BASELINE).y;
+    let baseline = w.at(0, RESIDUAL_BASELINE).y;
     let mut x = left;
     for (temperature, pen) in [
         (view.residual_brew, palette::PEN_BREW_BOILER),

@@ -24,7 +24,7 @@ use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
 use variegated_controller_types::{MachineMode, Routine, ScheduleItem};
 use variegated_gs3_panel::view::HourMinute;
-use variegated_gs3_panel::{ShotTrace, geometry, palette, type_scale};
+use variegated_gs3_panel::{ShotTrace, Window, geometry, palette, type_scale};
 use variegated_instrumentation::instrumented_section;
 use variegated_machine_menu::{UnitStyle, unit_suffix};
 use variegated_timekeeping::DateTimeInZone;
@@ -34,15 +34,37 @@ use crate::display::view;
 use crate::display_state::DisplayState;
 use crate::menu::{self, MENU_VISIBLE_ROWS, MenuContext, MenuId, MenuValue};
 
-// The visible window, named the way this file has always named it, but taken from the panel
-// crate so there is one definition of where the bezel is. Changing it there moves the menu
-// too, which is the point: the menu and the machine screens are the same panel.
-const EFFECTIVE_X: i32 = geometry::WINDOW_ORIGIN.x;
-const EFFECTIVE_Y: i32 = geometry::WINDOW_ORIGIN.y;
+// The visible window's *size*, which is fixed. Where it sits is not: it is trimmed from the
+// menu and lives in `GraphicalDisplayState::window`, so the menu moves with the machine
+// screens -- which is what makes the trim mean anything, since the menu is the screen you are
+// standing at while you make it.
 const EFFECTIVE_WIDTH: i32 = geometry::WINDOW_SIZE.width as i32;
 const EFFECTIVE_HEIGHT: i32 = geometry::WINDOW_SIZE.height as i32;
-const EFFECTIVE_CENTER_X: i32 = EFFECTIVE_X + EFFECTIVE_WIDTH / 2;
-const EFFECTIVE_CENTER_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT / 2;
+
+/// The menu's four corners, resolved from whichever window a frame is being drawn at.
+///
+/// A struct rather than four `let`s repeated in three functions: they are always wanted
+/// together, and a function that derived only some of them from the live window would draw
+/// half a screen in one place and half in another.
+#[derive(Clone, Copy)]
+struct Frame {
+    x: i32,
+    y: i32,
+    centre_x: i32,
+    centre_y: i32,
+}
+
+impl Frame {
+    fn of(window: Window) -> Self {
+        let origin = window.origin();
+        Self {
+            x: origin.x,
+            y: origin.y,
+            centre_x: origin.x + EFFECTIVE_WIDTH / 2,
+            centre_y: origin.y + EFFECTIVE_HEIGHT / 2,
+        }
+    }
+}
 
 /// Graphical display state with rendering functionality
 pub struct GraphicalDisplayState {
@@ -165,7 +187,52 @@ impl GraphicalDisplayState {
         let steps = scratch.steps();
         let frame = view::panel_view(self, &scratch, &steps);
 
-        instrumented_section!("Panel", { variegated_gs3_panel::render(&frame, display) })
+        instrumented_section!("Panel", {
+            variegated_gs3_panel::render(&frame, self.window(), display)
+        })
+    }
+
+    /// Where the panel's content sits inside the bezel's aperture.
+    ///
+    /// Derived from the trim rather than cached beside it, so there is one copy: the value
+    /// arrives on the config watch into `DisplayState`, and `Window::new` clamps it, so a
+    /// stored value from a firmware with a different window size cannot push content off the
+    /// panel. Before the button task has published, it is the shipped default.
+    fn window(&self) -> Window {
+        let origin = self.shared_state.panel_origin();
+        Window::new(origin.x as i32, origin.y as i32)
+    }
+
+    /// The window the menu is drawn at.
+    ///
+    /// The stored one, except while an origin editor is open: then it is the value being
+    /// dialled, so the *whole* screen -- title, number and hint row -- moves as the buttons
+    /// are pressed, with the outline `render_menu_editor` draws marking its edge.
+    ///
+    /// Everything moving together is the point. What is being set is where all of this goes,
+    /// and an outline that moved while the text stayed put would be showing a preview of one
+    /// thing beside the current state of another.
+    ///
+    /// It costs no flash write and no round trip: the live value arrives on the menu watch,
+    /// which the display task already receives on every press.
+    fn menu_window(&self) -> Window {
+        let Some(frame) = self.shared_state.menu.stack.top() else {
+            return self.window();
+        };
+        let Some(editor) = self
+            .shared_state
+            .menu
+            .editor
+            .and_then(menu::EditorState::number)
+        else {
+            return self.window();
+        };
+        let origin = self.window().origin();
+        match frame.id {
+            MenuId::EditPanelOriginX => Window::new(editor.value() as i32, origin.y),
+            MenuId::EditPanelOriginY => Window::new(origin.x, editor.value() as i32),
+            _ => self.window(),
+        }
     }
 
     /// How long the display task may wait before drawing this state again.
@@ -193,9 +260,10 @@ impl GraphicalDisplayState {
         D: DrawTarget<Color = Rgb565>,
     {
         const MENU_ROW_HEIGHT: i32 = 18;
-        const MENU_FIRST_ROW_Y: i32 = EFFECTIVE_Y + 21;
-        const MENU_SEPARATOR_Y: i32 = EFFECTIVE_Y + 17;
-        const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 12;
+        let f = Frame::of(self.menu_window());
+        let menu_first_row_y = f.y + 21;
+        let menu_separator_y = f.y + 17;
+        let menu_hint_y = f.y + EFFECTIVE_HEIGHT - 12;
         /// The baseline every row's label and value share.
         ///
         /// One baseline for two faces: the label is set in the row faces and the value in the
@@ -217,7 +285,7 @@ impl GraphicalDisplayState {
         type_scale::STATE_WORD
             .render_aligned(
                 format_args!("{}", menu::title(frame.id, &data)),
-                Point::new(EFFECTIVE_X + 4, EFFECTIVE_Y + 2),
+                Point::new(f.x + 4, f.y + 2),
                 VerticalPosition::Top,
                 HorizontalAlignment::Left,
                 FontColor::Transparent(palette::INK),
@@ -235,8 +303,8 @@ impl GraphicalDisplayState {
         }
 
         Line::new(
-            Point::new(EFFECTIVE_X, MENU_SEPARATOR_Y),
-            Point::new(EFFECTIVE_X + EFFECTIVE_WIDTH - 1, MENU_SEPARATOR_Y),
+            Point::new(f.x, menu_separator_y),
+            Point::new(f.x + EFFECTIVE_WIDTH - 1, menu_separator_y),
         )
         .into_styled(
             PrimitiveStyleBuilder::new()
@@ -260,6 +328,7 @@ impl GraphicalDisplayState {
             &self.shared_state.status,
             self.shared_state.menu.wifi_pending,
             self.shared_state.menu_config(),
+            self.shared_state.panel_origin(),
         );
         let ssid = MenuContext::wifi_ssid(&self.shared_state.status);
 
@@ -271,7 +340,7 @@ impl GraphicalDisplayState {
             type_scale::STEP_OTHER
                 .render_aligned(
                     format_args!("{}", menu::empty_label(frame.id)),
-                    Point::new(EFFECTIVE_X + 6, MENU_FIRST_ROW_Y + MENU_ROW_BASELINE),
+                    Point::new(f.x + 6, menu_first_row_y + MENU_ROW_BASELINE),
                     VerticalPosition::Baseline,
                     HorizontalAlignment::Left,
                     FontColor::Transparent(palette::INK_MUTED),
@@ -284,14 +353,14 @@ impl GraphicalDisplayState {
             let Some(row) = menu::row(frame.id, index, &data) else {
                 continue;
             };
-            let row_y = MENU_FIRST_ROW_Y + screen_row as i32 * MENU_ROW_HEIGHT;
+            let row_y = menu_first_row_y + screen_row as i32 * MENU_ROW_HEIGHT;
             let selected = index == frame.nav.selected();
 
             // Weight carries rank within a size, the way it does on the machine panels: the
             // selected row is the bold 10 px face against the regular one, on a filled bar.
             let (face, text_color) = if selected {
                 Rectangle::new(
-                    Point::new(EFFECTIVE_X, row_y),
+                    Point::new(f.x, row_y),
                     Size::new(
                         (EFFECTIVE_WIDTH - MENU_TRACK_WIDTH) as u32,
                         MENU_ROW_HEIGHT as u32,
@@ -308,7 +377,7 @@ impl GraphicalDisplayState {
 
             face.render_aligned(
                 format_args!("{}", menu::label(&row, &ctx)),
-                Point::new(EFFECTIVE_X + 6, row_y + MENU_ROW_BASELINE),
+                Point::new(f.x + 6, row_y + MENU_ROW_BASELINE),
                 VerticalPosition::Baseline,
                 HorizontalAlignment::Left,
                 FontColor::Transparent(text_color),
@@ -333,7 +402,7 @@ impl GraphicalDisplayState {
                     .render_aligned(
                         format_args!("{}", text),
                         Point::new(
-                            EFFECTIVE_X + EFFECTIVE_WIDTH - 6,
+                            f.x + EFFECTIVE_WIDTH - 6,
                             row_y + MENU_ROW_BASELINE,
                         ),
                         VerticalPosition::Baseline,
@@ -352,8 +421,8 @@ impl GraphicalDisplayState {
         if let Some((thumb_y, thumb_height)) = frame.nav.thumb(geo, MENU_TRACK_HEIGHT) {
             Rectangle::new(
                 Point::new(
-                    EFFECTIVE_X + EFFECTIVE_WIDTH - MENU_TRACK_WIDTH,
-                    MENU_FIRST_ROW_Y + thumb_y as i32,
+                    f.x + EFFECTIVE_WIDTH - MENU_TRACK_WIDTH,
+                    menu_first_row_y + thumb_y as i32,
                 ),
                 Size::new(MENU_TRACK_WIDTH as u32, thumb_height),
             )
@@ -379,7 +448,7 @@ impl GraphicalDisplayState {
         type_scale::LABEL
             .render_aligned(
                 format_args!("{}", hint),
-                Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
+                Point::new(f.centre_x, menu_hint_y),
                 VerticalPosition::Top,
                 HorizontalAlignment::Center,
                 FontColor::Transparent(palette::INK_FAINT),
@@ -410,7 +479,27 @@ impl GraphicalDisplayState {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 12;
+        let window = self.menu_window();
+        let f = Frame::of(window);
+        let menu_hint_y = f.y + EFFECTIVE_HEIGHT - 12;
+
+        // On the two trim rows, the edge of the window itself. Two pixels, not one: this is
+        // the thing being aligned against a physical aperture from arm's length, and a single
+        // lit pixel against black at that distance is a suggestion rather than an edge.
+        //
+        // Drawn first, so the value and the hint row sit over it rather than under.
+        if matches!(menu, MenuId::EditPanelOriginX | MenuId::EditPanelOriginY) {
+            window
+                .rect()
+                .into_styled(
+                    PrimitiveStyleBuilder::new()
+                        .stroke_color(palette::INK)
+                        .stroke_width(2)
+                        .stroke_alignment(embedded_graphics::primitives::StrokeAlignment::Inside)
+                        .build(),
+                )
+                .draw(display)?;
+        }
 
         // Nothing to edit means the frame was pushed without a value, which the button task
         // does not do. Draw the hints anyway rather than an empty screen.
@@ -442,8 +531,8 @@ impl GraphicalDisplayState {
                 .map(|d| d.advance.x)
                 .unwrap_or(0);
 
-            let baseline = EFFECTIVE_CENTER_Y + 12;
-            let left = EFFECTIVE_CENTER_X - (number_width + 4 + suffix_width) / 2;
+            let baseline = f.centre_y + 12;
+            let left = f.centre_x - (number_width + 4 + suffix_width) / 2;
             let after = type_scale::PRIMARY_30
                 .render(
                     number.as_str(),
@@ -471,7 +560,7 @@ impl GraphicalDisplayState {
                 // panel's `-` and `+` on both screens, and reusing a vertical word for a
                 // number would suggest the mapping had changed when it has not.
                 format_args!("1 Less   2 More   3 Confirm   4 Cancel"),
-                Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
+                Point::new(f.centre_x, menu_hint_y),
                 VerticalPosition::Top,
                 HorizontalAlignment::Center,
                 FontColor::Transparent(palette::INK_FAINT),
@@ -499,7 +588,8 @@ impl GraphicalDisplayState {
     where
         D: DrawTarget<Color = Rgb565>,
     {
-        const MENU_HINT_Y: i32 = EFFECTIVE_Y + EFFECTIVE_HEIGHT - 12;
+        let f = Frame::of(self.menu_window());
+        let menu_hint_y = f.y + EFFECTIVE_HEIGHT - 12;
         /// The field buttons 1 and 2 are moving.
         const SELECTED: Rgb565 = palette::INK;
         /// The one they are not.
@@ -520,7 +610,7 @@ impl GraphicalDisplayState {
                 (&text[end..], UNSELECTED),
             ];
 
-            let baseline = EFFECTIVE_CENTER_Y + 12;
+            let baseline = f.centre_y + 12;
             let width = face
                 .get_rendered_dimensions(
                     text.as_str(),
@@ -530,7 +620,7 @@ impl GraphicalDisplayState {
                 .map(|dimensions| dimensions.advance.x)
                 .unwrap_or(0);
 
-            let mut pen = Point::new(EFFECTIVE_CENTER_X - width / 2, baseline);
+            let mut pen = Point::new(f.centre_x - width / 2, baseline);
             for (run, color) in runs {
                 if run.is_empty() {
                     continue;
@@ -558,7 +648,7 @@ impl GraphicalDisplayState {
                 // only place on either panel that can say so *before* the press. `3 Field` for
                 // the same reason -- button 3 confirms on every other editor and does not here.
                 format_args!("1 Less  2 More  3 Field  4 Done"),
-                Point::new(EFFECTIVE_CENTER_X, MENU_HINT_Y),
+                Point::new(f.centre_x, menu_hint_y),
                 VerticalPosition::Top,
                 HorizontalAlignment::Center,
                 FontColor::Transparent(palette::INK_FAINT),

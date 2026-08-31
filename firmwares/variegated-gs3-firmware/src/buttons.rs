@@ -110,6 +110,9 @@ use crate::menu::{
 use variegated_controller_lib::routine::{Routine, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::schedule::ScheduleStore as ScheduleStoreTrait;
 use variegated_controller_types::Configuration;
+use variegated_controller_types::panel::PanelOrigin;
+// The panel origin's store is reached through the trait, like every other settings store.
+use variegated_controller_lib::settings::SettingsStorage;
 use variegated_machine_menu::{
     apply_schedule_change, parameter_adjustable, routine_rows, schedule_rows, ParameterValues,
     RoutineRows, ScheduleChange,
@@ -291,6 +294,20 @@ pub struct ButtonEventHandler {
     /// hold on this task. It was a single `Option<f32>` -- the brew boiler's ceiling -- until
     /// the Settings menu grew rows backed by more of it.
     menu_config: crate::menu::MenuConfig,
+    /// Where the panel's content sits inside the bezel's aperture.
+    ///
+    /// **This task owns it**, unlike everything else on this screen: it has a settings key of
+    /// its own, no `MachineCommand`, and no reason to reach the controller. Loaded from flash
+    /// at startup, written on confirm, and published to the display tasks on the config watch.
+    ///
+    /// Before flash has been read it is the shipped default, which is what the firmware has
+    /// always drawn at -- so a machine that has never been trimmed never moves.
+    panel_origin: PanelOrigin,
+    /// Whether [`Self::panel_origin`] has changed and has not been written to flash yet.
+    ///
+    /// The same shape as `schedules_dirty` and for the same reason: the press is handled in a
+    /// synchronous function and the store is behind an async mutex.
+    panel_origin_dirty: bool,
     /// The Bluetooth associations, for the Bluetooth submenu's rows.
     ///
     /// Kept beside the projection rather than in it because it is a list of rows rather than
@@ -349,6 +366,8 @@ impl ButtonEventHandler {
             pending_schedule_change: None,
             schedules_dirty: false,
             menu_config: crate::menu::MenuConfig::default(),
+            panel_origin: PanelOrigin::DEFAULT,
+            panel_origin_dirty: false,
             bluetooth: None,
             button_3_hold_start: None,
             button_5_hold_start: None,
@@ -493,6 +512,16 @@ impl ButtonEventHandler {
         core::mem::take(&mut self.schedules_dirty)
     }
 
+    /// The panel's trim, if it has changed since it was last written to flash.
+    fn take_dirty_panel_origin(&mut self) -> Option<PanelOrigin> {
+        core::mem::take(&mut self.panel_origin_dirty).then_some(self.panel_origin)
+    }
+
+    /// Seed the trim from flash, at startup.
+    fn set_panel_origin(&mut self, origin: PanelOrigin) {
+        self.panel_origin = origin;
+    }
+
     /// Apply a change to this task's own copy of a schedule row.
     ///
     /// **Applied locally as well as sent**, because the controller takes up to a status period
@@ -524,6 +553,7 @@ impl ButtonEventHandler {
     pub fn menu_config_snapshot(&self) -> crate::menu::MenuConfigSnapshot {
         crate::menu::MenuConfigSnapshot {
             config: self.menu_config,
+            panel_origin: self.panel_origin,
             bluetooth: self.bluetooth.clone().unwrap_or_default(),
             schedules: self.schedules.clone().unwrap_or_default(),
         }
@@ -575,14 +605,20 @@ impl ButtonEventHandler {
 
         // Read `improv` first, then let it retire an outstanding request: a change in either
         // direction is the confirmation we were waiting for.
-        let improv = MenuContext::from_status(status, false, self.menu_config).improv;
+        let improv =
+            MenuContext::from_status(status, false, self.menu_config, self.panel_origin).improv;
         if let Some(request) = self.wifi_request {
             if !request.is_outstanding(improv, Instant::now()) {
                 self.wifi_request = None;
             }
         }
         self.menu_context =
-            MenuContext::from_status(status, self.wifi_request.is_some(), self.menu_config);
+            MenuContext::from_status(
+                status,
+                self.wifi_request.is_some(),
+                self.menu_config,
+                self.panel_origin,
+            );
 
         // The menu is a full-screen takeover, and the machine can become busy underneath it --
         // a schedule can start a routine, and so can the comms processor. The busy condition is
@@ -784,6 +820,21 @@ impl ButtonEventHandler {
                 let command = menu::confirm_editor(id, value, &self.menu_config);
                 if let MenuId::EditParameter { position, .. } = id {
                     self.values.set(position as usize, value);
+                }
+                // The panel's trim is this task's too, and unlike a parameter it is written to
+                // flash. Not from here, which is not async: the flag is what the task loop
+                // acts on, exactly as `schedules_dirty` is. Applied locally in the same breath
+                // so the row and the panel do not disagree in the frame after the press.
+                match id {
+                    MenuId::EditPanelOriginX => {
+                        self.panel_origin.x = value as u8;
+                        self.panel_origin_dirty = true;
+                    }
+                    MenuId::EditPanelOriginY => {
+                        self.panel_origin.y = value as u8;
+                        self.panel_origin_dirty = true;
+                    }
+                    _ => {}
                 }
                 defmt::info!("Menu: confirmed editor at {}", value);
                 self.pop_menu();
@@ -1191,16 +1242,45 @@ pub async fn button_controller_task(
     // `main_task`, which is where the store is created -- exactly as `routine_repository` is.
     // The global stays for the TFT task, which runs on core 1 and is spawned before that.
     schedule_store: &'static crate::ScheduleStoreMutex,
+    // The panel's trim. Owned here rather than by the controller: it has a settings key of
+    // its own, no `MachineCommand`, and nothing outside this firmware's own screens has any
+    // use for it. Passed like the two stores above, and created in the same place.
+    panel_origin_store: &'static crate::PanelOriginStoreMutex,
     checkin: variegated_checkin::CheckinHandle,
     menu_sender: MenuSender,
     menu_config_sender: crate::menu::MenuConfigSender,
 ) {
     let mut recognizer = ButtonEventRecognizer::new();
     let mut handler = ButtonEventHandler::new();
-    // The last projection sent to the displays, so an unchanged republish costs nothing.
-    let mut menu_config_published: Option<crate::menu::MenuConfigSnapshot> = None;
 
     defmt::info!("Button controller task started");
+
+    // The panel's trim, and one publish of it before anything else.
+    //
+    // Published here rather than left to the first `Configuration`, which is up to ten
+    // seconds away: without it the panel would come up at the compiled default and then jump
+    // to the trimmed position once the controller got around to republishing. A machine that
+    // has been trimmed should come up trimmed.
+    //
+    // A read failure is the store's own "nothing stored yet", which `load_settings` reports
+    // as the default -- the value the firmware has always drawn at.
+    let origin = panel_origin_store
+        .lock()
+        .await
+        .load_settings()
+        .await
+        .unwrap_or_default();
+    defmt::info!("Panel origin: {}, {}", origin.x, origin.y);
+    handler.set_panel_origin(origin);
+
+    // The last projection sent to the displays, so an unchanged republish costs nothing. It
+    // starts at the trim's publish above rather than at `None`, which is what makes that
+    // publish the *first* rather than one that is immediately repeated.
+    let mut menu_config_published = {
+        let snapshot = handler.menu_config_snapshot();
+        menu_config_sender.send(snapshot.clone());
+        Some(snapshot)
+    };
 
     mcp23017.set_pin_pullup(ROUTINE_BUTTON_0 as u8, true).await.unwrap();
     mcp23017.set_pin_pullup(ROUTINE_BUTTON_1 as u8, true).await.unwrap();
@@ -1343,6 +1423,21 @@ pub async fn button_controller_task(
         // command. Gated on the dirty flag rather than run every iteration, because building
         // the snapshot clones two lists and this loop runs at 100 Hz.
         if handler.take_schedules_dirty() {
+            let snapshot = handler.menu_config_snapshot();
+            if Some(&snapshot) != menu_config_published.as_ref() {
+                menu_config_sender.send(snapshot.clone());
+                menu_config_published = Some(snapshot);
+            }
+        }
+
+        // The panel's trim, on confirm. One write per confirm rather than per press: a press
+        // moves the picture, which the display task is already showing live from the editor's
+        // value on the menu watch, and only confirming makes it survive a reboot.
+        if let Some(origin) = handler.take_dirty_panel_origin() {
+            let mut store = panel_origin_store.lock().await;
+            if let Err(e) = store.save_settings(&origin).await {
+                defmt::error!("Failed to save panel origin: {}", e);
+            }
             let snapshot = handler.menu_config_snapshot();
             if Some(&snapshot) != menu_config_published.as_ref() {
                 menu_config_sender.send(snapshot.clone());

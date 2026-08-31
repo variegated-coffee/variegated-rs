@@ -20,6 +20,7 @@ use embassy_time::{Duration, Instant};
 use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameter};
 use variegated_controller_lib::scale_calibration::ScaleCalibration;
 use variegated_controller_types::bluetooth::BluetoothPeripheralList;
+use variegated_controller_types::panel::PanelOrigin;
 use variegated_controller_types::{
     BoilerIndex, GroupBrewControlMode, ImprovState, MachineCommand, MachineMode, RoutineIndex,
     Status, TemperatureType,
@@ -96,6 +97,15 @@ pub enum MenuId {
     /// One frame for pressure, flow and duty rather than three, because the mode decides
     /// which quantity exists -- see [`MenuItemKind::BrewTarget`].
     EditBrewTarget,
+    /// Trimming where the panel's content sits inside the bezel, horizontally.
+    ///
+    /// Two frames rather than one two-field editor: the time editor spends button 3 on
+    /// switching field and has no cancel as a result, and an alignment is a thing you want to
+    /// be able to back out of. Two ordinary number editors keep 3 and 4 meaning confirm and
+    /// cancel.
+    EditPanelOriginX,
+    /// The same, vertically.
+    EditPanelOriginY,
     /// Scale actions: tare, and calibration where the fitted scale supports it.
     Scale,
     /// What the radio is connected to. Read-only.
@@ -140,7 +150,9 @@ impl MenuId {
             MenuId::EditParameter { .. }
             | MenuId::EditBrewTemperature
             | MenuId::EditSteamTemperature
-            | MenuId::EditBrewTarget => MenuKind::NumberEditor,
+            | MenuId::EditBrewTarget
+            | MenuId::EditPanelOriginX
+            | MenuId::EditPanelOriginY => MenuKind::NumberEditor,
             MenuId::EditScheduleTime(_) => MenuKind::TimeEditor,
             MenuId::Root
             | MenuId::Settings
@@ -169,6 +181,14 @@ pub enum MenuItemKind {
     BrewTemperature,
     /// Edits the steam boiler setpoint.
     SteamTemperature,
+    /// Trims where the panel's content sits inside the bezel, horizontally.
+    ///
+    /// Unlike every other row here it changes nothing about the machine -- only about where
+    /// this screen draws. It is in the menu because that is the only place the judgement can
+    /// be made: you are looking at the thing you are aligning.
+    PanelOriginX,
+    /// The same, vertically.
+    PanelOriginY,
     /// Cycles the group's brew control mode.
     ///
     /// Through a curated four of [`GroupBrewControlMode`]'s ten, not all of them: the six
@@ -299,6 +319,14 @@ const SETTINGS_ITEMS: &[MenuItem] = &[
     MenuItem { label: "Wi-Fi Setup", kind: MenuItemKind::WifiProvisioning },
     MenuItem { label: "Wi-Fi Info", kind: MenuItemKind::OpenWifiInfo },
     MenuItem { label: "Bluetooth", kind: MenuItemKind::OpenBluetooth },
+    // Last, and not because they matter least: this list is ordered "the numbers you change
+    // while tasting first", and where the bezel sits is set once and then never again.
+    //
+    // It is here at all -- rather than being initial configuration, which section 2 of
+    // MENU-STRUCTURE.md would exclude -- because it is judged by eye from in front of the
+    // machine. The panel is the only place the judgement can be made.
+    MenuItem { label: "Screen X", kind: MenuItemKind::PanelOriginX },
+    MenuItem { label: "Screen Y", kind: MenuItemKind::PanelOriginY },
 ];
 
 /// Scale actions. **Tare first, and it is the only one every scale can do.**
@@ -622,6 +650,8 @@ pub fn row_count(menu: MenuId, data: &MenuData) -> usize {
         | MenuId::EditBrewTemperature
         | MenuId::EditSteamTemperature
         | MenuId::EditBrewTarget
+        | MenuId::EditPanelOriginX
+        | MenuId::EditPanelOriginY
         | MenuId::EditScheduleTime(_) => 0,
     }
 }
@@ -711,6 +741,8 @@ pub fn row<'a>(menu: MenuId, index: usize, data: &MenuData<'a>) -> Option<MenuRo
         | MenuId::EditBrewTemperature
         | MenuId::EditSteamTemperature
         | MenuId::EditBrewTarget
+        | MenuId::EditPanelOriginX
+        | MenuId::EditPanelOriginY
         | MenuId::EditScheduleTime(_) => None,
     }
 }
@@ -766,6 +798,11 @@ pub fn title<'a>(menu: MenuId, data: &MenuData<'a>) -> &'a str {
         // and threading one in for this alone would change three call sites -- the editor is
         // seeded from the row, so if it is open at all the mode had a target when it opened.
         MenuId::EditBrewTarget => "Brew target",
+        // The row's own label, unchanged: while this editor is open the panel is drawn at the
+        // value being dialled, so the title is one of the things moving. Naming the axis is
+        // what says which of the two is moving it.
+        MenuId::EditPanelOriginX => "Screen X",
+        MenuId::EditPanelOriginY => "Screen Y",
         MenuId::Scale => "Scale",
         MenuId::WifiInfo => "Wi-Fi Info",
         MenuId::Bluetooth => "Bluetooth",
@@ -816,6 +853,10 @@ pub fn editor_unit(menu: MenuId, data: &MenuData) -> Option<ParameterUnit> {
             .routine
             .and_then(|r| r.parameters().get(position as usize))
             .and_then(|p| p.unit),
+        // Listed rather than left to the wildcard, so that the absence reads as a decision:
+        // these are pixels, and `ParameterUnit` is append-only and shared with every stored
+        // routine. A display's own measure has no business in it.
+        MenuId::EditPanelOriginX | MenuId::EditPanelOriginY => None,
         _ => None,
     }
 }
@@ -922,6 +963,14 @@ pub struct MenuContext {
     pub wifi: Option<WifiInfo>,
     /// Everything the menu reads out of `Configuration`.
     pub config: MenuConfig,
+    /// Where the panel's content sits inside the bezel's aperture.
+    ///
+    /// **Not on [`MenuConfig`], and not an `Option`.** It comes from a settings key of its
+    /// own rather than from `Configuration`, so `MenuConfig::from_configuration` could not
+    /// produce it -- a field that constructor left unset would be a trap. And unlike a boiler
+    /// ceiling there is always a defensible value: the shipped default, before flash has been
+    /// read at all. A row that read `n/a` for a setting that always exists would be lying.
+    pub panel_origin: PanelOrigin,
 }
 
 /// What the Wi-Fi info screen reports, once staleness has been ruled out.
@@ -936,8 +985,13 @@ pub struct WifiInfo {
 }
 
 impl MenuContext {
-    /// Read the projection out of a status, plus the two things a status does not carry.
-    pub fn from_status(status: &Status, wifi_pending: bool, config: MenuConfig) -> Self {
+    /// Read the projection out of a status, plus the three things a status does not carry.
+    pub fn from_status(
+        status: &Status,
+        wifi_pending: bool,
+        config: MenuConfig,
+        panel_origin: PanelOrigin,
+    ) -> Self {
         // Absent *or* stale reads as "nothing to report" -- see the note on `wifi`. A
         // `comms_status` with no age has never been received at all.
         let fresh = status
@@ -960,6 +1014,7 @@ impl MenuContext {
                 ip: c.wifi_ip,
             }),
             config,
+            panel_origin,
         }
     }
 
@@ -1091,6 +1146,18 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
                     MenuValue::Number { value, unit: Some(ParameterUnit::Celsius) }
                 }
                 None => MenuValue::Text(UNAVAILABLE),
+            }),
+            // Never `n/a`: the origin always has a value, because the shipped default is one.
+            // No unit either -- these are pixels, and `ParameterUnit` is append-only and
+            // shared with every stored routine, so it is not the place for a display's own
+            // measure.
+            MenuItemKind::PanelOriginX => Some(MenuValue::Number {
+                value: ctx.panel_origin.x as f32,
+                unit: None,
+            }),
+            MenuItemKind::PanelOriginY => Some(MenuValue::Number {
+                value: ctx.panel_origin.y as f32,
+                unit: None,
             }),
             // `n/a` rather than `Off` before the first `Configuration`: this row says what
             // the pump is doing, and "off" is a claim rather than an absence.
@@ -1432,6 +1499,23 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
                 },
                 None => MenuActivation::Refuse,
             },
+            // Never refused: the origin always has a value. The bounds come from the crate
+            // that owns the geometry -- the travel is the panel minus the window -- so the
+            // menu cannot offer a trim the drawing would have to clamp back.
+            MenuItemKind::PanelOriginX => MenuActivation::Edit {
+                menu: MenuId::EditPanelOriginX,
+                value: panel_origin_adjustable(
+                    ctx.panel_origin.x,
+                    variegated_gs3_panel::Window::MAX_ORIGIN.x,
+                ),
+            },
+            MenuItemKind::PanelOriginY => MenuActivation::Edit {
+                menu: MenuId::EditPanelOriginY,
+                value: panel_origin_adjustable(
+                    ctx.panel_origin.y,
+                    variegated_gs3_panel::Window::MAX_ORIGIN.y,
+                ),
+            },
             // Mode only, with no values update: this row changes *which* target the group
             // uses, and carrying a value would also overwrite the one the row below edits.
             //
@@ -1655,6 +1739,11 @@ pub fn confirm_editor(menu: MenuId, value: f32, config: &MenuConfig) -> Option<M
         }
         // A routine parameter's value never leaves the button task until the routine runs.
         MenuId::EditParameter { .. } => None,
+        // **Committed by the button task, not here.** The panel's trim is one machine's
+        // physical alignment: it has a settings key of its own, no `MachineCommand`, and no
+        // reason to reach the controller at all. `handle_editor_press` writes it and
+        // republishes, the way it already writes a routine parameter into `values`.
+        MenuId::EditPanelOriginX | MenuId::EditPanelOriginY => None,
         // **Committed by `handle_time_editor_press`, not here.** This function's input is an
         // `f32` and a time is two `u8`s, so it could not be reached without a wider parameter
         // anyway -- and widening it would still not be enough. `MenuData::schedules` holds
@@ -1676,6 +1765,18 @@ pub fn confirm_editor(menu: MenuId, value: f32, config: &MenuConfig) -> Option<M
         | MenuId::Schedules
         | MenuId::ScheduleItem(_) => None,
     }
+}
+
+/// An editor for one axis of the panel's trim.
+///
+/// One pixel per press, and a pixel is the finest the panel can be moved -- so unlike every
+/// other editor here the step is not a judgement about how fast a user wants to travel, it is
+/// the only step there is. Thirty-eight presses cross the whole range.
+///
+/// `max` is passed rather than assumed, because the two axes have different travel and the
+/// crate that owns the geometry is what knows them.
+fn panel_origin_adjustable(current: u8, max: i32) -> Adjustable {
+    Adjustable::new(current as f32, 0.0, max as f32, 1.0)
 }
 
 /// An editor for a quantity identified by its unit.
@@ -1838,6 +1939,16 @@ pub type MenuSender = embassy_sync::watch::Sender<
 pub struct MenuConfigSnapshot {
     /// The scalars. See [`MenuConfig`].
     pub config: MenuConfig,
+    /// Where the panel's content sits inside the bezel's aperture.
+    ///
+    /// Here rather than on [`MenuConfig`], whose contract is that
+    /// `MenuConfig::from_configuration` builds all of it: this comes from a settings key of
+    /// its own, so a field that constructor did not set would be a trap for the next person
+    /// to add one.
+    ///
+    /// It rides this watch rather than getting one of its own because it changes about as
+    /// often as a machine is installed, and the display tasks already take this one.
+    pub panel_origin: PanelOrigin,
     /// The Bluetooth associations, for that submenu's rows. At most four.
     pub bluetooth: BluetoothPeripheralList,
     /// Every stored schedule, for [`MenuId::Schedules`] and the menus below it.

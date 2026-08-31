@@ -11,7 +11,7 @@ use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use u8g2_fonts::types::{HorizontalAlignment, VerticalPosition};
 
 use crate::draw;
-use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, at, body_right, hairline_v};
+use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, Window, hairline_v};
 use crate::palette;
 use crate::type_scale;
 use crate::view::{ExitView, RoutineView};
@@ -48,18 +48,18 @@ const VALUES_BASELINE: i32 = 44;
 /// Baseline of the pressure-and-water row. `inb16` inks 16 px above it.
 const SECOND_ROW_BASELINE: i32 = 66;
 
-pub(crate) fn draw<D>(view: &RoutineView<'_>, target: &mut D) -> Result<(), D::Error>
+pub(crate) fn draw<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    spine(view, target)?;
+    spine(view, w, target)?;
     hairline_v(
-        at(SPINE_DIVIDER_DX, PAD_TOP),
+        w.at(SPINE_DIVIDER_DX, PAD_TOP),
         (BOTTOM - PAD_TOP) as u32,
         target,
     )?;
-    values(view, target)?;
-    exit_footer(view, target)?;
+    values(view, w, target)?;
+    exit_footer(view, w, target)?;
     Ok(())
 }
 
@@ -73,14 +73,14 @@ fn window_start(current: usize, count: usize) -> usize {
     current.saturating_sub(1).min(last_start)
 }
 
-fn spine<D>(view: &RoutineView<'_>, target: &mut D) -> Result<(), D::Error>
+fn spine<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     draw::run(
         &type_scale::CHIP,
         format_args!("{}", view.name),
-        at(PAD_LEFT, PAD_TOP),
+        w.at(PAD_LEFT, PAD_TOP),
         VerticalPosition::Top,
         palette::INK_MUTED,
         target,
@@ -89,7 +89,7 @@ where
     let start = window_start(view.current_step, view.steps.len());
     for (row, index) in (start..view.steps.len()).take(VISIBLE_STEPS).enumerate() {
         let dy = FIRST_STEP_DY + row as i32 * STEP_PITCH;
-        let top = at(PAD_LEFT, dy);
+        let top = w.at(PAD_LEFT, dy);
         let step = &view.steps[index];
 
         if index == view.current_step {
@@ -148,7 +148,7 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("{total:.1} s TOTAL"),
-            at(PAD_LEFT, BOTTOM),
+            w.at(PAD_LEFT, BOTTOM),
             VerticalPosition::Bottom,
             palette::INK_FAINT,
             target,
@@ -158,7 +158,7 @@ where
     Ok(())
 }
 
-fn values<D>(view: &RoutineView<'_>, target: &mut D) -> Result<(), D::Error>
+fn values<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -169,12 +169,12 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("{label}"),
-            at(dx, PAD_TOP),
+            w.at(dx, PAD_TOP),
             VerticalPosition::Top,
             palette::INK_MUTED,
             target,
         );
-        let baseline = at(dx, VALUES_BASELINE);
+        let baseline = w.at(dx, VALUES_BASELINE);
         let after = widgets::value(
             &type_scale::PRIMARY_30,
             value,
@@ -196,7 +196,7 @@ where
 
     // Pressure against what it was asked for, and water in. Both at the number floor: they
     // are context for the two figures above, not the figures themselves.
-    let baseline = at(RIGHT_DX, SECOND_ROW_BASELINE);
+    let baseline = w.at(RIGHT_DX, SECOND_ROW_BASELINE);
     let after = widgets::value(
         &type_scale::NUMBER_FLOOR,
         view.pressure_bar,
@@ -226,7 +226,7 @@ where
         );
     }
 
-    let baseline = at(WATER_DX, SECOND_ROW_BASELINE);
+    let baseline = w.at(WATER_DX, SECOND_ROW_BASELINE);
     let after = widgets::value(
         &type_scale::NUMBER_FLOOR,
         view.water_in_ml,
@@ -248,12 +248,12 @@ where
     Ok(())
 }
 
-fn exit_footer<D>(view: &RoutineView<'_>, target: &mut D) -> Result<(), D::Error>
+fn exit_footer<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let left = at(RIGHT_DX, 0).x;
-    let right = body_right();
+    let left = w.at(RIGHT_DX, 0).x;
+    let right = w.body_right();
 
     match view.exit {
         ExitView::Phrase(phrase) => {
@@ -263,7 +263,7 @@ where
             draw::run(
                 &type_scale::LABEL,
                 format_args!("{phrase}"),
-                at(RIGHT_DX, BOTTOM),
+                w.at(RIGHT_DX, BOTTOM),
                 VerticalPosition::Bottom,
                 palette::INK_MUTED,
                 target,
@@ -278,7 +278,7 @@ where
             draw::run(
                 &type_scale::LABEL,
                 format_args!("{phrase}"),
-                at(RIGHT_DX, 88),
+                w.at(RIGHT_DX, 88),
                 VerticalPosition::Top,
                 palette::INK_MUTED,
                 target,
@@ -288,7 +288,7 @@ where
                 Some(value) => draw::aligned(
                     &type_scale::LABEL,
                     format_args!("{:.*} / {:.*}", decimals, value, decimals, threshold),
-                    Point::new(right, at(0, 88).y),
+                    Point::new(right, w.at(0, 88).y),
                     VerticalPosition::Top,
                     HorizontalAlignment::Right,
                     palette::INK,
@@ -297,7 +297,7 @@ where
                 None => draw::aligned(
                     &type_scale::LABEL,
                     format_args!("/ {:.*}", decimals, threshold),
-                    Point::new(right, at(0, 88).y),
+                    Point::new(right, w.at(0, 88).y),
                     VerticalPosition::Top,
                     HorizontalAlignment::Right,
                     palette::INK_FAINT,
@@ -314,7 +314,7 @@ where
             };
             widgets::progress(
                 Rectangle::new(
-                    at(RIGHT_DX, 100),
+                    w.at(RIGHT_DX, 100),
                     Size::new((right - left) as u32, 5),
                 ),
                 palette::pen(quantity),

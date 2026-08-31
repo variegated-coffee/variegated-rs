@@ -40,6 +40,16 @@ pub mod key {
     /// `load_settings` maps that to `Default` -- a silent factory reset of every machine's
     /// boiler setpoints in the field, to buy one string. See the note on this module.
     pub const TIMEZONE: u8 = 4;
+    /// Where the GS3's panel content sits inside the bezel's aperture.
+    ///
+    /// A key of its own for the reason [`TIMEZONE`] gives, and one more: this is one
+    /// machine's physical alignment, so it has no business on a blob that crosses the UART.
+    ///
+    /// The number is allocated here rather than in the GS3's own crate even though only that
+    /// firmware writes it, because this module is the record of what is in the settings
+    /// range -- a key allocated somewhere else is a key the next allocation cannot see, and
+    /// two stores that pick the same number silently overwrite each other.
+    pub const PANEL_ORIGIN: u8 = 5;
 }
 
 /// The flash range every settings store lives in.

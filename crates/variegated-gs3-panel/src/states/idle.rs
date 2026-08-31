@@ -10,7 +10,7 @@ use embedded_graphics::primitives::{Circle, PrimitiveStyle};
 use u8g2_fonts::types::{HorizontalAlignment, VerticalPosition};
 
 use crate::draw;
-use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, at, body_right, hairline_h, hairline_v};
+use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, Window, hairline_h, hairline_v};
 use crate::palette;
 use crate::type_scale;
 use crate::view::{IdleView, Readiness};
@@ -46,41 +46,41 @@ const STEAM_PRESSURE_BASELINE: i32 = 84;
 /// alone; wider and the deviation stops being the thing the number above is read against.
 const AT_TEMPERATURE_C: f32 = 0.5;
 
-pub(crate) fn draw<D>(view: &IdleView<'_>, target: &mut D) -> Result<(), D::Error>
+pub(crate) fn draw<D>(view: &IdleView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     // The strip's divider. Everything else lives to the left of it.
-    let right = body_right();
+    let right = w.body_right();
     hairline_v(
-        Point::new(right, at(0, PAD_TOP).y),
+        Point::new(right, w.at(0, PAD_TOP).y),
         (BOTTOM - PAD_TOP) as u32,
         target,
     )?;
     let content_right = right - 10;
 
-    top_rule(view, content_right, target);
-    brew_cell(view, target)?;
+    top_rule(view, w, content_right, target);
+    brew_cell(view, w, target)?;
 
     hairline_v(
-        Point::new(at(CELL_DIVIDER_DX, 0).x, at(0, 26).y),
+        Point::new(w.at(CELL_DIVIDER_DX, 0).x, w.at(0, 26).y),
         (RULE_DY - 32) as u32,
         target,
     )?;
 
-    steam_cell(view, target)?;
+    steam_cell(view, w, target)?;
 
     hairline_h(
-        at(PAD_LEFT, RULE_DY),
-        (content_right - at(PAD_LEFT, 0).x) as u32,
+        w.at(PAD_LEFT, RULE_DY),
+        (content_right - w.at(PAD_LEFT, 0).x) as u32,
         target,
     )?;
-    readiness_row(view, content_right, target)?;
+    readiness_row(view, w, content_right, target)?;
 
     Ok(())
 }
 
-fn top_rule<D>(view: &IdleView<'_>, content_right: i32, target: &mut D)
+fn top_rule<D>(view: &IdleView<'_>, w: Window, content_right: i32, target: &mut D)
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -93,7 +93,7 @@ where
                 "{:02}:{:02}:{:02}",
                 clock.hour, clock.minute, clock.second
             ),
-            at(PAD_LEFT, PAD_TOP),
+            w.at(PAD_LEFT, PAD_TOP),
             VerticalPosition::Top,
             palette::INK_MUTED,
             target,
@@ -103,7 +103,7 @@ where
         draw::aligned(
             &type_scale::LABEL,
             format_args!("NEXT OFF {:02}:{:02}", off.hour, off.minute),
-            Point::new(content_right, at(0, PAD_TOP + 1).y),
+            Point::new(content_right, w.at(0, PAD_TOP + 1).y),
             VerticalPosition::Top,
             HorizontalAlignment::Right,
             palette::INK_FAINT,
@@ -112,20 +112,20 @@ where
     }
 }
 
-fn brew_cell<D>(view: &IdleView<'_>, target: &mut D) -> Result<(), D::Error>
+fn brew_cell<D>(view: &IdleView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     draw::run(
         &type_scale::LABEL,
         format_args!("BREW"),
-        at(PAD_LEFT, 26),
+        w.at(PAD_LEFT, 26),
         VerticalPosition::Top,
         palette::INK_MUTED,
         target,
     );
 
-    let baseline = at(PAD_LEFT, BREW_BASELINE);
+    let baseline = w.at(PAD_LEFT, BREW_BASELINE);
     let after = widgets::value(
         &type_scale::PRIMARY_46,
         view.brew_temperature,
@@ -154,7 +154,7 @@ where
         let after = draw::run(
             &type_scale::LABEL,
             format_args!("TARGET {setpoint:.1}"),
-            at(PAD_LEFT, TARGET_DY),
+            w.at(PAD_LEFT, TARGET_DY),
             VerticalPosition::Top,
             palette::INK_FAINT,
             target,
@@ -169,7 +169,7 @@ where
             draw::run(
                 &type_scale::LABEL,
                 format_args!("{deviation:+.1}"),
-                Point::new(after + 6, at(0, TARGET_DY).y),
+                Point::new(after + 6, w.at(0, TARGET_DY).y),
                 VerticalPosition::Top,
                 colour,
                 target,
@@ -180,20 +180,20 @@ where
     Ok(())
 }
 
-fn steam_cell<D>(view: &IdleView<'_>, target: &mut D) -> Result<(), D::Error>
+fn steam_cell<D>(view: &IdleView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     draw::run(
         &type_scale::LABEL,
         format_args!("STEAM"),
-        at(STEAM_LEFT_DX, 26),
+        w.at(STEAM_LEFT_DX, 26),
         VerticalPosition::Top,
         palette::INK_MUTED,
         target,
     );
 
-    let baseline = at(STEAM_LEFT_DX, STEAM_BASELINE);
+    let baseline = w.at(STEAM_LEFT_DX, STEAM_BASELINE);
     let after = widgets::value(
         &type_scale::PRIMARY_30,
         view.steam_temperature,
@@ -214,7 +214,7 @@ where
         target,
     );
 
-    let baseline = at(STEAM_LEFT_DX, STEAM_PRESSURE_BASELINE);
+    let baseline = w.at(STEAM_LEFT_DX, STEAM_PRESSURE_BASELINE);
     let after = widgets::value(
         &type_scale::NUMBER_FLOOR,
         view.steam_pressure,
@@ -238,13 +238,14 @@ where
 
 fn readiness_row<D>(
     view: &IdleView<'_>,
+    w: Window,
     content_right: i32,
     target: &mut D,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let baseline = at(PAD_LEFT, BOTTOM);
+    let baseline = w.at(PAD_LEFT, BOTTOM);
 
     // Status is stated, not implied: the word carries it and the dot only reinforces.
     let (word, colour) = match view.readiness {

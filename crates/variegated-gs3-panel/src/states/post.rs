@@ -10,7 +10,7 @@ use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle, Rectangle};
 use u8g2_fonts::types::VerticalPosition;
 
 use crate::draw;
-use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, at, hairline_v};
+use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, Window, hairline_v};
 use crate::palette;
 use crate::type_scale;
 use crate::view::{Outcome, PostView};
@@ -42,18 +42,18 @@ const CURVE_DY: i32 = PAD_TOP;
 
 const LEGEND_DY: i32 = CURVE_DY + CURVE_HEIGHT + 8;
 
-pub(crate) fn draw<D>(view: &PostView<'_>, target: &mut D) -> Result<(), D::Error>
+pub(crate) fn draw<D>(view: &PostView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    left_column(view, target)?;
-    hairline_v(at(DIVIDER_DX, PAD_TOP), (BOTTOM - PAD_TOP) as u32, target)?;
-    curve(view, target)?;
-    legend(view, target)?;
+    left_column(view, w, target)?;
+    hairline_v(w.at(DIVIDER_DX, PAD_TOP), (BOTTOM - PAD_TOP) as u32, target)?;
+    curve(view, w, target)?;
+    legend(view, w, target)?;
     Ok(())
 }
 
-fn left_column<D>(view: &PostView<'_>, target: &mut D) -> Result<(), D::Error>
+fn left_column<D>(view: &PostView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -61,19 +61,19 @@ where
         Outcome::Complete => ("COMPLETE", palette::OK),
         Outcome::Aborted => ("ABORTED", palette::DANGER),
     };
-    Circle::new(at(PAD_LEFT, PAD_TOP + 2), 6)
+    Circle::new(w.at(PAD_LEFT, PAD_TOP + 2), 6)
         .into_styled(PrimitiveStyle::with_fill(colour))
         .draw(target)?;
     draw::run(
         &type_scale::STATE_WORD,
         format_args!("{word}"),
-        at(PAD_LEFT + 12, PAD_TOP),
+        w.at(PAD_LEFT + 12, PAD_TOP),
         VerticalPosition::Top,
         colour,
         target,
     );
 
-    let baseline = at(PAD_LEFT, TIME_BASELINE);
+    let baseline = w.at(PAD_LEFT, TIME_BASELINE);
     let after = draw::run(
         &type_scale::PRIMARY_27,
         format_args!("{:.1}", view.shot_seconds),
@@ -91,7 +91,7 @@ where
         target,
     );
 
-    let baseline = at(PAD_LEFT, WEIGHT_BASELINE);
+    let baseline = w.at(PAD_LEFT, WEIGHT_BASELINE);
     let after = widgets::value(
         &type_scale::NUMBER_FLOOR,
         view.weight_out_g,
@@ -112,7 +112,7 @@ where
 
     // The ratio needs both ends. With no scale paired there is no weight out and therefore
     // no ratio, and the row states the dose alone rather than inventing one.
-    let baseline = at(PAD_LEFT, RATIO_BASELINE);
+    let baseline = w.at(PAD_LEFT, RATIO_BASELINE);
     match (view.weight_out_g, view.dose_g) {
         (Some(out), Some(dose)) if dose > 0.0 => {
             let after = draw::run(
@@ -154,7 +154,7 @@ where
     }
 
     // Provenance: which routine, and how much water went in to produce the figures above.
-    let baseline = at(PAD_LEFT, BOTTOM);
+    let baseline = w.at(PAD_LEFT, BOTTOM);
     let mut x = baseline.x;
     if let Some(routine) = view.routine {
         x = draw::run(
@@ -197,7 +197,7 @@ fn time_x(seconds: f32, total: f32) -> i32 {
     ((seconds / total).clamp(0.0, 1.0) * (CURVE_WIDTH - 1) as f32) as i32
 }
 
-fn curve<D>(view: &PostView<'_>, target: &mut D) -> Result<(), D::Error>
+fn curve<D>(view: &PostView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -208,7 +208,7 @@ where
         return Ok(());
     }
 
-    let origin = at(RIGHT_DX, CURVE_DY);
+    let origin = w.at(RIGHT_DX, CURVE_DY);
     let total = trace.elapsed_seconds();
 
     // Phase bands behind everything. They are the answer to "why did it do that", and a
@@ -290,14 +290,14 @@ where
     Ok(())
 }
 
-fn legend<D>(view: &PostView<'_>, target: &mut D) -> Result<(), D::Error>
+fn legend<D>(view: &PostView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     // A pen is never identified by colour alone: every swatch carries its word, and the
     // pressure pen carries its peak because that is the figure the curve is read for.
-    let mut x = at(RIGHT_DX, 0).x;
-    let y = at(0, LEGEND_DY).y;
+    let mut x = w.at(RIGHT_DX, 0).x;
+    let y = w.at(0, LEGEND_DY).y;
 
     Rectangle::new(Point::new(x, y + 3), Size::new(7, 2))
         .into_styled(PrimitiveStyle::with_fill(palette::PEN_PRESSURE))
@@ -341,7 +341,7 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("FIRST DROP {first_drop:.1} s"),
-            at(RIGHT_DX, BOTTOM),
+            w.at(RIGHT_DX, BOTTOM),
             VerticalPosition::Bottom,
             palette::INK_FAINT,
             target,

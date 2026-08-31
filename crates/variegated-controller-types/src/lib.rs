@@ -93,6 +93,7 @@ pub mod machine_definition;
 pub mod machine_mode;
 pub mod peripherals;
 pub mod routines;
+pub mod panel;
 pub mod schedule;
 pub mod shot_log;
 // `shot_state` is gone from here. It was an implementation -- a state machine with a
@@ -116,6 +117,7 @@ pub use controller_variants::*;
 pub use duty_cycle::*;
 pub use machine_definition::*;
 pub use machine_mode::*;
+pub use panel::*;
 pub use peripherals::*;
 pub use routines::core::*;
 pub use routines::parameters::*;

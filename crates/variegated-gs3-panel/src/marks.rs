@@ -19,7 +19,7 @@
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 
-use crate::geometry::{MARK_PITCH, MARK_SIZE, strip_origin};
+use crate::geometry::{MARK_PITCH, MARK_SIZE, Window};
 use crate::palette;
 use crate::view::MarkState;
 
@@ -167,11 +167,15 @@ where
 }
 
 /// The vertical strip at the right edge, used by every state but free-brewing.
-pub fn draw_column<D>(states: &[MarkState; 5], target: &mut D) -> Result<(), D::Error>
+pub fn draw_column<D>(
+    states: &[MarkState; 5],
+    w: Window,
+    target: &mut D,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let origin = strip_origin();
+    let origin = w.strip_origin();
     for (i, state) in states.iter().enumerate() {
         draw_one(i, *state, origin + Point::new(0, i as i32 * MARK_PITCH), target)?;
     }
