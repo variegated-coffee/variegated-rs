@@ -1,9 +1,12 @@
 //! The panel's type: section 3 of the display specification.
 //!
 //! Two families, split by kind. **Helvetica for words** -- labels, units, state words --
-//! because at 8 and 10 px those bitmaps were drawn by hand for exactly those sizes and read
-//! better than any grid font. Weight carries rank within a size rather than a size change:
-//! [`STEP_CURRENT`] against [`STEP_OTHER`], [`CHIP`] against [`LABEL`].
+//! because those bitmaps were drawn by hand for exactly these sizes and read better than any
+//! grid font. Weight carries rank within a size rather than a size change:
+//! [`STEP_CURRENT`] against [`STEP_OTHER`].
+//!
+//! The word tier was raised after the panel was read on the machine; see the note above
+//! [`STATE_WORD`] for what failed and why the floor is now bold ten.
 //!
 //! **Inconsolata Bold for numbers**, in the digits-only `_mn` cuts. Dropping the alphabet
 //! keeps seven sizes affordable in flash, and the `_mn` cuts are monospaced -- so a value
@@ -38,9 +41,9 @@ use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{Circle, Line, PrimitiveStyle, Rectangle};
 use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts::{
-    u8g2_font_helvB08_tr, u8g2_font_helvB10_tr, u8g2_font_helvR08_tr, u8g2_font_helvR10_tr,
-    u8g2_font_helvR12_tr, u8g2_font_helvR14_tr, u8g2_font_inb16_mn, u8g2_font_inb19_mn,
-    u8g2_font_inb21_mn, u8g2_font_inb24_mn, u8g2_font_inb33_mn, u8g2_font_inb38_mn,
+    u8g2_font_helvB10_tr, u8g2_font_helvB12_tr, u8g2_font_helvB14_tr, u8g2_font_helvB24_tr,
+    u8g2_font_helvR12_tr, u8g2_font_inb16_mn, u8g2_font_inb19_mn, u8g2_font_inb21_mn,
+    u8g2_font_inb24_mn, u8g2_font_inb33_mn, u8g2_font_inb38_mn,
 };
 
 /// Build a face with the panel's one global setting applied. See the module note.
@@ -95,27 +98,51 @@ pub const SECONDARY_19: FontRenderer = face::<u8g2_font_inb19_mn>();
 pub const NUMBER_FLOOR: FontRenderer = face::<u8g2_font_inb16_mn>();
 
 // --- Words -------------------------------------------------------------------------------
+//
+// **The 8 px tier is retired.** It was read off the machine and it does not survive: `150 s
+// TOTAL` was invisible, and `mL in`, `bar / 3.0`, `g` and `ENDS AT 10.0 S` were marginal even
+// where no badge print crossed them. Curved glass, glare and the absence of anti-aliasing
+// each take a bite, and eight pixels has nothing spare. Nor was the problem luminance -- the
+// greys were lifted first and it changed nothing. At that size the problem is stroke count.
+//
+// The floor for a word is now `helvB10_tr`, and **bold**, because regular is what disappeared.
+// Everything above it moves up a rung with it. The height came from deleting duplication
+// rather than from anywhere else: the exit condition was stated three ways, the routine name
+// twice, and the running total was never read.
 
-/// READY, HEATING, FREE BREW, COMPLETE; the running step; the idle clock.
-pub const STATE_WORD: FontRenderer = face::<u8g2_font_helvB10_tr>();
+/// READY, COMPLETE, the running step's name. The old floor, back where it belongs.
+pub const STATE_WORD: FontRenderer = face::<u8g2_font_helvB12_tr>();
 
 /// The routine step the machine is in.
 pub const STEP_CURRENT: FontRenderer = STATE_WORD;
 
-/// Steps either side of the current one; residual temperatures.
-pub const STEP_OTHER: FontRenderer = face::<u8g2_font_helvR10_tr>();
+/// Steps either side of the current one, and any secondary word.
+pub const STEP_OTHER: FontRenderer = face::<u8g2_font_helvR12_tr>();
 
-/// The ON schedule chip, the free-brew mode chip, the routine name.
-pub const CHIP: FontRenderer = face::<u8g2_font_helvB08_tr>();
+/// The answer to the only question the idle state is asked.
+///
+/// One face above the state word, and used for exactly one thing: `READY` and `HEATING` are
+/// the only elements on this panel that change what the operator does next, and on the
+/// machine they were beaten for prominence by the clock, both temperatures, the target and
+/// the steam pressure.
+pub const ANSWER: FontRenderer = face::<u8g2_font_helvB24_tr>();
+
+/// A chip's word, and a section header.
+///
+/// The same face as [`LABEL`] now: the specification had them one rung apart at 8 and 8 bold,
+/// and with the floor at 10 there is nowhere below to put a label. Two names for one face
+/// because the two roles still differ -- a chip sits on a fill, a label does not -- and a
+/// future rung would want to move one without the other.
+pub const CHIP: FontRenderer = face::<u8g2_font_helvB10_tr>();
 
 /// Every uppercase label, unit, rail tick and provenance line.
-pub const LABEL: FontRenderer = face::<u8g2_font_helvR08_tr>();
+pub const LABEL: FontRenderer = face::<u8g2_font_helvB10_tr>();
 
-/// A unit beside a 27 px number, where an 8 px one would vanish.
-pub const UNIT_12: FontRenderer = face::<u8g2_font_helvR12_tr>();
+/// A unit beside a 21--30 px number. Bold, like everything else at the floor.
+pub const UNIT_12: FontRenderer = face::<u8g2_font_helvB12_tr>();
 
-/// A unit beside a 46--49 px number.
-pub const UNIT_14: FontRenderer = face::<u8g2_font_helvR14_tr>();
+/// A unit beside the hero clock, which is the one number still large enough to want one.
+pub const UNIT_14: FontRenderer = face::<u8g2_font_helvB14_tr>();
 
 // --- The two glyphs that are drawn rather than typed --------------------------------------
 

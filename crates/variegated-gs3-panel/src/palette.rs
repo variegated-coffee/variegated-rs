@@ -58,7 +58,15 @@ pub const WARN: Rgb565 = hex(0xE9A62B);
 pub const DANGER: Rgb565 = hex(0xFF5A5F);
 
 /// `pen.pressure` -- bar values and traces.
-pub const PEN_PRESSURE: Rgb565 = hex(0xF2564A);
+///
+/// Lifted from the specification's `#F2564A` after the panel was read on the machine: the
+/// pressure figure was legible but visibly behind the weight green and the water blue beside
+/// it, because a saturated red is the lowest-luminance hue an emissive panel can make. Same
+/// hue family, matched in luminance to the weight pen.
+///
+/// It stays clear of [`DANGER`] by that lift, and danger is reserved for the status marks --
+/// nothing else on the panel uses it, so the two never appear together.
+pub const PEN_PRESSURE: Rgb565 = hex(0xFF7A5C);
 
 /// `pen.flowOut` -- the mL/s command and its rail.
 pub const PEN_FLOW_OUT: Rgb565 = hex(0x35B6D6);
@@ -70,7 +78,12 @@ pub const PEN_WATER_IN: Rgb565 = hex(0x6C8FF5);
 pub const PEN_WEIGHT: Rgb565 = hex(0x6FD063);
 
 /// `pen.brewBoiler`.
-pub const PEN_BREW_BOILER: Rgb565 = hex(0xF08A4B);
+///
+/// Lifted from `#F08A4B` for [`PEN_PRESSURE`]'s reason, and one sharper: on the machine the
+/// brew temperature was set sixteen pixels larger than the steam temperature and read as the
+/// weaker of the two, because `#F08A4B` at 46 px lost to `#A88BF0` at 30. On an emissive
+/// panel luminance outranks size, which is the opposite of paper.
+pub const PEN_BREW_BOILER: Rgb565 = hex(0xFFA85C);
 
 /// `pen.steamBoiler`.
 pub const PEN_STEAM_BOILER: Rgb565 = hex(0xA88BF0);
@@ -148,6 +161,40 @@ mod tests {
         assert_eq!((INK.r(), INK.g(), INK.b()), (29, 60, 30));
         // #12171A -> 2, 5, 3
         assert_eq!((TROUGH.r(), TROUGH.g(), TROUGH.b()), (2, 5, 3));
+    }
+
+    /// Ink is the colour of a number with no pen.
+    ///
+    /// A hue means one specific measured quantity and nothing else. On the machine blue had
+    /// become the default colour for a number -- time in step, water in and the exit bar all
+    /// read as the same blue, and so did a shot time and a brew ratio on the post panel --
+    /// at which point colour had stopped doing the one job section 4 gives it.
+    ///
+    /// Time, a percentage, a ratio and a count are not sensed quantities and get ink.
+    #[test]
+    fn only_a_sensed_quantity_gets_a_hue() {
+        use crate::view::Quantity;
+
+        for quantity in [
+            Quantity::Time,
+            Quantity::Percent,
+            Quantity::Temperature,
+            Quantity::Conductivity,
+            Quantity::ExtractionRate,
+            Quantity::ExtractedSolids,
+        ] {
+            assert_eq!(pen(quantity), INK, "{quantity:?} should be ink");
+        }
+
+        for (quantity, expected) in [
+            (Quantity::Pressure, PEN_PRESSURE),
+            (Quantity::FlowRate, PEN_FLOW_OUT),
+            (Quantity::Weight, PEN_WEIGHT),
+            (Quantity::Volume, PEN_WATER_IN),
+        ] {
+            assert_eq!(pen(quantity), expected, "{quantity:?} lost its pen");
+            assert_ne!(pen(quantity), INK, "{quantity:?} should not be ink");
+        }
     }
 
     /// A pen is never identified by colour alone, but two pens that collapsed to the same

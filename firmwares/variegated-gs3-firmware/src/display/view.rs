@@ -422,9 +422,8 @@ pub fn panel_view<'a>(
             brew_setpoint: brew.map(|boiler| boiler.control_state.values.target_temperature),
             steam_temperature: steam.and_then(|boiler| boiler.temperature),
             steam_pressure: steam.and_then(|boiler| boiler.pressure),
+            steam_target_bar: steam.map(|boiler| boiler.control_state.values.target_pressure),
             readiness: readiness(brew, steam),
-            routine: (!scratch.routine_name.is_empty()).then_some(scratch.routine_name.as_str()),
-            dose_g: status.pending_shot_annotations.dose_weight(),
         }),
 
         DisplayMode::Brewing => StateView::FreeBrew(FreeBrewView {
@@ -463,9 +462,6 @@ pub fn panel_view<'a>(
                     .unwrap_or(0) as usize,
                 step_elapsed_s: execution
                     .and_then(|e| e.step_elapsed_time)
-                    .map(|d| d.as_secs_f32()),
-                total_elapsed_s: execution
-                    .and_then(|e| e.total_elapsed_time)
                     .map(|d| d.as_secs_f32()),
                 weight_g: group.and_then(|g| g.output_weight),
                 pressure_bar: group.and_then(|g| g.pressure),

@@ -101,9 +101,8 @@ pub fn idle_ready() -> PanelView<'static> {
             brew_setpoint: Some(93.0),
             steam_temperature: Some(113.4),
             steam_pressure: Some(1.42),
+            steam_target_bar: Some(1.3),
             readiness: Readiness::Ready,
-            routine: Some("LEVER-LIKE"),
-            dose_g: Some(20.0),
         }),
         overlay: None,
     }
@@ -123,13 +122,14 @@ pub fn idle_heating() -> PanelView<'static> {
     view
 }
 
-/// Idle with no scale paired: every gram field reads as no reading.
+/// Idle with no scale paired.
+///
+/// Only the mark changes: with the routine and dose off this panel, nothing else in the idle
+/// state depends on a scale. The fixture is kept because the strip is what the state has to
+/// get right when one is missing.
 pub fn idle_no_scale() -> PanelView<'static> {
     let mut view = idle_ready();
     view.marks[1] = MarkState::Attention;
-    if let StateView::Idle(ref mut idle) = view.state {
-        idle.dose_g = None;
-    }
     view
 }
 
@@ -231,7 +231,6 @@ pub fn routine() -> PanelView<'static> {
             steps: &LEVER_LIKE_STEPS,
             current_step: 1,
             step_elapsed_s: Some(6.2),
-            total_elapsed_s: Some(14.3),
             weight_g: Some(7.1),
             pressure_bar: Some(3.42),
             pressure_target: Some(3.5),
@@ -254,7 +253,6 @@ pub fn routine_scrolled() -> PanelView<'static> {
         routine.steps = &LONG_STEPS;
         routine.current_step = 5;
         routine.step_elapsed_s = Some(19.4);
-        routine.total_elapsed_s = Some(44.8);
     }
     view
 }

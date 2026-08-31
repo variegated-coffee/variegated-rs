@@ -6,13 +6,23 @@
 //! ```
 //!
 //! Writes `target/panel/<name>.png` at 1x -- what the panel emits, pixel for pixel -- and
-//! `<name>@3x.png`, which is the same image nearest-neighbour scaled so a 8 px label can be
-//! read on a monitor. Nothing is anti-aliased at either size, because nothing on the panel
-//! is.
+//! `<name>@3x.png`, the same image nearest-neighbour scaled. Nothing is anti-aliased at
+//! either size, because nothing on the panel is.
 //!
-//! The dashed rectangle marks the 390x115 the bezel leaves visible. It is drawn *after* the
-//! panel and only into the scaled copy, so the 1x image stays exactly what the hardware
-//! would show.
+//! # Both sit on a cream field, and that is not decoration
+//!
+//! The first round of these panels was approved on a dark page, and three of the four
+//! legibility findings that came back off the machine were flattered by it. The bezel is a
+//! bright printed ring around a small black window: the eye adapts to the surround, and dim
+//! pixels give up contrast they kept on a monitor. Black is the right *surface* -- the panel
+//! is emissive and the bezel sits beside the pixels, not behind them -- so what was wrong was
+//! the page, not the background.
+//!
+//! **Judge at 1x.** The same round was approved at 1.5x, which makes an 8 px word look like a
+//! 12 px one. The 3x copy is for reading a specific glyph, not for deciding whether it reads.
+//!
+//! The dashed rectangle marks the 390x115 the bezel leaves visible. It is drawn only into the
+//! scaled copy, so the 1x image stays exactly what the hardware would show.
 //!
 //! `png` rather than `embedded-graphics-simulator`: the simulator pulls SDL, which would
 //! make the one verification step this crate exists for depend on a system package.
@@ -90,33 +100,51 @@ fn write_png(path: &Path, width: usize, height: usize, data: &[u8]) {
     writer.write_image_data(data).expect("png data");
 }
 
-/// The 1x image: exactly what the panel emits.
+/// The bezel's cream, which is what the panel is actually looked at against.
+const SURROUND: [u8; 3] = [0xF4, 0xF1, 0xE6];
+
+/// How much of it to show around the panel, in panel pixels.
+const MARGIN: usize = 26;
+
+/// The 1x image: exactly what the panel emits, on the surround it is read against.
 fn save_1x(fb: &Framebuffer, path: &Path) {
-    let mut data = Vec::with_capacity(WIDTH * HEIGHT * 3);
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
-            data.extend_from_slice(&fb.rgb888(x, y));
+    let (w, h) = (WIDTH + MARGIN * 2, HEIGHT + MARGIN * 2);
+    let mut data = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        for x in 0..w {
+            if x >= MARGIN && x < MARGIN + WIDTH && y >= MARGIN && y < MARGIN + HEIGHT {
+                data.extend_from_slice(&fb.rgb888(x - MARGIN, y - MARGIN));
+            } else {
+                data.extend_from_slice(&SURROUND);
+            }
         }
     }
-    write_png(path, WIDTH, HEIGHT, &data);
+    write_png(path, w, h, &data);
 }
 
 /// The 3x image, with the visible window outlined so the bezel's edge is obvious.
 fn save_3x(fb: &Framebuffer, window: Window, path: &Path) {
-    let (w, h) = (WIDTH * SCALE, HEIGHT * SCALE);
-    let mut data = vec![0u8; w * h * 3];
+    let margin = MARGIN * SCALE;
+    let (w, h) = (WIDTH * SCALE + margin * 2, HEIGHT * SCALE + margin * 2);
+    let mut data = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         for x in 0..w {
-            let px = fb.rgb888(x / SCALE, y / SCALE);
-            let i = (y * w + x) * 3;
-            data[i..i + 3].copy_from_slice(&px);
+            if x >= margin && x < margin + WIDTH * SCALE && y >= margin && y < margin + HEIGHT * SCALE
+            {
+                data.extend_from_slice(&fb.rgb888((x - margin) / SCALE, (y - margin) / SCALE));
+            } else {
+                data.extend_from_slice(&SURROUND);
+            }
         }
     }
 
     // A dashed outline of the window, in the hairline colour, drawn only here.
     let outline = [0x40u8, 0x50, 0x58];
     let origin = window.origin();
-    let (ox, oy) = (origin.x as usize * SCALE, origin.y as usize * SCALE);
+    let (ox, oy) = (
+        margin + origin.x as usize * SCALE,
+        margin + origin.y as usize * SCALE,
+    );
     let (ww, wh) = (
         WINDOW_SIZE.width as usize * SCALE,
         WINDOW_SIZE.height as usize * SCALE,
@@ -140,7 +168,18 @@ fn save_3x(fb: &Framebuffer, window: Window, path: &Path) {
 }
 
 fn main() {
-    let out = Path::new("target/panel");
+    // Resolved from the manifest rather than the working directory. `cargo run` inherits the
+    // caller's cwd, so a relative path here writes into whichever directory the command was
+    // typed in -- which silently produced a second, stale set of these images once.
+    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/panel")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/panel");
+            fs::create_dir_all(&path).expect("create target/panel");
+            path.canonicalize().expect("canonicalize target/panel")
+        });
+    let out = out.as_path();
     fs::create_dir_all(out).expect("create target/panel");
 
     let trace = fixtures::lever_like_trace();

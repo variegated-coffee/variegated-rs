@@ -133,10 +133,14 @@ pub enum Readiness {
     },
 }
 
-/// Idle: brew temperature dominates, because it is the one figure that decides whether to
-/// pull.
+/// Idle: laid out around the answer to the one question the state is asked.
+///
+/// **The selected routine and its dose are deliberately absent.** Both were on the
+/// specification's bottom rule and neither answers *can I pull a shot now?* -- the routine is
+/// one press away in the menu, and the dose is stated by the panel that reports the shot.
+/// They were what pushed the answer into the corner.
 #[derive(Clone, Copy, Debug)]
-pub struct IdleView<'a> {
+pub struct IdleView {
     /// The wall clock, with seconds.
     pub clock: Option<Clock>,
     /// The next scheduled off, at the right of the top rule.
@@ -145,16 +149,23 @@ pub struct IdleView<'a> {
     pub brew_temperature: Option<f32>,
     /// Its setpoint.
     pub brew_setpoint: Option<f32>,
-    /// Steam boiler, in degrees C.
+    /// Steam boiler, in degrees C. Drawn in muted ink beside the pressure.
     pub steam_temperature: Option<f32>,
     /// Steam pressure, in bar.
+    ///
+    /// This is the figure that decides whether the machine can steam, so it carries the
+    /// steam pen and the temperature drops to muted ink beside it. A target is only
+    /// meaningful against the variable its boiler is actually controlling; on a
+    /// temperature-controlled steam boiler the two would swap.
     pub steam_pressure: Option<f32>,
+    /// What the steam boiler is being held at, in bar.
+    ///
+    /// Beside the pressure, for the reason the brew target is beside the temperature: a
+    /// reading means little without the number it is being held against, and stating the
+    /// target is cheaper to read than a signed deviation.
+    pub steam_target_bar: Option<f32>,
     /// READY, or HEATING with an estimate.
     pub readiness: Readiness,
-    /// The routine that will run, uppercase.
-    pub routine: Option<&'a str>,
-    /// The dose it will run against.
-    pub dose_g: Option<f32>,
 }
 
 /// The one variable free-brewing commands.
@@ -259,6 +270,25 @@ impl Quantity {
         }
     }
 
+    /// The unit's short form in capitals, for a label set in the label face.
+    ///
+    /// A second table rather than an uppercasing of [`Self::unit`]: this crate has no
+    /// allocator, and `to_ascii_uppercase` wants one.
+    pub fn unit_upper(self) -> &'static str {
+        match self {
+            Quantity::Time => "S",
+            Quantity::Temperature => "C",
+            Quantity::Pressure => "BAR",
+            Quantity::FlowRate => "ML/S",
+            Quantity::Weight => "G",
+            Quantity::Percent => "%",
+            Quantity::Volume => "ML",
+            Quantity::Conductivity => "MS/CM",
+            Quantity::ExtractionRate => "MS.ML/CM.S",
+            Quantity::ExtractedSolids => "MS.ML/CM",
+        }
+    }
+
     /// The unit's short form. ASCII, because every face on this panel is.
     pub fn unit(self) -> &'static str {
         match self {
@@ -309,8 +339,6 @@ pub struct RoutineView<'a> {
     pub current_step: usize,
     /// Time in the current step.
     pub step_elapsed_s: Option<f32>,
-    /// Time since the routine started.
-    pub total_elapsed_s: Option<f32>,
     /// In the cup.
     pub weight_g: Option<f32>,
     /// At the group.
@@ -385,7 +413,7 @@ pub enum StateView<'a> {
     /// Section 6.1, and standby.
     Off(OffView<'a>),
     /// Section 6.2.
-    Idle(IdleView<'a>),
+    Idle(IdleView),
     /// Section 6.3.
     FreeBrew(FreeBrewView),
     /// Section 6.4.

@@ -9,7 +9,7 @@ use embedded_graphics::prelude::*;
 use u8g2_fonts::types::VerticalPosition;
 
 use crate::draw;
-use crate::geometry::{PAD_BOTTOM, PAD_LEFT, PAD_TOP, Window, hairline_v};
+use crate::geometry::{PAD_LEFT, Window, hairline_v};
 use crate::palette;
 use crate::type_scale;
 use crate::view::OffView;
@@ -17,25 +17,24 @@ use crate::widgets;
 
 /// The right column's width.
 ///
-/// The figure gives 128, against its narrower outline face. 110 is what the panel's own
-/// `07:00` needs -- five `inb24` cells at 19 px -- and the 18 px it gives back is what lets
-/// the hero clock and its seconds share the left column.
-const RIGHT_WIDTH: i32 = 110;
+/// 142, which is what `TOMORROW` beside a wait needs once the four label lines here came off
+/// the 8 px floor. The clock and its seconds still fit the left column with room over.
+const RIGHT_WIDTH: i32 = 142;
 
 /// Baseline of the hero clock, relative to the window top. `inb38` inks 38 px above it.
 const CLOCK_BASELINE: i32 = 66;
 
-/// Top of the next-event time. `inb24` inks 24 px down from here.
-const NEXT_TIME_TOP: i32 = 44;
+/// Baseline of the next-event time. `inb24` inks 24 px above it.
+const NEXT_TIME_BASELINE: i32 = 48;
 
-/// Top of the day-and-wait line under it.
-const NEXT_WAIT_TOP: i32 = 76;
+/// Baseline of the day-and-wait line under it.
+const NEXT_WAIT_BASELINE: i32 = 68;
 
 /// Baseline of the residual temperatures, at the foot of the right column.
-const RESIDUAL_BASELINE: i32 = 105;
+const RESIDUAL_BASELINE: i32 = 111;
 
 /// Content bottom, relative to the window top.
-const BOTTOM: i32 = crate::geometry::WINDOW_SIZE.height as i32 - PAD_BOTTOM;
+const BOTTOM: i32 = 111;
 
 pub(crate) fn draw<D>(view: &OffView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
@@ -46,11 +45,7 @@ where
 
     left_column(view, w, target)?;
 
-    hairline_v(
-        Point::new(divider_x, w.at(0, PAD_TOP).y),
-        (BOTTOM - PAD_TOP) as u32,
-        target,
-    )?;
+    hairline_v(Point::new(divider_x, w.at(0, 0).y), BOTTOM as u32, target)?;
 
     right_column(view, w, right_left, target)?;
     Ok(())
@@ -64,8 +59,8 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("{date}"),
-            w.at(PAD_LEFT, PAD_TOP),
-            VerticalPosition::Top,
+            w.at(PAD_LEFT, 11),
+            VerticalPosition::Baseline,
             palette::INK_MUTED,
             target,
         );
@@ -123,14 +118,14 @@ fn right_column<D>(view: &OffView<'_>, w: Window, left: i32, target: &mut D) -> 
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let top = w.at(0, PAD_TOP).y;
+    let top = w.at(0, 2).y;
 
     if let Some(next) = view.next {
         let after = draw::run(
             &type_scale::LABEL,
             format_args!("NEXT"),
-            Point::new(left, top + 2),
-            VerticalPosition::Top,
+            Point::new(left, w.at(0, 13).y),
+            VerticalPosition::Baseline,
             palette::INK_MUTED,
             target,
         );
@@ -152,34 +147,32 @@ where
         draw::run(
             &type_scale::PRIMARY_30,
             format_args!("{:02}:{:02}", next.at.hour, next.at.minute),
-            Point::new(left, w.at(0, NEXT_TIME_TOP).y),
-            VerticalPosition::Top,
+            Point::new(left, w.at(0, NEXT_TIME_BASELINE).y),
+            VerticalPosition::Baseline,
             palette::INK,
             target,
         );
 
+        let baseline = w.at(0, NEXT_WAIT_BASELINE).y;
         let mut x = draw::run(
             &type_scale::LABEL,
             format_args!("{}", next.day),
-            Point::new(left, w.at(0, NEXT_WAIT_TOP).y),
-            VerticalPosition::Top,
+            Point::new(left, baseline),
+            VerticalPosition::Baseline,
             palette::INK_FAINT,
             target,
         );
         if let Some(minutes) = next.wait_minutes {
             // The separator is drawn rather than typed; see `type_scale`.
-            x += type_scale::separator(
-                Point::new(x, w.at(0, NEXT_WAIT_TOP).y + 6),
-                palette::INK_FAINT,
-                target,
-            )? as i32;
-            let point = Point::new(x, w.at(0, NEXT_WAIT_TOP).y);
+            x += type_scale::separator(Point::new(x, baseline), palette::INK_FAINT, target)?
+                as i32;
+            let point = Point::new(x, baseline);
             if minutes >= 60 {
                 draw::run(
                     &type_scale::LABEL,
                     format_args!("{}h {:02}m", minutes / 60, minutes % 60),
                     point,
-                    VerticalPosition::Top,
+                    VerticalPosition::Baseline,
                     palette::INK_FAINT,
                     target,
                 );
@@ -188,7 +181,7 @@ where
                     &type_scale::LABEL,
                     format_args!("{minutes}m"),
                     point,
-                    VerticalPosition::Top,
+                    VerticalPosition::Baseline,
                     palette::INK_FAINT,
                     target,
                 );

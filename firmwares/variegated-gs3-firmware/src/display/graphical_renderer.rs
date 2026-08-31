@@ -483,22 +483,8 @@ impl GraphicalDisplayState {
         let f = Frame::of(window);
         let menu_hint_y = f.y + EFFECTIVE_HEIGHT - 12;
 
-        // On the two trim rows, the edge of the window itself. Two pixels, not one: this is
-        // the thing being aligned against a physical aperture from arm's length, and a single
-        // lit pixel against black at that distance is a suggestion rather than an edge.
-        //
-        // Drawn first, so the value and the hint row sit over it rather than under.
         if matches!(menu, MenuId::EditPanelOriginX | MenuId::EditPanelOriginY) {
-            window
-                .rect()
-                .into_styled(
-                    PrimitiveStyleBuilder::new()
-                        .stroke_color(palette::INK)
-                        .stroke_width(2)
-                        .stroke_alignment(embedded_graphics::primitives::StrokeAlignment::Inside)
-                        .build(),
-                )
-                .draw(display)?;
+            calibration_frame(window, display)?;
         }
 
         // Nothing to edit means the frame was pushed without a value, which the button task
@@ -664,4 +650,60 @@ impl Default for GraphicalDisplayState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The border and ticks a trimmed offset is judged against.
+///
+/// A correct offset reads as an unbroken rectangle with even margins inside the aperture; any
+/// error shows as a missing edge. The ticks are what turn "roughly centred" into a judgement
+/// you can actually make -- a corner tells you an edge is present, a midpoint tells you the
+/// margin above it matches the one below.
+///
+/// **Two pixels of border, where the review asked for one.** Everything else read on the
+/// machine had to be thickened, and this is the one element whose whole job is to be seen
+/// against a bright printed surround from arm's length. The ticks are the review's, at four
+/// pixels, drawn inward so they cannot themselves leave the window.
+fn calibration_frame<D>(window: Window, display: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    const TICK: u32 = 4;
+    const BORDER: u32 = 2;
+
+    let rect = window.rect();
+    rect.into_styled(
+        PrimitiveStyleBuilder::new()
+            .stroke_color(palette::INK)
+            .stroke_width(BORDER)
+            .stroke_alignment(embedded_graphics::primitives::StrokeAlignment::Inside)
+            .build(),
+    )
+    .draw(display)?;
+
+    let (x0, y0) = (rect.top_left.x, rect.top_left.y);
+    let (w, h) = (rect.size.width as i32, rect.size.height as i32);
+    let fill = PrimitiveStyleBuilder::new().fill_color(palette::INK).build();
+
+    // Four corners and four midpoints, each reaching inward from the edge it belongs to.
+    for (x, y, across) in [
+        (x0, y0, true),
+        (x0 + w - TICK as i32, y0, true),
+        (x0, y0 + h - BORDER as i32, true),
+        (x0 + w - TICK as i32, y0 + h - BORDER as i32, true),
+        (x0 + (w - TICK as i32) / 2, y0, true),
+        (x0 + (w - TICK as i32) / 2, y0 + h - BORDER as i32, true),
+        (x0, y0 + (h - TICK as i32) / 2, false),
+        (x0 + w - BORDER as i32, y0 + (h - TICK as i32) / 2, false),
+    ] {
+        let size = if across {
+            Size::new(TICK, BORDER + 2)
+        } else {
+            Size::new(BORDER + 2, TICK)
+        };
+        Rectangle::new(Point::new(x, y), size)
+            .into_styled(fill)
+            .draw(display)?;
+    }
+
+    Ok(())
 }

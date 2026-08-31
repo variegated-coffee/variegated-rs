@@ -109,17 +109,24 @@ fn the_faces_are_the_sizes_the_layout_assumes() {
         assert_eq!(ink_h, height, "{name} digit height");
     }
 
-    // The word faces ink exactly their nominal size, which is why they were kept at the
-    // sizes the specification names while the number faces had to be re-rung.
+    // The word faces ink exactly their nominal size, which is why the number faces had to be
+    // re-rung and these did not.
+    //
+    // **Nothing here may be below ten.** The 8 px tier was read on the machine and does not
+    // survive curved glass, glare and an unaliased bitmap; retiring it is the substantive
+    // change of the field review, and this is what stops it creeping back.
     for (name, font, height) in [
-        ("STATE_WORD", &type_scale::STATE_WORD, 11),
-        ("CHIP", &type_scale::CHIP, 8),
-        ("LABEL", &type_scale::LABEL, 8),
+        ("ANSWER", &type_scale::ANSWER, 25),
+        ("STATE_WORD", &type_scale::STATE_WORD, 12),
+        ("STEP_OTHER", &type_scale::STEP_OTHER, 12),
+        ("CHIP", &type_scale::CHIP, 11),
+        ("LABEL", &type_scale::LABEL, 11),
         ("UNIT_12", &type_scale::UNIT_12, 12),
         ("UNIT_14", &type_scale::UNIT_14, 14),
     ] {
         let (_, ink_h, ..) = ink(font, "H");
         assert_eq!(ink_h, height, "{name} cap height");
+        assert!(ink_h >= 10, "{name} is below the floor the machine set");
     }
 }
 

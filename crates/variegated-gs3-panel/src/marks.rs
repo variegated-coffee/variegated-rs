@@ -13,8 +13,12 @@
 //! so the honest form for a 16 px mark is the sixteen rows of pixels themselves: exactly
 //! reproducible, comparable against a reference image, and 32 bytes each.
 //!
-//! One row per `u16`, bit 15 -- the leftmost written bit -- at x = 0, so the literals below
-//! read as the picture they draw.
+//! One row per `u32`, eighteen bits wide, the leftmost written bit at x = 0 and grouped in
+//! sixes -- so the literals below read as the picture they draw.
+//!
+//! Everything is stroked two pixels. Read on the machine at one, behind curved glass and
+//! unaliased, a 16 px mark gave about one lit pixel of evidence per feature: the colours
+//! carried and the shapes did not.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -24,107 +28,117 @@ use crate::palette;
 use crate::view::MarkState;
 
 /// Associated and reachable. Red: no link, and shots queue locally.
-const NETWORK: [u16; 16] = [
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_1111_1111_0000,
-    0b0011_0000_0000_1100,
-    0b0100_0000_0000_0010,
-    0b0000_0000_0000_0000,
-    0b0000_0011_1100_0000,
-    0b0000_1100_0011_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0001_1000_0000,
-    0b0000_0010_0100_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0001_1000_0000,
-    0b0000_0001_1000_0000,
-    0b0000_0000_0000_0000,
+const NETWORK: [u32; 18] = [
+    0b000000_000000_000000,
+    0b000000_111111_000000,
+    0b000011_111111_110000,
+    0b000111_000000_111000,
+    0b001100_000000_001100,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_011110_000000,
+    0b000001_111111_100000,
+    0b000011_000000_110000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_001100_000000,
+    0b000000_011110_000000,
+    0b000000_000000_000000,
+    0b000000_001100_000000,
+    0b000000_001100_000000,
+    0b000000_000000_000000,
 ];
 
 /// Paired and reporting. Red: every gram field reads as no reading.
-const SCALE: [u16; 16] = [
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0011_1100_0000,
-    0b0000_0100_0010_0000,
-    0b0000_1000_0001_0000,
-    0b0000_1000_0001_0000,
-    0b0000_0100_0010_0000,
-    0b0000_0011_1100_0000,
-    0b0000_0001_1000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0111_1111_1111_1110,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
+const SCALE: [u32; 18] = [
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_111111_000000,
+    0b000011_100001_110000,
+    0b000110_000000_011000,
+    0b000110_000000_011000,
+    0b000110_000000_011000,
+    0b000110_000000_011000,
+    0b000011_100001_110000,
+    0b000000_111111_000000,
+    0b000000_000000_000000,
+    0b011111_111111_111110,
+    0b011111_111111_111110,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
 ];
 
 /// Steam boiler level satisfied. Red: needs filling, and steam is unavailable.
-const STEAM_BOILER: [u16; 16] = [
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0100_0010_0000,
-    0b0000_1000_0100_0000,
-    0b0000_1000_0100_0000,
-    0b0000_0100_0010_0000,
-    0b0000_0010_0001_0000,
-    0b0000_0010_0001_0000,
-    0b0000_0100_0010_0000,
-    0b0000_1000_0100_0000,
-    0b0000_1000_0100_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0011_1111_1111_1100,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
+const STEAM_BOILER: [u32; 18] = [
+    0b000000_000000_000000,
+    0b000011_000000_110000,
+    0b000110_000001_100000,
+    0b000110_000001_100000,
+    0b000011_000000_110000,
+    0b000001_100000_011000,
+    0b000001_100000_011000,
+    0b000011_000000_110000,
+    0b000110_000001_100000,
+    0b000110_000001_100000,
+    0b000011_000000_110000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b001111_111111_111100,
+    0b001111_111111_111100,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
 ];
 
 /// Water present. Red: empty, and the pump will not start.
-const TANK: [u16; 16] = [
-    0b0000_0000_0000_0000,
-    0b0000_0001_1000_0000,
-    0b0000_0010_0100_0000,
-    0b0000_0010_0100_0000,
-    0b0000_0100_0010_0000,
-    0b0000_1000_0001_0000,
-    0b0000_1000_0001_0000,
-    0b0001_0000_0000_1000,
-    0b0001_0000_0000_1000,
-    0b0001_0000_0000_1000,
-    0b0000_1000_0001_0000,
-    0b0000_0100_0010_0000,
-    0b0000_0011_1100_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
+const TANK: [u32; 18] = [
+    0b000000_000000_000000,
+    0b000000_001100_000000,
+    0b000000_011110_000000,
+    0b000000_110011_000000,
+    0b000000_110011_000000,
+    0b000001_100001_100000,
+    0b000001_100001_100000,
+    0b000011_000000_110000,
+    0b000011_000000_110000,
+    0b000011_000000_110000,
+    0b000011_000000_110000,
+    0b000001_100001_100000,
+    0b000000_110011_000000,
+    0b000000_011110_000000,
+    0b000000_001100_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
 ];
 
 /// Conductivity probe fitted and reading. Red: no solids or extraction figures this shot.
-const PROBE: [u16; 16] = [
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0100_0000_0000,
-    0b1100_1010_0000_0011,
-    0b1101_0001_0001_1011,
-    0b0000_0000_1010_0000,
-    0b0000_0000_0100_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
-    0b0000_0000_0000_0000,
+const PROBE: [u32; 18] = [
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000110_000000,
+    0b011000_000110_000110,
+    0b011000_011001_100110,
+    0b011000_011001_100110,
+    0b011001_100000_011110,
+    0b011001_100000_011110,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
+    0b000000_000000_000000,
 ];
 
 /// The five marks in the order section 5 fixes: network, scale, steam boiler, tank, probe.
-const BITMAPS: [&[u16; 16]; 5] = [&NETWORK, &SCALE, &STEAM_BOILER, &TANK, &PROBE];
+const BITMAPS: [&[u32; 18]; 5] = [&NETWORK, &SCALE, &STEAM_BOILER, &TANK, &PROBE];
 
 /// The colour a mark in this condition is drawn in.
 fn ink(state: MarkState) -> Rgb565 {
@@ -160,7 +174,7 @@ where
     ));
     target.draw_iter(rows.iter().enumerate().flat_map(|(y, row)| {
         (0..MARK_SIZE).filter_map(move |x| {
-            (row & (0x8000 >> x) != 0)
+            (row & (1 << (MARK_SIZE - 1 - x)) != 0)
                 .then(|| Pixel(origin + Point::new(x as i32, y as i32), color))
         })
     }))
@@ -223,13 +237,39 @@ mod tests {
         }
     }
 
-    /// The bitmaps are 16 wide by construction, but a literal one bit too long would silently
+    /// The bitmaps are 18 wide by construction, but a literal one bit too long would silently
     /// shift a whole mark left by a pixel, so assert the drawn columns stay inside the box.
     #[test]
     fn no_mark_escapes_its_box() {
+        let mask = (1u32 << MARK_SIZE) - 1;
         for rows in BITMAPS.iter() {
             for row in rows.iter() {
-                assert_eq!(row & !0xFFFF_u16, 0);
+                assert_eq!(row & !mask, 0, "{row:#020b} is wider than {MARK_SIZE}");
+            }
+        }
+    }
+
+    /// Two pixels of stroke is the whole point of the redraw, so it is asserted rather than
+    /// trusted: every lit pixel must have a lit neighbour on one axis or the other. A stray
+    /// single pixel is a one-pixel feature, which is what did not read on the machine.
+    #[test]
+    fn nothing_is_drawn_one_pixel_thin() {
+        for (index, rows) in BITMAPS.iter().enumerate() {
+            for (y, row) in rows.iter().enumerate() {
+                for x in 0..MARK_SIZE {
+                    let bit = |row: u32, x: u32| row & (1 << (MARK_SIZE - 1 - x)) != 0;
+                    if !bit(*row, x) {
+                        continue;
+                    }
+                    let horizontal = (x > 0 && bit(*row, x - 1))
+                        || (x + 1 < MARK_SIZE && bit(*row, x + 1));
+                    let vertical = (y > 0 && bit(rows[y - 1], x))
+                        || (y + 1 < rows.len() && bit(rows[y + 1], x));
+                    assert!(
+                        horizontal || vertical,
+                        "mark {index} has a lone pixel at {x},{y}",
+                    );
+                }
             }
         }
     }

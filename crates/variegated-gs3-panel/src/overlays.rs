@@ -22,13 +22,13 @@ use crate::view::Overlay;
 /// than the panel has vertical edges, and a vertical edge lands mid-figure: the steam
 /// temperature ran two pixels past the old card's right edge, leaving a lit sliver of a
 /// digit beside it that reads as a rendering fault. A band has no vertical edges to cut on.
-const BOX_HEIGHT: u32 = 66;
+const BOX_HEIGHT: u32 = 81;
 
 /// Where the band sits, from the window top.
 ///
-/// Chosen so its horizontal edges do not cut either: it clears the labels above it and the
-/// bottom rule below it on every state's panel.
-const BOX_TOP_DY: i32 = 21;
+/// Chosen so its horizontal edges do not cut either: `14..95` clears the top rule above it
+/// and the steam row below it on the idle panel, which is the tallest thing it covers.
+const BOX_TOP_DY: i32 = 14;
 
 /// The provisioning strip along the bottom edge. Tall enough to cover a bottom rule whole.
 const BANNER_HEIGHT: u32 = 20;

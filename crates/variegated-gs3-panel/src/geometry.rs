@@ -31,16 +31,27 @@ pub const PAD_BOTTOM: i32 = 8;
 /// See [`PAD_TOP`].
 pub const PAD_LEFT: i32 = 10;
 
-/// A status mark is 16x16.
-pub const MARK_SIZE: u32 = 16;
-
-/// Marks are 5 px apart, so one row of the strip is 21 px.
-pub const MARK_PITCH: i32 = MARK_SIZE as i32 + 5;
+/// A status mark is 18x18.
+///
+/// Sixteen, at the 1 px stroke the specification's figures use, was about one lit pixel of
+/// evidence per feature: read on the machine the colours carried and the shapes did not.
+/// Eighteen at two pixels is what makes a mark identifiable rather than merely present.
+pub const MARK_SIZE: u32 = 18;
 
 /// Five marks, fixed order.
 pub const MARK_COUNT: usize = 5;
 
-/// The height of the vertical strip: five marks and four gaps.
+/// The strip spreads over the window rather than sitting at a fixed gap.
+///
+/// Five 18 px marks and four 24 px steps fill the 115 px window exactly, one pixel down from
+/// its top edge. That is what gives the marks the most separation the panel can offer, which
+/// is the other half of making them identifiable.
+pub const MARK_PITCH: i32 = 24;
+
+/// Where the strip starts, from the window top.
+pub const STRIP_TOP_DY: i32 = 1;
+
+/// The height of the vertical strip: five marks and four steps.
 pub const STRIP_HEIGHT: i32 = MARK_PITCH * (MARK_COUNT as i32 - 1) + MARK_SIZE as i32;
 
 /// Where the 390x115 visible window sits on the panel.
@@ -135,13 +146,13 @@ impl Window {
 
     /// Top-left of the vertical status strip, at the right edge.
     ///
-    /// Centred vertically in the window rather than hung from the padding: the strip is
-    /// 100 px against 99 px of padded content, so aligning it to the content box would push
-    /// the conductivity mark one pixel into the bezel.
+    /// Flush to the window's right edge rather than inside the padding: the strip is the one
+    /// thing on this panel that is meant to be found without reading, and the edge is the
+    /// easiest place on a small window to find.
     pub fn strip_origin(self) -> Point {
         self.at(
-            WINDOW_SIZE.width as i32 - PAD_RIGHT - MARK_SIZE as i32,
-            (WINDOW_SIZE.height as i32 - STRIP_HEIGHT) / 2,
+            WINDOW_SIZE.width as i32 - MARK_SIZE as i32,
+            STRIP_TOP_DY,
         )
     }
 
@@ -214,20 +225,21 @@ mod tests {
         assert_eq!(Window::new(19, 26).origin(), Point::new(19, 26));
     }
 
-    /// The strip is one pixel taller than the padded content box, which is why
-    /// `strip_origin` centres in the window instead. If that ever stops being true the
-    /// comment there is wrong and someone should know.
+    /// Five 18 px marks and four 24 px steps fill the window exactly, flush to its right
+    /// edge. If that stops being true the strip has either lost its separation or grown out
+    /// of the aperture, and both are what the redraw was for.
     #[test]
-    fn the_strip_is_centred_within_the_window() {
+    fn the_strip_fills_the_window_flush_right() {
         for window in every_extreme() {
             let origin = window.strip_origin();
             assert!(origin.y >= window.origin().y);
-            assert!(
-                origin.y + STRIP_HEIGHT <= window.origin().y + WINDOW_SIZE.height as i32
+            assert_eq!(
+                origin.y + STRIP_HEIGHT,
+                window.origin().y + WINDOW_SIZE.height as i32,
             );
             assert_eq!(
                 origin.x + MARK_SIZE as i32,
-                window.origin().x + WINDOW_SIZE.width as i32 - PAD_RIGHT
+                window.origin().x + WINDOW_SIZE.width as i32,
             );
         }
     }
