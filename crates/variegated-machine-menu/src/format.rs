@@ -65,6 +65,17 @@ fn wants_decimal(value: f32) -> bool {
     value > -10.0 && value < 100.0
 }
 
+/// The unit's text on its own, without a value in front of it.
+///
+/// [`format_value`] is still the way to render a value and its unit together. This exists
+/// for the one caller that cannot use it: the GS3's TFT sets a changing number in
+/// Inconsolata and its unit in Helvetica, which are two runs at two sizes, and a combined
+/// string cannot be split back into them -- the digits-only Inconsolata cut would simply
+/// drop the letters.
+pub const fn unit_suffix(unit: Option<ParameterUnit>, style: UnitStyle) -> &'static str {
+    suffix(unit, style)
+}
+
 const fn suffix(unit: Option<ParameterUnit>, style: UnitStyle) -> &'static str {
     match style {
         UnitStyle::Compact => "",

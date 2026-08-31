@@ -67,6 +67,9 @@ variegated-rp235x-atomic-raw-mutex = { version = "0.1.0", path = "../../crates/v
 variegated-menu = { version = "0.1.0", path = "../../crates/variegated-menu", features = ["defmt"] }
 variegated-machine-menu = { version = "0.1.0", path = "../../crates/variegated-machine-menu", features = ["defmt"] }
 variegated-buttons = { version = "0.1.0", path = "../../crates/variegated-buttons", features = ["defmt"] }
+# The five machine panels, the status strip and the overlays. Optional for the same reason
+# `u8g2-fonts` is: a build without `tft-display` has nothing to draw them on.
+variegated-gs3-panel = { version = "0.1.0", path = "../../crates/variegated-gs3-panel", features = ["defmt"], optional = true }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }
 embedded-hal.workspace = true
@@ -74,7 +77,7 @@ embedded-hal-async.workspace = true
 embedded-graphics.workspace = true
 embedded-graphics-core.workspace = true
 display-interface-spi = { workspace = true, optional = true }
-u8g2-fonts = { version = "0.8.0", optional = true }
+u8g2-fonts = { workspace = true, optional = true }
 hd44780-controller = { version = "0.1.0-alpha.2", features = ["async"], optional = true }
 heapless.workspace = true
 
@@ -99,7 +102,7 @@ default = ["rp235xb", "tft-display", "gear-pump", "belka", "bluetooth-group-1-sc
 rp2040 = ["embassy-rp/rp2040"]
 rp235xa = ["embassy-rp/rp235xa"]
 rp235xb = ["embassy-rp/rp235xb", "variegated-controller-lib/rp235xb"]
-tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts"]
+tft-display = ["dep:variegated-nv3007", "dep:display-interface-spi", "dep:u8g2-fonts", "dep:variegated-gs3-panel"]
 # The 2x16 HD44780 character LCD on the LCD MCP23017 (I2C 0x21).
 #
 # Deliberately *not* part of the default set: not every machine has the LCD fitted, and

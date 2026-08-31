@@ -83,6 +83,13 @@ run "variegated-menu" -p variegated-menu "$@"
 # them because neither firmware crate can host a test binary: both set `test = false` and
 # depend on `embassy-rp`. Moving that arithmetic into this crate is what made it checkable.
 run "variegated-machine-menu" -p variegated-machine-menu "$@"
+# The GS3's panel: its geometry, type scale, palette, five states and shot trace.
+#
+# `--features fixtures` is not optional. The two assertions this suite exists for -- that no
+# two runs of text overlap, and that nothing is drawn outside the 390x115 the bezel leaves
+# visible -- are checked against every state and every variant, and the fixtures *are* that
+# list. Without them the suite still passes, having checked nothing.
+run "variegated-gs3-panel" -p variegated-gs3-panel --features fixtures "$@"
 # Press/chord/hold recognition from raw button samples. Same opt-in `defmt` as
 # `variegated-menu`, and host-testable for the same reason: it takes milliseconds as a
 # plain `u64` rather than an `embassy_time::Instant`, so a test binary has no

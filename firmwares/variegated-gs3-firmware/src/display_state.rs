@@ -51,10 +51,11 @@ pub enum ActivityOverlay {
 impl ActivityOverlay {
     /// The one line the overlay draws.
     ///
-    /// Short on purpose. The TFT box is 200px wide and every font in this firmware is a
-    /// `_tr` variant -- glyphs 32..127 -- and `render_aligned` resolves the whole bounding
-    /// box before drawing, so a string that overruns or carries a non-ASCII character is
-    /// dropped entirely and shows as an empty box. The character LCD has 16 columns.
+    /// Short on purpose: the character LCD has 16 columns, and the TFT's band is one line.
+    /// ASCII on purpose too -- every face in this firmware covers 32..127.
+    ///
+    /// Both panels draw this one, rather than each carrying its own two words: they announce
+    /// the same two things and must not drift into calling them differently.
     pub fn label(self) -> &'static str {
         match self {
             ActivityOverlay::HotWater => "Hot Water",
@@ -421,6 +422,10 @@ impl DisplayState {
     }
 
     /// Format tank level as "T0" (empty) or "T1" (non-empty) (2 chars)
+    ///
+    /// The character LCD's, like the five `format_*` above it: the TFT draws the tank as one
+    /// of the status strip's five marks.
+    #[cfg_attr(not(feature = "character-display"), allow(dead_code))]
     pub fn format_tank_level(&self) -> String {
         // Check the first available tank
         if let Some((_, tank_status)) = self.status.tank_statuses.iter().next() {

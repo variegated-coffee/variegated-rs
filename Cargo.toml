@@ -25,6 +25,7 @@ members = [
     "crates/variegated-log",
     "crates/variegated-machine-menu",
     "crates/variegated-menu",
+    "crates/variegated-gs3-panel",
     "crates/variegated-soft-pwm",
     "crates/variegated-instrumentation",
     "crates/variegated-mcp23017",
@@ -95,6 +96,7 @@ default-members = [
     "crates/variegated-log",
     "crates/variegated-machine-menu",
     "crates/variegated-menu",
+    "crates/variegated-gs3-panel",
     "crates/variegated-soft-pwm",
     "crates/variegated-instrumentation",
     "crates/variegated-mcp23017",
@@ -195,6 +197,11 @@ embedded-hal-async = "1.0.0"
 embedded-storage-async = "0.4.1"
 display-interface = "0.5"
 display-interface-spi = "0.5"
+# The u8g2 bitmap faces the GS3 panel is drawn in. Here rather than in the firmware
+# manifest alone because `variegated-gs3-panel` now owns the drawing and the firmware still
+# draws the menu: two copies of this at different versions would put two font renderers in
+# one binary, and the panel's type scale would stop matching the menu's.
+u8g2-fonts = "0.8.0"
 
 # Serialization / storage
 crc = "3.4.0"

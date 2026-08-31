@@ -26,6 +26,9 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_time::Duration;
 #[cfg(feature = "character-display")]
 use embassy_time::Timer;
+// The TFT paces its own drawing against the wall clock; the LCD task does not.
+#[cfg(feature = "tft-display")]
+use embassy_time::Instant;
 #[cfg(feature = "character-display")]
 use hd44780_controller::controller::{Controller, config::{InitialConfig, RuntimeConfig}};
 #[cfg(feature = "character-display")]
@@ -148,6 +151,9 @@ pub mod lcd_renderer;
 
 #[cfg(feature = "tft-display")]
 pub mod graphical_renderer;
+
+#[cfg(feature = "tft-display")]
+pub mod view;
 
 // Both display tasks take a status subscriber and read the routine repository through
 // the trait; only the character LCD needs the expander-backed HD44780 device.
@@ -383,6 +389,17 @@ pub async fn graphical_display_task(
     // Create graphical display state
     let mut display_state = GraphicalDisplayState::new();
 
+    // When this task may next draw a frame.
+    //
+    // The panel does not animate: each state is a fixed frame with a small number of value
+    // windows, and nothing moves, resizes or reflows while a state is held. Redrawing is not
+    // free either -- the driver compares each new frame against the previous one to find what
+    // to send, and that comparison is 143 KB whether or not anything moved. So the loop keeps
+    // running at 10 ms for the watches it has to service, and the *drawing* is paced by the
+    // state (see `GraphicalDisplayState::redraw_period_ms`) and pulled forward whenever
+    // something actually changes.
+    let mut next_redraw = Instant::now();
+
     // Counter to throttle schedule queries (query every ~1 second)
     let mut schedule_query_counter = 0u32;
 
@@ -396,15 +413,23 @@ pub async fn graphical_display_task(
         // no lock and no critical section on either core.
         checkin.good();
 
-        // Update status
+        // Update status.
+        //
+        // `GraphicalDisplayState::update_status`, not the shared model's: the TFT keeps three
+        // things the character LCD does not -- when the machine went off, the dose a shot
+        // started against, and the shot's own samples -- and all three are derived from the
+        // *transition* into a status rather than from the status itself.
         if let Some(new_status) = status_receiver.try_next_message_pure() {
-            display_state.shared_state.update_status(new_status);
+            display_state.update_status(new_status);
+            // A value moved, so the next pass draws whatever it moved.
+            next_redraw = Instant::now();
         }
 
         // See the note in `lcd_display_task`: `try_changed` so the loop keeps rendering, and
         // so a repeated Identify extends the flash rather than queueing behind it.
         if let Some(requested_at) = identify_receiver.try_changed() {
             display_state.identify_until = Some(requested_at + IDENTIFY_FLASH_DURATION);
+            next_redraw = Instant::now();
         }
 
         // `try_changed`, not `changed`, for the reason spelled out above the identify block: this
@@ -415,6 +440,7 @@ pub async fn graphical_display_task(
             if !nav.stack.is_open() {
                 display_state.shared_state.release_menu_data();
             }
+            next_redraw = Instant::now();
         }
 
         // What the Settings rows read out of `Configuration`. `try_changed` for the same
@@ -422,6 +448,7 @@ pub async fn graphical_display_task(
         // actually differs -- so on a settled machine this is a `None` every iteration.
         if let Some(config) = menu_config_receiver.try_changed() {
             display_state.shared_state.update_menu_config(config);
+            next_redraw = Instant::now();
         }
 
         // Query schedule store periodically (every ~1 second = 100 * 10ms)
@@ -473,19 +500,28 @@ pub async fn graphical_display_task(
             }
         }
 
-        instrumented_section!("Display update", {
-            if let Err(_) = display_state.render(&mut *display) {
-                defmt::error!("Failed to render to TFT display");
-            }
-        });
+        // Everything above runs every pass -- the check-in, the watches, the schedule query.
+        // Only the drawing is paced, and it is an `if` rather than an early `continue`
+        // because `async_task_loop!` puts its delay at the *bottom* of the loop: skipping to
+        // the next iteration would skip the 10 ms wait with it and spin this core.
+        if Instant::now() >= next_redraw {
+            next_redraw =
+                Instant::now() + Duration::from_millis(display_state.redraw_period_ms() as u64);
 
-        instrumented_section!("Display flush", {
-            // Flush to display with delta updates
-            // With double buffering, only changed regions are sent (typically 50-100 transactions)
-            // Falls back to full update if >70% changed (~3 transactions)
-            if let Err(_) = display.flush().await {
-                defmt::error!("Failed to flush TFT display");
-            }
-        });
+            instrumented_section!("Display update", {
+                if let Err(_) = display_state.render(&mut *display) {
+                    defmt::error!("Failed to render to TFT display");
+                }
+            });
+
+            instrumented_section!("Display flush", {
+                // Flush to display with delta updates
+                // With double buffering, only changed regions are sent (typically 50-100 transactions)
+                // Falls back to full update if >70% changed (~3 transactions)
+                if let Err(_) = display.flush().await {
+                    defmt::error!("Failed to flush TFT display");
+                }
+            });
+        }
     });
 }

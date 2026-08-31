@@ -1,0 +1,36 @@
+[package]
+name = "variegated-gs3-panel"
+version = "0.1.0"
+edition = "2024"
+description = "The GS3's 428x168 status panel: geometry, type scale, palette and drawing, against any Rgb565 draw target"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Opt-in, not default, for the same reason `variegated-menu` gives: a `Format` impl
+# monomorphized on a host has no `_defmt_acquire` to link against, and the failure reads
+# "Too many sections!". A crate whose whole point is that it can be host-tested must not
+# turn defmt on by itself.
+defmt = { workspace = true, optional = true }
+
+embedded-graphics.workspace = true
+embedded-graphics-core.workspace = true
+u8g2-fonts.workspace = true
+
+[dev-dependencies]
+# For the preview example only, and never reachable from a firmware build: `cargo build
+# --target thumbv8m.main-none-eabihf` does not build examples, and dev-dependencies are not
+# linked into a library's own rlib. `png` rather than `embedded-graphics-simulator`, which
+# pulls SDL and would make the preview unrunnable without a system package.
+png = "0.18"
+
+[features]
+default = []
+defmt = ["dep:defmt"]
+# Every state and variant with the specification's own numbers in it. Compiled by `cargo
+# test` regardless -- the layout tests assert on them -- and by the preview example, which
+# names it in `required-features` so a plain `cargo test` does not build it.
+fixtures = []
+
+[[example]]
+name = "render_png"
+required-features = ["fixtures"]

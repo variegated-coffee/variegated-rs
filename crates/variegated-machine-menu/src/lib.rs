@@ -40,7 +40,7 @@ mod temperature;
 pub use brew::{
     brew_mode_label, brew_target, duty_cycle_from_editor, next_brew_mode, OFFERED_BREW_MODES,
 };
-pub use format::{format_value, UnitStyle, VALUE_TEXT_LEN};
+pub use format::{format_value, unit_suffix, UnitStyle, VALUE_TEXT_LEN};
 pub use listing::{RoutineRow, RoutineRows, MAX_MENU_ROUTINES, ROUTINE_NAME_LEN, routine_rows};
 pub use parameters::{
     parameter_adjustable, parameter_bounds, parameter_geometry, parameter_row,
