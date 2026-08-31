@@ -33,10 +33,20 @@ pub const SURFACE: Rgb565 = hex(0x000000);
 pub const INK: Rgb565 = hex(0xEDF1F2);
 
 /// Labels: the uppercase word naming a value.
-pub const INK_MUTED: Rgb565 = hex(0x8D989E);
+///
+/// The specification gives `#8D989E`, and this is a step above it. Both greys were lifted
+/// after the first panels were rendered: the design system's ramp was drawn for ink on a
+/// white page, where a mid grey recedes, and on an emissive black one the same value goes the
+/// other way -- it stops being quiet and starts being hard to read. The hue and the ordering
+/// against [`INK`] and [`INK_FAINT`] are unchanged.
+pub const INK_MUTED: Rgb565 = hex(0xA5B0B6);
 
 /// Units, rail ticks and provenance lines -- the quietest thing that is still text.
-pub const INK_FAINT: Rgb565 = hex(0x5A6469);
+///
+/// The specification gives `#5A6469`; see [`INK_MUTED`] for why this sits above it. This is
+/// the grey that needed it most: it is the one used at 8 px, where an emissive panel has the
+/// least ink to work with.
+pub const INK_FAINT: Rgb565 = hex(0x7A858B);
 
 /// READY, COMPLETE, a healthy status mark.
 pub const OK: Rgb565 = hex(0x45C86A);
