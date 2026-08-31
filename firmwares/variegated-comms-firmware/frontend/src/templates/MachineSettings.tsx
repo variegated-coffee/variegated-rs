@@ -1,4 +1,4 @@
-import { tokens } from '@variegated-coffee/ui';
+import { tokens, tokensFor, type Theme } from '@variegated-coffee/ui';
 import { ShotUploadPanel } from '../components/ShotUploadPanel';
 import { BluetoothPanel } from '../components/BluetoothPanel';
 import { ShotLogPanel } from '../components/ShotLogPanel';
@@ -36,14 +36,18 @@ export interface MachineSettingsProps {
  * The card each panel sits in.
  *
  * One object rather than the same properties written out at each `<section>`.
+ *
+ * A function of the theme rather than a module-level capture: the const form read
+ * `tokens.color` once at import, which is why setting a palette rethemed nothing. This
+ * frontend threads no scheme yet, so the caller passes the light one and nothing moves.
  */
-const panelStyle = {
-  marginTop: tokens.space.lg,
-  background: tokens.color.surfaceRaised,
-  padding: tokens.space.lg,
-  border: `1px solid ${tokens.color.border}`,
-  borderRadius: tokens.radius.md,
-};
+const panelStyleFor = (t: Theme) => ({
+  marginTop: t.space.lg,
+  background: t.color.surfaceRaised,
+  padding: t.space.lg,
+  border: `1px solid ${t.color.border}`,
+  borderRadius: t.radius.md,
+});
 
 export function MachineSettings({
   machineDefinition,
@@ -52,6 +56,8 @@ export function MachineSettings({
   routines,
   connected,
 }: MachineSettingsProps) {
+  const panelStyle = panelStyleFor(tokensFor('light'));
+
   return (
     <>
       <section style={panelStyle}>
