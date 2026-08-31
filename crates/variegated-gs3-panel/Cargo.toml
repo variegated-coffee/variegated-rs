@@ -30,6 +30,11 @@ defmt = ["dep:defmt"]
 # test` regardless -- the layout tests assert on them -- and by the preview example, which
 # names it in `required-features` so a plain `cargo test` does not build it.
 fixtures = []
+# Put the window's border and ticks on every frame, in every state. For finding the bezel's
+# aperture during bring-up, when the question is whether the drawing is in the cutout at all
+# rather than how well it is centred in it -- the origin editors already draw the same frame
+# for the second question. Additive, like every feature must be: it only ever draws more.
+always-draw-bounds = []
 
 [[example]]
 name = "render_png"

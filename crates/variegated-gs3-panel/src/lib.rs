@@ -1,6 +1,6 @@
 //! The GS3's 428x168 status panel.
 //!
-//! This crate is the display specification made executable: the geometry of the 390x115
+//! This crate is the display specification made executable: the geometry of the 396x111
 //! window the bezel leaves visible, the two-family type ladder, the palette, the five
 //! machine states and the overlays that go over them. It draws against any
 //! [`DrawTarget`](embedded_graphics::draw_target::DrawTarget) whose colour is
@@ -10,7 +10,7 @@
 //! # Why it is a crate rather than a module in the firmware
 //!
 //! The firmware's only target sets `test = false` and depends on `embassy-rp`, so nothing
-//! that lives there can be compiled on a host -- and a 390x115 pixel specification whose
+//! that lives there can be compiled on a host -- and a 396x111 pixel specification whose
 //! only verification is "flash it and look" is a specification nobody checks. Everything
 //! here builds and runs on a host, `cargo test` covers the arithmetic, and
 //! `cargo run --example render_png` puts every state and every variant on disk as an image
@@ -40,6 +40,7 @@ pub mod geometry;
 pub mod marks;
 pub mod overlays;
 pub mod palette;
+pub mod rhythm;
 pub mod states;
 pub mod trace;
 pub mod type_scale;
@@ -64,6 +65,19 @@ pub use view::{
 /// and sends only the regions that changed, so a second layer of it in the drawing code
 /// would be two sources of truth about what moved. What the caller *should* do is not call
 /// this every 10 ms -- see the redraw budget in section 8, and [`states::redraw_period_ms`].
+///
+/// # `always-draw-bounds`
+///
+/// With that feature on, every frame ends with [`geometry::calibration_frame`] over the top
+/// of it -- the same border and ticks the origin editors draw, on every state, all the time.
+///
+/// It answers a different question from the editors. They ask how well the drawing is
+/// centred in the aperture, with nothing else on the screen to judge it against; this asks
+/// whether the bezel's cutout is where the drawing thinks it is *at all*, against whatever
+/// the machine happens to be showing. A build-time feature rather than a setting because the
+/// frame sits on the status strip and the marks, which are flush to the window's edges: it
+/// costs something on every screen, and that is a decision for a manifest rather than for
+/// whoever was last in the menu.
 pub fn render<D>(view: &PanelView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -71,7 +85,9 @@ where
     // An identify flash replaces the screen rather than sitting on it. The point of Improv
     // Identify is to answer "which of these machines am I talking to" for someone standing
     // in the room, and a panel that alternates fully lit and fully dark answers that in a
-    // way no amount of text on the usual screen can.
+    // way no amount of text on the usual screen can. `always-draw-bounds` does not reach it:
+    // the frame is invisible on the lit phase and would put a lit rectangle on the dark one,
+    // which is the half of the flash that carries the signal.
     if let Some(Overlay::Identify { lit }) = view.overlay {
         return target.clear(if lit { palette::INK } else { palette::SURFACE });
     }
@@ -86,19 +102,23 @@ where
         StateView::Post(post) => states::post::draw(post, w, target)?,
     }
 
-    // Free-brewing puts its marks in the header, in a horizontal row, because the panel's
-    // full width is spent on the rail. Every other state has the column at the right edge.
-    if matches!(view.state, StateView::FreeBrew(_)) {
-        states::free_brew::header_marks(&view.marks, w, target)?;
-    } else {
-        marks::draw_column(&view.marks, w, target)?;
-    }
+    // One position, one size, every state. Free-brewing used to lay its marks along the
+    // header at half the spacing so the rail could have the panel's full width; read as a
+    // set, that made the status strip move and shrink on exactly the four screens where the
+    // machine is doing something.
+    marks::draw_column(&view.marks, w, target)?;
 
     // After the state renderer, so an overlay is on top in every state rather than in the
     // ones that happened to be considered.
     if let Some(overlay) = view.overlay {
-        overlays::draw(&overlay, w, target)?;
+        overlays::draw(&overlay, w, states::overlay_floor(&view.state), target)?;
     }
+
+    // Last of all, so nothing can cover the one thing being looked at. It sits on the status
+    // strip and the marks, which are flush to the window's edges -- that is the cost of the
+    // feature, and the reason it is not something a machine ships with.
+    #[cfg(feature = "always-draw-bounds")]
+    geometry::calibration_frame(w, target)?;
 
     Ok(())
 }
@@ -175,7 +195,7 @@ mod tests {
         ]
     }
 
-    /// Nothing may live outside the 390x115 window: the rest of the panel is addressable and
+    /// Nothing may live outside the visible window: the rest of the panel is addressable and
     /// permanently behind the bezel, so a figure drawn there is a figure nobody will ever
     /// see.
     #[test]
@@ -235,6 +255,59 @@ mod tests {
                 );
                 assert_eq!(a.size, b.size, "{name}: a run changed size");
             }
+        }
+    }
+
+    /// An unpaired scale changes the mark and nothing else about idle.
+    ///
+    /// The third review looked at two idle renders that differed only in one mark being red
+    /// instead of green, both saying `READY`, and could not tell from the images whether that
+    /// was correct or one of them drawing a stale status. It is correct: the routine and the
+    /// dose came off this panel in the first remediation, so nothing idle draws depends on a
+    /// scale -- and a scale has nothing to do with whether the boilers are at temperature,
+    /// which is the only thing `READY` claims.
+    ///
+    /// Asserted rather than left in a comment, because the question will be asked again by
+    /// whoever next reads the two side by side. If a weight ever returns to this state, this
+    /// fails and says so.
+    #[test]
+    fn an_unpaired_scale_changes_only_the_mark_in_idle() {
+        let (_, ready) = drawn(&fixtures::idle_ready(), Window::DEFAULT);
+        let (_, no_scale) = drawn(&fixtures::idle_no_scale(), Window::DEFAULT);
+        assert_eq!(
+            ready, no_scale,
+            "idle drew something different with no scale paired",
+        );
+    }
+
+    /// How much room each state has left at the foot of the window.
+    ///
+    /// The third remediation shortened the window by four pixels and asked which element each
+    /// state should give them up from, working from heights read off rendered images. Read off
+    /// the layout instead, no state had to give up anything -- but three of them now finish
+    /// within two pixels of the bottom edge, which is the answer to that document's own open
+    /// question about whether 111 is the floor. It is: one more pixel and idle, routine
+    /// execution and post-routine all break together.
+    ///
+    /// `cargo test -p variegated-gs3-panel --features fixtures -- --nocapture` prints the
+    /// table. The assertion is only that nothing has run out, because the point of the number
+    /// is to be read before the window changes again, not to be defended at some value.
+    #[test]
+    fn every_state_reports_its_headroom() {
+        let trace = fixtures::lever_like_trace();
+        let aborted = fixtures::lever_like_trace_to(12.4);
+        let w = Window::DEFAULT;
+        let floor = w.origin().y + geometry::WINDOW_SIZE.height as i32;
+        for (name, view) in fixtures::all(&trace, &aborted) {
+            if matches!(view.overlay, Some(Overlay::Identify { .. })) {
+                continue;
+            }
+            let (Some(rect), _) = drawn(&view, w) else {
+                continue;
+            };
+            let headroom = floor - (rect.top_left.y + rect.size.height as i32);
+            std::println!("{name:28} {headroom:3} px of headroom");
+            assert!(headroom >= 0, "{name} has overrun the window by {headroom}");
         }
     }
 

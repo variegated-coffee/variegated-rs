@@ -69,6 +69,12 @@ variegated-machine-menu = { version = "0.1.0", path = "../../crates/variegated-m
 variegated-buttons = { version = "0.1.0", path = "../../crates/variegated-buttons", features = ["defmt"] }
 # The five machine panels, the status strip and the overlays. Optional for the same reason
 # `u8g2-fonts` is: a build without `tft-display` has nothing to draw them on.
+#
+# `always-draw-bounds` puts the window's border and ticks on every frame, in every state --
+# the same frame the two origin editors draw. It is named here rather than behind a feature
+# of this crate because cargo features are additive: a passthrough would let a build turn it
+# *on* and never off, which is the wrong way round for something every screen carries. Take
+# it off this line to ship a machine without it.
 variegated-gs3-panel = { version = "0.1.0", path = "../../crates/variegated-gs3-panel", features = ["defmt"], optional = true }
 
 rotary-encoder-hal = { version = "0.6.0", features = ["table-decoder"] }

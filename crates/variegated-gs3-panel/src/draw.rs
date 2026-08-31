@@ -11,15 +11,16 @@ use core::fmt::Arguments;
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+
+use crate::type_scale::Face;
 
 /// Draw a run of text from its left edge and return the x the next run starts at.
 ///
 /// This is what makes a number and its unit sit together without a measured constant
 /// between them: draw the number, and start the unit at what comes back.
 pub fn run<D>(
-    font: &FontRenderer,
+    font: &Face,
     args: Arguments<'_>,
     at: Point,
     vpos: VerticalPosition,
@@ -32,6 +33,7 @@ where
     #[cfg(test)]
     probe::record(font, args, at, vpos, None);
     at.x + font
+        .font()
         .render(args, at, vpos, FontColor::Transparent(color), target)
         .map(|d| d.advance.x)
         .unwrap_or(0)
@@ -39,7 +41,7 @@ where
 
 /// Draw a run anchored somewhere other than its left edge.
 pub fn aligned<D>(
-    font: &FontRenderer,
+    font: &Face,
     args: Arguments<'_>,
     at: Point,
     vpos: VerticalPosition,
@@ -51,7 +53,9 @@ pub fn aligned<D>(
 {
     #[cfg(test)]
     probe::record(font, args, at, vpos, Some(halign));
-    let _ = font.render_aligned(args, at, vpos, halign, FontColor::Transparent(color), target);
+    let _ = font
+        .font()
+        .render_aligned(args, at, vpos, halign, FontColor::Transparent(color), target);
 }
 
 /// Where each run of text actually put ink, so a test can assert that no two of them
@@ -115,7 +119,7 @@ pub(crate) mod probe {
     }
 
     pub(crate) fn record(
-        font: &FontRenderer,
+        font: &Face,
         args: Arguments<'_>,
         at: Point,
         vpos: VerticalPosition,
@@ -125,9 +129,13 @@ pub(crate) mod probe {
         let colour = FontColor::Transparent(Rgb565::new(31, 63, 31));
         let _ = match halign {
             Some(halign) => font
+                .font()
                 .render_aligned(args, at, vpos, halign, colour, &mut bounds)
                 .map(|_| ()),
-            None => font.render(args, at, vpos, colour, &mut bounds).map(|_| ()),
+            None => font
+                .font()
+                .render(args, at, vpos, colour, &mut bounds)
+                .map(|_| ()),
         };
         if let (Some(min), Some(max)) = (bounds.min, bounds.max) {
             let rect = Rectangle::with_corners(min, max);
@@ -172,8 +180,48 @@ pub(crate) mod probe {
 ///
 /// For laying out a row right-to-left, or centring a group of runs that are drawn
 /// left-to-right.
-pub fn width(font: &FontRenderer, args: Arguments<'_>) -> i32 {
-    font.get_rendered_dimensions(args, Point::zero(), VerticalPosition::Baseline)
+/// The longest prefix of `text` that fits `width`, abbreviated with a full stop if it was cut.
+///
+/// A routine step is named by whoever wrote the routine, so its length is unbounded, and the
+/// column it sits in is 134 px. Left to overrun, a long name runs into the rule that is the
+/// only thing separating the spine from the figures beside it -- which is the one place on
+/// this panel where two columns of text meet.
+///
+/// A full stop rather than an ellipsis: `…` is outside every `_tr` cut (see [`crate::type_scale`]),
+/// and a trailing point is the ordinary way to mark an abbreviation, so `Declining prof.` reads
+/// as a shortened name rather than as a wrong one. Cutting silently at a character boundary
+/// would produce a plausible word that is not the step's name, which is worse than either.
+///
+/// Returns the whole string untouched when it fits, which is the common case.
+pub fn fitted<'a>(font: &Face, text: &'a str, width: i32) -> (&'a str, bool) {
+    if width_of(font, text) <= width {
+        return (text, false);
+    }
+    let point = width_of(font, ".");
+    let mut end = text.len();
+    while end > 0 {
+        end -= 1;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if width_of(font, &text[..end]) + point <= width {
+            break;
+        }
+    }
+    (&text[..end], true)
+}
+
+/// [`width`] for a plain string, which is what [`fitted`] measures repeatedly.
+fn width_of(font: &Face, text: &str) -> i32 {
+    font.font()
+        .get_rendered_dimensions(text, Point::zero(), VerticalPosition::Baseline)
+        .map(|d| d.advance.x)
+        .unwrap_or(0)
+}
+
+pub fn width(font: &Face, args: Arguments<'_>) -> i32 {
+    font.font()
+        .get_rendered_dimensions(args, Point::zero(), VerticalPosition::Baseline)
         .map(|d| d.advance.x)
         .unwrap_or(0)
 }

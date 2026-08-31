@@ -12,6 +12,26 @@ pub mod routine;
 
 use crate::view::StateView;
 
+/// The lowest edge, from the window top, at which an overlay band may stop on this state.
+///
+/// An overlay takes the top rows and is sized to its own content, but its bottom edge lands on
+/// whatever is underneath -- and an edge through the middle of a 33 px temperature reads as a
+/// rendering fault rather than as an overlay. Each state answers with a y inside one of its own
+/// gaps, so the edge always falls *between* two rows.
+///
+/// It is asked of the state rather than fixed once because the states do not share a row grid:
+/// off's clock ends at 57 where free-brewing's rail begins at 47, so there is no single height
+/// that clears both. The old band picked idle's numbers and cut every other state.
+pub(crate) fn overlay_floor(state: &StateView<'_>) -> i32 {
+    match state {
+        StateView::Off(_) => off::OVERLAY_FLOOR,
+        StateView::Idle(_) => idle::OVERLAY_FLOOR,
+        StateView::FreeBrew(_) => free_brew::OVERLAY_FLOOR,
+        StateView::Routine(_) => routine::OVERLAY_FLOOR,
+        StateView::Post(_) => post::OVERLAY_FLOOR,
+    }
+}
+
 /// How often a state's values are worth redrawing, in milliseconds. Section 8.
 ///
 /// The panel does not animate: each state is a fixed frame with a small number of value

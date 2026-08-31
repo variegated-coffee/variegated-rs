@@ -4,95 +4,114 @@
 //! provisioning banner and the activity box are both suppressed during a shot, and that is a
 //! decision about the machine rather than about pixels. This module draws whatever it is
 //! handed.
+//!
+//! # Two rules, from the second review
+//!
+//! **An overlay takes the top rows, never the bottom.** The provisioning banner sat along the
+//! bottom edge, where it covered the steam row and the lowest status mark -- so the state it
+//! obscured was the one telling you whether the machine is safe to use. Everything on this
+//! panel is composed downwards from the answer, which means the bottom row is where the
+//! qualifications live, and burying a qualification is worse than burying a headline.
+//!
+//! **An overlay is sized to its content.** The activity box was 81 px tall and held one
+//! centred word; a large ruled box holding `STEAMING` is a box saying *something has gone
+//! wrong* about a machine doing exactly what it was asked. `STEAMING` needs a line, not a box.
+//!
+//! **And all three are left-aligned**, like every other row on this panel. There were two
+//! alignments across three overlays -- `WI-FI SETUP: READY TO PAIR` centred, `DOSE 19.9 G` not
+//! -- which made them read as three unrelated things rather than as one mechanism. Centring
+//! also put the one word furthest from the left edge every other row starts at, which is the
+//! edge the eye is already on.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle};
-use u8g2_fonts::types::{HorizontalAlignment, VerticalPosition};
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
+use u8g2_fonts::types::VerticalPosition;
 
 use crate::draw;
-use crate::geometry::{WINDOW_SIZE, Window};
+use crate::geometry::Window;
 use crate::palette;
+use crate::rhythm;
 use crate::type_scale;
 use crate::view::Overlay;
 
-/// The band the activity and dose overlays share.
-///
-/// Full window width, rather than the 200 px card the firmware drew before. A card narrower
-/// than the panel has vertical edges, and a vertical edge lands mid-figure: the steam
-/// temperature ran two pixels past the old card's right edge, leaving a lit sliver of a
-/// digit beside it that reads as a rendering fault. A band has no vertical edges to cut on.
-const BOX_HEIGHT: u32 = 81;
-
-/// Where the band sits, from the window top.
-///
-/// Chosen so its horizontal edges do not cut either: `14..95` clears the top rule above it
-/// and the steam row below it on the idle panel, which is the tallest thing it covers.
-const BOX_TOP_DY: i32 = 14;
-
-/// The provisioning strip along the bottom edge. Tall enough to cover a bottom rule whole.
-const BANNER_HEIGHT: u32 = 20;
+/// The clear space inside a band, above and below its content.
+const PAD: i32 = 6;
 
 /// Draw an overlay.
 ///
 /// [`Overlay::Identify`] is handled in [`crate::render`] before anything else is drawn --
 /// it replaces the screen rather than sitting on it -- so it is a no-op here.
-pub fn draw<D>(overlay: &Overlay<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
+/// `floor` is the lowest edge at which this state's rows allow a band to stop; see
+/// [`crate::states::overlay_floor`].
+pub fn draw<D>(
+    overlay: &Overlay<'_>,
+    w: Window,
+    floor: i32,
+    target: &mut D,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     match overlay {
         Overlay::Identify { .. } => Ok(()),
-        Overlay::Provisioning { line } => provisioning(line, w, target),
-        Overlay::Activity { label } => activity(label, w, target),
-        Overlay::Dose { grams } => dose(*grams, w, target),
+        Overlay::Provisioning { line } => provisioning(line, w, floor, target),
+        Overlay::Activity { label } => activity(label, w, floor, target),
+        Overlay::Dose { grams } => dose(*grams, w, floor, target),
     }
 }
 
-/// The centred box, returning its top-left.
-fn popup_box<D>(w: Window, target: &mut D) -> Result<Point, D::Error>
+/// Paint an opaque band across the top of the window, and return its top.
+///
+/// Flush to the window's top edge, so the band has one horizontal edge rather than two. Its
+/// height is its own content plus padding, or `floor` if that is lower -- **sized to content,
+/// but never stopping mid-row.** An edge through the middle of a 33 px temperature reads as a
+/// rendering fault rather than as an overlay, and the states do not share a row grid, so where
+/// the gaps are is a question only the state underneath can answer.
+///
+/// It stops short of the status strip for the same reason it no longer reaches the bottom
+/// edge: a red mark is a statement of consequence, and an overlay that covered one would hide
+/// "the tank is empty" behind "hot water".
+/// Returns the baseline a single row of `face` sits on inside the band.
+fn band<D>(
+    w: Window,
+    face: &crate::type_scale::Face,
+    floor: i32,
+    target: &mut D,
+) -> Result<i32, D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let top_left = w.at(0, BOX_TOP_DY);
-    // Stops short of the status strip. A red mark is a statement of consequence and the
-    // strip is meant to be checkable at a glance; an overlay that covered it would hide
-    // "the tank is empty" behind "hot water", which is the wrong way round.
-    let size = Size::new((w.body_right() - w.origin().x) as u32, BOX_HEIGHT);
+    let height = (face.height() + PAD * 2).max(floor);
+    let top_left = w.at(0, 0);
+    let size = Size::new((w.body_right() - w.origin().x) as u32, height as u32);
     // Opaque: the panel underneath is painted out, not shown through. Said here so the
     // layout test does not read a covered figure as one drawn through another.
     #[cfg(test)]
     crate::draw::probe::occlude(Rectangle::new(top_left, size));
     Rectangle::new(top_left, size)
-        .into_styled(
-            PrimitiveStyleBuilder::new()
-                .fill_color(palette::SURFACE)
-                .stroke_color(palette::HAIRLINE)
-                .stroke_width(1)
-                .build(),
-        )
+        .into_styled(PrimitiveStyle::with_fill(palette::TROUGH))
         .draw(target)?;
-    Ok(top_left)
+    // Centred in whatever height the band ended up with, so a band pushed down to the state's
+    // next gap holds its line in the middle rather than pinned to the top.
+    Ok(top_left.y + (height - face.height()) / 2 + face.ascent())
 }
 
 /// What the machine is doing, while it is doing it.
 ///
 /// The tap and the steam valve had no feedback on the panel at all: the machine either made
-/// a noise or it did not.
-fn activity<D>(label: &str, w: Window, target: &mut D) -> Result<(), D::Error>
+/// a noise or it did not. One line, in a band the height of that line -- an announcement, not
+/// an alarm.
+fn activity<D>(label: &str, w: Window, floor: i32, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let top_left = popup_box(w, target)?;
-    draw::aligned(
+    let baseline = band(w, &type_scale::STATE_WORD, floor, target)?;
+    draw::run(
         &type_scale::STATE_WORD,
         format_args!("{label}"),
-        Point::new(
-            (w.origin().x + w.body_right()) / 2,
-            top_left.y + BOX_HEIGHT as i32 / 2,
-        ),
-        VerticalPosition::Center,
-        HorizontalAlignment::Center,
+        Point::new(w.text_left(), baseline),
+        VerticalPosition::Baseline,
         palette::INK,
         target,
     );
@@ -101,76 +120,67 @@ where
 
 /// The dose the user just captured.
 ///
-/// Two lines rather than one, and the number in the readout face: a dose is a value the
-/// operator is checking, not an announcement.
-fn dose<D>(grams: f32, w: Window, target: &mut D) -> Result<(), D::Error>
+/// Two runs rather than two rows: a dose is a value the operator is checking, and it is being
+/// checked against nothing, so it needs a label beside it and no more room than that.
+fn dose<D>(grams: f32, w: Window, floor: i32, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let top_left = popup_box(w, target)?;
-    let centre_x = (w.origin().x + w.body_right()) / 2;
-    draw::aligned(
+    let baseline = band(w, &type_scale::PRIMARY_27, floor, target)?;
+    let after = draw::run(
         &type_scale::LABEL,
-        format_args!("DOSE CAPTURED"),
-        Point::new(centre_x, top_left.y + 16),
-        VerticalPosition::Top,
-        HorizontalAlignment::Center,
+        format_args!("DOSE"),
+        Point::new(w.text_left(), baseline),
+        VerticalPosition::Baseline,
         palette::INK_MUTED,
         target,
     );
-    // Centred as one unit: the number is measured, then the pair is placed, so the `g` does
-    // not shift the digits off centre.
-    let number_width = draw::width(&type_scale::PRIMARY_27, format_args!("{grams:.1}"));
-    let unit_width = draw::width(&type_scale::UNIT_12, format_args!("g"));
-    let left = centre_x - (number_width + 4 + unit_width) / 2;
-    let baseline = top_left.y + 52;
     let after = draw::run(
         &type_scale::PRIMARY_27,
         format_args!("{grams:.1}"),
-        Point::new(left, baseline),
+        Point::new(after + rhythm::GAP, baseline),
         VerticalPosition::Baseline,
         palette::PEN_WEIGHT,
         target,
     );
-    draw::run(
+    let after = draw::run(
         &type_scale::UNIT_12,
-        format_args!("g"),
-        Point::new(after + 4, baseline),
+        format_args!("G"),
+        Point::new(after + rhythm::TIGHT, baseline),
         VerticalPosition::Baseline,
-        palette::INK_MUTED,
+        palette::INK_FAINT,
+        target,
+    );
+    let after = rhythm::divider(after, baseline, &type_scale::PRIMARY_27, target)?;
+    draw::run(
+        &type_scale::LABEL,
+        format_args!("CAPTURED"),
+        Point::new(after, baseline),
+        VerticalPosition::Baseline,
+        palette::INK_FAINT,
         target,
     );
     Ok(())
 }
 
-/// The Improv provisioning window, along the bottom edge.
+/// The Improv provisioning window.
 ///
 /// A strip rather than another mark in the status column: the column carries conditions the
 /// operator does not act on, and a provisioning window is one that has to say what is
-/// happening and where to go next. Covering the bottom rule is the right trade for a mode
-/// that is transient, deliberately entered and self-expiring.
-fn provisioning<D>(line: &str, w: Window, target: &mut D) -> Result<(), D::Error>
+/// happening and where to go next. It takes the top rows, like every other overlay -- along
+/// the bottom it covered the steam row and the lowest status mark, which is to say it hid
+/// whether the machine was safe to use behind a transient, self-expiring mode the operator
+/// entered on purpose.
+fn provisioning<D>(line: &str, w: Window, floor: i32, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let top = w.at(0, WINDOW_SIZE.height as i32 - BANNER_HEIGHT as i32);
-    // Stops short of the status strip, for the reason `popup_box` gives.
-    let size = Size::new((w.body_right() - w.origin().x) as u32, BANNER_HEIGHT);
-    // Opaque; see the note in `popup_box`.
-    #[cfg(test)]
-    crate::draw::probe::occlude(Rectangle::new(top, size));
-    Rectangle::new(top, size)
-        .into_styled(PrimitiveStyle::with_fill(palette::TROUGH))
-        .draw(target)?;
-    draw::aligned(
+    let baseline = band(w, &type_scale::STATE_WORD, floor, target)?;
+    draw::run(
         &type_scale::STATE_WORD,
         format_args!("{line}"),
-        Point::new(
-            (w.origin().x + w.body_right()) / 2,
-            top.y + BANNER_HEIGHT as i32 / 2,
-        ),
-        VerticalPosition::Center,
-        HorizontalAlignment::Center,
+        Point::new(w.text_left(), baseline),
+        VerticalPosition::Baseline,
         palette::INK,
         target,
     );

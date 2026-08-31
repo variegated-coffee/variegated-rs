@@ -14,12 +14,12 @@
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::{FontColor, VerticalPosition};
-use variegated_gs3_panel::type_scale;
+use variegated_gs3_panel::type_scale::{self, Face};
 
-fn measure(font: &FontRenderer, text: &str) -> (i32, i32) {
+fn measure(font: &Face, text: &str) -> (i32, i32) {
     let dims = font
+        .font()
         .get_rendered_dimensions(text, Point::zero(), VerticalPosition::Top)
         .expect("measurable");
     (
@@ -69,16 +69,17 @@ impl DrawTarget for InkBounds {
 
 /// The ink extent of `text` drawn on a baseline at the origin: (width, height, top, bottom)
 /// where top and bottom are relative to the baseline, negative being above it.
-fn ink(font: &FontRenderer, text: &str) -> (i32, i32, i32, i32) {
+fn ink(font: &Face, text: &str) -> (i32, i32, i32, i32) {
     let mut bounds = InkBounds::default();
-    font.render(
-        text,
-        Point::zero(),
-        VerticalPosition::Baseline,
-        FontColor::Transparent(Rgb565::WHITE),
-        &mut bounds,
-    )
-    .expect("renderable");
+    font.font()
+        .render(
+            text,
+            Point::zero(),
+            VerticalPosition::Baseline,
+            FontColor::Transparent(Rgb565::WHITE),
+            &mut bounds,
+        )
+        .expect("renderable");
     match (bounds.min, bounds.max) {
         (Some((x0, y0)), Some((x1, y1))) => (x1 - x0 + 1, y1 - y0 + 1, y0, y1),
         _ => (0, 0, 0, 0),
@@ -94,7 +95,7 @@ fn ink(font: &FontRenderer, text: &str) -> (i32, i32, i32, i32) {
 #[test]
 fn the_faces_are_the_sizes_the_layout_assumes() {
     // (face, digit advance, digit ink height)
-    let expected: [(&str, &FontRenderer, i32, i32); 7] = [
+    let expected: [(&str, &Face,i32, i32); 7] = [
         ("HERO inb38", &type_scale::HERO, 31, 38),
         ("PRIMARY_46 inb33", &type_scale::PRIMARY_46, 27, 32),
         ("PRIMARY_30 inb24", &type_scale::PRIMARY_30, 21, 24),
@@ -130,9 +131,62 @@ fn the_faces_are_the_sizes_the_layout_assumes() {
     }
 }
 
+/// Every face's declared ink extent agrees with the font, and with what it actually draws.
+///
+/// [`Face`] carries its own ascent and descent because `rhythm` lays rows out from ink rather
+/// than from nominal size, and a hand-written number is a number that drifts. These two
+/// assertions are what stop it:
+///
+/// * the **ascent** is checked against u8g2's own `get_ascent`, so it is the font's opinion
+///   and not a measurement someone took once;
+/// * the **descent** is checked against a representative string's real ink, because u8g2's
+///   `get_descent` describes glyphs these cuts do not contain -- it is −9 on `inb38`, which is
+///   the room a comma would want in a face that has no comma. Laying out from that would put
+///   nine pixels of nothing under every number on the panel.
+#[test]
+fn every_face_knows_how_far_its_ink_reaches() {
+    let faces: [(&str, &Face, &str); 14] = [
+        ("HERO", &type_scale::HERO, "21:58"),
+        ("PRIMARY_46", &type_scale::PRIMARY_46, "93.2"),
+        ("PRIMARY_30", &type_scale::PRIMARY_30, "113.4"),
+        ("PRIMARY_27", &type_scale::PRIMARY_27, "51.1"),
+        ("SECONDARY_21", &type_scale::SECONDARY_21, "1.76"),
+        ("SECONDARY_19", &type_scale::SECONDARY_19, "8.39"),
+        ("NUMBER_FLOOR", &type_scale::NUMBER_FLOOR, "1.42"),
+        ("ANSWER", &type_scale::ANSWER, "READY"),
+        ("STATE_WORD", &type_scale::STATE_WORD, "HEATING"),
+        ("STEP_CURRENT", &type_scale::STEP_CURRENT, "Preinfusion"),
+        ("STEP_OTHER", &type_scale::STEP_OTHER, "Declining profile"),
+        ("CHIP", &type_scale::CHIP, "PUMP DUTY"),
+        ("LABEL", &type_scale::LABEL, "ENDS AT 8.0 G IN CUP"),
+        ("UNIT_12", &type_scale::UNIT_12, "BAR"),
+    ];
+
+    for (name, face, sample) in faces {
+        assert_eq!(
+            face.ascent(),
+            face.font().get_ascent() as i32,
+            "{name} declares an ascent the font does not agree with",
+        );
+        let (_, _, top, bottom) = ink(face, sample);
+        assert!(
+            -top <= face.ascent(),
+            "{name} inks {} px above the baseline but declares {}",
+            -top,
+            face.ascent(),
+        );
+        assert!(
+            bottom <= face.descent(),
+            "{name} inks {bottom} px below the baseline but declares {}",
+            face.descent(),
+        );
+    }
+}
+
 #[test]
 fn print_the_scale() {
-    let faces: [(&str, &FontRenderer, &str); 13] = [
+    let faces: [(&str, &Face,&str); 14] = [
+        ("ANSWER helvB24", &type_scale::ANSWER, "READY"),
         ("HERO inb38", &type_scale::HERO, "21:58"),
         ("PRIMARY_46 inb33", &type_scale::PRIMARY_46, "93.2"),
         ("PRIMARY_30 inb24", &type_scale::PRIMARY_30, "113.4"),
@@ -152,7 +206,9 @@ fn print_the_scale() {
         let (digit_w, _) = measure(font, "0");
         let (ink_w, ink_h, top, bottom) = ink(font, sample);
         println!(
-            "{name:22} {sample:24} adv {w:4} box {h:3} | digit adv {digit_w:3} | ink {ink_w:4}x{ink_h:3} top {top:4} bottom {bottom:3}"
+            "{name:22} {sample:24} adv {w:4} box {h:3} | digit adv {digit_w:3} | ink {ink_w:4}x{ink_h:3} top {top:4} bottom {bottom:3} | reported asc {} desc {}",
+            font.font().get_ascent(),
+            font.font().get_descent(),
         );
     }
 }

@@ -5,51 +5,41 @@
 //! what the machine actually achieved, so deviation is read as distance rather than as
 //! arithmetic. The rail's unit and full scale change with the mode; nothing else moves.
 //!
-//! This is the one state that spends the panel's full width, so its status marks go along
-//! the header rather than down the right edge.
+//! # What the second review changed
+//!
+//! * **The status marks come home.** This state used to lay them along its header, at half the
+//!   spacing, so it could spend the panel's full width on the rail. Across the set that made
+//!   the strip move and shrink on the four screens where the machine is actually doing
+//!   something. The rail gives up twenty pixels instead, which it had to spare.
+//! * **Hue no longer separates the command from the measurement.** `COMMAND 2.0 ML/S` was
+//!   drawn in the quantity's pen and the achieved `1.76` in plain ink -- so the fact, what the
+//!   machine is actually doing, was the one figure with no identity, and two readings of the
+//!   same physical quantity were told apart by a colour that means the quantity. Both carry
+//!   the pen now. **Hue answers *what*; size answers *which***: the measurement is large, the
+//!   command is smaller and muted, and each is labelled.
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::Rectangle;
-use u8g2_fonts::types::{HorizontalAlignment, VerticalPosition};
+use u8g2_fonts::types::VerticalPosition;
 
 use crate::draw;
-use crate::geometry::{Window, hairline_v};
-use crate::marks;
+use crate::geometry::Window;
 use crate::palette;
+use crate::rhythm::{self, Stack};
 use crate::type_scale;
-use crate::view::{Command, FreeBrewView, MarkState};
+use crate::view::{Command, FreeBrewView};
 use crate::widgets;
 
-// This state spends the panel's full width on the rail, so it has no column down the right
-// edge to line up with and its marks go along the header instead.
+/// Where the first row's ink starts, from the window top.
+const TOP: i32 = rhythm::MARGIN;
 
-const CONTENT_LEFT_DX: i32 = 0;
-const CONTENT_RIGHT_DX: i32 = crate::geometry::WINDOW_SIZE.width as i32;
-const CONTENT_WIDTH: i32 = CONTENT_RIGHT_DX - CONTENT_LEFT_DX;
-
-/// Top of the status-mark row, which shares the header with the state word.
-const MARKS_DY: i32 = 0;
-
-/// Baseline of the header's state word and the top of its chip.
-const HEADER_BASELINE: i32 = 14;
-
-/// Baseline of the command line. `inb21`, the tallest thing on it, inks 21 px above --
-/// clear of the 18 px marks that end at `MARKS_DY + 18`.
-const COMMAND_ROW_DY: i32 = 44;
-
-/// The rail's top. Its notch overhangs 3 px either side.
-const RAIL_DY: i32 = 52;
-
-/// Top of the bottom row's labels.
-///
-/// The rail's tick labels are gone: the chip already names the scale, and four numbers under
-/// a bar at the old 8 px floor were four things that could not be read saying what one word
-/// says. The rail's job is the distance between the fill and the notch, which needs no axis.
-const CELLS_LABEL_DY: i32 = 78;
-
-/// Baseline of the bottom row's values. `inb19` inks 19 px above it.
-const CELLS_VALUE_DY: i32 = 110;
+/// Mid-gap between the values row and the rail. See [`crate::states::overlay_floor`].
+pub(crate) const OVERLAY_FLOOR: i32 = TOP
+    + type_scale::STATE_WORD.height()
+    + rhythm::PITCH
+    + type_scale::SECONDARY_21.height()
+    + rhythm::PITCH / 2;
 
 /// What a mode makes of the rail, the chip and the units.
 struct Scale {
@@ -59,7 +49,7 @@ struct Scale {
     unit: &'static str,
     /// Full-scale deflection.
     full: f32,
-    /// The pen the command is drawn in.
+    /// The pen both figures are drawn in.
     pen: Rgb565,
     /// The rail's fill.
     fill: Rgb565,
@@ -110,66 +100,115 @@ where
     D: DrawTarget<Color = Rgb565>,
 {
     let (scale, commanded) = scale_of(view.command);
-    header(&scale, w, target)?;
-    command_row(view, &scale, commanded, w, target)?;
-    rail(view, &scale, commanded, w, target)?;
-    bottom_row(view, w, target)?;
+
+    // The header carries the mode chip; see the note in `off`. A `STATE_WORD` is one pixel
+    // taller than the chip face, so this costs nothing here -- but it is the same rule.
+    let mut stack = Stack::new(TOP.max(widgets::chip_overhang(&type_scale::STATE_WORD)));
+    let header_baseline = stack.row(&type_scale::STATE_WORD);
+    let values_baseline = stack.row(&type_scale::SECONDARY_21);
+    let rail_top = stack.block(widgets::RAIL_HEIGHT as i32);
+    let cells_label = stack.row(&type_scale::LABEL);
+    let cells_value = stack.paired(&type_scale::SECONDARY_19);
+
+    header(&scale, w, w.at(0, header_baseline).y, target)?;
+    values(view, &scale, commanded, w, w.at(0, values_baseline).y, target)?;
+    rail(view, &scale, commanded, w, rail_top, target)?;
+    bottom_row(
+        view,
+        w,
+        w.at(0, cells_label).y,
+        w.at(0, cells_value).y,
+        target,
+    )?;
     Ok(())
 }
 
-/// The header row, including the status marks. The marks are drawn here rather than by
-/// [`crate::render`] because this is the only state whose strip is horizontal.
-pub(crate) fn header_marks<D>(
-    states: &[MarkState; 5],
-    w: Window,
-    target: &mut D,
-) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    marks::draw_row(states, w.at(CONTENT_RIGHT_DX, 0).x, w.at(0, MARKS_DY).y, target)
-}
-
-fn header<D>(scale: &Scale, w: Window, target: &mut D) -> Result<(), D::Error>
+fn header<D>(scale: &Scale, w: Window, baseline: i32, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let after = draw::run(
         &type_scale::STATE_WORD,
         format_args!("FREE BREW"),
-        w.at(CONTENT_LEFT_DX, HEADER_BASELINE),
+        Point::new(w.at(0, 0).x, baseline),
         VerticalPosition::Baseline,
         palette::INK,
         target,
     );
     // Outlined rather than filled: the chip names the variable being commanded, which is a
-    // setting the operator chose, not something that has happened.
+    // setting the operator chose, not something that has happened. On the word's own baseline,
+    // so the rect aligns to the cap box beside it rather than to a line box neither shares.
     widgets::chip_outlined(
         format_args!("{}", scale.word),
         scale.pen,
         scale.fill,
-        Point::new(after + 7, w.at(0, HEADER_BASELINE - 10).y),
+        after + rhythm::GAP,
+        baseline,
         target,
     )?;
     Ok(())
 }
 
-fn command_row<D>(
+/// What the machine is doing, and what it was told to do.
+///
+/// The measurement first and largest. Under duty control there is nothing downstream to
+/// measure the command against, so the commanded duty stands alone as the fact and both of its
+/// consequences go in the bottom row.
+fn values<D>(
     view: &FreeBrewView,
     scale: &Scale,
     commanded: f32,
     w: Window,
+    baseline: i32,
     target: &mut D,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let baseline = w.at(CONTENT_LEFT_DX, COMMAND_ROW_DY);
+    let left = w.at(0, 0).x;
 
+    // `ACTUAL` and `COMMAND`, which is the pair the review asks for: two readings of one
+    // quantity, told apart by what they are rather than by which is which colour. Naming the
+    // measurement by its unit instead -- `ML/S 1.76` -- reads as a third quantity, and the
+    // chip above has already said which one this is.
+    let after = match view.measured {
+        Some(measured) => {
+            let after = draw::run(
+                &type_scale::LABEL,
+                format_args!("ACTUAL"),
+                Point::new(left, baseline),
+                VerticalPosition::Baseline,
+                palette::INK_MUTED,
+                target,
+            );
+            let after = draw::run(
+                &type_scale::SECONDARY_21,
+                format_args!("{measured:.2}"),
+                Point::new(after + rhythm::GAP, baseline),
+                VerticalPosition::Baseline,
+                scale.pen,
+                target,
+            );
+            let after = draw::run(
+                &type_scale::LABEL,
+                format_args!("{}", scale.unit),
+                Point::new(after + rhythm::TIGHT, baseline),
+                VerticalPosition::Baseline,
+                palette::INK_FAINT,
+                target,
+            );
+            rhythm::divider(after, baseline, &type_scale::SECONDARY_21, target)?
+        }
+        None => left,
+    };
+
+    // Same pen, smaller and muted. The command is the same quantity as the measurement, so
+    // colour cannot be what tells them apart -- and the operator set it, so it is the one of
+    // the two they already know.
     let after = draw::run(
         &type_scale::LABEL,
         format_args!("COMMAND"),
-        baseline,
+        Point::new(after, baseline),
         VerticalPosition::Baseline,
         palette::INK_MUTED,
         target,
@@ -177,44 +216,19 @@ where
     let after = draw::run(
         &type_scale::NUMBER_FLOOR,
         format_args!("{:.*}", scale.decimals, commanded),
-        Point::new(after + 5, baseline.y),
+        Point::new(after + rhythm::GAP, baseline),
         VerticalPosition::Baseline,
-        scale.pen,
+        palette::dim(scale.pen),
         target,
     );
     draw::run(
         &type_scale::LABEL,
         format_args!("{}", scale.unit),
-        Point::new(after + 4, baseline.y),
+        Point::new(after + rhythm::TIGHT, baseline),
         VerticalPosition::Baseline,
         palette::INK_FAINT,
         target,
     );
-
-    // Under duty control there is nothing downstream to measure the command against, so the
-    // measured slot is empty and both consequences go in the bottom row instead.
-    if let Some(measured) = view.measured {
-        let unit_width = draw::width(&type_scale::LABEL, format_args!("{} IN", scale.unit));
-        let right = w.at(CONTENT_RIGHT_DX, 0).x;
-        draw::aligned(
-            &type_scale::LABEL,
-            format_args!("{} IN", scale.unit),
-            Point::new(right, baseline.y),
-            VerticalPosition::Baseline,
-            HorizontalAlignment::Right,
-            palette::INK_FAINT,
-            target,
-        );
-        draw::aligned(
-            &type_scale::SECONDARY_21,
-            format_args!("{:.2}", measured),
-            Point::new(right - unit_width - 4, baseline.y),
-            VerticalPosition::Baseline,
-            HorizontalAlignment::Right,
-            palette::INK,
-            target,
-        );
-    }
 
     Ok(())
 }
@@ -224,14 +238,16 @@ fn rail<D>(
     scale: &Scale,
     commanded: f32,
     w: Window,
+    top: i32,
     target: &mut D,
 ) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
+    let left = w.at(0, 0).x;
     let area = Rectangle::new(
-        w.at(CONTENT_LEFT_DX, RAIL_DY),
-        Size::new(CONTENT_WIDTH as u32, widgets::RAIL_HEIGHT),
+        Point::new(left, w.at(0, top).y),
+        Size::new((w.body_right() - left) as u32, widgets::RAIL_HEIGHT),
     );
 
     // The fill is what the machine achieved. Under duty control the command *is* what the
@@ -250,18 +266,26 @@ where
     Ok(())
 }
 
-fn bottom_row<D>(view: &FreeBrewView, w: Window, target: &mut D) -> Result<(), D::Error>
+fn bottom_row<D>(
+    view: &FreeBrewView,
+    w: Window,
+    label_baseline: i32,
+    value_baseline: i32,
+    target: &mut D,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     // Four cells. Which four depends on the mode: under duty control there is no downstream
     // setpoint, so pressure and flow -- the two consequences of a duty -- take equal weight
     // and the running total of water in gives up its cell.
-    // Units in capitals, like every other label on the panel. At the raised floor they are
-    // set in the same bold ten as the label above them, and a lowercase run beside an
-    // uppercase one reads as two tiers where there is only one.
+    // One decimal on the flow, where the row above gives the commanded flow two. Under duty
+    // control flow is a consequence rather than the thing being aimed at, and `ML/S` is the
+    // widest unit on the panel: at two decimals this cell is the fifteen pixels that push the
+    // row into the status marks, and a hundredth of a millilitre per second is not a figure
+    // anybody reads off a summary row.
     let fourth: (&str, Option<f32>, usize, &str, Rgb565) = match view.command {
-        Command::Duty { .. } => ("FLOW", view.flow_in_ml_s, 2, "ML/S", palette::PEN_FLOW_OUT),
+        Command::Duty { .. } => ("FLOW", view.flow_in_ml_s, 1, "ML/S", palette::PEN_FLOW_OUT),
         _ => ("IN", view.water_in_ml, 0, "ML", palette::PEN_WATER_IN),
     };
 
@@ -278,44 +302,47 @@ where
         fourth,
     ];
 
-    let cell_width = CONTENT_WIDTH / 4;
+    // Laid out left to right from what each cell actually measures, rather than on a grid of
+    // four equal columns: a grid cell whose content is one pixel wider than its share puts
+    // `BAR` through the figure beside it, which four equal columns of 92 px did.
+    //
+    // Divided by rules. Six pixels of black between `8.39 BAR` and `IN` is not a division at
+    // 1x -- the four cells read as one run of text, which is the same fault the review found
+    // in the post-routine stats line and the same fix.
+    let mut x = w.at(0, 0).x;
     for (i, (label, value, decimals, unit, pen)) in cells.iter().enumerate() {
-        let left = w.at(CONTENT_LEFT_DX + cell_width * i as i32, 0).x;
-        // A hairline between cells, not around them: the panel's only decoration is a
-        // divider, and a box round each figure would be four more.
         if i > 0 {
-            hairline_v(
-                Point::new(left - 9, w.at(0, CELLS_LABEL_DY - 4).y),
-                (CELLS_VALUE_DY - CELLS_LABEL_DY + 6) as u32,
-                target,
-            )?;
+            x = rhythm::divider(x, value_baseline, &type_scale::SECONDARY_19, target)?;
         }
-        draw::run(
+        // A cell is as wide as its widest row, which is not always the figure: with no scale
+        // paired `WEIGHT` is 56 px of label over an 8 px dash, and advancing by the dash put
+        // `PRESSURE` through the middle of it.
+        let label_end = draw::run(
             &type_scale::LABEL,
             format_args!("{label}"),
-            Point::new(left, w.at(0, CELLS_LABEL_DY).y),
-            VerticalPosition::Top,
+            Point::new(x, label_baseline),
+            VerticalPosition::Baseline,
             palette::INK_MUTED,
             target,
         );
-        let baseline = Point::new(left, w.at(0, CELLS_VALUE_DY).y);
         let after = widgets::value(
             &type_scale::SECONDARY_19,
             *value,
             *decimals,
-            baseline,
+            Point::new(x, value_baseline),
             VerticalPosition::Baseline,
             *pen,
             target,
         )?;
-        draw::run(
+        let value_end = draw::run(
             &type_scale::LABEL,
             format_args!("{unit}"),
-            Point::new(after + 3, baseline.y),
+            Point::new(after + rhythm::TIGHT, value_baseline),
             VerticalPosition::Baseline,
             palette::INK_FAINT,
             target,
         );
+        x = label_end.max(value_end);
     }
 
     Ok(())

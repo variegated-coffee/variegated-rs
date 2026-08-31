@@ -46,9 +46,59 @@ use u8g2_fonts::fonts::{
     u8g2_font_inb24_mn, u8g2_font_inb33_mn, u8g2_font_inb38_mn,
 };
 
+/// A face, and how far its ink actually reaches either side of the baseline.
+///
+/// # Why the metrics are carried rather than asked for
+///
+/// [`crate::rhythm`] places rows from ink, not from nominal size, and neither of u8g2's own
+/// numbers can be used unqualified for that:
+///
+/// * **`get_rendered_dimensions` reports the font's common glyph cell**, which for an `_mn`
+///   cut is 65 px where the lit pixels are 52. Every region on this panel is sized against
+///   ink, so a layout built on that box would leave a third of the window empty and call it
+///   full.
+/// * **`get_descent` describes glyphs this panel never draws.** It is −9 on `inb38`, which is
+///   the room a comma would need in a cut that contains no comma: the `_mn` faces draw digits
+///   and the `_tr` faces draw capitals, and neither descends at all.
+///
+/// [`Self::ascent`] *is* u8g2's own `get_ascent`, asserted against it in `tests/metrics.rs` so
+/// it cannot drift from the font data. [`Self::descent`] is the panel's, and is zero
+/// everywhere except the one face that sets mixed case.
+pub struct Face {
+    font: FontRenderer,
+    ascent: i32,
+    descent: i32,
+}
+
+impl Face {
+    /// How far this face's ink reaches above the baseline.
+    pub const fn ascent(&self) -> i32 {
+        self.ascent
+    }
+
+    /// How far below, for the content this panel sets in it.
+    pub const fn descent(&self) -> i32 {
+        self.descent
+    }
+
+    /// Ink top to ink bottom.
+    pub const fn height(&self) -> i32 {
+        self.ascent + self.descent
+    }
+
+    /// The renderer underneath, for the two callers that measure rather than draw.
+    pub const fn font(&self) -> &FontRenderer {
+        &self.font
+    }
+}
+
 /// Build a face with the panel's one global setting applied. See the module note.
-const fn face<F: u8g2_fonts::Font>() -> FontRenderer {
-    FontRenderer::new::<F>().with_ignore_unknown_chars(true)
+const fn face<F: u8g2_fonts::Font>(ascent: i32, descent: i32) -> Face {
+    Face {
+        font: FontRenderer::new::<F>().with_ignore_unknown_chars(true),
+        ascent,
+        descent,
+    }
 }
 
 // --- Numbers -----------------------------------------------------------------------------
@@ -76,26 +126,35 @@ const fn face<F: u8g2_fonts::Font>() -> FontRenderer {
 // they live in are the ones with vertical slack, and the alternative is three tiers that
 // are all the same face.
 
+// Digits do not descend, so every `_mn` face's descent is zero or one. That is a statement
+// about the *content* -- these cuts hold nothing but digits, a colon and a full stop -- and it
+// is what lets a number sit 6 px under a label instead of 15, which is what u8g2's own
+// `get_descent` would have reserved for the comma these faces do not contain.
+//
+// The two largest cuts are the exception, by a single pixel: `21:58` and `93.2` drop the
+// bottom row of their punctuation below the baseline where the smaller cuts do not.
+// `tests/metrics.rs` is what found that, and is why these are measured rather than assumed.
+
 /// The off-state clock. One per panel, at most.
-pub const HERO: FontRenderer = face::<u8g2_font_inb38_mn>();
+pub const HERO: Face = face::<u8g2_font_inb38_mn>(38, 1);
 
 /// Brew temperature: the number that decides whether to pull.
-pub const PRIMARY_46: FontRenderer = face::<u8g2_font_inb33_mn>();
+pub const PRIMARY_46: Face = face::<u8g2_font_inb33_mn>(33, 1);
 
 /// Next-on time, steam temperature, time in step.
-pub const PRIMARY_30: FontRenderer = face::<u8g2_font_inb24_mn>();
+pub const PRIMARY_30: Face = face::<u8g2_font_inb24_mn>(24, 0);
 
 /// A finished shot's time.
-pub const PRIMARY_27: FontRenderer = face::<u8g2_font_inb21_mn>();
+pub const PRIMARY_27: Face = face::<u8g2_font_inb21_mn>(21, 0);
 
 /// The measured value under a command.
-pub const SECONDARY_21: FontRenderer = face::<u8g2_font_inb21_mn>();
+pub const SECONDARY_21: Face = face::<u8g2_font_inb21_mn>(21, 0);
 
 /// Time, weight, pressure and water-in in the free-brewing bottom row.
-pub const SECONDARY_19: FontRenderer = face::<u8g2_font_inb19_mn>();
+pub const SECONDARY_19: Face = face::<u8g2_font_inb19_mn>(19, 0);
 
 /// Commanded values, steam pressure, step figures. The floor for a number.
-pub const NUMBER_FLOOR: FontRenderer = face::<u8g2_font_inb16_mn>();
+pub const NUMBER_FLOOR: Face = face::<u8g2_font_inb16_mn>(16, 0);
 
 // --- Words -------------------------------------------------------------------------------
 //
@@ -111,13 +170,17 @@ pub const NUMBER_FLOOR: FontRenderer = face::<u8g2_font_inb16_mn>();
 // twice, and the running total was never read.
 
 /// READY, COMPLETE, the running step's name. The old floor, back where it belongs.
-pub const STATE_WORD: FontRenderer = face::<u8g2_font_helvB12_tr>();
+pub const STATE_WORD: Face = face::<u8g2_font_helvB12_tr>(12, 0);
 
 /// The routine step the machine is in.
-pub const STEP_CURRENT: FontRenderer = STATE_WORD;
+pub const STEP_CURRENT: Face = face::<u8g2_font_helvB12_tr>(12, 0);
 
 /// Steps either side of the current one, and any secondary word.
-pub const STEP_OTHER: FontRenderer = face::<u8g2_font_helvR12_tr>();
+///
+/// The one face on this panel that sets mixed case -- a step is named by its author, in
+/// sentence case -- so it is the one with a descent to declare. Everything else here is
+/// capitals or digits, and neither reaches below the baseline.
+pub const STEP_OTHER: Face = face::<u8g2_font_helvR12_tr>(12, 4);
 
 /// The answer to the only question the idle state is asked.
 ///
@@ -125,7 +188,7 @@ pub const STEP_OTHER: FontRenderer = face::<u8g2_font_helvR12_tr>();
 /// the only elements on this panel that change what the operator does next, and on the
 /// machine they were beaten for prominence by the clock, both temperatures, the target and
 /// the steam pressure.
-pub const ANSWER: FontRenderer = face::<u8g2_font_helvB24_tr>();
+pub const ANSWER: Face = face::<u8g2_font_helvB24_tr>(25, 0);
 
 /// A chip's word, and a section header.
 ///
@@ -133,16 +196,16 @@ pub const ANSWER: FontRenderer = face::<u8g2_font_helvB24_tr>();
 /// and with the floor at 10 there is nowhere below to put a label. Two names for one face
 /// because the two roles still differ -- a chip sits on a fill, a label does not -- and a
 /// future rung would want to move one without the other.
-pub const CHIP: FontRenderer = face::<u8g2_font_helvB10_tr>();
+pub const CHIP: Face = face::<u8g2_font_helvB10_tr>(11, 0);
 
 /// Every uppercase label, unit, rail tick and provenance line.
-pub const LABEL: FontRenderer = face::<u8g2_font_helvB10_tr>();
+pub const LABEL: Face = face::<u8g2_font_helvB10_tr>(11, 0);
 
 /// A unit beside a 21--30 px number. Bold, like everything else at the floor.
-pub const UNIT_12: FontRenderer = face::<u8g2_font_helvB12_tr>();
+pub const UNIT_12: Face = face::<u8g2_font_helvB12_tr>(12, 0);
 
 /// A unit beside the hero clock, which is the one number still large enough to want one.
-pub const UNIT_14: FontRenderer = face::<u8g2_font_helvB14_tr>();
+pub const UNIT_14: Face = face::<u8g2_font_helvB14_tr>(14, 0);
 
 // --- The two glyphs that are drawn rather than typed --------------------------------------
 

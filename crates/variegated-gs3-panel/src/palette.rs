@@ -26,6 +26,18 @@ const fn hex(rgb: u32) -> Rgb565 {
     )
 }
 
+/// The same hue at roughly half the luminance.
+///
+/// For the one place two readings of the *same* physical quantity appear together: free
+/// brewing's measured value and the command under it. Hue cannot separate them, because hue
+/// is what says they are the same quantity -- so the pen stays and the luminance carries the
+/// distinction, alongside size. Halving each channel keeps the hue exactly where a second
+/// hand-picked literal would drift from it.
+pub fn dim(colour: Rgb565) -> Rgb565 {
+    use embedded_graphics::prelude::RgbColor;
+    Rgb565::new(colour.r() / 2, colour.g() / 2, colour.b() / 2)
+}
+
 /// The surface everything is drawn on.
 pub const SURFACE: Rgb565 = hex(0x000000);
 
@@ -92,7 +104,16 @@ pub const PEN_STEAM_BOILER: Rgb565 = hex(0xA88BF0);
 pub const TROUGH: Rgb565 = hex(0x12171A);
 
 /// The 1 px region divider. The only decoration this panel allows.
-pub const HAIRLINE: Rgb565 = hex(0x232A2E);
+///
+/// The specification gives `#232A2E`, and this is a step above it, for the reason
+/// [`INK_MUTED`] gives and one more: **the rule is now load-bearing.** A 6 px vertical pitch
+/// means no horizontal gap may exceed 6 either, so distance can no longer separate one group
+/// from the next and every division on this panel is a rule. At 14% luminance behind curved
+/// glass this was decoration; if it does not read, `STEAM 1.42 BAR 113.4 C TARGET 1.3`
+/// reverts to one run of text and the panel is worse than it was with 10 px gaps.
+///
+/// Still far below [`INK_FAINT`], which is what keeps it a rule rather than a mark.
+pub const HAIRLINE: Rgb565 = hex(0x3A444A);
 
 /// The filled part of the flow rail.
 ///

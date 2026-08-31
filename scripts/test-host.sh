@@ -90,6 +90,12 @@ run "variegated-machine-menu" -p variegated-machine-menu "$@"
 # visible -- are checked against every state and every variant, and the fixtures *are* that
 # list. Without them the suite still passes, having checked nothing.
 run "variegated-gs3-panel" -p variegated-gs3-panel --features fixtures "$@"
+# Again with the bounds frame, because that is the configuration the GS3 actually builds --
+# its manifest names `always-draw-bounds` on the dependency. The frame is drawn last, over
+# everything, and flush to the window's edges, so it is the one thing on this panel with
+# nothing above it to catch an error: without this run, the escape assertion never sees it.
+run "variegated-gs3-panel (bounds)" -p variegated-gs3-panel \
+    --features fixtures,always-draw-bounds "$@"
 # Press/chord/hold recognition from raw button samples. Same opt-in `defmt` as
 # `variegated-menu`, and host-testable for the same reason: it takes milliseconds as a
 # plain `u64` rather than an `embassy_time::Instant`, so a test binary has no

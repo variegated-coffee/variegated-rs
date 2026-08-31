@@ -4,7 +4,7 @@
 //! `variegated-gs3-panel`, which is generic over an `Rgb565` draw target and knows nothing
 //! about `Status`. They are there rather than here because this crate's only target sets
 //! `test = false` and depends on `embassy-rp`, so nothing in it can be compiled on a host --
-//! and a 390x115 pixel specification whose only verification is "flash it and look" is one
+//! and a 396x111 pixel specification whose only verification is "flash it and look" is one
 //! nobody checks. That crate's `cargo test` asserts that no two runs of text overlap and that
 //! nothing leaves the visible window, on every state and every variant; its
 //! `--example render_png` puts them all on disk to hold against the figures.
@@ -283,6 +283,7 @@ impl GraphicalDisplayState {
         let data = self.shared_state.menu_data();
 
         type_scale::STATE_WORD
+            .font()
             .render_aligned(
                 format_args!("{}", menu::title(frame.id, &data)),
                 Point::new(f.x + 4, f.y + 2),
@@ -338,6 +339,7 @@ impl GraphicalDisplayState {
         // still does not say whether the list is empty or still loading.
         if geo.total_rows == 0 {
             type_scale::STEP_OTHER
+                .font()
                 .render_aligned(
                     format_args!("{}", menu::empty_label(frame.id)),
                     Point::new(f.x + 6, menu_first_row_y + MENU_ROW_BASELINE),
@@ -375,7 +377,7 @@ impl GraphicalDisplayState {
                 (&type_scale::STEP_OTHER, palette::INK)
             };
 
-            face.render_aligned(
+            face.font().render_aligned(
                 format_args!("{}", menu::label(&row, &ctx)),
                 Point::new(f.x + 6, row_y + MENU_ROW_BASELINE),
                 VerticalPosition::Baseline,
@@ -399,6 +401,7 @@ impl GraphicalDisplayState {
             let rendered = value.as_ref().map(|value| value.text(UnitStyle::Ascii));
             if let Some(text) = info.as_deref().or(rendered.as_deref()) {
                 type_scale::LABEL
+                    .font()
                     .render_aligned(
                         format_args!("{}", text),
                         Point::new(
@@ -446,6 +449,7 @@ impl GraphicalDisplayState {
             "1 Up   2 Down   3 Select   4 Back"
         };
         type_scale::LABEL
+            .font()
             .render_aligned(
                 format_args!("{}", hint),
                 Point::new(f.centre_x, menu_hint_y),
@@ -484,7 +488,7 @@ impl GraphicalDisplayState {
         let menu_hint_y = f.y + EFFECTIVE_HEIGHT - 12;
 
         if matches!(menu, MenuId::EditPanelOriginX | MenuId::EditPanelOriginY) {
-            calibration_frame(window, display)?;
+            geometry::calibration_frame(window, display)?;
         }
 
         // Nothing to edit means the frame was pushed without a value, which the button task
@@ -505,6 +509,7 @@ impl GraphicalDisplayState {
 
             // Measured then placed, so the unit does not push the digits off centre.
             let number_width = type_scale::PRIMARY_30
+                .font()
                 .get_rendered_dimensions(
                     number.as_str(),
                     Point::zero(),
@@ -513,6 +518,7 @@ impl GraphicalDisplayState {
                 .map(|d| d.advance.x)
                 .unwrap_or(0);
             let suffix_width = type_scale::UNIT_12
+                .font()
                 .get_rendered_dimensions(suffix, Point::zero(), VerticalPosition::Baseline)
                 .map(|d| d.advance.x)
                 .unwrap_or(0);
@@ -520,6 +526,7 @@ impl GraphicalDisplayState {
             let baseline = f.centre_y + 12;
             let left = f.centre_x - (number_width + 4 + suffix_width) / 2;
             let after = type_scale::PRIMARY_30
+                .font()
                 .render(
                     number.as_str(),
                     Point::new(left, baseline),
@@ -530,6 +537,7 @@ impl GraphicalDisplayState {
                 .map(|d| left + d.advance.x)
                 .unwrap_or(left);
             type_scale::UNIT_12
+                .font()
                 .render(
                     suffix,
                     Point::new(after + 4, baseline),
@@ -541,6 +549,7 @@ impl GraphicalDisplayState {
         }
 
         type_scale::LABEL
+            .font()
             .render_aligned(
                 // "Less"/"More" rather than the list's "Up"/"Down": buttons 1 and 2 are the
                 // panel's `-` and `+` on both screens, and reusing a vertical word for a
@@ -598,6 +607,7 @@ impl GraphicalDisplayState {
 
             let baseline = f.centre_y + 12;
             let width = face
+                .font()
                 .get_rendered_dimensions(
                     text.as_str(),
                     Point::new(0, baseline),
@@ -612,7 +622,7 @@ impl GraphicalDisplayState {
                     continue;
                 }
 
-                face.render(
+                face.font().render(
                     run,
                     pen,
                     VerticalPosition::Baseline,
@@ -622,6 +632,7 @@ impl GraphicalDisplayState {
                 .ok();
 
                 pen.x += face
+                    .font()
                     .get_rendered_dimensions(run, pen, VerticalPosition::Baseline)
                     .map(|dimensions| dimensions.advance.x)
                     .unwrap_or(0);
@@ -629,6 +640,7 @@ impl GraphicalDisplayState {
         }
 
         type_scale::LABEL
+            .font()
             .render_aligned(
                 // `4 Done`, not `4 Back`: this editor has no cancel, and the hint row is the
                 // only place on either panel that can say so *before* the press. `3 Field` for
@@ -652,58 +664,8 @@ impl Default for GraphicalDisplayState {
     }
 }
 
-/// The border and ticks a trimmed offset is judged against.
-///
-/// A correct offset reads as an unbroken rectangle with even margins inside the aperture; any
-/// error shows as a missing edge. The ticks are what turn "roughly centred" into a judgement
-/// you can actually make -- a corner tells you an edge is present, a midpoint tells you the
-/// margin above it matches the one below.
-///
-/// **Two pixels of border, where the review asked for one.** Everything else read on the
-/// machine had to be thickened, and this is the one element whose whole job is to be seen
-/// against a bright printed surround from arm's length. The ticks are the review's, at four
-/// pixels, drawn inward so they cannot themselves leave the window.
-fn calibration_frame<D>(window: Window, display: &mut D) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    const TICK: u32 = 4;
-    const BORDER: u32 = 2;
-
-    let rect = window.rect();
-    rect.into_styled(
-        PrimitiveStyleBuilder::new()
-            .stroke_color(palette::INK)
-            .stroke_width(BORDER)
-            .stroke_alignment(embedded_graphics::primitives::StrokeAlignment::Inside)
-            .build(),
-    )
-    .draw(display)?;
-
-    let (x0, y0) = (rect.top_left.x, rect.top_left.y);
-    let (w, h) = (rect.size.width as i32, rect.size.height as i32);
-    let fill = PrimitiveStyleBuilder::new().fill_color(palette::INK).build();
-
-    // Four corners and four midpoints, each reaching inward from the edge it belongs to.
-    for (x, y, across) in [
-        (x0, y0, true),
-        (x0 + w - TICK as i32, y0, true),
-        (x0, y0 + h - BORDER as i32, true),
-        (x0 + w - TICK as i32, y0 + h - BORDER as i32, true),
-        (x0 + (w - TICK as i32) / 2, y0, true),
-        (x0 + (w - TICK as i32) / 2, y0 + h - BORDER as i32, true),
-        (x0, y0 + (h - TICK as i32) / 2, false),
-        (x0 + w - BORDER as i32, y0 + (h - TICK as i32) / 2, false),
-    ] {
-        let size = if across {
-            Size::new(TICK, BORDER + 2)
-        } else {
-            Size::new(BORDER + 2, TICK)
-        };
-        Rectangle::new(Point::new(x, y), size)
-            .into_styled(fill)
-            .draw(display)?;
-    }
-
-    Ok(())
-}
+// The calibration frame itself is `geometry::calibration_frame`, in the panel crate: it is a
+// statement about where the window is, which is that crate's subject, and it now has a second
+// caller there -- the `always-draw-bounds` feature puts the same border on every frame. Two
+// copies of "where the design stops" would be one copy too many for a thing whose only job is
+// to be believed.

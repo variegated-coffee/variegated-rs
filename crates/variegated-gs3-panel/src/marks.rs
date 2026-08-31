@@ -19,6 +19,22 @@
 //! Everything is stroked two pixels. Read on the machine at one, behind curved glass and
 //! unaliased, a 16 px mark gave about one lit pixel of evidence per feature: the colours
 //! carried and the shapes did not.
+//!
+//! # One optical width
+//!
+//! The second review found the column's right edge ragged, with one mark reading a size
+//! larger than the rest. Measured off these bitmaps the spread was worse than reported and
+//! in the other direction: the scale and the probe spanned all sixteen columns of an
+//! eighteen-pixel box, the network and the boiler fourteen, and the tank ten. A drop that
+//! looks small beside a beam that touches both walls is not saying anything about the water
+//! level.
+//!
+//! So all five now span [`INK_LEFT`]`..=`[`INK_RIGHT`] -- one left edge, one right edge, and
+//! the column reads as five of one thing. [`the_marks_share_an_optical_width`] is what keeps
+//! it that way, because this is a property no one of these literals can be checked against on
+//! its own.
+//!
+//! [`the_marks_share_an_optical_width`]: tests::the_marks_share_an_optical_width
 
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
@@ -26,6 +42,16 @@ use embedded_graphics::prelude::*;
 use crate::geometry::{MARK_PITCH, MARK_SIZE, Window};
 use crate::palette;
 use crate::view::MarkState;
+
+/// The leftmost column any mark lights, and the rightmost.
+///
+/// Fourteen pixels of the eighteen, which is where the network and boiler marks already sat.
+/// Not the ten the review names -- that figure is measured off its own SVG stand-ins in a
+/// sixteen-unit box, and pulling every mark down to it would give back most of what the first
+/// remediation bought by going from sixteen pixels to eighteen.
+pub const INK_LEFT: u32 = 2;
+/// See [`INK_LEFT`].
+pub const INK_RIGHT: u32 = 15;
 
 /// Associated and reachable. Red: no link, and shots queue locally.
 const NETWORK: [u32; 18] = [
@@ -62,8 +88,8 @@ const SCALE: [u32; 18] = [
     0b000011_100001_110000,
     0b000000_111111_000000,
     0b000000_000000_000000,
-    0b011111_111111_111110,
-    0b011111_111111_111110,
+    0b001111_111111_111100,
+    0b001111_111111_111100,
     0b000000_000000_000000,
     0b000000_000000_000000,
     0b000000_000000_000000,
@@ -94,22 +120,26 @@ const STEAM_BOILER: [u32; 18] = [
 ];
 
 /// Water present. Red: empty, and the pump will not start.
+///
+/// Widened from ten columns to fourteen. It was the narrowest mark in the strip by four
+/// pixels, which made the one condition that stops the pump read as the least important thing
+/// in the column.
 const TANK: [u32; 18] = [
+    0b000000_000000_000000,
     0b000000_000000_000000,
     0b000000_001100_000000,
     0b000000_011110_000000,
     0b000000_110011_000000,
-    0b000000_110011_000000,
-    0b000001_100001_100000,
     0b000001_100001_100000,
     0b000011_000000_110000,
-    0b000011_000000_110000,
-    0b000011_000000_110000,
+    0b000110_000000_011000,
+    0b001100_000000_001100,
+    0b001100_000000_001100,
+    0b001100_000000_001100,
+    0b000110_000000_011000,
     0b000011_000000_110000,
     0b000001_100001_100000,
-    0b000000_110011_000000,
-    0b000000_011110_000000,
-    0b000000_001100_000000,
+    0b000000_111111_000000,
     0b000000_000000_000000,
     0b000000_000000_000000,
     0b000000_000000_000000,
@@ -124,11 +154,11 @@ const PROBE: [u32; 18] = [
     0b000000_000000_000000,
     0b000000_000000_000000,
     0b000000_000110_000000,
-    0b011000_000110_000110,
-    0b011000_011001_100110,
-    0b011000_011001_100110,
-    0b011001_100000_011110,
-    0b011001_100000_011110,
+    0b001100_000110_001100,
+    0b001100_011001_101100,
+    0b001100_011001_101100,
+    0b001100_110000_111100,
+    0b001100_110000_111100,
     0b000000_000000_000000,
     0b000000_000000_000000,
     0b000000_000000_000000,
@@ -180,7 +210,13 @@ where
     }))
 }
 
-/// The vertical strip at the right edge, used by every state but free-brewing.
+/// The vertical strip at the right edge. Every state, without exception.
+///
+/// Free-brewing used to lay the same marks along its header instead, closer together, because
+/// it wanted the panel's full width for its rail. Read as a set that made the strip move and
+/// shrink between states -- and status is the one thing on this panel that has to be findable
+/// without being looked for, which means it has to be in the same place whatever is running.
+/// The rail gives up the width instead; it had it to spare.
 pub fn draw_column<D>(
     states: &[MarkState; 5],
     w: Window,
@@ -192,31 +228,6 @@ where
     let origin = w.strip_origin();
     for (i, state) in states.iter().enumerate() {
         draw_one(i, *state, origin + Point::new(0, i as i32 * MARK_PITCH), target)?;
-    }
-    Ok(())
-}
-
-/// The width the horizontal row occupies.
-pub const ROW_WIDTH: u32 = MARK_SIZE * 5 + 4 * 4;
-
-/// The same marks laid along a header, for free-brewing.
-///
-/// Free-brewing spends the panel's full width on the rail, so its marks go in the header
-/// rather than down the right edge. Same bitmaps at the same size, closer together: a
-/// second, smaller set would be a second drawing to keep in agreement with this one, and
-/// the strip is meant to be recognised at a glance across every state.
-pub fn draw_row<D>(states: &[MarkState; 5], right: i32, top: i32, target: &mut D) -> Result<(), D::Error>
-where
-    D: DrawTarget<Color = Rgb565>,
-{
-    let left = right - ROW_WIDTH as i32;
-    for (i, state) in states.iter().enumerate() {
-        draw_one(
-            i,
-            *state,
-            Point::new(left + i as i32 * (MARK_SIZE as i32 + 4), top),
-            target,
-        )?;
     }
     Ok(())
 }
@@ -271,6 +282,23 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The five marks share one left edge and one right edge.
+    ///
+    /// This is the finding that cannot be seen in any one bitmap: each literal below looks
+    /// like a reasonable drawing of its own subject, and the fault only exists in the set.
+    /// Before this, the spread ran from ten columns to sixteen, so the column's right edge was
+    /// ragged and the widest marks read a size larger than the narrowest.
+    #[test]
+    fn the_marks_share_an_optical_width() {
+        for (index, rows) in BITMAPS.iter().enumerate() {
+            let lit = |x: u32| rows.iter().any(|row| row & (1 << (MARK_SIZE - 1 - x)) != 0);
+            let left = (0..MARK_SIZE).find(|x| lit(*x)).expect("a mark has ink");
+            let right = (0..MARK_SIZE).rev().find(|x| lit(*x)).expect("a mark has ink");
+            assert_eq!(left, INK_LEFT, "mark {index} starts at column {left}");
+            assert_eq!(right, INK_RIGHT, "mark {index} ends at column {right}");
         }
     }
 

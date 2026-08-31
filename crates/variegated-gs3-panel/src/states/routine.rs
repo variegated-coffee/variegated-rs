@@ -29,27 +29,29 @@ use u8g2_fonts::types::{HorizontalAlignment, VerticalPosition};
 use crate::draw;
 use crate::geometry::{Window, hairline_v};
 use crate::palette;
+use crate::rhythm::{self, Stack};
 use crate::type_scale;
 use crate::view::{ExitView, RoutineView};
 use crate::widgets;
 
-/// Baseline of the top rule.
-const HEADER_BASELINE: i32 = 13;
-
-/// Where the two columns start, below the rule.
-const CONTENT_TOP: i32 = 18;
+/// Where the first row's ink starts, from the window top.
+const TOP: i32 = rhythm::MARGIN;
 
 /// The spine's width. Holds `Declining profile` at 12 px beside its number.
-const SPINE_WIDTH: i32 = 128;
-const SPINE_DIVIDER_DX: i32 = SPINE_WIDTH + 10;
-const RIGHT_DX: i32 = SPINE_DIVIDER_DX + 10;
+///
+/// All six pixels of the resize went here, and they were needed: this is the only column in
+/// the set whose content was being clipped, and six pixels is about one and a half characters
+/// at `helvR12`. It is still not enough on its own -- a step name is the routine author's, so
+/// no column width bounds it -- which is what [`draw::fitted`] is for.
+const SPINE_WIDTH: i32 = 134;
+
+/// Where a step's name starts, in from the spine's left edge: past its number.
+const STEP_TEXT_DX: i32 = 12;
+const SPINE_DIVIDER_DX: i32 = SPINE_WIDTH;
+const RIGHT_DX: i32 = SPINE_DIVIDER_DX + rhythm::RULE_WIDTH;
 
 /// Four step rows fit. Beyond that the window scrolls around the current step.
 const VISIBLE_STEPS: usize = 4;
-const STEP_PITCH: i32 = 18;
-
-/// Baseline of the first step row.
-const FIRST_STEP_BASELINE: i32 = CONTENT_TOP + 12;
 
 /// The second column of the values block: weight, beside time in step.
 const VALUES_SECOND_DX: i32 = RIGHT_DX + 104;
@@ -58,34 +60,72 @@ const VALUES_SECOND_DX: i32 = RIGHT_DX + 104;
 ///
 /// Further right than the values column above it: the pressure beside it carries its target
 /// as well, which is the longest run on this half of the panel.
-const WATER_DX: i32 = RIGHT_DX + 138;
-
-/// Baseline of the two big figures. `inb24` inks 24 px above it.
-const VALUES_BASELINE: i32 = 52;
-
-/// Baseline of the pressure-and-water row. `inb19` inks 19 px above it.
-const SECOND_ROW_BASELINE: i32 = 76;
-
-/// Baseline of the exit line.
-const EXIT_BASELINE: i32 = 101;
+const WATER_DX: i32 = RIGHT_DX + 132;
 
 /// The exit bar.
-const EXIT_BAR_DY: i32 = 106;
-const EXIT_BAR_HEIGHT: u32 = 5;
+const EXIT_BAR_HEIGHT: i32 = 5;
+
+/// Mid-gap below the two big figures, which is also mid-gap in the spine beside them.
+/// See [`crate::states::overlay_floor`].
+pub(crate) const OVERLAY_FLOOR: i32 = TOP
+    + type_scale::LABEL.height()
+    + rhythm::PITCH
+    + type_scale::LABEL.height()
+    + rhythm::PAIR
+    + type_scale::PRIMARY_30.height()
+    + rhythm::PITCH / 2;
+
+/// Where the right half's rows sit.
+///
+/// A struct because the two halves are laid out independently -- the spine's rhythm is its own
+/// step pitch -- but both have to end inside the same window, and the exit bar is the thing
+/// that finds out first if they do not.
+struct Rows {
+    header: i32,
+    content_top: i32,
+    label: i32,
+    value: i32,
+    second: i32,
+    exit: i32,
+    bar: i32,
+}
+
+fn rows() -> Rows {
+    let mut stack = Stack::new(TOP);
+    let header = stack.row(&type_scale::LABEL);
+    let content_top = stack.bottom() + rhythm::PITCH;
+    let label = stack.row(&type_scale::LABEL);
+    // Paired: `IN STEP` and the figure under it are one object, and they were 0 px apart --
+    // two glyph boxes touching, which reads as a collision rather than as a pair.
+    let value = stack.paired(&type_scale::PRIMARY_30);
+    let second = stack.row(&type_scale::SECONDARY_19);
+    let exit = stack.row(&type_scale::LABEL);
+    let bar = stack.block(EXIT_BAR_HEIGHT);
+    Rows {
+        header,
+        content_top,
+        label,
+        value,
+        second,
+        exit,
+        bar,
+    }
+}
 
 pub(crate) fn draw<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    header(view, w, target);
-    spine(view, w, target)?;
+    let rows = rows();
+    header(view, w, w.at(0, rows.header).y, target);
+    spine(view, w, rows.content_top, target)?;
     hairline_v(
-        w.at(SPINE_DIVIDER_DX, CONTENT_TOP),
-        (crate::geometry::WINDOW_SIZE.height as i32 - CONTENT_TOP) as u32,
+        w.at(SPINE_DIVIDER_DX + rhythm::RULE_GAP, rows.content_top),
+        (crate::geometry::WINDOW_SIZE.height as i32 - rows.content_top - 2) as u32,
         target,
     )?;
-    values(view, w, target)?;
-    exit_footer(view, w, target)?;
+    values(view, w, &rows, target)?;
+    exit_footer(view, w, &rows, target)?;
     Ok(())
 }
 
@@ -93,22 +133,22 @@ where
 ///
 /// The step *name* is not here -- the bold row in the spine states it once, and stating it
 /// twice is what the 8 px tier was spending its height on.
-fn header<D>(view: &RoutineView<'_>, w: Window, target: &mut D)
+fn header<D>(view: &RoutineView<'_>, w: Window, baseline: i32, target: &mut D)
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let after = draw::run(
         &type_scale::LABEL,
         format_args!("STEP"),
-        w.at(0, HEADER_BASELINE),
+        Point::new(w.at(0, 0).x, baseline),
         VerticalPosition::Baseline,
         palette::INK_MUTED,
         target,
     );
     draw::run(
-        &type_scale::STATE_WORD,
+        &type_scale::LABEL,
         format_args!("{}/{}", view.current_step + 1, view.steps.len()),
-        Point::new(after + 6, w.at(0, HEADER_BASELINE).y),
+        Point::new(after + rhythm::GAP, baseline),
         VerticalPosition::Baseline,
         palette::INK,
         target,
@@ -116,7 +156,7 @@ where
     draw::aligned(
         &type_scale::LABEL,
         format_args!("{}", view.name),
-        Point::new(w.body_right(), w.at(0, HEADER_BASELINE).y),
+        Point::new(w.body_right(), baseline),
         VerticalPosition::Baseline,
         HorizontalAlignment::Right,
         palette::INK_FAINT,
@@ -134,13 +174,22 @@ fn window_start(current: usize, count: usize) -> usize {
     current.saturating_sub(1).min(last_start)
 }
 
-fn spine<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
+fn spine<D>(
+    view: &RoutineView<'_>,
+    w: Window,
+    content_top: i32,
+    target: &mut D,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
+    // The step list is a stack like any other, so its rows sit at the panel's pitch instead of
+    // at a step pitch of their own -- and the one face here that has a descent gets it counted,
+    // which a fixed pitch could not do.
+    let mut stack = Stack::new(content_top);
     let start = window_start(view.current_step, view.steps.len());
-    for (row, index) in (start..view.steps.len()).take(VISIBLE_STEPS).enumerate() {
-        let baseline = w.at(0, FIRST_STEP_BASELINE + row as i32 * STEP_PITCH);
+    for index in (start..view.steps.len()).take(VISIBLE_STEPS) {
+        let baseline = Point::new(w.at(0, 0).x, w.at(0, stack.row(&type_scale::STEP_OTHER)).y);
         let step = &view.steps[index];
 
         // Three states, three inks, and no rule through any of them. The number carries the
@@ -161,20 +210,39 @@ where
             number_ink,
             target,
         );
-        draw::run(
+        // Cut to the column rather than allowed to run into the rule. The current step is set
+        // in the bold face, which is the widest one here and therefore the one that overran --
+        // so the state where the name matters most was the state that broke.
+        let (name, cut) = draw::fitted(face, step.description, SPINE_WIDTH - STEP_TEXT_DX);
+        let after = draw::run(
             face,
-            format_args!("{}", step.description),
-            Point::new(baseline.x + 13, baseline.y),
+            format_args!("{name}"),
+            Point::new(baseline.x + STEP_TEXT_DX, baseline.y),
             VerticalPosition::Baseline,
             text_ink,
             target,
         );
+        if cut {
+            draw::run(
+                face,
+                format_args!("."),
+                Point::new(after, baseline.y),
+                VerticalPosition::Baseline,
+                text_ink,
+                target,
+            );
+        }
     }
 
     Ok(())
 }
 
-fn values<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
+fn values<D>(
+    view: &RoutineView<'_>,
+    w: Window,
+    rows: &Rows,
+    target: &mut D,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -191,12 +259,12 @@ where
         draw::run(
             &type_scale::LABEL,
             format_args!("{label}"),
-            w.at(dx, CONTENT_TOP + 10),
+            w.at(dx, rows.label),
             VerticalPosition::Baseline,
             palette::INK_MUTED,
             target,
         );
-        let baseline = w.at(dx, VALUES_BASELINE);
+        let baseline = w.at(dx, rows.value);
         let after = widgets::value(
             &type_scale::PRIMARY_30,
             value,
@@ -209,7 +277,7 @@ where
         draw::run(
             &type_scale::UNIT_12,
             format_args!("{unit}"),
-            Point::new(after + 3, baseline.y),
+            Point::new(after + rhythm::TIGHT, baseline.y),
             VerticalPosition::Baseline,
             palette::INK_FAINT,
             target,
@@ -217,7 +285,7 @@ where
     }
 
     // Pressure against what it was asked for, and water in.
-    let baseline = w.at(RIGHT_DX, SECOND_ROW_BASELINE);
+    let baseline = w.at(RIGHT_DX, rows.second);
     let after = widgets::value(
         &type_scale::SECONDARY_19,
         view.pressure_bar,
@@ -230,23 +298,23 @@ where
     let after = draw::run(
         &type_scale::LABEL,
         format_args!("BAR"),
-        Point::new(after + 4, baseline.y),
+        Point::new(after + rhythm::TIGHT, baseline.y),
         VerticalPosition::Baseline,
         palette::INK_FAINT,
         target,
     );
     if let Some(target_bar) = view.pressure_target {
         draw::run(
-            &type_scale::UNIT_12,
+            &type_scale::LABEL,
             format_args!("/ {target_bar:.1}"),
-            Point::new(after + 4, baseline.y),
+            Point::new(after + rhythm::TIGHT, baseline.y),
             VerticalPosition::Baseline,
             palette::INK_MUTED,
             target,
         );
     }
 
-    let baseline = w.at(WATER_DX, SECOND_ROW_BASELINE);
+    let baseline = w.at(WATER_DX, rows.second);
     let after = widgets::value(
         &type_scale::SECONDARY_19,
         view.water_in_ml,
@@ -259,7 +327,7 @@ where
     draw::run(
         &type_scale::LABEL,
         format_args!("ML IN"),
-        Point::new(after + 4, baseline.y),
+        Point::new(after + rhythm::TIGHT, baseline.y),
         VerticalPosition::Baseline,
         palette::INK_FAINT,
         target,
@@ -269,13 +337,18 @@ where
 }
 
 /// What ends this step: the threshold, and the bar. Once.
-fn exit_footer<D>(view: &RoutineView<'_>, w: Window, target: &mut D) -> Result<(), D::Error>
+fn exit_footer<D>(
+    view: &RoutineView<'_>,
+    w: Window,
+    rows: &Rows,
+    target: &mut D,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let left = w.at(RIGHT_DX, 0).x;
     let right = w.body_right();
-    let baseline = w.at(RIGHT_DX, EXIT_BASELINE);
+    let baseline = w.at(RIGHT_DX, rows.exit);
 
     match view.exit {
         ExitView::Phrase(phrase) => {
@@ -307,7 +380,7 @@ where
             let after = draw::run(
                 &type_scale::NUMBER_FLOOR,
                 format_args!("{:.*}", quantity.decimals(), threshold),
-                Point::new(after + 5, baseline.y),
+                Point::new(after + rhythm::GAP, baseline.y),
                 VerticalPosition::Baseline,
                 palette::INK,
                 target,
@@ -315,7 +388,7 @@ where
             draw::run(
                 &type_scale::LABEL,
                 format_args!("{}", quantity.unit_upper()),
-                Point::new(after + 4, baseline.y),
+                Point::new(after + rhythm::TIGHT, baseline.y),
                 VerticalPosition::Baseline,
                 palette::INK_FAINT,
                 target,
@@ -330,8 +403,8 @@ where
             };
             widgets::progress(
                 Rectangle::new(
-                    w.at(RIGHT_DX, EXIT_BAR_DY),
-                    Size::new((right - left) as u32, EXIT_BAR_HEIGHT),
+                    w.at(RIGHT_DX, rows.bar),
+                    Size::new((right - left) as u32, EXIT_BAR_HEIGHT as u32),
                 ),
                 palette::pen(quantity),
                 fraction,

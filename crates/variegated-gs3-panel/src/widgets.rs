@@ -6,15 +6,83 @@ use core::fmt::Arguments;
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
-use u8g2_fonts::FontRenderer;
 use u8g2_fonts::types::VerticalPosition;
 
 use crate::draw;
 use crate::palette;
-use crate::type_scale;
+use crate::type_scale::{self, Face};
 
-/// A chip's height, filled or outlined.
-pub const CHIP_HEIGHT: u32 = 13;
+/// The clear space between a chip's border and the word inside it.
+///
+/// Findings 21 and 22 were one fault: the rect was drawn around the text's *line* box with no
+/// padding, so the word overflowed its own border horizontally -- `FLOW IN` and `PUMP DUTY`
+/// both did, and `PRESSURE` escaped only by being narrower -- while the rect, centred on a
+/// line box, sat below the baseline of the words beside it. Both are fixed by measuring the
+/// string and padding it, at draw time, rather than by any constant width.
+const CHIP_PAD_X: i32 = 3;
+/// See [`CHIP_PAD_X`]. Two, so a 11 px cap box makes a 15 px chip.
+const CHIP_PAD_Y: i32 = 2;
+
+/// A chip's height: the chip face's cap box plus its padding, top and bottom.
+pub const CHIP_HEIGHT: u32 = (type_scale::CHIP.ascent() + CHIP_PAD_Y * 2) as u32;
+
+/// How far a chip's border paints above the cap box of the text it sits beside.
+///
+/// A chip is centred on its neighbour's cap box, so its rect reaches `CHIP_PAD_Y` past the
+/// chip face's own ascent -- which is above the row's ink whenever the neighbour is set no
+/// larger than the chip. Two pixels beside a `LABEL`, one beside a `STATE_WORD`.
+///
+/// A row that opens a stack has to allow for it: at the panel's 1 px top margin the `NEXT ON`
+/// chip on the off panel was drawing its top edge one pixel outside the window, where the
+/// bezel eats it and the chip reads as an open-topped bracket.
+pub const fn chip_overhang(beside: &Face) -> i32 {
+    let above = type_scale::CHIP.ascent() + CHIP_PAD_Y - beside.ascent();
+    if above > 0 { above } else { 0 }
+}
+
+/// How wide the chip around `word` will be.
+///
+/// Exposed because a row that places a chip has to measure it *including* the padding -- the
+/// other half of finding 22. A caller that measured the string alone would lay the next run
+/// six pixels inside the border.
+pub fn chip_width(word: Arguments<'_>) -> i32 {
+    draw::width(&type_scale::CHIP, word) + CHIP_PAD_X * 2
+}
+
+/// Draw a chip so its word sits on `baseline`, the same baseline as the text beside it.
+///
+/// Anchoring on the baseline rather than on a top edge is what aligns the rect to its
+/// neighbours' cap boxes: the border is derived from where the word will be, so the two
+/// cannot disagree.
+fn chip<D>(
+    word: Arguments<'_>,
+    ink: Rgb565,
+    style: PrimitiveStyle<Rgb565>,
+    left: i32,
+    baseline: i32,
+    target: &mut D,
+) -> Result<i32, D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let width = chip_width(word);
+    let top = baseline - type_scale::CHIP.ascent() - CHIP_PAD_Y;
+    Rectangle::new(
+        Point::new(left, top),
+        Size::new(width as u32, CHIP_HEIGHT),
+    )
+    .into_styled(style)
+    .draw(target)?;
+    draw::run(
+        &type_scale::CHIP,
+        word,
+        Point::new(left + CHIP_PAD_X, baseline),
+        VerticalPosition::Baseline,
+        ink,
+        target,
+    );
+    Ok(left + width)
+}
 
 /// Draw a filled chip -- a word on a solid, in the chip face -- and return the x after it.
 ///
@@ -24,28 +92,21 @@ pub const CHIP_HEIGHT: u32 = 13;
 pub fn chip_filled<D>(
     word: Arguments<'_>,
     fill: Rgb565,
-    at: Point,
+    left: i32,
+    baseline: i32,
     target: &mut D,
 ) -> Result<i32, D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let text_width = draw::width(&type_scale::CHIP, word);
-    let width = text_width as u32 + 8;
-    // 13, not 11: the chip face inks 8 px, so an 11 px chip puts its own edge through the
-    // last row of the word inside it.
-    Rectangle::new(at, Size::new(width, CHIP_HEIGHT))
-        .into_styled(PrimitiveStyle::with_fill(fill))
-        .draw(target)?;
-    draw::run(
-        &type_scale::CHIP,
+    chip(
         word,
-        at + Point::new(4, 3),
-        VerticalPosition::Top,
         palette::CHIP_INK,
+        PrimitiveStyle::with_fill(fill),
+        left,
+        baseline,
         target,
-    );
-    Ok(at.x + width as i32)
+    )
 }
 
 /// Draw an outlined chip in a pen's own hue, and return the x after it.
@@ -55,28 +116,21 @@ pub fn chip_outlined<D>(
     word: Arguments<'_>,
     ink: Rgb565,
     outline: Rgb565,
-    at: Point,
+    left: i32,
+    baseline: i32,
     target: &mut D,
 ) -> Result<i32, D::Error>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let text_width = draw::width(&type_scale::CHIP, word);
-    let width = text_width as u32 + 8;
-    // 13, not 11: the chip face inks 8 px, so an 11 px chip puts its own edge through the
-    // last row of the word inside it.
-    Rectangle::new(at, Size::new(width, CHIP_HEIGHT))
-        .into_styled(PrimitiveStyle::with_stroke(outline, 1))
-        .draw(target)?;
-    draw::run(
-        &type_scale::CHIP,
+    chip(
         word,
-        at + Point::new(4, 3),
-        VerticalPosition::Top,
         ink,
+        PrimitiveStyle::with_stroke(outline, 1),
+        left,
+        baseline,
         target,
-    );
-    Ok(at.x + width as i32)
+    )
 }
 
 /// The height of a free-brewing rail.
@@ -164,7 +218,7 @@ where
 /// The distinction is the point: a sensor that is not answering is not a sensor reading
 /// zero, and a panel that drew `0.0 g` for an unpaired scale would be lying about the shot.
 pub fn value<D>(
-    font: &FontRenderer,
+    font: &Face,
     value: Option<f32>,
     decimals: usize,
     at: Point,
@@ -187,22 +241,14 @@ where
         None => {
             // The dash is drawn on the baseline whatever the caller anchored the number
             // with, because a dash hung from the top of a 46 px cell would sit above the
-            // digits it stands in for.
+            // digits it stands in for. The face's own ascent gives the drop exactly, where
+            // the reported box used to give it to within a third of a cell.
             let baseline = match vpos {
                 VerticalPosition::Baseline => at,
-                _ => Point::new(at.x, at.y + font_height(font) * 3 / 4),
+                _ => Point::new(at.x, at.y + font.ascent()),
             };
             let advance = type_scale::no_reading(baseline, color, target)?;
             Ok(at.x + advance as i32)
         }
     }
-}
-
-/// A face's rendered height, used only to drop a substituted dash onto the baseline.
-fn font_height(font: &FontRenderer) -> i32 {
-    font.get_rendered_dimensions(format_args!("0"), Point::zero(), VerticalPosition::Top)
-        .ok()
-        .and_then(|d| d.bounding_box)
-        .map(|bb| bb.size.height as i32)
-        .unwrap_or(8)
 }

@@ -21,8 +21,10 @@
 //! **Judge at 1x.** The same round was approved at 1.5x, which makes an 8 px word look like a
 //! 12 px one. The 3x copy is for reading a specific glyph, not for deciding whether it reads.
 //!
-//! The dashed rectangle marks the 390x115 the bezel leaves visible. It is drawn only into the
-//! scaled copy, so the 1x image stays exactly what the hardware would show.
+//! The dashed rectangle marks the window the bezel leaves visible -- whatever
+//! [`WINDOW_SIZE`] currently says, so it follows a resize rather than needing to be told about
+//! one. It is drawn only into the scaled copy, so the 1x image stays exactly what the
+//! hardware would show.
 //!
 //! `png` rather than `embedded-graphics-simulator`: the simulator pulls SDL, which would
 //! make the one verification step this crate exists for depend on a system package.
