@@ -31,11 +31,14 @@
 //! static sections, and the 1 Hz stack and heap high-water lines in `debug/snapshot.rs` for
 //! what it actually costs once running.
 
+use embassy_futures::join::join;
 use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_net::dns::DnsQueryType;
 use embassy_net::tcp::{TcpSocket, TcpWriter};
 use embassy_net::Stack;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::WaitResult;
+use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
 use variegated_comms_api_types::uplink_types::{
@@ -114,7 +117,20 @@ async fn next_status_deadline() -> Instant {
 /// it.
 const COMMAND_SETTLE: Duration = Duration::from_secs(2);
 
-/// How long the socket may be idle before a keepalive ping.
+/// How often a keepalive ping goes out.
+///
+/// **An interval, not an idle timer -- and until the session loop was restructured, it was
+/// neither, because the ping never fired at all.** It used to be
+/// `with_timeout(KEEPALIVE_INTERVAL, read_record(..))`, rebuilt on every turn of the loop. The
+/// configuration publish arrives every ten seconds from the far side's own timer
+/// (`variegated-comms`'s link loop), which is shorter than this, so the timeout was restarted
+/// before it could ever expire and `http::ping` was dead code on every machine with a healthy
+/// application processor.
+///
+/// What that cost: a machine in `Off` or `PowerSaveStandby` sends nothing for ten minutes and
+/// received no pings, while [`SOCKET_TIMEOUT`] is two minutes -- so its session was being reset
+/// underneath it and reconnecting, over and over, on a perfectly good network. A machine that
+/// was `On` survived only because its sixty-second status happened to be inside the timeout.
 ///
 /// **This is what liveness rests on, not the status.** Plantlet calls a machine connected while
 /// its socket is up; the status carries what the machine is *doing*, and on an idle machine it
@@ -452,14 +468,8 @@ async fn open(
 enum Wake {
     /// The status deadline elapsed, or the machine changed mode. Both mean "send a status".
     Status,
-    /// A record arrived: `n` bytes at the start of the scratch buffer.
-    Record(usize),
-    /// A ping arrived: `n` bytes at the start of the scratch buffer. A pong is owed.
-    Ping(usize),
-    /// The read failed. The session is over.
-    ReadFailed,
-    /// Nothing arrived for a keepalive interval.
-    Idle,
+    /// The read finished. Leave the send loop so what it read can be acted on.
+    Frame,
     /// The routine list changed.
     Routines,
     /// A setting changed.
@@ -510,14 +520,15 @@ async fn run(
     // the truth from the moment the socket opens -- and it is *first* rather than merely early
     // because the routine list below can be several kilobytes on a machine with many
     // routines, and the connected indicator should not queue behind it.
-    // **A deadline, not a delay.** `select` drops the arms that did not win, so a `Timer::after`
-    // built inside the loop restarts its countdown every time *any* other arm fires -- and the
-    // keepalive read times out every `KEEPALIVE_INTERVAL`, which is shorter than either status
-    // interval. The status timer could therefore never reach its interval: one went up on
-    // connect and then never again, on a link that was working perfectly.
     //
-    // An `Instant` does not move when the loop restarts, so the deadline survives being
-    // rebuilt however often the loop goes round.
+    // **`next_status_at` is a deadline, not a delay.** `select` drops the arms that did not win,
+    // so a `Timer::after` built inside the loop would restart its countdown every time *any*
+    // other arm fires -- and the send loop below is woken at least every `HEARTBEAT`, which is
+    // shorter than every status interval. The status timer could therefore never reach its
+    // interval: one went up on connect and then never again, on a link that was working
+    // perfectly. An `Instant` does not move when the loop restarts, so the deadline survives
+    // being rebuilt however often the loop goes round.
+    //
     // Dropped rather than acted on. `Signal` is latching and nobody waits on it between
     // sessions, so a mode change during a reconnect would otherwise fire on this session's first
     // loop turn -- immediately after the status below, which already carries that mode.
@@ -550,74 +561,241 @@ async fn run(
     let mut last_configuration: Option<alloc::vec::Vec<u8>> = None;
     send_configuration(&mut socket_tx, &mut session, &mut last_configuration, true).await?;
 
-    loop {
-        checkin.good();
+    // The keepalive as a deadline rather than an idle timer; see `KEEPALIVE_INTERVAL`.
+    let mut next_ping_at = Instant::now() + KEEPALIVE_INTERVAL;
 
-        // Narrowed before anything is awaited -- see [`Wake`] for why that matters more than it
-        // looks. Nothing in this statement suspends, so none of the `Either4` is stored.
-        let wake = match select4(
-            // The deadline and the mode change are paired because they mean the same thing --
-            // "send a status now" -- and share a handler. Pairing them here rather than adding a
-            // fifth arm also keeps the recompute below on the single path that recomputes it,
-            // so a machine that has just come on picks up the shorter interval immediately.
-            select(Timer::at(next_status_at), channels::MACHINE_MODE_CHANGED.wait()),
-            with_timeout(
-                KEEPALIVE_INTERVAL,
-                http::read_record(&mut socket_rx, pending, &mut scratch),
+    loop {
+        // **Both signals are constructed fresh here, inside the loop.** `Signal` is latching, so
+        // one hoisted out would already be set on the second pass and the send loop would break
+        // out of itself immediately -- leaving a session that reads perfectly and never sends
+        // anything again. `websocket.rs` constructs its own inside its loop for the same reason.
+        let frame_done: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+        let fatal: Signal<CriticalSectionRawMutex, AttemptEnd> = Signal::new();
+
+        // **The read runs to completion and is never cancelled. That is the whole point of this
+        // structure.** `read_exact` keeps its cursor in its own future while the bytes have
+        // already left smoltcp's RX ring, so a dropped read loses them and the next one parses a
+        // payload as a frame header. It was previously an arm of the select below, where the
+        // configuration publish -- which arrives every ten seconds, from the far side's own timer
+        // -- cancelled it six times a minute.
+        //
+        // `select` around the `join` is what lets a failed *send* end the session promptly.
+        // `join` polls both to completion and never cancels, so without this a write failure
+        // would sit waiting for a read that may not come for `SOCKET_TIMEOUT`. The error travels
+        // on `fatal` rather than out of the join because the join's own output is discarded when
+        // the select drops it. Dropping the read here is the one place in this file where that is
+        // correct: the session is being torn down and the socket goes with it.
+        let outcome = select(
+            join(
+                async {
+                    let read = http::read_record(&mut socket_rx, pending, &mut scratch).await;
+                    frame_done.signal(());
+                    read
+                },
+                async {
+                    // Written as an inner block returning a `Result` so the sends below can use
+                    // `?`, with the one place that reports failure at the end of it.
+                    let sending: Result<(), AttemptEnd> = async {
+                        loop {
+                            checkin.good();
+
+                            // A deadline, not an idle timer. `HEARTBEAT` below guarantees a pass
+                            // every five seconds, so this lands within five seconds of its mark
+                            // without needing a fifth arm.
+                            if Instant::now() >= next_ping_at {
+                                http::ping(&mut socket_tx).await.map_err(|_| {
+                                    log_warn!("Uplink: writing a keepalive ping failed");
+                                    AttemptEnd::SessionOver
+                                })?;
+                                next_ping_at = Instant::now() + KEEPALIVE_INTERVAL;
+                            }
+
+                            // Timed out as well as selected on, and that is load-bearing now that
+                            // the read is not in here: the only guaranteed wake left is the status
+                            // deadline, which on a sleeping machine is ten minutes, and the Uplink
+                            // check-in row is declared at fifteen seconds. Every arm is cancel-safe
+                            // -- `Timer::at` holds its deadline outside the future, `Signal::wait`
+                            // does not consume on cancel, a subscriber does not advance until it
+                            // takes a message, and `Channel::receive` dequeues nothing on pending
+                            // -- so rebuilding them each pass loses nothing.
+                            let Ok(wake) = with_timeout(
+                                variegated_checkin::HEARTBEAT,
+                                async {
+                                    // Narrowed before anything is awaited -- see [`Wake`] for why
+                                    // that matters. Nothing here suspends, so none of the
+                                    // `Either4` is stored in this task's future.
+                                    match select4(
+                                        // The deadline and the mode change are paired because they
+                                        // mean the same thing -- "send a status now" -- and share a
+                                        // handler. Pairing them rather than adding a fifth arm also
+                                        // keeps the recompute on the single path that recomputes it,
+                                        // so a machine that has just come on picks up the shorter
+                                        // interval immediately.
+                                        select(
+                                            Timer::at(next_status_at),
+                                            channels::MACHINE_MODE_CHANGED.wait(),
+                                        ),
+                                        frame_done.wait(),
+                                        // The two "something the machine holds has changed" arms,
+                                        // paired into one rather than growing this to a `select5`.
+                                        select(
+                                            routines.next_message(),
+                                            configuration.next_message(),
+                                        ),
+                                        channels::UPLINK_SHOT_OFFER.receive(),
+                                    )
+                                    .await
+                                    {
+                                        Either4::First(_) => Wake::Status,
+                                        Either4::Second(()) => Wake::Frame,
+                                        // `Lagged` is answered rather than ignored. A missed
+                                        // publish means the thing changed and this task did not
+                                        // see how -- and the cache holds the current value either
+                                        // way, so sending it is exactly the right recovery.
+                                        Either4::Third(Either::First(
+                                            WaitResult::Message(_) | WaitResult::Lagged(_),
+                                        )) => Wake::Routines,
+                                        Either4::Third(Either::Second(
+                                            WaitResult::Message(_) | WaitResult::Lagged(_),
+                                        )) => Wake::Configuration,
+                                        Either4::Fourth(entry) => {
+                                            Wake::Shot(entry.id, entry.size_bytes)
+                                        }
+                                    }
+                                },
+                            )
+                            .await
+                            else {
+                                // Nothing happened for a heartbeat. The check-in at the top of the
+                                // next pass is the whole purpose of coming round.
+                                continue;
+                            };
+
+                            match wake {
+                                // The read finished. Leave, so what it read can be acted on
+                                // with the writer this loop has been holding.
+                                Wake::Frame => return Ok(()),
+                                Wake::Status => {
+                                    // Either the interval elapsed or the machine changed mode.
+                                    // Both are "send a status", and the recompute below picks up
+                                    // whichever interval now applies.
+                                    //
+                                    // Floored, because a mode change is the one send on this link
+                                    // driven by a value the *controller* produces rather than by a
+                                    // clock or a byte comparison. A controller that flapped between
+                                    // modes would otherwise put one sealed record, one Durable
+                                    // Object wake and one row written per flap onto someone's home
+                                    // internet connection, with nothing here to stop it.
+                                    if last_status_sent_at.elapsed() >= MIN_STATUS_GAP {
+                                        send_status(&mut socket_tx, &mut session).await?;
+                                        last_status_sent_at = Instant::now();
+
+                                        // From now, not from the deadline that just passed: a
+                                        // status delayed by a query does not make the next one
+                                        // early to compensate.
+                                        //
+                                        // Sampled here rather than once per session, so a machine
+                                        // switched on keeps to the minute from its next status
+                                        // onward without waiting for a reconnect.
+                                        next_status_at = next_status_deadline().await;
+                                    } else {
+                                        // Suppressed by the floor. Come back when it lifts rather
+                                        // than recomputing a full interval -- a machine that has
+                                        // just gone *off* would otherwise have its change swallowed
+                                        // and report it ten minutes later.
+                                        next_status_at = last_status_sent_at + MIN_STATUS_GAP;
+                                    }
+                                }
+                                // The routine list changed -- somebody saved a routine, here or
+                                // from the local frontend. Pushed rather than waiting to be asked,
+                                // which is what makes an edit at the machine show up on Plantlet
+                                // without anyone pressing refresh.
+                                Wake::Routines => {
+                                    // Read back from the cache rather than from the message, so
+                                    // this shares one path with the send above. Safe against the
+                                    // publish: the application processor holds the cache lock
+                                    // across both the publish and the write, so there is no window
+                                    // where this observes the old list.
+                                    send_routine_list(&mut socket_tx, &mut session).await?;
+                                }
+                                // A setting changed -- at the machine's own panel, from the local
+                                // frontend, from Home Assistant, or because Plantlet sent a
+                                // command. **This arm is what acknowledges an `UplinkCommand`**:
+                                // there is no per-command ack, and this is the reason there does
+                                // not need to be. What arrives says what the machine now believes,
+                                // which is a stronger statement than "your message was received".
+                                Wake::Configuration => {
+                                    // Fires every ten seconds whether or not anything changed, so
+                                    // `send_configuration` compares and usually sends nothing.
+                                    if send_configuration(
+                                        &mut socket_tx,
+                                        &mut session,
+                                        &mut last_configuration,
+                                        false,
+                                    )
+                                    .await?
+                                    {
+                                        // Something really did change. A status follows, because
+                                        // half of what a person changes from Plantlet does not
+                                        // appear in the configuration at all -- the machine's mode
+                                        // is in `Status` -- and waiting out the status interval to
+                                        // see whether the machine came on is a minute of looking at
+                                        // a page that says nothing happened.
+                                        next_status_at = Instant::now();
+                                    }
+                                }
+                                // The uploader has a shot small enough for this transport and is
+                                // waiting to hear whether it goes here or over a POST.
+                                //
+                                // Answered on every path, including the failures: the uploader
+                                // blocks on this signal, and a shot nobody answers for is a shot
+                                // that waits out its timeout and then gets posted anyway --
+                                // slower, and for no reason.
+                                Wake::Shot(id, size_bytes) => {
+                                    let sent =
+                                        send_shot(&mut socket_tx, &mut session, id, size_bytes)
+                                            .await;
+                                    channels::UPLINK_SHOT_ANSWER
+                                        .signal(matches!(sent, Ok(true)));
+                                    sent?;
+                                }
+                            }
+                        }
+                    }
+                    .await;
+
+                    // The one place a send failure is reported. It travels on the signal rather
+                    // than out of this block because the `select` above discards the join's
+                    // output when it takes the other arm.
+                    if let Err(end) = sending {
+                        fatal.signal(end);
+                    }
+                },
             ),
-            // The two "something the machine holds has changed" arms, paired into one rather
-            // than growing this to a `select5`. They are the same kind of event and neither
-            // is hot: the application processor compares before publishing either.
-            select(routines.next_message(), configuration.next_message()),
-            channels::UPLINK_SHOT_OFFER.receive(),
+            fatal.wait(),
         )
-        .await
-        {
-            Either4::First(_) => Wake::Status,
-            Either4::Second(Ok(Ok(http::Inbound::Record(len)))) => Wake::Record(len),
-            Either4::Second(Ok(Ok(http::Inbound::Ping(len)))) => Wake::Ping(len),
-            Either4::Second(Ok(Err(()))) => Wake::ReadFailed,
-            Either4::Second(Err(_)) => Wake::Idle,
-            // `Lagged` is answered rather than ignored. A missed publish means the thing
-            // changed and this task did not see how -- and the cache holds the current value
-            // either way, so sending it is exactly the right recovery.
-            Either4::Third(Either::First(
-                WaitResult::Message(_) | WaitResult::Lagged(_),
-            )) => Wake::Routines,
-            Either4::Third(Either::Second(
-                WaitResult::Message(_) | WaitResult::Lagged(_),
-            )) => Wake::Configuration,
-            Either4::Fourth(entry) => Wake::Shot(entry.id, entry.size_bytes),
+        .await;
+
+        // Bound with `let` rather than matched directly, so the join future -- and with it the
+        // borrows of `session`, `socket_tx`, `next_status_at` and `last_configuration` -- is
+        // dropped at the semicolon. A `match` on the expression would hold them for the whole of
+        // the match and nothing below could take them.
+        let (read, ()) = match outcome {
+            Either::First(joined) => {
+                // The send half can fail in the same poll in which the read completes. `select`
+                // polls the join first, so the join wins and the signal is never waited on --
+                // and the write failure would be dropped on the floor, leaving the session to
+                // carry on until the next write failed too. Checked rather than reasoned about.
+                if let Some(end) = fatal.try_take() {
+                    return Err(end);
+                }
+                joined
+            }
+            Either::Second(end) => return Err(end),
         };
 
-        match wake {
-            Wake::Status => {
-                // Either the interval elapsed or the machine changed mode. Both are "send a
-                // status", and the recompute below picks up whichever interval now applies.
-                //
-                // Floored, because a mode change is the one send on this link driven by a value
-                // the *controller* produces rather than by a clock or a byte comparison. A
-                // controller that flapped between modes would otherwise put one sealed record,
-                // one Durable Object wake and one row written per flap onto someone's home
-                // internet connection, with nothing here to stop it.
-                if last_status_sent_at.elapsed() >= MIN_STATUS_GAP {
-                    send_status(&mut socket_tx, &mut session).await?;
-                    last_status_sent_at = Instant::now();
-
-                    // From now, not from the deadline that just passed: a status delayed by a
-                    // query does not make the next one early to compensate.
-                    //
-                    // Sampled here rather than once per session, so a machine switched on keeps
-                    // to the minute from its next status onward without waiting for a reconnect.
-                    next_status_at = next_status_deadline().await;
-                } else {
-                    // Suppressed by the floor. Come back when it lifts rather than recomputing a
-                    // full interval -- a machine that has just gone *off* would otherwise have
-                    // its change swallowed and report it ten minutes later.
-                    next_status_at = last_status_sent_at + MIN_STATUS_GAP;
-                }
-            }
-            Wake::Record(len) => {
+        match read {
+            Ok(http::Inbound::Record(len)) => {
                 handle(
                     &mut session,
                     &scratch[..len],
@@ -630,63 +808,17 @@ async fn run(
                 .await?;
             }
             // A ping from the server, read but not answered by the half that read it -- see
-            // `http::pong`. Answered here, where the writer is.
-            Wake::Ping(len) => {
+            // `http::pong`. Answered here, where the writer is, and after the send loop has
+            // stopped, so it cannot land in the middle of a frame.
+            Ok(http::Inbound::Ping(len)) => {
                 http::pong(&mut socket_tx, &scratch[..len]).await.map_err(|_| {
                     log_warn!("Uplink: writing a pong failed");
                     AttemptEnd::SessionOver
                 })?;
             }
-            Wake::ReadFailed => {
+            Err(()) => {
                 log_warn!("Uplink: reading a record failed, ending the session");
                 return Err(AttemptEnd::SessionOver);
-            }
-            Wake::Idle => {
-                // Idle for a keepalive interval. A protocol-level ping, which the server's
-                // runtime answers without waking the hibernating object.
-                http::ping(&mut socket_tx).await.map_err(|_| {
-                    log_warn!("Uplink: writing a keepalive ping failed");
-                    AttemptEnd::SessionOver
-                })?;
-            }
-            // The routine list changed -- somebody saved a routine, here or from the local
-            // frontend. Pushed rather than waiting to be asked, which is what makes an edit
-            // at the machine show up on Plantlet without anyone pressing refresh.
-            //
-            Wake::Routines => {
-                // Read back from the cache rather than from the message, so this shares one
-                // path with the send above. Safe against the publish: the application
-                // processor holds the cache lock across both the publish and the write, so
-                // there is no window where this observes the old list.
-                send_routine_list(&mut socket_tx, &mut session).await?;
-            }
-            // A setting changed -- at the machine's own panel, from the local frontend, from
-            // Home Assistant, or because Plantlet sent a command. **This arm is what
-            // acknowledges an `UplinkCommand`**: there is no per-command ack, and this is the
-            // reason there does not need to be. What arrives says what the machine now
-            // believes, which is a stronger statement than "your message was received".
-            Wake::Configuration => {
-                // Fires every ten seconds whether or not anything changed, so
-                // `send_configuration` compares and usually sends nothing.
-                if send_configuration(&mut socket_tx, &mut session, &mut last_configuration, false).await? {
-                    // Something really did change. A status follows, because half of what a
-                    // person changes from Plantlet does not appear in the configuration at
-                    // all -- the machine's mode is in `Status` -- and waiting out the status
-                    // interval to see whether the machine came on is a minute of looking at
-                    // a page that says nothing happened.
-                    next_status_at = Instant::now();
-                }
-            }
-            // The uploader has a shot small enough for this transport and is waiting to hear
-            // whether it goes here or over a POST.
-            //
-            // Answered on every path, including the failures: the uploader blocks on this
-            // signal, and a shot nobody answers for is a shot that waits out its timeout and
-            // then gets posted anyway -- slower, and for no reason.
-            Wake::Shot(id, size_bytes) => {
-                let sent = send_shot(&mut socket_tx, &mut session, id, size_bytes).await;
-                channels::UPLINK_SHOT_ANSWER.signal(matches!(sent, Ok(true)));
-                sent?;
             }
         }
     }
