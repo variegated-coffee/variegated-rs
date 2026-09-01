@@ -177,6 +177,30 @@ impl Status {
     pub fn any_steam_wand_steaming(&self) -> bool {
         self.steam_wand_statuses.values().any(|status| status.is_steaming)
     }
+
+    /// Whether any group is brewing.
+    pub fn any_group_brewing(&self) -> bool {
+        self.group_statuses.values().any(|status| status.is_brewing)
+    }
+
+    /// Whether the machine is doing something worth watching second by second.
+    ///
+    /// The uplink's status cadence is a function of this: a busy machine reports once a second,
+    /// where one merely switched on reports once a minute. See `status_interval_secs` in
+    /// `variegated-comms-api-types`, which is where that rule lives and is tested.
+    ///
+    /// **A running routine counts even when no group reports brewing.** A routine step that is
+    /// pre-infusing, blooming or pausing need not set [`GroupStatus::is_brewing`], and it is
+    /// still a shot in progress with somebody watching it. There is no finer-grained signal to
+    /// use: [`RoutineExecutionStatus::current_step`] is a bare index with no step kind attached.
+    ///
+    /// Steaming and tap dispensing are deliberately *not* here. They have their own `any_`
+    /// predicates above for callers that want them, but neither produces the second-by-second
+    /// curve a shot does, and both can run for minutes -- which would make this the machine's
+    /// normal state rather than an exceptional one.
+    pub fn is_busy(&self) -> bool {
+        self.any_group_brewing() || self.routine_execution.is_some()
+    }
 }
 
 #[cfg(feature = "defmt")]
@@ -406,6 +430,13 @@ pub struct BrewStatus {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GroupStatus {
+    /// Whether this group is pulling a shot right now.
+    ///
+    /// Set from the controller's own state -- `state == Brewing` -- rather than inferred from
+    /// the pump or the valve, so it means "the controller believes it is brewing" and not
+    /// "water is moving". [`Status::is_busy`] reads it through [`Status::any_group_brewing`],
+    /// and the uplink's status cadence is a function of that, so a controller that leaves this
+    /// set costs real traffic rather than a wrong pixel.
     pub is_brewing: bool,
     pub three_way_valve_open: Option<bool>,
     pub current_brew: Option<BrewStatus>,
@@ -578,5 +609,90 @@ mod tests {
 
         assert!(status.any_water_tap_dispensing());
         assert!(status.any_steam_wand_steaming());
+    }
+
+    /// A routine mid-flight, for the busy tests below.
+    fn running_routine() -> RoutineExecutionStatus {
+        RoutineExecutionStatus {
+            routine_index: crate::RoutineIndex::Custom(3),
+            current_step: Some(1),
+            step_elapsed_time: Some(Duration::from_secs(4)),
+            total_elapsed_time: Some(Duration::from_secs(9)),
+            resolved_parameters: FnvIndexMap::new(),
+        }
+    }
+
+    /// The state every display holds until the first status arrives must not read as busy --
+    /// it would put a machine that has said nothing yet onto the one-second cadence.
+    #[test]
+    fn a_default_status_is_not_busy() {
+        let status = Status::default();
+        assert!(!status.any_group_brewing());
+        assert!(!status.is_busy());
+    }
+
+    #[test]
+    fn an_idle_group_is_not_busy() {
+        let mut status = Status::default();
+        status.group_statuses.insert(0, GroupStatus::default()).ok();
+
+        assert!(!status.any_group_brewing());
+        assert!(!status.is_busy());
+    }
+
+    #[test]
+    fn a_brewing_group_is_busy() {
+        let mut status = Status::default();
+        status
+            .group_statuses
+            .insert(0, GroupStatus { is_brewing: true, ..GroupStatus::default() })
+            .ok();
+
+        assert!(status.any_group_brewing());
+        assert!(status.is_busy());
+    }
+
+    /// The point of `any_`, as for taps and wands: a second group brewing counts even when
+    /// group 0 is idle.
+    #[test]
+    fn a_later_group_counts() {
+        let mut status = Status::default();
+        status.group_statuses.insert(0, GroupStatus::default()).ok();
+        status
+            .group_statuses
+            .insert(1, GroupStatus { is_brewing: true, ..GroupStatus::default() })
+            .ok();
+
+        assert!(status.any_group_brewing());
+        assert!(status.is_busy());
+    }
+
+    /// **The case `any_group_brewing` alone would miss.** A routine step that is pre-infusing,
+    /// blooming or pausing need not set `is_brewing`, and it is still a shot somebody is
+    /// watching. This is the whole reason `is_busy` is not just `any_group_brewing`.
+    #[test]
+    fn a_running_routine_is_busy_without_a_brewing_group() {
+        let mut status = Status::default();
+        status.group_statuses.insert(0, GroupStatus::default()).ok();
+        status.routine_execution = Some(running_routine());
+
+        assert!(!status.any_group_brewing());
+        assert!(status.is_busy());
+    }
+
+    /// Steaming and tap dispensing are deliberately outside `is_busy`: they have their own
+    /// predicates, and neither produces the curve a shot does.
+    #[test]
+    fn steaming_and_dispensing_are_not_busy() {
+        let mut status = Status::default();
+        status.water_tap_statuses.insert(0, WaterTapStatus { is_dispensing: true }).ok();
+        status.steam_wand_statuses.insert(0, SteamWandStatus {
+            is_steaming: true,
+            valve_openness: 100,
+        }).ok();
+
+        assert!(status.any_water_tap_dispensing());
+        assert!(status.any_steam_wand_steaming());
+        assert!(!status.is_busy());
     }
 }

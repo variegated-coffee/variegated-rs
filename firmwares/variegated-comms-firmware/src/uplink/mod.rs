@@ -42,7 +42,8 @@ use embassy_sync::signal::Signal;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 use variegated_comms_api_types::api_types::RoutineSummaryStorage;
 use variegated_comms_api_types::uplink_types::{
-    shot_log_prefix, status_interval_secs, UplinkMessage, MAX_UPLINK_CLIENT_RECORD_LEN,
+    defer_updates, shot_log_prefix, status_interval_secs, UplinkMessage,
+    COMMAND_BURST_COUNT, COMMAND_BURST_INTERVAL_SECS, MAX_UPLINK_CLIENT_RECORD_LEN,
     STATUS_INTERVAL_ACTIVE_SECS,
 };
 use variegated_comms_api_types::ws_types::{ClientQuery, QueryOutcome};
@@ -61,31 +62,18 @@ use variegated_shot_upload::{parse_url, Scheme};
 // keeps current. See `send_status` for why reading a subscriber here was wrong.
 use crate::channels;
 
-/// How long until the next unprompted status, for the machine's current mode.
-///
-/// A minute while the machine is on, ten while it is off or in standby. The decision itself is
-/// [`status_interval_secs`], in `variegated-comms-api-types`, because this crate sets
-/// `harness = false` and runs no tests -- a rule kept here would be one nothing could check.
-///
-/// Read from [`channels::STATUS_CACHE`] rather than from a subscriber, for the reason
-/// `send_status` gives: a subscriber this task both drained and read raced with itself.
-///
-/// The empty-cache case is decided by [`status_interval_secs`] rather than here, so that it is
-/// covered by a test -- see that function on why an unknown mode must not become `Off`.
-///
-/// **Compute this into a variable, never inside a `select` argument list.** A future built there
-/// would hold the cache's guard for the whole of the select, against a lock `cache_update_task`
-/// takes on every status.
-/// The closest together two unprompted statuses may be sent.
+/// The closest together two *mode-change* statuses may be sent.
 ///
 /// A floor on the mode-change path, which is the only send here driven by a value the
 /// application processor produces rather than by a clock or a byte comparison. Five seconds is
-/// far longer than any real sequence of mode changes and far shorter than either interval, so it
-/// cannot delay a change anyone is watching -- while a controller that flapped would cost one
-/// record every five seconds instead of one per flap.
+/// far longer than any real sequence of mode changes, so it cannot delay a change anyone is
+/// watching -- while a controller that flapped would cost one record every five seconds instead
+/// of one per flap.
 ///
-/// It also collapses the pair a `SetMachineMode` command produces: the command's own settle-send
-/// (`COMMAND_SETTLE`) and the mode change it causes are two events about one thing.
+/// **It does not apply to the scheduled cadence, and must not.** It used to, because the
+/// deadline and the mode change shared one arm and one handler -- which was harmless while the
+/// shortest interval was a minute, and would silently swallow the one-second brewing cadence
+/// whole. The two paths are separate arms now for exactly this reason.
 const MIN_STATUS_GAP: Duration = Duration::from_secs(5);
 
 const _: () = assert!(
@@ -93,29 +81,50 @@ const _: () = assert!(
     "the floor must not throttle the ordinary cadence"
 );
 
-async fn next_status_deadline() -> Instant {
-    let mode = {
-        // `MachineMode` is `Copy`, so the guard is released at the end of this block rather than
-        // held across the await below -- and the 2.4 kB `Status` is never cloned.
+/// How long until the next unprompted status, and whether pushed updates should wait for it.
+///
+/// The decisions themselves are [`status_interval_secs`] and [`defer_updates`], in
+/// `variegated-comms-api-types`, because this crate sets `harness = false` and runs no tests --
+/// a rule kept here would be one nothing could check. Both are answered from the one lock this
+/// takes, so a caller never has to reach for the cache twice.
+///
+/// Read from [`channels::STATUS_CACHE`] rather than from a subscriber, for the reason
+/// `send_status` gives: a subscriber this task both drained and read raced with itself.
+///
+/// The empty-cache case is decided over there rather than here, so that it is covered by a test
+/// -- see [`status_interval_secs`] on why an unknown mode must not become `Off`.
+///
+/// **The clock lives here and the rule lives there.** `busy_since` is when the machine last
+/// became busy, or `None`; this turns it into a duration so the rule stays a pure function of
+/// numbers. It is reset the moment the machine stops being busy, which is what re-arms
+/// `BUSY_CADENCE_LIMIT_SECS` for the next shot.
+///
+/// **Compute this into a variable, never inside a `select` argument list.** A future built there
+/// would hold the cache's guard for the whole of the select, against a lock `cache_update_task`
+/// takes on every status.
+async fn next_status_deadline(busy_since: &mut Option<Instant>) -> (Instant, bool) {
+    let (mode, busy) = {
+        // Both `Copy`, so the guard is released at the end of this block rather than held across
+        // the await below -- and the 2.4 kB `Status` is never cloned.
         let guard = channels::STATUS_CACHE.lock().await;
-        guard.as_ref().map(|status| status.mode)
+        match guard.as_ref() {
+            Some(status) => (Some(status.mode), status.is_busy()),
+            None => (None, false),
+        }
     };
 
-    Instant::now() + Duration::from_secs(status_interval_secs(mode))
-}
+    let busy_for_secs = if busy {
+        Some(busy_since.get_or_insert_with(Instant::now).elapsed().as_secs())
+    } else {
+        *busy_since = None;
+        None
+    };
 
-/// How long to let a command take effect before reporting a status about it.
-///
-/// A command leaves this task on a channel, crosses the inter-processor link, and is applied
-/// by the controller. A status read the instant it is queued would describe the state the
-/// command is about to change and read as though nothing happened.
-///
-/// Two seconds is generous for a link that carries a routine chunk in milliseconds, and being
-/// generous is the right way to be wrong here: too short reports the old state and looks
-/// broken, where too long merely delays a page update by a second. It does not need to bound
-/// anything -- if the command is somehow slower than this, the next scheduled status corrects
-/// it.
-const COMMAND_SETTLE: Duration = Duration::from_secs(2);
+    (
+        Instant::now() + Duration::from_secs(status_interval_secs(mode, busy_for_secs)),
+        defer_updates(mode),
+    )
+}
 
 /// How often a keepalive ping goes out.
 ///
@@ -466,8 +475,11 @@ async fn open(
 /// [`Wake::Shot`] carries the two fields the send needs rather than the whole entry, so an
 /// entry's annotation strings are not carried across the write either.
 enum Wake {
-    /// The status deadline elapsed, or the machine changed mode. Both mean "send a status".
-    Status,
+    /// The status deadline elapsed.
+    StatusDue,
+    /// The machine changed mode, which is also "send a status" -- but this is the one path
+    /// [`MIN_STATUS_GAP`] floors, so it cannot share a variant with the deadline.
+    ModeChanged,
     /// The read finished. Leave the send loop so what it read can be acted on.
     Frame,
     /// The routine list changed.
@@ -534,8 +546,20 @@ async fn run(
     // loop turn -- immediately after the status below, which already carries that mode.
     channels::MACHINE_MODE_CHANGED.reset();
 
-    let mut next_status_at = next_status_deadline().await;
+    // When the machine last became busy, or `None`. Owned here so it survives the cadence being
+    // recomputed, and reset by `next_status_deadline` the moment it stops being busy.
+    let mut busy_since: Option<Instant> = None;
+    let (mut next_status_at, mut asleep) = next_status_deadline(&mut busy_since).await;
     let mut last_status_sent_at = Instant::now();
+
+    // How many statuses are still owed from a command's burst; see `COMMAND_BURST_COUNT`.
+    let mut burst_remaining: u8 = 0;
+
+    // Pushes held back while the machine is asleep, to go out with the next status. Only ever
+    // set while `asleep`, and cleared by the flush -- see `defer_updates`.
+    let mut routines_pending = false;
+    let mut configuration_pending = false;
+
     send_status(&mut socket_tx, &mut session).await?;
 
     // And the routine list, once, at the top of the session.
@@ -563,6 +587,50 @@ async fn run(
 
     // The keepalive as a deadline rather than an idle timer; see `KEEPALIVE_INTERVAL`.
     let mut next_ping_at = Instant::now() + KEEPALIVE_INTERVAL;
+
+    // Send a status, flush anything held back for it, and pick the next deadline.
+    //
+    // A macro rather than a function or a closure because it mutates half a dozen of this
+    // function's locals *and* awaits, which is the same reason `send_shot` writes `flush!` this
+    // way. Two arms reach it -- the deadline and the mode change -- and the whole point of the
+    // rework is that they must not share a handler, only this tail of one.
+    macro_rules! send_status_and_reschedule {
+        () => {{
+            send_status(&mut socket_tx, &mut session).await?;
+            last_status_sent_at = Instant::now();
+
+            // Deferred pushes ride along with the status rather than waking the server on
+            // their own; see `defer_updates`. `send_configuration` compares bytes here, so a
+            // setting that moved and moved back costs nothing.
+            if routines_pending {
+                routines_pending = false;
+                send_routine_list(&mut socket_tx, &mut session).await?;
+            }
+            if configuration_pending {
+                configuration_pending = false;
+                send_configuration(&mut socket_tx, &mut session, &mut last_configuration, false)
+                    .await?;
+            }
+
+            // Recomputed on every send, not once per session, so a machine that has just come
+            // on -- or just started brewing -- picks up the shorter interval from its next
+            // status onward without waiting for a reconnect. This is also where `busy_since`
+            // is advanced and where the deferral flag is refreshed.
+            let (deadline, defer) = next_status_deadline(&mut busy_since).await;
+            asleep = defer;
+
+            next_status_at = if burst_remaining > 0 {
+                // Still inside a command's burst, which outranks the ordinary cadence: it is
+                // shorter than every interval by construction, and it is over in five seconds.
+                burst_remaining -= 1;
+                Instant::now() + Duration::from_secs(COMMAND_BURST_INTERVAL_SECS)
+            } else {
+                // From now, not from the deadline that just passed: a status delayed by a
+                // query does not make the next one early to compensate.
+                deadline
+            };
+        }};
+    }
 
     loop {
         // **Both signals are constructed fresh here, inside the loop.** `Signal` is latching, so
@@ -625,12 +693,10 @@ async fn run(
                                     // that matters. Nothing here suspends, so none of the
                                     // `Either4` is stored in this task's future.
                                     match select4(
-                                        // The deadline and the mode change are paired because they
-                                        // mean the same thing -- "send a status now" -- and share a
-                                        // handler. Pairing them rather than adding a fifth arm also
-                                        // keeps the recompute on the single path that recomputes it,
-                                        // so a machine that has just come on picks up the shorter
-                                        // interval immediately.
+                                        // Paired into one arm rather than growing this to a
+                                        // `select5`, but narrowed to *two* `Wake`s below: they
+                                        // both mean "send a status" and share the tail of a
+                                        // handler, yet only the mode change is floored.
                                         select(
                                             Timer::at(next_status_at),
                                             channels::MACHINE_MODE_CHANGED.wait(),
@@ -646,7 +712,8 @@ async fn run(
                                     )
                                     .await
                                     {
-                                        Either4::First(_) => Wake::Status,
+                                        Either4::First(Either::First(())) => Wake::StatusDue,
+                                        Either4::First(Either::Second(())) => Wake::ModeChanged,
                                         Either4::Second(()) => Wake::Frame,
                                         // `Lagged` is answered rather than ignored. A missed
                                         // publish means the thing changed and this task did not
@@ -675,35 +742,32 @@ async fn run(
                                 // The read finished. Leave, so what it read can be acted on
                                 // with the writer this loop has been holding.
                                 Wake::Frame => return Ok(()),
-                                Wake::Status => {
-                                    // Either the interval elapsed or the machine changed mode.
-                                    // Both are "send a status", and the recompute below picks up
-                                    // whichever interval now applies.
-                                    //
-                                    // Floored, because a mode change is the one send on this link
-                                    // driven by a value the *controller* produces rather than by a
-                                    // clock or a byte comparison. A controller that flapped between
-                                    // modes would otherwise put one sealed record, one Durable
-                                    // Object wake and one row written per flap onto someone's home
-                                    // internet connection, with nothing here to stop it.
+                                // The cadence itself. **Not floored**: the interval is already
+                                // the answer to how often this should happen, and while the
+                                // machine is brewing that answer is one second -- which
+                                // `MIN_STATUS_GAP` would swallow whole.
+                                Wake::StatusDue => send_status_and_reschedule!(),
+                                // A mode change, which is the one send on this link driven by a
+                                // value the *controller* produces rather than by a clock or a
+                                // byte comparison. A controller that flapped between modes would
+                                // otherwise put one sealed record, one Durable Object wake and
+                                // one row written per flap onto someone's home internet
+                                // connection, with nothing here to stop it.
+                                Wake::ModeChanged => {
                                     if last_status_sent_at.elapsed() >= MIN_STATUS_GAP {
-                                        send_status(&mut socket_tx, &mut session).await?;
-                                        last_status_sent_at = Instant::now();
-
-                                        // From now, not from the deadline that just passed: a
-                                        // status delayed by a query does not make the next one
-                                        // early to compensate.
-                                        //
-                                        // Sampled here rather than once per session, so a machine
-                                        // switched on keeps to the minute from its next status
-                                        // onward without waiting for a reconnect.
-                                        next_status_at = next_status_deadline().await;
+                                        send_status_and_reschedule!();
                                     } else {
                                         // Suppressed by the floor. Come back when it lifts rather
                                         // than recomputing a full interval -- a machine that has
-                                        // just gone *off* would otherwise have its change swallowed
-                                        // and report it ten minutes later.
-                                        next_status_at = last_status_sent_at + MIN_STATUS_GAP;
+                                        // just gone *off* would otherwise have its change
+                                        // swallowed and report it ten minutes later.
+                                        //
+                                        // `min`, not assignment: a machine that is brewing has a
+                                        // deadline sooner than the floor, and pushing it out to
+                                        // the floor would make a mode change *slow the cadence
+                                        // down*.
+                                        next_status_at =
+                                            next_status_at.min(last_status_sent_at + MIN_STATUS_GAP);
                                     }
                                 }
                                 // The routine list changed -- somebody saved a routine, here or
@@ -711,12 +775,20 @@ async fn run(
                                 // which is what makes an edit at the machine show up on Plantlet
                                 // without anyone pressing refresh.
                                 Wake::Routines => {
-                                    // Read back from the cache rather than from the message, so
-                                    // this shares one path with the send above. Safe against the
-                                    // publish: the application processor holds the cache lock
-                                    // across both the publish and the write, so there is no window
-                                    // where this observes the old list.
-                                    send_routine_list(&mut socket_tx, &mut session).await?;
+                                    if asleep {
+                                        // Held for the next status rather than waking the server
+                                        // on its own; see `defer_updates`. The message is still
+                                        // taken -- deferring means waiting, not ignoring, and a
+                                        // subscriber nobody drains simply lags.
+                                        routines_pending = true;
+                                    } else {
+                                        // Read back from the cache rather than from the message,
+                                        // so this shares one path with the send above. Safe
+                                        // against the publish: the application processor holds
+                                        // the cache lock across both the publish and the write,
+                                        // so there is no window where this observes the old list.
+                                        send_routine_list(&mut socket_tx, &mut session).await?;
+                                    }
                                 }
                                 // A setting changed -- at the machine's own panel, from the local
                                 // frontend, from Home Assistant, or because Plantlet sent a
@@ -724,6 +796,14 @@ async fn run(
                                 // there is no per-command ack, and this is the reason there does
                                 // not need to be. What arrives says what the machine now believes,
                                 // which is a stronger statement than "your message was received".
+                                Wake::Configuration if asleep => {
+                                    // Held for the next status; see `defer_updates`. Note this
+                                    // arm fires every ten seconds regardless, so on a sleeping
+                                    // machine the flag is essentially always set -- and that is
+                                    // fine, because the flush compares bytes and a configuration
+                                    // that has not moved sends nothing.
+                                    configuration_pending = true;
+                                }
                                 Wake::Configuration => {
                                     // Fires every ten seconds whether or not anything changed, so
                                     // `send_configuration` compares and usually sends nothing.
@@ -801,6 +881,7 @@ async fn run(
                     &scratch[..len],
                     &mut socket_tx,
                     &mut next_status_at,
+                    &mut burst_remaining,
                     &mut last_configuration,
                     commands,
                     checkin,
@@ -1038,6 +1119,7 @@ async fn handle(
     record: &[u8],
     writer: &mut TcpWriter<'_>,
     next_status_at: &mut Instant,
+    burst_remaining: &mut u8,
     last_configuration: &mut Option<alloc::vec::Vec<u8>>,
     commands: &embassy_sync::channel::Sender<
         'static,
@@ -1104,18 +1186,24 @@ async fn handle(
                 log_warn!("Uplink: the machine command queue is full, dropping a command");
             }
 
-            // A status shortly after, and this is the arm that matters for it.
+            // A burst of statuses after, and this is the arm that matters for it.
             //
             // **Not every command changes the configuration.** `SetMachineMode` changes
             // `Status.mode` and touches no setting at all, so the configuration arm above
             // would never fire for it and the only evidence the machine came on would be the
-            // next scheduled status -- a minute later, on a page somebody is watching.
+            // next scheduled status -- ten minutes later, on a page somebody is watching.
             //
-            // Delayed rather than immediate because the command has not been applied yet: it
-            // is on a channel bound for the application processor, and a status read now
-            // would report the state the command is about to change and look like it did
-            // nothing.
-            *next_status_at = Instant::now() + COMMAND_SETTLE;
+            // This was a single status after a two-second `COMMAND_SETTLE`, which had to guess
+            // how long the command would take to cross the link and be applied, and reported
+            // the *old* state whenever it guessed low -- a page that says nothing happened.
+            // Five statuses a second apart do not have to guess: the first goes out
+            // immediately, so the click is acknowledged at once even though what it carries is
+            // probably still the old state, and the rest cover the window the guess was for.
+            //
+            // Re-armed rather than added to, so a person clicking twice gets five statuses
+            // from the second click rather than ten.
+            *burst_remaining = COMMAND_BURST_COUNT;
+            *next_status_at = Instant::now();
             Ok(())
         }
         Downlink::Query(id, query) => {

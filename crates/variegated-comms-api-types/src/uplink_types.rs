@@ -76,6 +76,42 @@ pub const STATUS_INTERVAL_ACTIVE_SECS: u64 = 60;
 /// How often one goes up while it is off or in power save.
 pub const STATUS_INTERVAL_IDLE_SECS: u64 = 600;
 
+/// How often one goes up while the machine is brewing or running a routine.
+///
+/// A shot is thirty seconds long and is the one thing on this machine somebody watches second
+/// by second: a pressure curve sampled once a minute is one point.
+pub const STATUS_INTERVAL_BUSY_SECS: u64 = 1;
+
+/// How long the busy cadence may run before it is read as a stuck flag rather than a shot.
+///
+/// **A failsafe, not an operational timeout.** No brew and no routine runs five minutes, so
+/// this cannot fire on working hardware -- which is the test it has to pass, because what it
+/// bounds is the case where the *machine* is wrong. `Status::routine_execution` that is never
+/// cleared, or an `is_brewing` left set by a controller that lost its way, would otherwise put a
+/// machine on the one-second cadence indefinitely: 3,600 Durable Object wakes and 3,600 D1
+/// writes an hour, forever, for a machine doing nothing.
+///
+/// Five minutes caps one such episode at 300 statuses and then falls back to the interval the
+/// mode asks for. It re-arms when the flag next goes false, so a machine that recovers is not
+/// punished for having been wrong once.
+pub const BUSY_CADENCE_LIMIT_SECS: u64 = 300;
+
+/// How many statuses follow a command from Plantlet, and how far apart.
+///
+/// A command is the one moment somebody is looking at a page waiting for it to change, and a
+/// single status afterwards is a coin toss: it may be read before the application processor has
+/// applied the command, in which case the page says nothing happened. Five of them a second
+/// apart cover the whole window it takes to cross the link and come back, and the first one
+/// going out immediately means the page acknowledges the click at once even if what it carries
+/// is still the old state.
+///
+/// This replaced a single delayed status -- the old `COMMAND_SETTLE` -- which had to guess how
+/// long the link would take and reported the old state whenever it guessed low.
+pub const COMMAND_BURST_COUNT: u8 = 5;
+
+/// The spacing of the statuses in a post-command burst. See [`COMMAND_BURST_COUNT`].
+pub const COMMAND_BURST_INTERVAL_SECS: u64 = 1;
+
 /// How long until the next unprompted status, given what the machine is doing.
 ///
 /// A status is the one thing on this link that is *not* free: a record wakes the hibernating
@@ -84,12 +120,12 @@ pub const STATUS_INTERVAL_IDLE_SECS: u64 = 600;
 /// is most of what Plantlet costs to run, and it buys nothing — the machine is not doing
 /// anything, and whether it is *reachable* is answered by the socket rather than by this.
 ///
-/// So the cadence follows the machine: a minute while someone might be watching a temperature
-/// climb, ten minutes while it sits there off.
+/// So the cadence follows the machine: once a second while it is pulling a shot, a minute while
+/// someone might be watching a temperature climb, ten minutes while it sits there off.
 ///
-/// **This lives here, and not in the firmware's uplink loop, because it is a pure function of a
-/// `Copy` enum and the firmware crate runs no tests** — it sets `harness = false`, so a
-/// `#[test]` beside the loop would neither run nor say it had not. Here it is covered.
+/// **This lives here, and not in the firmware's uplink loop, because it is a pure function and
+/// the firmware crate runs no tests** — it sets `harness = false`, so a `#[test]` beside the
+/// loop would neither run nor say it had not. Here it is covered.
 ///
 /// Exhaustive on purpose: a fourth [`MachineMode`] should stop the build and be given an
 /// interval deliberately, rather than defaulting into ten-minute silence.
@@ -99,18 +135,58 @@ pub const STATUS_INTERVAL_IDLE_SECS: u64 = 600;
 /// put a machine that has just booted, and may well be on, into ten minutes of silence. The
 /// caller passes the `Option` through rather than resolving it precisely so that this case is
 /// decided here, where it can be tested.
-pub fn status_interval_secs(mode: Option<MachineMode>) -> u64 {
-    match mode {
-        Some(MachineMode::On) => STATUS_INTERVAL_ACTIVE_SECS,
-        // Standby is not distinguished from off anywhere in the controllers, and there is
-        // nothing to watch in either: the boilers are cold and the machine is waiting to be
-        // asked for something.
-        Some(MachineMode::Off | MachineMode::PowerSaveStandby) => STATUS_INTERVAL_IDLE_SECS,
-        // Only in the seconds between the socket opening and the first status arriving from
-        // the application processor. Reporting too often for a moment is the harmless
-        // direction to be wrong in.
-        None => STATUS_INTERVAL_ACTIVE_SECS,
+///
+/// # Busy, and why it outranks the mode
+///
+/// `busy_for_secs` is `None` when the machine is not doing anything, and otherwise how long it
+/// has been continuously busy — see `Status::is_busy`, which is what "busy" means. The caller
+/// owns that clock, so this stays a pure function of durations rather than something that has to
+/// be tested against a timer.
+///
+/// A machine reporting brewing while `Off` is contradictory, and this resolves it in favour of
+/// **busy**: the useful way to be wrong is to report the thing that is happening. That is only
+/// safe to say because [`BUSY_CADENCE_LIMIT_SECS`] bounds what a stuck flag can cost — past the
+/// limit this falls back to whatever the mode asks for, which is exactly the ten-minute silence
+/// an `Off` machine deserves.
+pub fn status_interval_secs(mode: Option<MachineMode>, busy_for_secs: Option<u64>) -> u64 {
+    match busy_for_secs {
+        Some(elapsed) if elapsed < BUSY_CADENCE_LIMIT_SECS => STATUS_INTERVAL_BUSY_SECS,
+        // Either not busy, or busy for longer than any real shot -- see the constant.
+        _ => match mode {
+            Some(MachineMode::On) => STATUS_INTERVAL_ACTIVE_SECS,
+            // Standby is not distinguished from off anywhere in the controllers, and there is
+            // nothing to watch in either: the boilers are cold and the machine is waiting to be
+            // asked for something.
+            Some(MachineMode::Off | MachineMode::PowerSaveStandby) => STATUS_INTERVAL_IDLE_SECS,
+            // Only in the seconds between the socket opening and the first status arriving from
+            // the application processor. Reporting too often for a moment is the harmless
+            // direction to be wrong in.
+            None => STATUS_INTERVAL_ACTIVE_SECS,
+        },
     }
+}
+
+/// Whether a pushed update should wait for the next scheduled status.
+///
+/// A status is not the only thing that wakes the hibernating Durable Object. The machine also
+/// pushes its configuration whenever a setting moves and its routine list whenever somebody
+/// saves a routine — and on a machine nobody is looking at, neither is worth a wake of its own.
+/// Deferred, they ride along with the next status, which on a sleeping machine is ten minutes
+/// away. Piggybacking rather than running a second timer is what keeps this exactly one wake
+/// per interval and stops the two cadences drifting apart.
+///
+/// Deferring means *waiting*, never dropping: the send still happens, and
+/// `send_configuration` compares bytes at that point so an update that turned out to be a
+/// no-op costs nothing.
+///
+/// **`None` does not defer**, for the same reason it takes the active interval above: a machine
+/// that has not said what it is doing yet may well be on, with its owner watching.
+///
+/// This does not reach the sends a session makes when it opens, nor an explicit
+/// `RequestConfiguration` or `RequestRoutineList` — a server that has just connected knowing
+/// nothing is not the case this is about, and an ask always gets an answer.
+pub fn defer_updates(mode: Option<MachineMode>) -> bool {
+    matches!(mode, Some(MachineMode::Off | MachineMode::PowerSaveStandby))
 }
 
 /// Which way a message is allowed to travel.
@@ -483,8 +559,103 @@ mod tests {
     /// The whole point of the adaptive cadence: an idle machine costs a tenth as much.
     #[test]
     fn an_idle_machine_reports_a_tenth_as_often() {
-        assert_eq!(status_interval_secs(Some(MachineMode::On)), 60);
-        assert_eq!(status_interval_secs(Some(MachineMode::Off)), 600);
+        assert_eq!(status_interval_secs(Some(MachineMode::On), None), 60);
+        assert_eq!(status_interval_secs(Some(MachineMode::Off), None), 600);
+    }
+
+    /// The other end of the same idea: a shot is watched second by second.
+    #[test]
+    fn a_brewing_machine_reports_every_second() {
+        assert_eq!(status_interval_secs(Some(MachineMode::On), Some(0)), 1);
+        assert_eq!(status_interval_secs(Some(MachineMode::On), Some(29)), 1);
+    }
+
+    /// Busy outranks the mode, and it has to: `is_brewing` and `mode` come from the same
+    /// status, so a machine that reports both `Off` and brewing is telling us something is
+    /// happening. Reporting it is the useful way to be wrong; [`BUSY_CADENCE_LIMIT_SECS`] is
+    /// what makes saying so affordable.
+    #[test]
+    fn busy_beats_every_mode() {
+        for mode in [
+            Some(MachineMode::On),
+            Some(MachineMode::Off),
+            Some(MachineMode::PowerSaveStandby),
+            None,
+        ] {
+            assert_eq!(
+                status_interval_secs(mode, Some(0)),
+                STATUS_INTERVAL_BUSY_SECS,
+                "{mode:?} while busy"
+            );
+        }
+    }
+
+    /// The failsafe. A `routine_execution` that is never cleared would otherwise hold a machine
+    /// at one status a second forever -- 3,600 Durable Object wakes an hour for a machine doing
+    /// nothing. Past the limit the mode decides again.
+    #[test]
+    fn a_stuck_busy_flag_falls_back_to_the_modes_interval() {
+        assert_eq!(
+            status_interval_secs(Some(MachineMode::On), Some(BUSY_CADENCE_LIMIT_SECS - 1)),
+            STATUS_INTERVAL_BUSY_SECS
+        );
+        assert_eq!(
+            status_interval_secs(Some(MachineMode::On), Some(BUSY_CADENCE_LIMIT_SECS)),
+            STATUS_INTERVAL_ACTIVE_SECS
+        );
+        // And a machine that is *also* off goes all the way back to silence, rather than
+        // stopping at the active interval.
+        assert_eq!(
+            status_interval_secs(Some(MachineMode::Off), Some(BUSY_CADENCE_LIMIT_SECS)),
+            STATUS_INTERVAL_IDLE_SECS
+        );
+    }
+
+    /// The limit has to be longer than any real shot or routine, or it stops being a failsafe
+    /// and starts being a thing that fires on working hardware.
+    #[test]
+    fn the_busy_limit_cannot_fire_on_a_real_shot() {
+        // A long blooming routine is a few minutes; a shot is well under one.
+        const LONGEST_PLAUSIBLE_ROUTINE_SECS: u64 = 4 * 60;
+        assert!(BUSY_CADENCE_LIMIT_SECS > LONGEST_PLAUSIBLE_ROUTINE_SECS);
+    }
+
+    /// A burst has to be over well before the cadence it interrupts would have sent anything,
+    /// or the two would interleave and a command would leave the machine reporting faster than
+    /// it should for a minute.
+    #[test]
+    fn a_command_burst_finishes_inside_the_active_interval() {
+        let burst = COMMAND_BURST_COUNT as u64 * COMMAND_BURST_INTERVAL_SECS;
+        assert!(burst < STATUS_INTERVAL_ACTIVE_SECS, "a {burst}s burst");
+    }
+
+    /// Which modes are "asleep" is decided twice -- once for the interval, once for whether a
+    /// pushed update waits for it -- and the two must not drift. A fourth `MachineMode` given
+    /// an interval in one and forgotten in the other fails here.
+    #[test]
+    fn deferring_updates_agrees_with_the_idle_interval() {
+        for mode in [
+            Some(MachineMode::On),
+            Some(MachineMode::Off),
+            Some(MachineMode::PowerSaveStandby),
+            None,
+        ] {
+            assert_eq!(
+                defer_updates(mode),
+                status_interval_secs(mode, None) == STATUS_INTERVAL_IDLE_SECS,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A machine that has not reported yet pushes immediately, for the same reason it reports
+    /// on the active interval: it may well be on, with somebody watching.
+    #[test]
+    fn an_unknown_mode_does_not_defer_updates() {
+        assert!(!defer_updates(None));
+        assert!(!defer_updates(Some(MachineMode::On)));
+        assert!(defer_updates(Some(MachineMode::Off)));
+        assert!(defer_updates(Some(MachineMode::PowerSaveStandby)));
     }
 
     /// Standby is idle, not active.
@@ -495,8 +666,8 @@ mod tests {
     #[test]
     fn standby_reports_as_rarely_as_off() {
         assert_eq!(
-            status_interval_secs(Some(MachineMode::PowerSaveStandby)),
-            status_interval_secs(Some(MachineMode::Off))
+            status_interval_secs(Some(MachineMode::PowerSaveStandby), None),
+            status_interval_secs(Some(MachineMode::Off), None)
         );
     }
 
@@ -508,22 +679,25 @@ mod tests {
     /// the function takes an `Option` instead of the caller resolving it.
     #[test]
     fn a_machine_that_has_not_reported_yet_uses_the_active_interval() {
-        assert_eq!(status_interval_secs(None), STATUS_INTERVAL_ACTIVE_SECS);
+        assert_eq!(status_interval_secs(None, None), STATUS_INTERVAL_ACTIVE_SECS);
         assert_ne!(
-            status_interval_secs(None),
-            status_interval_secs(Some(MachineMode::default()))
+            status_interval_secs(None, None),
+            status_interval_secs(Some(MachineMode::default()), None)
         );
     }
 
-    /// Every mode maps to one of the two intervals, and nothing invents a third.
+    /// An idle machine maps to one of the two mode intervals, and nothing invents a fourth.
+    ///
+    /// The busy interval is deliberately outside this: it is not a property of the mode, and
+    /// `busy_beats_every_mode` is what covers it.
     #[test]
-    fn every_mode_maps_to_one_of_the_two_intervals() {
+    fn every_mode_maps_to_one_of_the_two_idle_intervals() {
         for mode in [
             MachineMode::On,
             MachineMode::Off,
             MachineMode::PowerSaveStandby,
         ] {
-            let interval = status_interval_secs(Some(mode));
+            let interval = status_interval_secs(Some(mode), None);
             assert!(
                 interval == STATUS_INTERVAL_ACTIVE_SECS || interval == STATUS_INTERVAL_IDLE_SECS,
                 "{mode:?} mapped to {interval}"
