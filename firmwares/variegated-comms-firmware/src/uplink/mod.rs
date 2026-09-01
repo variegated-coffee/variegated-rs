@@ -33,7 +33,7 @@
 
 use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_net::dns::DnsQueryType;
-use embassy_net::tcp::TcpSocket;
+use embassy_net::tcp::{TcpSocket, TcpWriter};
 use embassy_net::Stack;
 use embassy_sync::pubsub::WaitResult;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
@@ -453,6 +453,19 @@ async fn run(
     // task's high-water mark does not depend on how long a session lasts.
     let mut scratch = alloc::vec![0u8; MAX_UPLINK_CLIENT_RECORD_LEN];
 
+    // Two halves of one socket, for the reason `websocket.rs` gives where it does the same:
+    // the read borrows only the reader, so the send side is an independent borrow and the read
+    // never has to sit in a `select` that owns the whole socket. `TcpSocket::split` hands back
+    // two values over a `Copy` handle -- the aliasing is smoltcp's problem, not the borrow
+    // checker's.
+    //
+    // **Exactly one of these writes at any instant**: the send loop while the join below is
+    // running, and the pong or `handle` after it has finished. That invariant is what makes
+    // `FrameWriter`'s streaming safe -- it promises a `payload_len` in a header and then fills
+    // it across many awaits, so anything that interleaved a write would desynchronise the
+    // connection permanently and silently. Do not give the read half a writer.
+    let (mut socket_rx, mut socket_tx) = socket.split();
+
     log_info!("Uplink: session running");
 
     // A status first, before anything else goes out.
@@ -478,7 +491,7 @@ async fn run(
 
     let mut next_status_at = next_status_deadline().await;
     let mut last_status_sent_at = Instant::now();
-    send_status(socket, &mut session).await?;
+    send_status(&mut socket_tx, &mut session).await?;
 
     // And the routine list, once, at the top of the session.
     //
@@ -488,11 +501,11 @@ async fn run(
     // is the refresh button, but a feature that only works when somebody presses something
     // is not the one that was designed. A no-op when the cache is still empty; see
     // `send_routine_list`.
-    send_routine_list(socket, &mut session).await?;
+    send_routine_list(&mut socket_tx, &mut session).await?;
 
     // And what the machine is. Once per session and never again: the hardware does not change
     // while the machine is switched on, so there is no interval and no pubsub arm for it.
-    send_machine_definition(socket, &mut session).await?;
+    send_machine_definition(&mut socket_tx, &mut session).await?;
 
     // And every setting it holds. Unlike the definition this *does* change while the machine
     // runs -- somebody turns a dial, or Plantlet sends a command -- so it also has an arm in
@@ -501,7 +514,7 @@ async fn run(
     // The bytes are remembered so that arm can tell a real change from the ten-second
     // reprint; see `send_configuration`.
     let mut last_configuration: Option<alloc::vec::Vec<u8>> = None;
-    send_configuration(socket, &mut session, &mut last_configuration, true).await?;
+    send_configuration(&mut socket_tx, &mut session, &mut last_configuration, true).await?;
 
     loop {
         checkin.good();
@@ -514,7 +527,7 @@ async fn run(
             select(Timer::at(next_status_at), channels::MACHINE_MODE_CHANGED.wait()),
             with_timeout(
                 KEEPALIVE_INTERVAL,
-                http::read_record(socket, pending, &mut scratch),
+                http::read_record(&mut socket_rx, pending, &mut scratch),
             ),
             // The two "something the machine holds has changed" arms, paired into one rather
             // than growing this to a `select5`. They are the same kind of event and neither
@@ -534,7 +547,7 @@ async fn run(
                 // one Durable Object wake and one row written per flap onto someone's home
                 // internet connection, with nothing here to stop it.
                 if last_status_sent_at.elapsed() >= MIN_STATUS_GAP {
-                    send_status(socket, &mut session).await?;
+                    send_status(&mut socket_tx, &mut session).await?;
                     last_status_sent_at = Instant::now();
 
                     // From now, not from the deadline that just passed: a status delayed by a
@@ -550,17 +563,25 @@ async fn run(
                     next_status_at = last_status_sent_at + MIN_STATUS_GAP;
                 }
             }
-            Either4::Second(Ok(Ok(len))) => {
+            Either4::Second(Ok(Ok(http::Inbound::Record(len)))) => {
                 handle(
                     &mut session,
                     &scratch[..len],
-                    socket,
+                    &mut socket_tx,
                     &mut next_status_at,
                     &mut last_configuration,
                     commands,
                     checkin,
                 )
                 .await?;
+            }
+            // A ping from the server, read but not answered by the half that read it -- see
+            // `http::pong`. Answered here, where the writer is.
+            Either4::Second(Ok(Ok(http::Inbound::Ping(len)))) => {
+                http::pong(&mut socket_tx, &scratch[..len]).await.map_err(|_| {
+                    log_warn!("Uplink: writing a pong failed");
+                    AttemptEnd::SessionOver
+                })?;
             }
             Either4::Second(Ok(Err(()))) => {
                 log_warn!("Uplink: reading a record failed, ending the session");
@@ -569,7 +590,7 @@ async fn run(
             Either4::Second(Err(_)) => {
                 // Idle for a keepalive interval. A protocol-level ping, which the server's
                 // runtime answers without waking the hibernating object.
-                http::ping(socket).await.map_err(|_| {
+                http::ping(&mut socket_tx).await.map_err(|_| {
                     log_warn!("Uplink: writing a keepalive ping failed");
                     AttemptEnd::SessionOver
                 })?;
@@ -595,7 +616,7 @@ async fn run(
                 // path with the send above. Safe against the publish: the application
                 // processor holds the cache lock across both the publish and the write, so
                 // there is no window where this observes the old list.
-                send_routine_list(socket, &mut session).await?;
+                send_routine_list(&mut socket_tx, &mut session).await?;
             }
             // A setting changed -- at the machine's own panel, from the local frontend, from
             // Home Assistant, or because Plantlet sent a command. **This arm is what
@@ -607,7 +628,7 @@ async fn run(
             )) => {
                 // Fires every ten seconds whether or not anything changed, so
                 // `send_configuration` compares and usually sends nothing.
-                if send_configuration(socket, &mut session, &mut last_configuration, false).await? {
+                if send_configuration(&mut socket_tx, &mut session, &mut last_configuration, false).await? {
                     // Something really did change. A status follows, because half of what a
                     // person changes from Plantlet does not appear in the configuration at
                     // all -- the machine's mode is in `Status` -- and waiting out the status
@@ -623,7 +644,7 @@ async fn run(
             // signal, and a shot nobody answers for is a shot that waits out its timeout and
             // then gets posted anyway -- slower, and for no reason.
             Either4::Fourth(entry) => {
-                let sent = send_shot(socket, &mut session, entry.id, entry.size_bytes).await;
+                let sent = send_shot(&mut socket_tx, &mut session, entry.id, entry.size_bytes).await;
                 channels::UPLINK_SHOT_ANSWER.signal(matches!(sent, Ok(true)));
                 sent?;
             }
@@ -686,7 +707,7 @@ fn encode_configuration(
 /// `RequestConfiguration`. Those go out whatever the bytes say: the server asked, or has just
 /// arrived and has nothing at all.
 async fn send_configuration(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
     last: &mut Option<alloc::vec::Vec<u8>>,
     force: bool,
@@ -704,7 +725,7 @@ async fn send_configuration(
     }
 
     *last = Some(plaintext.clone());
-    send_message(socket, session, plaintext).await?;
+    send_message(writer, session, plaintext).await?;
     Ok(true)
 }
 
@@ -718,7 +739,7 @@ async fn send_configuration(
 /// link asks for at boot. Not an error -- the definition arrives within a second or two of a
 /// cold start, and a session opened before it does gets one on its next connect.
 async fn send_machine_definition(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
 ) -> Result<(), AttemptEnd> {
     // Scoped and cloned out, like `send_status`: the guard is also taken by the receiver task
@@ -732,7 +753,7 @@ async fn send_machine_definition(
         return Ok(());
     };
 
-    send_message(socket, session, plaintext).await
+    send_message(writer, session, plaintext).await
 }
 
 /// Send the current status, read from the cache the HTTP server already keeps.
@@ -751,7 +772,7 @@ async fn send_machine_definition(
 /// this task no longer holds a status subscriber at all -- which also stops the loop being
 /// woken, and its in-flight read cancelled, once a second for a message it ignored.
 async fn send_status(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
 ) -> Result<(), AttemptEnd> {
     // Scoped so the guard is released and the `Status` clone dropped before the send: the
@@ -766,7 +787,7 @@ async fn send_status(
         return Ok(());
     };
 
-    send_message(socket, session, plaintext).await
+    send_message(writer, session, plaintext).await
 }
 
 /// What the server asked for, narrowed out of the envelope.
@@ -843,7 +864,7 @@ impl Downlink {
 async fn handle(
     session: &mut UplinkSession,
     record: &[u8],
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     next_status_at: &mut Instant,
     last_configuration: &mut Option<alloc::vec::Vec<u8>>,
     commands: &embassy_sync::channel::Sender<
@@ -892,12 +913,12 @@ async fn handle(
             *next_status_at = Instant::now();
             Ok(())
         }
-        Downlink::RequestRoutineList => send_routine_list(socket, session).await,
-        Downlink::RequestMachineDefinition => send_machine_definition(socket, session).await,
+        Downlink::RequestRoutineList => send_routine_list(writer, session).await,
+        Downlink::RequestMachineDefinition => send_machine_definition(writer, session).await,
         // Forced: the server asked, so it gets an answer whether or not the bytes have moved
         // since the last one.
         Downlink::RequestConfiguration => {
-            send_configuration(socket, session, last_configuration, true)
+            send_configuration(writer, session, last_configuration, true)
                 .await
                 .map(|_| ())
         }
@@ -937,7 +958,7 @@ async fn handle(
                 log_warn!("Uplink: a query reply would not encode, dropping it");
                 return Ok(());
             };
-            send_message(socket, session, plaintext).await
+            send_message(writer, session, plaintext).await
         }
     }
 }
@@ -969,7 +990,7 @@ fn encode_routine_list(list: &RoutineSummaryList) -> Option<alloc::vec::Vec<u8>>
 /// wipe its own routine history off the server. Saying nothing costs a round trip the server
 /// retries anyway; saying "none" destroys state.
 async fn send_routine_list(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
 ) -> Result<(), AttemptEnd> {
     // The guard is released before the send: it is also taken by the update path that keeps
@@ -983,7 +1004,7 @@ async fn send_routine_list(
         return Ok(());
     };
 
-    send_message(socket, session, plaintext).await
+    send_message(writer, session, plaintext).await
 }
 
 /// Stream one shot onto the socket as a single sealed record.
@@ -1003,7 +1024,7 @@ async fn send_routine_list(
 /// deal in 1024-byte pieces, but the prefix above offsets one against the other, so a link
 /// chunk never lines up with a record chunk after the first.
 async fn send_shot(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
     id: variegated_controller_types::shot_log::ShotLogId,
     total: u32,
@@ -1022,11 +1043,11 @@ async fn send_shot(
         }
     };
 
-    let mut frame = http::begin_frame(socket, UplinkSession::sealed_len(plaintext_len))
+    let mut frame = http::begin_frame(writer, UplinkSession::sealed_len(plaintext_len))
         .await
         .map_err(|_| AttemptEnd::SessionOver)?;
     frame
-        .write(socket, &sealer.counter_bytes())
+        .write(writer, &sealer.counter_bytes())
         .await
         .map_err(|_| AttemptEnd::SessionOver)?;
 
@@ -1050,7 +1071,7 @@ async fn send_shot(
                     .seal_chunk(&mut sealer, &staged[..take], &mut sealed)
                     .map_err(|_| AttemptEnd::SessionOver)?;
                 frame
-                    .write(socket, &sealed[..n])
+                    .write(writer, &sealed[..n])
                     .await
                     .map_err(|_| AttemptEnd::SessionOver)?;
 
@@ -1137,7 +1158,7 @@ async fn send_shot(
 /// refresh, and a query reply is re-asked because the slot it was about still has no CRC
 /// recorded.
 async fn send_message(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     session: &mut UplinkSession,
     plaintext: alloc::vec::Vec<u8>,
 ) -> Result<(), AttemptEnd> {
@@ -1155,7 +1176,7 @@ async fn send_message(
     };
     drop(plaintext);
 
-    http::write_record(socket, &sealed[..len]).await.map_err(|_| {
+    http::write_record(writer, &sealed[..len]).await.map_err(|_| {
         // The likeliest way a session dies, and the one that says least from the far end:
         // the server sees the connection vanish with no close frame, because there is no
         // socket left to send one on.

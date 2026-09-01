@@ -13,8 +13,19 @@
 //! conforming server with a protocol error, which is a confusing failure to debug from this
 //! end.
 
+//! # One socket, two halves
+//!
+//! Everything past the upgrade takes a [`TcpReader`] or a [`TcpWriter`] rather than the whole
+//! [`TcpSocket`]. That is not tidiness: it is what lets `super::run` hold the read in a future
+//! it never cancels while the send side stays an independent borrow. `read_exact` keeps its
+//! cursor in its own future, so a cancelled read loses bytes that have already left smoltcp's
+//! RX ring and desynchronises the framing -- see the note on `super::run`'s loop.
+//!
+//! [`upgrade`] is the exception and keeps the whole socket: it runs before the split and needs
+//! both directions on one object.
+
 use edge_ws::{FrameHeader, FrameType};
-use embassy_net::tcp::TcpSocket;
+use embassy_net::tcp::{TcpReader, TcpSocket, TcpWriter};
 use embedded_io_async::{Read, Write};
 use esp_hal::rng::Rng;
 use variegated_log::log_warn;
@@ -171,20 +182,24 @@ pub async fn upgrade(
 /// The two are one stream; the split only exists because the head had to be read in whole
 /// segments. A caller must not reach past this to the socket, or it will read frames out of
 /// order with whatever is still buffered.
+///
+/// **Not cancel-safe, and cannot be made so from here.** `pending.take` advances its cursor
+/// before the await, and `read_exact` keeps its own in the future this returns. Dropping that
+/// future loses both. The caller is what guarantees this is never cancelled mid-record.
 async fn read_exact_buffered(
-    socket: &mut TcpSocket<'_>,
+    reader: &mut TcpReader<'_>,
     pending: &mut Pending,
     out: &mut [u8],
 ) -> Result<(), ()> {
     let taken = pending.take(out);
     if taken < out.len() {
-        socket.read_exact(&mut out[taken..]).await.map_err(|_| ())?;
+        reader.read_exact(&mut out[taken..]).await.map_err(|_| ())?;
     }
     Ok(())
 }
 
 /// Write one binary frame, masked.
-pub async fn write_record(socket: &mut TcpSocket<'_>, record: &[u8]) -> Result<(), ()> {
+pub async fn write_record(writer: &mut TcpWriter<'_>, record: &[u8]) -> Result<(), ()> {
     // A fresh mask per frame, from the hardware RNG. The mask is not a security measure --
     // it exists so a client cannot be tricked into emitting bytes a proxy would mistake for a
     // request -- but a predictable one defeats even that, and drawing it is nearly free.
@@ -198,7 +213,7 @@ pub async fn write_record(socket: &mut TcpSocket<'_>, record: &[u8]) -> Result<(
 
     let mut header_bytes = [0u8; MAX_FRAME_HEADER];
     let header_len = header.serialize(&mut header_bytes).map_err(|_| ())?;
-    socket.write_all(&header_bytes[..header_len]).await.map_err(|_| ())?;
+    writer.write_all(&header_bytes[..header_len]).await.map_err(|_| ())?;
 
     // Masked in place in chunks, so a record does not need a second buffer its own size. The
     // offset carries across chunks because the mask cycles every four bytes from the start of
@@ -209,7 +224,7 @@ pub async fn write_record(socket: &mut TcpSocket<'_>, record: &[u8]) -> Result<(
         let take = chunk.len().min(record.len() - offset);
         chunk[..take].copy_from_slice(&record[offset..offset + take]);
         FrameHeader::mask_with(&mut chunk[..take], Some(mask), offset);
-        socket.write_all(&chunk[..take]).await.map_err(|_| ())?;
+        writer.write_all(&chunk[..take]).await.map_err(|_| ())?;
         offset += take;
     }
 
@@ -237,7 +252,7 @@ impl FrameWriter {
     /// Refuses to write past the length already promised in the header: a frame that
     /// overruns its own length desynchronises the connection for good, and the peer's next
     /// read is garbage rather than an error.
-    pub async fn write(&mut self, socket: &mut TcpSocket<'_>, bytes: &[u8]) -> Result<(), ()> {
+    pub async fn write(&mut self, writer: &mut TcpWriter<'_>, bytes: &[u8]) -> Result<(), ()> {
         if bytes.len() > self.remaining {
             return Err(());
         }
@@ -249,7 +264,7 @@ impl FrameWriter {
             let take = chunk.len().min(bytes.len() - at);
             chunk[..take].copy_from_slice(&bytes[at..at + take]);
             FrameHeader::mask_with(&mut chunk[..take], Some(self.mask), self.offset);
-            socket.write_all(&chunk[..take]).await.map_err(|_| ())?;
+            writer.write_all(&chunk[..take]).await.map_err(|_| ())?;
             self.offset += take;
             at += take;
         }
@@ -266,7 +281,7 @@ impl FrameWriter {
 
 /// Write a binary frame header for a payload of known length, to be filled in by writes.
 pub async fn begin_frame(
-    socket: &mut TcpSocket<'_>,
+    writer: &mut TcpWriter<'_>,
     payload_len: usize,
 ) -> Result<FrameWriter, ()> {
     let mask = Rng::new().random();
@@ -278,7 +293,7 @@ pub async fn begin_frame(
 
     let mut bytes = [0u8; MAX_FRAME_HEADER];
     let len = header.serialize(&mut bytes).map_err(|_| ())?;
-    socket.write_all(&bytes[..len]).await.map_err(|_| ())?;
+    writer.write_all(&bytes[..len]).await.map_err(|_| ())?;
 
     Ok(FrameWriter { mask, offset: 0, remaining: payload_len })
 }
@@ -289,7 +304,7 @@ pub async fn begin_frame(
 /// runtime answers a ping with a pong itself and **does not wake the hibernating Durable
 /// Object**, so a keepalive costs the server no wall-clock time. An application-level ping
 /// would wake it every two minutes, per machine, forever.
-pub async fn ping(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
+pub async fn ping(writer: &mut TcpWriter<'_>) -> Result<(), ()> {
     let header = FrameHeader {
         frame_type: FrameType::Ping,
         payload_len: 0,
@@ -297,23 +312,76 @@ pub async fn ping(socket: &mut TcpSocket<'_>) -> Result<(), ()> {
     };
     let mut header_bytes = [0u8; MAX_FRAME_HEADER];
     let header_len = header.serialize(&mut header_bytes).map_err(|_| ())?;
-    socket.write_all(&header_bytes[..header_len]).await.map_err(|_| ())
+    writer.write_all(&header_bytes[..header_len]).await.map_err(|_| ())
 }
 
-/// Read one binary frame into `out`, answering pings and skipping what is not a record.
+/// Echo a ping's payload back as a pong, masked.
 ///
-/// Returns the payload length. A close frame, a frame larger than `out`, or a protocol error
-/// is `Err` -- all of which the caller turns into "reconnect", because a session whose framing
-/// is in doubt is not one to keep using.
+/// **Separate from [`read_record`] on purpose, and it must stay that way.** The read half has no
+/// writer, and giving it one would let a pong be spliced into the middle of a [`FrameWriter`]
+/// body whose `payload_len` has already been promised on the wire -- which desynchronises the
+/// connection for good and leaves the peer reading garbage rather than an error. Writing the
+/// pong from the caller, after the read has finished, is what keeps exactly one writer.
+///
+/// RFC 6455 caps a control frame's payload at 125 bytes; [`read_record`] refuses anything
+/// longer before it reaches here.
+pub async fn pong(writer: &mut TcpWriter<'_>, payload: &[u8]) -> Result<(), ()> {
+    let header = FrameHeader {
+        frame_type: FrameType::Pong,
+        payload_len: payload.len() as u64,
+        mask_key: Some(Rng::new().random()),
+    };
+
+    let mut header_bytes = [0u8; MAX_FRAME_HEADER];
+    let header_len = header.serialize(&mut header_bytes).map_err(|_| ())?;
+    writer.write_all(&header_bytes[..header_len]).await.map_err(|_| ())?;
+
+    if !payload.is_empty() {
+        // Masked in place in a local copy: the caller's buffer is the read scratch and must not
+        // come back altered. 125 bytes is the whole of a control frame, so one copy is cheap.
+        let mut masked = [0u8; MAX_CONTROL_PAYLOAD];
+        let len = payload.len();
+        masked[..len].copy_from_slice(payload);
+        FrameHeader::mask_with(&mut masked[..len], header.mask_key, 0);
+        writer.write_all(&masked[..len]).await.map_err(|_| ())?;
+    }
+
+    Ok(())
+}
+
+/// The largest payload a WebSocket control frame may carry, per RFC 6455.
+const MAX_CONTROL_PAYLOAD: usize = 125;
+
+/// What one call to [`read_record`] produced.
+///
+/// A ping is handed back rather than answered in place because this half of the socket cannot
+/// write; see [`pong`]. The payload of either sits at the start of the `out` buffer the caller
+/// passed in, which is why both variants carry only a length.
+pub enum Inbound {
+    /// A binary record: `n` bytes at the start of `out`.
+    Record(usize),
+    /// A ping: `n` bytes of payload at the start of `out`. The caller owes a [`pong`].
+    Ping(usize),
+}
+
+/// Read one frame into `out`, skipping what is neither a record nor a ping.
+///
+/// A close frame, a frame larger than `out`, an oversized control frame or a protocol error is
+/// `Err` -- all of which the caller turns into "reconnect", because a session whose framing is
+/// in doubt is not one to keep using.
+///
+/// **Not cancel-safe.** Dropping this future mid-frame loses whatever it had already read and
+/// leaves the next call reading a payload as a header. `super::run` is what guarantees it runs
+/// to completion.
 pub async fn read_record(
-    socket: &mut TcpSocket<'_>,
+    reader: &mut TcpReader<'_>,
     pending: &mut Pending,
     out: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<Inbound, ()> {
     loop {
         let mut header_bytes = [0u8; MAX_FRAME_HEADER];
         // Two bytes are enough to learn how many more the header needs.
-        read_exact_buffered(socket, pending, &mut header_bytes[..2]).await?;
+        read_exact_buffered(reader, pending, &mut header_bytes[..2]).await?;
 
         // Derived from the two bytes in hand, the way `websocket.rs` does it: the length
         // indicator says how many more length bytes follow, and the mask bit says whether
@@ -326,7 +394,7 @@ pub async fn read_record(
         } + if header_bytes[1] & 0x80 != 0 { 4 } else { 0 };
 
         if extra > 2 {
-            read_exact_buffered(socket, pending, &mut header_bytes[2..extra]).await?;
+            read_exact_buffered(reader, pending, &mut header_bytes[2..extra]).await?;
         }
         let (header, _) = FrameHeader::deserialize(&header_bytes[..extra]).map_err(|_| ())?;
 
@@ -339,39 +407,31 @@ pub async fn read_record(
                     // to keep a session with.
                     return Err(());
                 }
-                read_exact_buffered(socket, pending, &mut out[..len]).await?;
+                read_exact_buffered(reader, pending, &mut out[..len]).await?;
                 // A server never masks, so nothing to unmask here -- and if one did,
                 // `mask_key` would be `Some` and the payload would be gibberish, which the
                 // record's own tag catches.
-                return Ok(len);
+                return Ok(Inbound::Record(len));
             }
+            // Read into `out` and handed back rather than answered here: this half cannot
+            // write. The bound is still checked -- it is what stops a "ping" being used to
+            // deliver an arbitrary-length control frame -- but `out` is the record scratch and
+            // is far larger than 125 bytes, so the payload costs no buffer of its own.
             FrameType::Ping => {
-                let mut payload = [0u8; 125];
-                if len > payload.len() {
+                if len > MAX_CONTROL_PAYLOAD {
                     return Err(());
                 }
-                read_exact_buffered(socket, pending, &mut payload[..len]).await?;
-                // A pong echoes the ping's payload, per RFC 6455.
-                let pong = FrameHeader {
-                    frame_type: FrameType::Pong,
-                    payload_len: len as u64,
-                    mask_key: Some(Rng::new().random()),
-                };
-                let mut bytes = [0u8; MAX_FRAME_HEADER];
-                let n = pong.serialize(&mut bytes).map_err(|_| ())?;
-                socket.write_all(&bytes[..n]).await.map_err(|_| ())?;
-                if len > 0 {
-                    FrameHeader::mask_with(&mut payload[..len], pong.mask_key, 0);
-                    socket.write_all(&payload[..len]).await.map_err(|_| ())?;
-                }
+                read_exact_buffered(reader, pending, &mut out[..len]).await?;
+                return Ok(Inbound::Ping(len));
             }
             FrameType::Pong => {
-                // Ours, answered. Drain and carry on.
-                let mut discard = [0u8; 125];
-                if len > discard.len() {
+                // Ours, answered. Drain and carry on **without returning**: a pong is the
+                // reply to our own keepalive, and ending the read on one would cost the
+                // caller a whole loop pass three times a minute for nothing.
+                if len > MAX_CONTROL_PAYLOAD {
                     return Err(());
                 }
-                read_exact_buffered(socket, pending, &mut discard[..len]).await?;
+                read_exact_buffered(reader, pending, &mut out[..len]).await?;
             }
             FrameType::Text(_) | FrameType::Close => return Err(()),
         }
