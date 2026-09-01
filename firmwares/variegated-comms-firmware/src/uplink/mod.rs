@@ -485,8 +485,10 @@ enum Wake {
     Frame,
     /// The routine list changed.
     Routines,
-    /// A setting changed.
-    Configuration,
+    /// A setting changed. Carries the encoded configuration when the message itself was in
+    /// hand, and `None` when it was not -- a `Lagged`, or a machine asleep -- in which case the
+    /// cache is the right source. See the narrowing site for why the two differ.
+    Configuration(Option<alloc::vec::Vec<u8>>),
     /// The uploader is offering a shot, and is blocked until it hears back.
     Shot(variegated_controller_types::shot_log::ShotLogId, u32),
 }
@@ -723,9 +725,39 @@ async fn run(
                                         Either4::Third(Either::First(
                                             WaitResult::Message(_) | WaitResult::Lagged(_),
                                         )) => Wake::Routines,
+                                        // **Encoded here, from the message, rather than read
+                                        // back from `CONFIG_CACHE` -- and that is a fix, not a
+                                        // shortcut.** That cache is filled by `cache_update_task`
+                                        // from *its own* subscriber to this same channel. Both
+                                        // tasks are woken by one `publish_immediate` and nothing
+                                        // orders them, so an uplink that ran first read the
+                                        // *previous* configuration, compared it against what it
+                                        // last sent, found no difference and sent nothing at all.
+                                        // The change then waited for the controller's ten-second
+                                        // republish to happen to win the race -- which from
+                                        // Plantlet looked like a random delay of up to ten
+                                        // seconds on a setting the machine's own frontend had
+                                        // already shown. `websocket.rs` never had the bug
+                                        // because it encodes the message it was handed.
+                                        //
+                                        // Encoding here is safe from the usual hazard precisely
+                                        // because this statement does not await: the 3.4 kB
+                                        // `Configuration` is dropped at the semicolon and only a
+                                        // `Vec` handle reaches the arm. It is also cheaper than
+                                        // the cache read it replaces, which cloned the whole
+                                        // configuration back out on every publish.
+                                        Either4::Third(Either::Second(WaitResult::Message(
+                                            config,
+                                        ))) if !asleep => {
+                                            Wake::Configuration(encode_configuration(config))
+                                        }
+                                        // Asleep, so there is nothing to encode -- the flush
+                                        // reads the cache later, long after this race is over.
+                                        // And on `Lagged` there is no message to encode, so the
+                                        // cache, which has caught up by definition, is right.
                                         Either4::Third(Either::Second(
                                             WaitResult::Message(_) | WaitResult::Lagged(_),
-                                        )) => Wake::Configuration,
+                                        )) => Wake::Configuration(None),
                                         Either4::Fourth(entry) => {
                                             Wake::Shot(entry.id, entry.size_bytes)
                                         }
@@ -809,7 +841,7 @@ async fn run(
                                 // there is no per-command ack, and this is the reason there does
                                 // not need to be. What arrives says what the machine now believes,
                                 // which is a stronger statement than "your message was received".
-                                Wake::Configuration if asleep => {
+                                Wake::Configuration(_) if asleep => {
                                     // Held for the next status; see `defer_updates`. Note this
                                     // arm fires every ten seconds regardless, so on a sleeping
                                     // machine the flag is essentially always set -- and that is
@@ -817,17 +849,38 @@ async fn run(
                                     // that has not moved sends nothing.
                                     configuration_pending = true;
                                 }
-                                Wake::Configuration => {
+                                Wake::Configuration(plaintext) => {
                                     // Fires every ten seconds whether or not anything changed, so
-                                    // `send_configuration` compares and usually sends nothing.
-                                    if send_configuration(
-                                        &mut socket_tx,
-                                        &mut session,
-                                        &mut last_configuration,
-                                        false,
-                                    )
-                                    .await?
-                                    {
+                                    // the comparison inside usually sends nothing.
+                                    let changed = match plaintext {
+                                        // The message's own bytes, which is what makes a setting
+                                        // change reach Plantlet at once rather than whenever the
+                                        // republish happened to beat `cache_update_task`.
+                                        Some(plaintext) => {
+                                            send_encoded_configuration(
+                                                &mut socket_tx,
+                                                &mut session,
+                                                &mut last_configuration,
+                                                false,
+                                                plaintext,
+                                            )
+                                            .await?
+                                        }
+                                        // A `Lagged`, or bytes that would not encode. The cache
+                                        // has caught up by now either way, so it is the right
+                                        // source here even though it was the wrong one above.
+                                        None => {
+                                            send_configuration(
+                                                &mut socket_tx,
+                                                &mut session,
+                                                &mut last_configuration,
+                                                false,
+                                            )
+                                            .await?
+                                        }
+                                    };
+
+                                    if changed {
                                         // Something really did change. A status follows, because
                                         // half of what a person changes from Plantlet does not
                                         // appear in the configuration at all -- the machine's mode
@@ -986,6 +1039,23 @@ async fn send_configuration(
         return Ok(false);
     };
 
+    send_encoded_configuration(writer, session, last, force, plaintext).await
+}
+
+/// Send a configuration whose bytes are already in hand, if they differ from the last one sent.
+///
+/// The tail of [`send_configuration`], split out because the session loop reaches it with the
+/// bytes already encoded from the pubsub message rather than read back from the cache -- see
+/// the narrowing site in [`run`] for the race that makes the difference. Everything from the
+/// comparison onward is identical either way, and must stay one path: `last` is what makes the
+/// ten-second republish free, and two places updating it would drift.
+async fn send_encoded_configuration(
+    writer: &mut TcpWriter<'_>,
+    session: &mut UplinkSession,
+    last: &mut Option<alloc::vec::Vec<u8>>,
+    force: bool,
+    plaintext: alloc::vec::Vec<u8>,
+) -> Result<bool, AttemptEnd> {
     if !force && last.as_deref() == Some(plaintext.as_slice()) {
         return Ok(false);
     }

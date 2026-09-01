@@ -896,7 +896,7 @@ async fn main(spawner: Spawner) -> ! {
     spawn_or_report!(spawner, "improv", improv::improv_task(peripheral));
     log_info!("BLE tasks spawned");
 
-    Timer::after_secs(5).await;
+    //Timer::after_secs(5).await;
 
     log_info!("Initializing Wifi");
 
