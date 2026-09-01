@@ -16,7 +16,7 @@ use variegated_controller_types::debug::DebugEvent;
 use crate::debug::bus;
 use variegated_trouble_connection_manager::BleConnectionManager;
 
-use crate::ble::scale_slot::{run_scale_slot, AcaiaOld, Bookoo};
+use crate::ble::scale_slot::{run_scale_slot, AcaiaNew, AcaiaOld, Bookoo};
 
 use crate::ble::scanner::ScanPrinter;
 use crate::ble::status;
@@ -281,6 +281,18 @@ pub async fn ble_slot_task(
                 }
                 BluetoothDriverKind::AcaiaOld => {
                     run_scale_slot::<AcaiaOld>(
+                        handle.clone(),
+                        stack,
+                        BdAddr::new(assignment.address),
+                        assignment.id,
+                        slot,
+                        sensor_sender,
+                        &mut scale_commands,
+                    )
+                    .await
+                }
+                BluetoothDriverKind::AcaiaNew => {
+                    run_scale_slot::<AcaiaNew>(
                         handle.clone(),
                         stack,
                         BdAddr::new(assignment.address),

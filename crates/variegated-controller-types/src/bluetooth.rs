@@ -95,6 +95,16 @@ pub enum BluetoothDriverKind {
     /// BooKoo Themis scales: the Themis, the Themis Mini and the Themis Ultra, which share
     /// one weight frame and one command set.
     Bookoo,
+    /// ACAIA scales from 2021 onwards: Pyxis, Lunar AL014+, Pearl 2021, Pearl S, Cinco.
+    ///
+    /// A separate driver from [`Self::AcaiaOld`] because the GATT topology differs -- a
+    /// vendor service with separate notify and write characteristics, where the older
+    /// protocol used one characteristic for both -- not because the commands do; those are
+    /// byte-identical.
+    ///
+    /// Note that a Lunar 2021 with AL008 hardware speaks the *older* protocol, so the model
+    /// year does not settle which of the two a scale needs.
+    AcaiaNew,
 }
 
 /// One entry in the association list.

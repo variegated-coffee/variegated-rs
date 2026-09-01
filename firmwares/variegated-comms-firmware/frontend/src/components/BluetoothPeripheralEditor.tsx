@@ -6,8 +6,15 @@ import { formatAddress, BluetoothAddress } from '../api/bluetooth';
 /** Longest name the wire type carries. Matches `BLUETOOTH_NAME_LEN`. */
 const NAME_MAX_BYTES = 24;
 
+/*
+ * The two ACAIA entries name model years rather than "old" and "new", because that is what
+ * is written on the scale. A Lunar 2021 with AL008 hardware speaks the pre-2021 protocol
+ * despite its name, so neither hint can promise correctness -- if weights never arrive,
+ * the other ACAIA entry is the first thing to try.
+ */
 const DRIVERS: { kind: BluetoothDriverKind['type']; label: string; hint: string }[] = [
-  { kind: 'AcaiaOld', label: 'ACAIA (older protocol)', hint: 'Lunar, Pearl and similar' },
+  { kind: 'AcaiaNew', label: 'ACAIA (2021 and later)', hint: 'Pyxis, Lunar 2021, Pearl S, Cinco' },
+  { kind: 'AcaiaOld', label: 'ACAIA (pre-2021)', hint: 'Lunar AL010, Pearl 2015' },
   { kind: 'Bookoo', label: 'BooKoo Themis', hint: 'Themis, Themis Mini and Themis Ultra' },
   { kind: 'BelkaPortal', label: 'Belka Portal', hint: 'Water sensor: conductivity, temperature' }
 ];

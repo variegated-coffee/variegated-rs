@@ -43,7 +43,9 @@
 //! stability bit and the display unit.
 
 mod command;
+mod discovery;
 mod incoming;
 
 pub use command::*;
+pub use discovery::*;
 pub use incoming::*;

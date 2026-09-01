@@ -56,7 +56,8 @@ export const ActuatorCapabilitySchema = enumType('ActuatorCapability', {
 export const BluetoothDriverKindSchema = enumType('BluetoothDriverKind', {
   BelkaPortal: unitVariant('BelkaPortal'),
   AcaiaOld: unitVariant('AcaiaOld'),
-  Bookoo: unitVariant('Bookoo')
+  Bookoo: unitVariant('Bookoo'),
+  AcaiaNew: unitVariant('AcaiaNew')
 });
 
 export const BoilerControlModeSchema = enumType('BoilerControlMode', {

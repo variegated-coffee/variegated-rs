@@ -10,11 +10,13 @@
 //!
 //! ## Available Drivers
 //!
-//! - [`acaia_old`] - ACAIA scales with old protocol (pre-2021 models)
+//! - [`acaia_old`] - ACAIA scales with the pre-2021 protocol (Lunar AL010, Pearl 2015)
+//! - [`acaia_new`] - ACAIA scales from 2021 (Pyxis, Lunar AL014+, Pearl S, Cinco)
 //! - [`bookoo`] - BooKoo Themis, Themis Mini and Themis Ultra
 //!
-//! ACAIA's newer protocol and Felicita are documented in SCALE_PROTOCOLS.md but not
-//! implemented.
+//! The two ACAIA modules share their commands, which are byte-identical across the
+//! generations; what differs is GATT topology and incoming framing. Felicita is documented
+//! in SCALE_PROTOCOLS.md but not implemented.
 //!
 //! ## Example
 //!
@@ -37,6 +39,7 @@
 //! }).await;
 //! ```
 
+pub mod acaia_new;
 pub mod acaia_old;
 pub mod bookoo;
 

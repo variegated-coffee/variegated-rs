@@ -14,7 +14,20 @@ This document describes the BLE services, characteristics, and communication pro
 
 ## ACAIA (New Protocol)
 
-**Supported Devices:** Most modern ACAIA scales (Pearl, Pyxis, Lunar 2021+, Cinco, etc.)
+**Supported Devices:** Pyxis, Lunar 2021 (AL014 and later), Pearl 2021, Pearl S, Cinco.
+**Implemented** — see `src/acaia_new/`, with the frame and command codec in
+`variegated-scale-codec`'s `acaia` module.
+
+> A Lunar 2021 with **AL008** hardware speaks the *pre-2021* protocol despite its name, so
+> the model year does not settle which driver a scale needs. Recognition is always a hint the
+> user can override.
+
+> **Do not take command bytes from this section.** The identification frame below is
+> twenty bytes with no length byte and no checksums, three paragraphs before a framing
+> section stating that every message carries both; and the heartbeat below is not a valid
+> frame at all. The bytes this firmware actually sends are computed by
+> `variegated-scale-codec`, whose tests assert them against the checksum rule and against
+> frames known good on real hardware. Both generations send **the same** commands.
 
 ### BLE Services and Characteristics
 
@@ -65,9 +78,16 @@ All messages follow this structure:
 
 **Payload Length:** Number of payload bytes (excluding header, type, length, and checksums)
 
-**Checksums:** Two separate checksums calculated as follows:
-- `cksum1`: XOR of all bytes at even indices (0, 2, 4, ...)
-- `cksum2`: XOR of all bytes at odd indices (1, 3, 5, ...)
+**Checksums:** Two separate checksums, each a **wrapping sum**, not an XOR:
+- `cksum1`: sum of the payload's even-indexed bytes (0, 2, 4, ...), masked to a byte
+- `cksum2`: sum of the payload's odd-indexed bytes (1, 3, 5, ...), masked to a byte
+
+> **This said XOR until it was checked against real frames, and it was wrong.** The
+> identification payload's even-indexed bytes sum to 410, whose low byte `0x9A` is the value
+> that ships in AcaiaArduinoBLE's and LunarGateway's hard-coded literals; XOR of the same
+> bytes gives `0x0E`. The notification request agrees (`0x15`/`0x06` by sum, `0x0B`/`0x00` by
+> XOR), and so does a captured weight frame. `variegated-scale-codec` implements the sum and
+> its tests prove all three.
 
 ### Weight Data Format
 
@@ -90,7 +110,10 @@ Weight update messages (type `0x05`):
 
 ### Heartbeat Message
 
-Must be sent periodically:
+Must be sent periodically. **The frame below is wrong** — it is not a valid message under
+the framing described above, and the real one is `EF DD 00 02 00 02 00`, which
+`variegated-scale-codec::acaia::heartbeat()` computes. Kept only so that anyone who
+implemented from this file can recognise what they copied:
 ```
 [0xEF, 0xDD, 0x00, 0x00, 0xEF, 0xDD]
 ```
@@ -369,9 +392,14 @@ Different scales can be identified by their advertised Bluetooth names:
 - "BOOKOO_SC_U_XXX" (Themis Ultra)
 - "BOOKOO_EM" is the Espresso Monitor, a different device entirely
 
-Note that this firmware does **no** name matching. It recognises peripherals by advertised
-service UUID only, and recognition merely pre-fills the driver in the pairing UI -- it is
-never a filter, so a scale that advertises no service is still pairable by hand.
+This firmware recognises peripherals by advertised service UUID, **and, for ACAIA only, by
+advertised name**. The exception exists because ACAIA's 2021+ scales do not reliably
+advertise their service UUID; every other implementation discovers them by name, and Home
+Assistant's integration carries no service-UUID matcher for them at all.
+
+Recognition merely pre-fills the driver in the pairing UI. It is never a filter, so a scale
+that advertises neither a known service nor a known name is still pairable by hand — which
+matters, because a Lunar 2021 AL008 is named like a modern scale and speaks the old protocol.
 
 **Felicita Scales:**
 - "FELIC" (prefix match)
@@ -399,7 +427,9 @@ Some scales can also be identified by their advertised service UUIDs:
 
 ### Common Patterns
 
-1. **Checksum Validation:** ACAIA protocols use dual checksums (even/odd byte indices)
+1. **Checksum Validation:** ACAIA protocols use dual checksums over even/odd payload indices.
+   They are **wrapping sums, not XORs** — see the ACAIA (New Protocol) section above for the
+   arithmetic that settles it.
 2. **Heartbeat Requirements:** ACAIA new protocol requires periodic heartbeat messages
 3. **ASCII Encoding:** Felicita uses ASCII digits for weight transmission
 4. **Sign Handling:** Multiple protocols use `0x2D` (ASCII '-') as negative indicator

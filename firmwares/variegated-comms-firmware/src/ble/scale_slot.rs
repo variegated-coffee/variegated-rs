@@ -41,6 +41,9 @@ use embassy_sync::pubsub::Subscriber;
 use embassy_time::{Duration, Instant, Timer};
 use trouble_host::prelude::{BdAddr, Connection};
 use variegated_adc_tools::{ConversionParameters, KalmanFilterParameters};
+use variegated_scale_trouble_driver::acaia_new::{
+    AcaiaNewDriver, AcaiaNewGattClient, AcaiaNewNotificationStream, ScaleEvent as AcaiaNewEvent,
+};
 use variegated_scale_trouble_driver::acaia_old::{
     AcaiaOldDriver, AcaiaOldGattClient, ScaleEvent as AcaiaScaleEvent,
     ScaleNotificationStream as AcaiaScaleNotificationStream, TimerOp as AcaiaTimerOp,
@@ -657,6 +660,191 @@ impl ScaleSession for AcaiaOldSession<'_> {
             } else {
                 self.last_heartbeat = now;
             }
+        }
+    }
+}
+
+/// ACAIA's 2021-and-later protocol.
+///
+/// Shares every outgoing command with [`AcaiaOld`] and differs from it in GATT topology and
+/// incoming framing. Flow is derived, as it is for the older generation: no ACAIA scale of
+/// either era reports a flow rate.
+pub struct AcaiaNew;
+
+/// A connected 2021+ ACAIA scale.
+pub struct AcaiaNewSession<'g> {
+    gatt: &'g AcaiaNewGattClient<'static, SlotController, SlotPool>,
+    stream: AcaiaNewNotificationStream<'g>,
+    last_heartbeat: Instant,
+    heartbeats_since_identity: u8,
+}
+
+/// How often the heartbeat goes out.
+///
+/// One second, not the two the legacy session uses, and the reason is jitter rather than the
+/// deadline itself. [`ScaleSession::tick`] is reached at least once a second even on a
+/// silent link, because of the 1 s liveness timer in the loop below -- so the effective
+/// interval is this value plus up to a second. At two seconds that is a three-second worst
+/// case, which is *exactly* the disconnect deadline reported for the Lunar 2021, with no
+/// margin at all. At one second it is two, leaving 750 ms against the 2750 ms figure two
+/// other sources give.
+///
+/// The cost is one seven-byte write per second on a link already carrying roughly fifteen
+/// notifications per second.
+const ACAIA_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often the identity frame is re-sent, counted in heartbeats.
+///
+/// **The least-evidenced constant here.** `ACAIA.md` records identity-before-every-heartbeat
+/// as a *Pyxis* quirk, not a requirement of the protocol, and no source says the other 2021+
+/// models want it. Once every ten seconds satisfies that note's intent -- the scale
+/// periodically re-hears who it is talking to -- at a twentieth of the traffic. If a Pyxis
+/// drops the link on a ten-second rhythm, set this to 1, which is the documented regime.
+const ACAIA_IDENTITY_EVERY_N_HEARTBEATS: u8 = 10;
+
+impl ScaleProtocol for AcaiaNew {
+    type Gatt = AcaiaNewGattClient<'static, SlotController, SlotPool>;
+    type Session<'g>
+        = AcaiaNewSession<'g>
+    where
+        Self: 'g;
+
+    const NAME: &'static str = "ACAIA 2021+";
+    const NATIVE_FLOW: bool = false;
+
+    async fn is_connected(handle: &SlotHandle, stack: &'static SlotStack, address: BdAddr) -> bool {
+        let device_handle = handle.register_device(address);
+        AcaiaNewDriver::new(device_handle, stack).is_connected().await
+    }
+
+    async fn connect(
+        handle: &SlotHandle,
+        stack: &'static SlotStack,
+        address: BdAddr,
+    ) -> Option<(Connection<'static, SlotPool>, Self::Gatt)> {
+        let device_handle = handle.register_device(address);
+        let driver = AcaiaNewDriver::new(device_handle, stack);
+        match driver.gatt_client().await {
+            Ok(pair) => Some(pair),
+            Err(e) => {
+                log_error!("Failed to create ACAIA 2021+ GATT client: {:?}", e);
+                None
+            }
+        }
+    }
+
+    async fn run_gatt_task(gatt: &Self::Gatt) {
+        let _ = gatt.task().await;
+    }
+
+    async fn open(gatt: &Self::Gatt) -> Option<Self::Session<'_>> {
+        let stream = match gatt.initialize().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                log_error!("Failed to initialize ACAIA 2021+ scale: {:?}", e);
+                return None;
+            }
+        };
+
+        // The initial heartbeat is what gets the stream moving; without it the link is up
+        // and silent, which looks exactly like a failed handshake.
+        if let Err(e) = gatt.send_heartbeat().await {
+            log_error!("Failed to send initial heartbeat: {:?}", e);
+        }
+
+        Some(AcaiaNewSession {
+            gatt,
+            stream,
+            last_heartbeat: Instant::now(),
+            heartbeats_since_identity: 0,
+        })
+    }
+}
+
+impl ScaleSession for AcaiaNewSession<'_> {
+    async fn next(&mut self) -> Result<ScaleSample, ()> {
+        match self.stream.next().await {
+            Ok(AcaiaNewEvent::Weight(w)) => Ok(ScaleSample {
+                // Already grams: the codec has applied both the decimal factor and the
+                // display unit, so a scale set to ounces needs no special handling here --
+                // including in `FlowEstimator`, whose zero-weight tare detection would
+                // otherwise be comparing against a value in the wrong scale.
+                weight: Some(w.grams),
+                // NATIVE_FLOW is false, so `publish_sample` ignores this. Setting it would
+                // be dead code that reads as though it worked.
+                flow: None,
+                // Battery arrives in its own frame on this protocol, not with the weight.
+                battery: None,
+            }),
+
+            // Published on its own, with no weight. `publish_sample` handles that: the
+            // weight arm simply does not fire, so the flow estimator is not fed a phantom
+            // sample and only the battery endpoint moves.
+            Ok(AcaiaNewEvent::Status(s)) => Ok(ScaleSample {
+                battery: Some(s.battery_percent as f32),
+                ..Default::default()
+            }),
+
+            // Decoded so the bytes are understood, logged so their arrival is visible,
+            // published nowhere -- the same treatment BooKoo's Ultra-only frames get. The
+            // ack is the useful one: it is the only positive evidence the scale is still
+            // listening to the heartbeat.
+            Ok(other) => {
+                log_info!("ACAIA event: {:?}", other);
+                Ok(ScaleSample::default())
+            }
+
+            // Not `Err(())`. One bad notification on a shared radio is not a dead link, and
+            // tearing it down trades a lost sample for a five-second reconnect. This matters
+            // more here than anywhere else, because this is the only scale path with a
+            // checksum that can actually reject a frame.
+            Err(e) => {
+                log_error!("Failed to read ACAIA 2021+ event: {:?}", e);
+                Ok(ScaleSample::default())
+            }
+        }
+    }
+
+    async fn apply(&mut self, op: ScaleOp) {
+        let result = match op {
+            ScaleOp::Tare => self.gatt.send_tare().await,
+            ScaleOp::StartTimer => self.gatt.send_timer(AcaiaTimerOp::Start).await,
+            ScaleOp::StopTimer => self.gatt.send_timer(AcaiaTimerOp::Stop).await,
+            ScaleOp::ResetTimer => self.gatt.send_timer(AcaiaTimerOp::Reset).await,
+            // Two writes, as on the older generation: ACAIA has no combined command.
+            ScaleOp::TareAndStartTimer => match self.gatt.send_tare().await {
+                Ok(()) => self.gatt.send_timer(AcaiaTimerOp::Start).await,
+                Err(e) => Err(e),
+            },
+        };
+
+        if let Err(e) = result {
+            log_error!("Failed to send ACAIA 2021+ scale op: {:?}", e);
+        }
+    }
+
+    async fn tick(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_heartbeat) < ACAIA_HEARTBEAT_INTERVAL {
+            return;
+        }
+
+        if self.heartbeats_since_identity >= ACAIA_IDENTITY_EVERY_N_HEARTBEATS
+            && self.gatt.send_identification().await.is_ok()
+        {
+            self.heartbeats_since_identity = 0;
+        }
+
+        match self.gatt.send_heartbeat().await {
+            Ok(()) => {
+                // Updated only on success. A failed write must not reset the clock, or a
+                // wedged characteristic looks like a healthy cadence right up until the
+                // scale drops the link.
+                self.last_heartbeat = now;
+                self.heartbeats_since_identity =
+                    self.heartbeats_since_identity.saturating_add(1);
+            }
+            Err(e) => log_error!("Failed to send ACAIA 2021+ heartbeat: {:?}", e),
         }
     }
 }

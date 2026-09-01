@@ -318,18 +318,31 @@ Pre-calculated bytes:
 
 ## Incoming Messages
 
-Incoming messages do **NOT** have checksums. Frame structure:
+> **Corrected.** This section previously said incoming messages carry no checksums and that
+> a frame is `4 + payload_length` bytes. Both are wrong, and were checked against a real
+> capture: `ef dd 0c 0c 05 df 06 00 00 01 00 07 00 00 02 f3 0d` is seventeen bytes with
+> `Length = 0x0C = 12`, and its trailing `f3 0d` is exactly the checksum pair over
+> `frame[3..15]`. See `variegated-scale-codec::acaia::incoming`, whose tests use that
+> capture.
+
+Incoming messages **do** carry checksums, and the length byte **counts itself**:
 
 ```
-┌─────────┬─────────┬─────────┬─────────┬─────────────────┐
-│ Byte 0  │ Byte 1  │ Byte 2  │ Byte 3  │ Bytes 4+        │
-├─────────┼─────────┼─────────┼─────────┼─────────────────┤
-│ MAGIC1  │ MAGIC2  │ Command │ Length  │ Payload         │
-│ 0xEF    │ 0xDD    │         │ N       │ (N bytes)       │
-└─────────┴─────────┴─────────┴─────────┴─────────────────┘
+┌─────────┬─────────┬─────────┬─────────┬─────────────┬─────────┬─────────┐
+│ Byte 0  │ Byte 1  │ Byte 2  │ Byte 3  │ Bytes 4+    │ ck1     │ ck2     │
+├─────────┼─────────┼─────────┼─────────┼─────────────┼─────────┼─────────┤
+│ MAGIC1  │ MAGIC2  │ Command │ Length  │ Payload     │         │         │
+│ 0xEF    │ 0xDD    │         │ N       │ (N-1 bytes) │         │         │
+└─────────┴─────────┴─────────┴─────────┴─────────────┴─────────┴─────────┘
 ```
 
-**Total frame size**: `4 + payload_length` bytes
+**Total frame size**: `N + 5` bytes.
+
+**Checksummed region**: `frame[3 .. N+3]` — starting *at* the length byte and including it.
+Excluding it produces a different and wrong answer.
+
+Note that legacy-protocol frames are a different shape again: they carry neither a length
+byte nor a checksum, and their length has to be inferred.
 
 ### Command 0x0C: Event Notification
 

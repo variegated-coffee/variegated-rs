@@ -13,6 +13,9 @@ use variegated_belka_portal_trouble_driver::BELKA_SERVICE_UUID;
 use variegated_controller_types::bluetooth::{
     bluetooth_name, BluetoothDriverKind, BluetoothName, DiscoveredBluetoothPeripheral,
 };
+use variegated_scale_trouble_driver::acaia_new::{
+    acaia_generation_from_name, Generation, ACAIA_NEW_SERVICE_UUID,
+};
 use variegated_scale_trouble_driver::acaia_old::ACAIA_OLD_SERVICE_UUID;
 use variegated_scale_trouble_driver::bookoo::BOOKOO_SERVICE_UUID;
 use variegated_trouble_connection_manager::ScanSink;
@@ -175,6 +178,8 @@ const MIN_REPORTED_RSSI: i8 = -80;
 fn driver_for_service(uuid: &Uuid) -> Option<BluetoothDriverKind> {
     if *uuid == ACAIA_OLD_SERVICE_UUID {
         Some(BluetoothDriverKind::AcaiaOld)
+    } else if *uuid == ACAIA_NEW_SERVICE_UUID {
+        Some(BluetoothDriverKind::AcaiaNew)
     } else if *uuid == BOOKOO_SERVICE_UUID {
         Some(BluetoothDriverKind::Bookoo)
     } else if *uuid == BELKA_SERVICE_UUID {
@@ -196,7 +201,13 @@ struct Advertisement {
     /// and truncated on a character boundary. A bare slice would panic on a multi-byte
     /// character straddling the limit.
     name: BluetoothName,
+    /// The merged answer -- what the pairing UI should pre-fill.
     driver: Option<BluetoothDriverKind>,
+    /// What the advertised service UUIDs alone said, before any name was consulted.
+    ///
+    /// Kept apart from `driver` solely for [`SEEN_DRIVER`]; see the note there, which
+    /// describes the report this would otherwise suppress.
+    uuid_driver: Option<BluetoothDriverKind>,
 }
 
 fn decode_advertisement(data: &[u8]) -> Advertisement {
@@ -234,10 +245,45 @@ fn decode_advertisement(data: &[u8]) -> Advertisement {
         }
     }
 
+    let driver_from_uuids = driver;
+
     let bytes = complete.or(shortened).unwrap_or(&[]);
+    let name = bluetooth_name(core::str::from_utf8(bytes).unwrap_or(""));
+
+    // Prefix-matched over the `BluetoothName` this function was going to build anyway, so
+    // the added cost is a handful of `starts_with` on a report that has already passed the
+    // discovery-scan check and the RSSI floor. This is not the every-advertisement path.
+    let named = driver_for_name(&name);
+
+    // **A service UUID wins, because it cannot be a coincidence.** A device that serves a
+    // service is that kind of device; a name is a string a user may have edited in a vendor
+    // app, and it has already been truncated to fit.
+    //
+    // Name matching exists at all because ACAIA's 2021+ scales do not reliably advertise
+    // their service, so for them there is often nothing else to go on.
+    let driver = driver_from_uuids.or(named);
+
     Advertisement {
-        name: bluetooth_name(core::str::from_utf8(bytes).unwrap_or("")),
+        name,
         driver,
+        uuid_driver: driver_from_uuids,
+    }
+}
+
+/// Which driver, if any, an advertised local *name* implies.
+///
+/// Names carry more weight for ACAIA than for anything else here: the 2021+ models put their
+/// name in the scan response and frequently advertise no service UUID at all, so UUID-only
+/// recognition leaves a Pyxis looking like an anonymous device.
+///
+/// Still only a hint. A Lunar 2021 with AL008 hardware speaks the *older* protocol despite
+/// its name, so no name test can be authoritative -- which is why the user can always
+/// override the choice, and why this never filters anything out.
+fn driver_for_name(name: &str) -> Option<BluetoothDriverKind> {
+    match acaia_generation_from_name(name) {
+        Some(Generation::Modern) => Some(BluetoothDriverKind::AcaiaNew),
+        Some(Generation::Legacy) => Some(BluetoothDriverKind::AcaiaOld),
+        None => None,
     }
 }
 
@@ -310,7 +356,13 @@ impl EventHandler for ScanPrinter {
             if !advertisement.name.is_empty() {
                 flags |= SEEN_NAME;
             }
-            if advertisement.driver.is_some() {
+            // **From a UUID only, never from the name.** A name-derived driver arrives
+            // *with* the name and is already accounted for by `SEEN_NAME`; counting it here
+            // as well would let a scan response that carries only a recognised name set
+            // both bits, after which the `AdvInd` carrying the actual service UUIDs would
+            // add nothing new and be suppressed by the dedup below. The UUID evidence would
+            // then never reach the application processor at all.
+            if advertisement.uuid_driver.is_some() {
                 flags |= SEEN_DRIVER;
             }
 
