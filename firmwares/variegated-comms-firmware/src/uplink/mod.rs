@@ -434,6 +434,40 @@ async fn open(
     handshake.finish(&message_two).map_err(|_| ())
 }
 
+/// Why the session loop woke.
+///
+/// **This exists for the reason [`Downlink`] exists, and it is the same reason as everything
+/// else in this module: memory.** A `match` keeps its scrutinee alive for the whole of the
+/// match, so awaiting inside an arm parks that scrutinee in this task's future -- and an
+/// embassy task's future is a static sized for its worst case, so it never comes back.
+///
+/// The scrutinee in question is `Either4<_, _, Either<WaitResult<RoutineSummaryList>,
+/// WaitResult<Configuration>>, ShotLogListEntry>`, sized by `Configuration` at about 3.4 kB.
+/// Both of the arms that value belongs to re-read from the caches and never look at it. So the
+/// select is narrowed to this in a statement with no await in it, and the `Either4` dies at the
+/// semicolon.
+///
+/// [`Wake::Shot`] carries the two fields the send needs rather than the whole entry, so an
+/// entry's annotation strings are not carried across the write either.
+enum Wake {
+    /// The status deadline elapsed, or the machine changed mode. Both mean "send a status".
+    Status,
+    /// A record arrived: `n` bytes at the start of the scratch buffer.
+    Record(usize),
+    /// A ping arrived: `n` bytes at the start of the scratch buffer. A pong is owed.
+    Ping(usize),
+    /// The read failed. The session is over.
+    ReadFailed,
+    /// Nothing arrived for a keepalive interval.
+    Idle,
+    /// The routine list changed.
+    Routines,
+    /// A setting changed.
+    Configuration,
+    /// The uploader is offering a shot, and is blocked until it hears back.
+    Shot(variegated_controller_types::shot_log::ShotLogId, u32),
+}
+
 /// Run a live session until something ends it.
 async fn run(
     socket: &mut TcpSocket<'_>,
@@ -519,7 +553,9 @@ async fn run(
     loop {
         checkin.good();
 
-        match select4(
+        // Narrowed before anything is awaited -- see [`Wake`] for why that matters more than it
+        // looks. Nothing in this statement suspends, so none of the `Either4` is stored.
+        let wake = match select4(
             // The deadline and the mode change are paired because they mean the same thing --
             // "send a status now" -- and share a handler. Pairing them here rather than adding a
             // fifth arm also keeps the recompute below on the single path that recomputes it,
@@ -537,7 +573,25 @@ async fn run(
         )
         .await
         {
-            Either4::First(_) => {
+            Either4::First(_) => Wake::Status,
+            Either4::Second(Ok(Ok(http::Inbound::Record(len)))) => Wake::Record(len),
+            Either4::Second(Ok(Ok(http::Inbound::Ping(len)))) => Wake::Ping(len),
+            Either4::Second(Ok(Err(()))) => Wake::ReadFailed,
+            Either4::Second(Err(_)) => Wake::Idle,
+            // `Lagged` is answered rather than ignored. A missed publish means the thing
+            // changed and this task did not see how -- and the cache holds the current value
+            // either way, so sending it is exactly the right recovery.
+            Either4::Third(Either::First(
+                WaitResult::Message(_) | WaitResult::Lagged(_),
+            )) => Wake::Routines,
+            Either4::Third(Either::Second(
+                WaitResult::Message(_) | WaitResult::Lagged(_),
+            )) => Wake::Configuration,
+            Either4::Fourth(entry) => Wake::Shot(entry.id, entry.size_bytes),
+        };
+
+        match wake {
+            Wake::Status => {
                 // Either the interval elapsed or the machine changed mode. Both are "send a
                 // status", and the recompute below picks up whichever interval now applies.
                 //
@@ -563,7 +617,7 @@ async fn run(
                     next_status_at = last_status_sent_at + MIN_STATUS_GAP;
                 }
             }
-            Either4::Second(Ok(Ok(http::Inbound::Record(len)))) => {
+            Wake::Record(len) => {
                 handle(
                     &mut session,
                     &scratch[..len],
@@ -577,17 +631,17 @@ async fn run(
             }
             // A ping from the server, read but not answered by the half that read it -- see
             // `http::pong`. Answered here, where the writer is.
-            Either4::Second(Ok(Ok(http::Inbound::Ping(len)))) => {
+            Wake::Ping(len) => {
                 http::pong(&mut socket_tx, &scratch[..len]).await.map_err(|_| {
                     log_warn!("Uplink: writing a pong failed");
                     AttemptEnd::SessionOver
                 })?;
             }
-            Either4::Second(Ok(Err(()))) => {
+            Wake::ReadFailed => {
                 log_warn!("Uplink: reading a record failed, ending the session");
                 return Err(AttemptEnd::SessionOver);
             }
-            Either4::Second(Err(_)) => {
+            Wake::Idle => {
                 // Idle for a keepalive interval. A protocol-level ping, which the server's
                 // runtime answers without waking the hibernating object.
                 http::ping(&mut socket_tx).await.map_err(|_| {
@@ -599,19 +653,7 @@ async fn run(
             // frontend. Pushed rather than waiting to be asked, which is what makes an edit
             // at the machine show up on Plantlet without anyone pressing refresh.
             //
-            // Cheap for the same reason the publish is: the application processor compares
-            // before publishing, so at steady state this arm never fires at all -- which
-            // matters more than it looks: every wake of this `select` cancels the in-flight
-            // `read_record`, and `read_exact` is not cancel-safe. An arm that fired once a
-            // second, as the status arm used to, was cancelling a partially-read record for
-            // a message it then discarded.
-            //
-            // `Lagged` is answered rather than ignored. A missed publish means the list
-            // changed and this task did not see how -- and the cache holds the current one
-            // either way, so sending it is exactly the right recovery.
-            Either4::Third(Either::First(
-                WaitResult::Message(_) | WaitResult::Lagged(_),
-            )) => {
+            Wake::Routines => {
                 // Read back from the cache rather than from the message, so this shares one
                 // path with the send above. Safe against the publish: the application
                 // processor holds the cache lock across both the publish and the write, so
@@ -623,9 +665,7 @@ async fn run(
             // acknowledges an `UplinkCommand`**: there is no per-command ack, and this is the
             // reason there does not need to be. What arrives says what the machine now
             // believes, which is a stronger statement than "your message was received".
-            Either4::Third(Either::Second(
-                WaitResult::Message(_) | WaitResult::Lagged(_),
-            )) => {
+            Wake::Configuration => {
                 // Fires every ten seconds whether or not anything changed, so
                 // `send_configuration` compares and usually sends nothing.
                 if send_configuration(&mut socket_tx, &mut session, &mut last_configuration, false).await? {
@@ -643,8 +683,8 @@ async fn run(
             // Answered on every path, including the failures: the uploader blocks on this
             // signal, and a shot nobody answers for is a shot that waits out its timeout and
             // then gets posted anyway -- slower, and for no reason.
-            Either4::Fourth(entry) => {
-                let sent = send_shot(&mut socket_tx, &mut session, entry.id, entry.size_bytes).await;
+            Wake::Shot(id, size_bytes) => {
+                let sent = send_shot(&mut socket_tx, &mut session, id, size_bytes).await;
                 channels::UPLINK_SHOT_ANSWER.signal(matches!(sent, Ok(true)));
                 sent?;
             }
