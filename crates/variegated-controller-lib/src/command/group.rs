@@ -8,7 +8,7 @@
 //! The trait is ungated so the handlers above it can be; only the impl for the HAL type needs
 //! `hardware`.
 
-use variegated_controller_types::{FlowRateType, PressureType, WeightType};
+use variegated_controller_types::{FlowRateType, PressureType, ScaleTimerCommand, WeightType};
 
 /// The group operations shared command handling performs.
 ///
@@ -28,6 +28,13 @@ pub trait GroupAccess {
     async fn zero_calibrate_scale(&mut self);
     /// Record the span, against a known 100 g mass.
     async fn calibrate_scale_with_100g(&mut self);
+    /// Drive the scale's own timer, on a scale that has one.
+    ///
+    /// Returns nothing for the same reason the three above do. The refusal a local load
+    /// cell gives -- it has no timer -- is a permanent property of the fitted hardware
+    /// rather than a transient failure, and `ScaleCapabilities::timer` is where a caller
+    /// asks about it in advance.
+    async fn control_scale_timer(&mut self, command: ScaleTimerCommand);
 
     /// What the scale reads, if one is attached and reporting.
     fn output_weight(&mut self) -> Option<WeightType>;
@@ -55,6 +62,10 @@ impl<M: embassy_sync::blocking_mutex::raw::RawMutex, const N: usize> GroupAccess
 
     async fn calibrate_scale_with_100g(&mut self) {
         let _ = self.scale_reference_weight_calibration(100).await;
+    }
+
+    async fn control_scale_timer(&mut self, command: ScaleTimerCommand) {
+        let _ = self.scale_control_timer(command).await;
     }
 
     fn output_weight(&mut self) -> Option<WeightType> {

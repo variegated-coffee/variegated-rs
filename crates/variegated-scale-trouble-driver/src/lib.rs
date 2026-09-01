@@ -2,16 +2,19 @@
 
 //! Driver for Bluetooth coffee scales
 //!
-//! This crate provides drivers for various Bluetooth-enabled coffee scales including:
-//! - ACAIA (Pearl, Pyxis, Lunar, Cinco, etc.) - both old and new protocols
-//! - Bookoo scales
-//! - Felicita (Arc, Parallel, etc.)
+//! This crate provides drivers for Bluetooth-enabled coffee scales.
 //!
-//! See SCALE_PROTOCOLS.md for detailed protocol documentation.
+//! See SCALE_PROTOCOLS.md for protocol documentation. Frame parsing and command building
+//! live in `variegated-scale-codec`, a crate of their own because this one cannot host a
+//! test binary; the drivers here are the GATT plumbing around it.
 //!
 //! ## Available Drivers
 //!
 //! - [`acaia_old`] - ACAIA scales with old protocol (pre-2021 models)
+//! - [`bookoo`] - BooKoo Themis, Themis Mini and Themis Ultra
+//!
+//! ACAIA's newer protocol and Felicita are documented in SCALE_PROTOCOLS.md but not
+//! implemented.
 //!
 //! ## Example
 //!
@@ -35,6 +38,7 @@
 //! ```
 
 pub mod acaia_old;
+pub mod bookoo;
 
 /// Re-export trouble-host types for convenience
 pub use variegated_trouble_connection_manager::{BdAddr, Connection, Controller, Stack};

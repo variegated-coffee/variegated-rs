@@ -9,6 +9,12 @@ harness = false # do not use the built in cargo test harness -> resolve rust-ana
 
 [dependencies]
 variegated-trouble-connection-manager = { path = "../variegated-trouble-connection-manager" }
+# The pure protocol codecs, in a crate of their own because this one cannot host a test
+# binary: `#![no_std]` is unconditional here, `harness = false` above means cargo wants a
+# `main`, and the `defmt` below is not optional so a host build has no `_defmt_acquire`.
+# Every command frame this driver sends is computed there and asserted against its
+# protocol's checksum rule by tests that actually run.
+variegated-scale-codec = { path = "../variegated-scale-codec", features = ["defmt"] }
 trouble-host = { workspace = true, features = ["defmt"] }
 defmt.workspace = true
 embassy-time = { workspace = true, features = ["defmt"] }

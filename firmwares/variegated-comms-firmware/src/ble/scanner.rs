@@ -14,6 +14,7 @@ use variegated_controller_types::bluetooth::{
     bluetooth_name, BluetoothDriverKind, BluetoothName, DiscoveredBluetoothPeripheral,
 };
 use variegated_scale_trouble_driver::acaia_old::ACAIA_OLD_SERVICE_UUID;
+use variegated_scale_trouble_driver::bookoo::BOOKOO_SERVICE_UUID;
 use variegated_trouble_connection_manager::ScanSink;
 
 use crate::channels::BLE_RESCAN_PENDING;
@@ -174,6 +175,8 @@ const MIN_REPORTED_RSSI: i8 = -80;
 fn driver_for_service(uuid: &Uuid) -> Option<BluetoothDriverKind> {
     if *uuid == ACAIA_OLD_SERVICE_UUID {
         Some(BluetoothDriverKind::AcaiaOld)
+    } else if *uuid == BOOKOO_SERVICE_UUID {
+        Some(BluetoothDriverKind::Bookoo)
     } else if *uuid == BELKA_SERVICE_UUID {
         Some(BluetoothDriverKind::BelkaPortal)
     } else {

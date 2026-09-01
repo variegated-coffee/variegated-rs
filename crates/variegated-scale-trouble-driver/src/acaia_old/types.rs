@@ -1,4 +1,5 @@
 use trouble_host::prelude::*;
+use variegated_scale_codec::acaia_old as codec;
 
 /// Service UUID for ACAIA Old protocol (Weight Scale Service - standard UUID)
 pub const ACAIA_OLD_SERVICE_UUID: Uuid = Uuid::new_short(0x1820);
@@ -28,23 +29,27 @@ pub const ACAIA_OLD_CHAR_UUID: Uuid = Uuid::new_short(0x2a80);
 // length byte the scale does not expect and checksums computed over the wrong payload --
 // so the scale dropped every tare while the handshake and heartbeat kept working. If you
 // add a command, derive it from the arithmetic above, not from `ACAIA.md`.
+//
+// That instruction is now enforced rather than merely written down. Every constant below
+// is *computed* by `variegated_scale_codec::acaia_old`, whose tests assert that each frame
+// carries the checksums its own payload implies -- the exact assertion `TARE_CMD` failed.
+// The codec lives in its own crate because this one cannot host a test binary; see its
+// crate docs. The four handshake and tare frames are byte-for-byte what they always were,
+// and a test there pins them so a refactor of the checksum arithmetic cannot quietly
+// change what a working driver sends.
 
 /// Identification message (20 bytes) sent during handshake
-pub const IDENTIFICATION_MSG: [u8; 20] = [
-    0xEF, 0xDD, 0x0B,  // magic + cmd
-    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,  // payload "01234567"
-    0x38, 0x39, 0x30, 0x31, 0x32, 0x33, 0x34,        // payload "8901234"
-    0x9A, 0x6D,  // cksum1, cksum2 over the 15 payload bytes
-];
+pub const IDENTIFICATION_MSG: [u8; 20] = codec::identification();
 
 /// Notification request message (14 bytes) sent during handshake
 ///
 /// Requests weight, battery, timer and button notifications.
-pub const NOTIFICATION_REQUEST_MSG: [u8; 14] = [
-    0xEF, 0xDD, 0x0C,  // magic + cmd
-    0x09, 0x00, 0x01, 0x01, 0x02, 0x02, 0x05, 0x03, 0x04,  // payload
-    0x15, 0x06,  // cksum1, cksum2 over the 9 payload bytes
-];
+///
+/// Note the mismatch with [`ScaleEvent`], which carries only a weight variant: this asks
+/// for four kinds of notification and the stream discards three. That is how it has always
+/// behaved and it is not changed here, but the comment on `ScaleEvent` claiming the
+/// protocol "only sends weight events" is contradicted by this very frame.
+pub const NOTIFICATION_REQUEST_MSG: [u8; 14] = codec::notification_request();
 
 /// Tare command (6 bytes)
 ///
@@ -54,18 +59,25 @@ pub const NOTIFICATION_REQUEST_MSG: [u8; 14] = [
 /// contents: read as `payload = [0x01, 0x00]`, `cksum1` has to be `0x01`, and it was
 /// `0x00`. The scale rejected the frame silently, which is why tare did nothing while
 /// weights streamed normally.
-pub const TARE_CMD: [u8; 6] = [
-    0xEF, 0xDD, 0x04,  // magic + cmd
-    0x00,              // payload
-    0x00, 0x00,        // cksum1, cksum2 (both zero, for a single zero payload byte)
-];
+pub const TARE_CMD: [u8; 6] = codec::tare();
 
 /// Heartbeat message (7 bytes) - must be sent every 1000ms (recommended)
-pub const HEARTBEAT_MSG: [u8; 7] = [
-    0xEF, 0xDD, 0x00,  // magic + cmd
-    0x02, 0x00,        // payload
-    0x02, 0x00,        // cksum1, cksum2
-];
+pub const HEARTBEAT_MSG: [u8; 7] = codec::heartbeat();
+
+/// Timer start command (7 bytes)
+///
+/// Seven, not the eight `ACAIA.md:281-314` shows, and for exactly the reason [`TARE_CMD`]
+/// is six: the `0x02` in the published frame is pyacaia's length byte. Read with it
+/// removed, each of the three timer frames has a two-byte payload whose checksums are the
+/// published trailing pair -- which is what confirms the reading, since a length byte
+/// would shift every index and change both.
+pub const TIMER_START_CMD: [u8; 7] = codec::timer(codec::TimerOp::Start);
+
+/// Timer stop command (7 bytes). See [`TIMER_START_CMD`] for the framing.
+pub const TIMER_STOP_CMD: [u8; 7] = codec::timer(codec::TimerOp::Stop);
+
+/// Timer reset command (7 bytes). See [`TIMER_START_CMD`] for the framing.
+pub const TIMER_RESET_CMD: [u8; 7] = codec::timer(codec::TimerOp::Reset);
 
 /// Events that can be received from the ACAIA Old protocol scale
 ///

@@ -1,6 +1,7 @@
 //! BLE functionality - scanning, device management, and measurement loops
 
 pub mod devices;
+pub mod scale_slot;
 pub mod scanner;
 pub mod status;
 
@@ -13,6 +14,27 @@ use variegated_log::{log_error, log_warn};
 use embassy_time::{Instant, Timer};
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
+
+/// The HCI controller this firmware runs on.
+///
+/// Spelled out once here because it appears in every BLE signature in this module tree and
+/// is neither short nor variable: there is exactly one radio, so a type parameter would be
+/// a generic over a set with one member.
+pub type SlotController = ExternalController<BleConnector<'static>, 20>;
+
+/// The packet pool, likewise fixed.
+pub type SlotPool = DefaultPacketPool;
+
+/// A handle onto the connection manager.
+///
+/// `'static` because `ManagerHandle::register_device` returns a `DeviceHandle` carrying the
+/// *manager's* lifetime, and the manager is `'static` in `ble_slot_task`. That is what lets
+/// `ScaleProtocol::Gatt` be a plain associated type rather than a second GAT.
+pub type SlotHandle =
+    variegated_trouble_connection_manager::ManagerHandle<'static, SlotController, SlotPool>;
+
+/// The BLE host stack.
+pub type SlotStack = Stack<'static, SlotController, SlotPool>;
 
 /// BLE host runner task
 ///

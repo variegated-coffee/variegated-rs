@@ -67,3 +67,31 @@ pub enum ScaleSelector {
     /// The scale under the named group -- the one brew-by-weight reads.
     GroupScale(GroupIndex),
 }
+
+/// What to do to a scale's own timer.
+///
+/// The timer runs on the scale and drives the scale's display; this firmware never reads it
+/// back. Both supported protocols can drive one -- BooKoo through its `04`/`05`/`06`/`07`
+/// commands, ACAIA through command `0x0D` -- so this is not specific to either.
+///
+/// Deliberately not the same type as
+/// [`crate::ScaleOp`], which is the *inter-processor* vocabulary and also carries
+/// [`crate::ScaleOp::Tare`]. Keeping them apart means adding an operation to the link does
+/// not silently widen what a client is allowed to ask for.
+///
+/// **Append-only**, for the same reason as [`ScaleSelector`]: it travels inside
+/// `MachineCommand`.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleTimerCommand {
+    /// Start the timer running.
+    Start,
+    /// Stop it, leaving the elapsed time displayed.
+    Stop,
+    /// Return it to zero.
+    Reset,
+    /// Zero the scale and start the timer together.
+    TareAndStart,
+}

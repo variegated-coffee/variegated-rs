@@ -5683,6 +5683,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-scale-codec"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.1.1",
+]
+
+[[package]]
 name = "variegated-scale-trouble-driver"
 version = "0.1.0"
 dependencies = [
@@ -5691,6 +5698,7 @@ dependencies = [
  "embassy-time",
  "heapless 0.9.3",
  "trouble-host",
+ "variegated-scale-codec",
  "variegated-trouble-connection-manager",
 ]
 

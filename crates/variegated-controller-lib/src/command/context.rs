@@ -467,6 +467,7 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
             ScaleAction::Tare => self.group().tare_scale().await,
             ScaleAction::ZeroCalibrate => self.group().zero_calibrate_scale().await,
             ScaleAction::CalibrateWith100g => self.group().calibrate_scale_with_100g().await,
+            ScaleAction::Timer(command) => self.group().control_scale_timer(command).await,
         }
     }
 
@@ -599,6 +600,10 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
             }
             MachineCommand::CalibrateGroupScale100g(index) => {
                 self.scale_action(index, ScaleAction::CalibrateWith100g).await
+            }
+            MachineCommand::ControlScaleTimer(selector, command) => {
+                let ScaleSelector::GroupScale(index) = selector;
+                self.scale_action(index, ScaleAction::Timer(command)).await
             }
             MachineCommand::InferGroupPressureIntegral(index, target) => {
                 self.seed_pump_integral(index, PumpQuantity::Pressure, target as f32)

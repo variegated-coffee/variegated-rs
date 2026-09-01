@@ -256,10 +256,21 @@ pub static BLE_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal:
 /// panic or log -- it silently wedges, so a tare would simply never arrive, and
 /// intermittently.
 ///
-/// Depth 1 with latest-wins semantics, matching what `Signal` gave: an operator who
-/// asks twice wants one tare. Published with `immediate_publisher`, which needs no
-/// publisher slot and never awaits -- the same non-blocking contract the UART reader
-/// requires everywhere else.
+/// Published with `immediate_publisher`, which needs no publisher slot and never awaits --
+/// the same non-blocking contract the UART reader requires everywhere else. A full queue
+/// evicts the oldest entry rather than blocking.
+///
+/// **Depth 4, not 1, and the reason is that `ScaleOp` is no longer one idempotent
+/// operation.** This was depth 1 with latest-wins semantics, matching what `Signal` gave,
+/// justified by "an operator who asks twice wants one tare". That argument holds exactly
+/// as long as `Tare` is the only variant. Once the enum gained timer control, a
+/// `TareAndStartTimer` published and then a `StopTimer` published before the slot loop
+/// next reaches its `select3` would evict the first and drop it **silently** -- two
+/// distinct operations collapsing into one, with nothing logged.
+///
+/// Four deep is one op per slot in flight. The payload is four bytes, so the whole change
+/// costs about 64 bytes of `.bss` across the four subscribers. Note that eviction is still
+/// the overflow behaviour; depth buys ordering room, not a guarantee.
 ///
 /// The staleness wrinkle is unchanged and still handled by the consumer: a tare raised
 /// while the scale is disconnected would otherwise sit queued and fire on the next
@@ -269,7 +280,7 @@ pub static BLE_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal:
 pub static SCALE_COMMAND_CHANNEL: PubSubChannel<
     CriticalSectionRawMutex,
     (PeripheralId, ScaleOp),
-    1,
+    4,
     MAX_BLUETOOTH_PERIPHERALS,
     1,
 > = PubSubChannel::new();

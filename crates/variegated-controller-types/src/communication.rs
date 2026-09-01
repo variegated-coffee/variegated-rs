@@ -503,14 +503,35 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
 /// An operation on a scale, as carried by
 /// [`ApplicationProcessorToCommsProcessorMessage::ScaleCommand`].
 ///
-/// Only `Tare` today, because it is the only one the ACAIA driver can perform --
-/// there is no zero-calibration or reference-weight command in that protocol. The
-/// enum exists rather than a bare "tare" message so that a scale which *does* support
-/// calibration can be added without a second wire variant. Append, never insert.
+/// Taring and timer control, which every driver in this tree can perform. **Not**
+/// calibration: neither protocol has a zero-calibration or reference-weight command, a
+/// Bluetooth scale is calibrated by its own vendor app, and
+/// [`variegated_hal::scale::ScaleCapabilities`] reports both as unsupported. That
+/// distinction is what `variegated-controller-lib`'s `scale_calibration` module is built
+/// on, and adding a variant here does not change it.
+///
+/// The timer runs on the scale and drives the scale's own display. Nothing in this
+/// firmware reads it back -- ACAIA's timer notifications are discarded by its driver, and
+/// BooKoo's arrive inside the weight frame as a millisecond counter the driver does not
+/// publish. These are write-only controls.
+///
+/// The two protocols differ in one place, and the drivers absorb it: BooKoo has a single
+/// atomic tare-and-start command, while ACAIA needs a tare followed by a timer start.
+///
+/// Append, never insert.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScaleOp {
+    /// Zero the scale.
     Tare,
+    /// Start the scale's timer running.
+    StartTimer,
+    /// Stop it, leaving the elapsed time on the scale's display.
+    StopTimer,
+    /// Return it to zero.
+    ResetTimer,
+    /// Zero the scale and start its timer. One command on BooKoo, two writes on ACAIA.
+    TareAndStartTimer,
 }

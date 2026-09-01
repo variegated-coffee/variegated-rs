@@ -157,62 +157,132 @@ Fixed-length frames (10 or 14 bytes):
 
 ## Bookoo
 
-**Supported Devices:** Bookoo coffee scales
+**Supported Devices:** BooKoo Themis, Themis Mini, Themis Ultra. **Implemented** — see
+`src/bookoo/`, with the frame and command codec in `variegated-scale-codec`.
+
+**Source:** BooKoo's own specification, <https://github.com/BooKooCode/OpenSource> —
+`bookoo_mini_scale/protocols.md` and `bookoo_ultra_scale/protocols.md`. Earlier revisions of
+this section were second-hand, taken from `ESP32Arduino-BLEScale`, and were wrong in ways
+worth naming: they invented a `[0x02, 0x00]` / `[0x00]` handshake that does not exist in the
+protocol at all (it is an ACAIA leftover), and omitted the product/type header, the flow
+rate, the battery, the settings fields and the checksum. The weight decode was correct and
+is unchanged.
+
+All UUIDs are 16-bit shorthand in the base range `0000xxxx-0000-1000-8000-00805F9B34FB`.
 
 ### BLE Services and Characteristics
 
-**Primary Service UUID:** `0FFE` (vendor-specific short UUID)
+**Primary Service UUID:** `0FFE`
 
 **Characteristics:**
-- **Read/Notify:** `FF11`
-  - Properties: NOTIFY
-  - Purpose: Receive weight updates
-- **Write:** `FF12`
-  - Properties: WRITE_WITHOUT_RESPONSE
-  - Purpose: Send initialization commands
+- **Read/Notify:** `FF11` — weight frames
+- **Write:** `FF12` — commands
 
-### Connection Handshake
+Note that these are *two* characteristics, where ACAIA's older protocol notifies and writes
+on one.
 
-1. **Send Initialization Byte Sequence 1:**
-   ```
-   [0x02, 0x00]
-   ```
+### Connection
 
-2. **Send Initialization Byte Sequence 2:**
-   ```
-   [0x00]
-   ```
+**There is no handshake and no heartbeat.** Write `0x0001` to the CCCD of `FF11` and the
+scale streams until it is switched off. Frames are 20 bytes, which fits the default 23-byte
+ATT MTU, so no MTU negotiation is needed either.
 
-3. **Enable Notifications**
-   - Subscribe to characteristic `FF11`
+This driver sends one command at connect — flow smoothing on — which is configuration
+rather than initialisation: without it the smoothing state is whatever the vendor app last
+left it as, and two identical machines would report differently filtered flow.
 
-### Weight Data Format
+### Weight Notification (20 bytes, `FF11`)
 
-Weight notifications are 10+ byte frames:
-```
-[..., ..., ..., ..., ..., ..., signByte, rawByte2, rawByte1, rawByte0, ...]
-```
+| Offset | Field | Encoding |
+|---|---|---|
+| 0 | Product number | `0x03` |
+| 1 | Type | `0x0B` = weight |
+| 2-4 | Milliseconds | u24 big-endian |
+| 5 | Weight unit | `01` gram, `02` ounce |
+| 6 | Weight sign | ASCII `0x2B` `'+'` / `0x2D` `'-'` |
+| 7-9 | Weight | grams x 100, u24 big-endian |
+| 10 | Flow sign | ASCII `0x2B` / `0x2D` |
+| 11-12 | Flow rate | g/s x 100, u16 big-endian |
+| 13 | Battery | percent, 0-100 |
+| 14-15 | Auto-off | minutes x 10, u16 big-endian |
+| 16 | Buzzer gear | 0-5, 0 = silent |
+| 17 | Flow smoothing | 0 off, 1 on |
+| 18 | Reserved | `00` |
+| 19 | Checksum | XOR of bytes 0-18 |
 
-**Positions:**
-- **Byte 6:** Sign indicator
-  - `0x2D` (ASCII '-'): Negative weight
-  - Other values: Positive weight
-- **Bytes 7-9:** 24-bit raw weight value (big-endian)
-
-**Weight Calculation:**
+**Weight calculation:**
 ```rust
 let raw = (data[7] as u32) << 16 | (data[8] as u32) << 8 | (data[9] as u32);
 let sign = if data[6] == 0x2D { -1.0 } else { 1.0 };
 let weight_grams = sign * (raw as f32) / 100.0;
 ```
 
-**Example:**
-```
-[..., ..., ..., ..., ..., ..., 0x00, 0x00, 0x13, 0x88, ...]
-```
-- Sign: positive (byte 6 != 0x2D)
-- Raw: `0x001388` = 5000
-- Result: 5000 / 100.0 = 50.00 grams
+Read **all three** weight bytes. `aiobookoo` reads only two and therefore wraps at
+655.35 g, on a scale that reads to 2 kg.
+
+**Flow rate is reported by the scale**, and this driver forwards it rather than
+differentiating the weight stream. BooKoo documents no notification rate anywhere, so a
+derivative taken over an unknown sample interval could easily be worse than the scale's own.
+Frames carry their own millisecond timestamp for the same reason: use it rather than
+arrival time.
+
+### Ultra-only notifications
+
+Same 20-byte shape, same trailing XOR. Decoded by this driver and logged, not published.
+
+**Type `0x0F` — powder weight:** `[2]` sign, `[3..5]` grams x 100 u24 BE, `[6..18]` zero.
+
+**Type `0x0D` — automatic-mode event:** `[2]` event code (`00` stopped, `01` started, `02`
+ready, `03` exit ready, `04` exit done), `[3..5]` ms u24 BE, `[6]` weight sign, `[7..9]`
+grams x 100, `[10]` result sign, `[11..12]` result x 100 u16 BE. The result is average flow
+in timing mode, or the liquid-to-powder ratio in ratio mode.
+
+### Commands (6 bytes, write to `FF12`)
+
+`[0]=0x03`, `[1]=0x0A`, `[2..4]=DATA1..3`, `[5]=XOR of bytes 0-4`. Since
+`0x03 ^ 0x0A = 0x09`, the checksum is `0x09 ^ DATA1 ^ DATA2 ^ DATA3`.
+
+| Command | Bytes |
+|---|---|
+| Tare | `03 0A 01 00 00 08` |
+| Beep gear *n* (0-5) | `03 0A 02 00 n (0x0B^n)` |
+| Auto-off *m* min (5-30) | `03 0A 03 00 m (0x0A^m)` |
+| Start timer | `03 0A 04 00 00 0D` |
+| Stop timer | `03 0A 05 00 00 0C` |
+| Reset timer | `03 0A 06 00 00 0F` |
+| Tare + start timer | `03 0A 07 00 00 0E` |
+| Flow smoothing off / on | `03 0A 08 00 00 01` / `03 0A 08 01 00 00` |
+
+> **Compute these, do not copy them.** BooKoo's *own* document published four wrong timer
+> checksums until commit `6c9f39de` (2026-07-30) — start, stop, reset and tare+start were
+> each shifted one table row, and only the corrected values above satisfy the documented XOR
+> rule. The libraries that copied the old table still ship the invalid bytes: `aiobookoo`
+> and therefore the Home Assistant integration, Beanconqueror, `AcaiaArduinoBLE` and
+> `ESP32Arduino-BLEScale`. They are reported to work, which *suggests* the firmware does not
+> validate command checksums, but nothing states that and a silently-ignored command is
+> indistinguishable from a broken driver. `variegated-scale-codec` builds every frame from
+> the rule and asserts it in a test.
+
+Note the asymmetry: flow smoothing takes its parameter in DATA2 (byte 3) while beep gear and
+auto-off take theirs in DATA3 (byte 4). Both current BooKoo documents say so; it looks like a
+documentation inconsistency and is unverified against hardware.
+
+### Not relied upon
+
+- **Notification rate** — undocumented, in the specification and everywhere else.
+- **Manufacturer data** — no source documents any; discovery matches on service UUID.
+- **Unit byte polarity** — the Ultra document says `01` gram / `02` ounce; `awprice`'s Go
+  library declares the opposite. The document wins, and anything else is surfaced rather
+  than assumed.
+- **Byte 18** — both official documents call it reserved. One third-party library decodes it
+  as the Ultra stop-condition.
+
+### A separate device: the BooKoo Espresso Monitor
+
+Not a scale and not implemented here. Product number `0x02`, service `0x0FFF`, command
+`FF01`, extraction data `FF02`; the data frame is 10 bytes with pressure in bar x 100 as
+u16 BE at `[4..6]`, battery at `[6]`, and **no checksum byte**. Advertises as `BOOKOO_EM`.
+See `espresso_monitor/protocols.md` in the same repository.
 
 ---
 
@@ -295,7 +365,13 @@ Different scales can be identified by their advertised Bluetooth names:
 - "PROCH" (Proch model)
 
 **Bookoo Scales:**
-- "BOOKOO_SC"
+- "BOOKOO_SC 123456" (Themis, Themis Mini — a six-digit serial suffix)
+- "BOOKOO_SC_U_XXX" (Themis Ultra)
+- "BOOKOO_EM" is the Espresso Monitor, a different device entirely
+
+Note that this firmware does **no** name matching. It recognises peripherals by advertised
+service UUID only, and recognition merely pre-fills the driver in the pairing UI -- it is
+never a filter, so a scale that advertises no service is still pairable by hand.
 
 **Felicita Scales:**
 - "FELIC" (prefix match)
@@ -375,5 +451,19 @@ fn detect_scale_type(name: &str, services: &[Uuid]) -> ScaleType {
 
 ## References
 
-- Original implementation: [ESP32Arduino-BLEScale](https://github.com/isPointless/ESP32Arduino-BLEScale)
+- **BooKoo, authoritative:** [BooKooCode/OpenSource](https://github.com/BooKooCode/OpenSource)
+  — `bookoo_mini_scale/protocols.md`, `bookoo_ultra_scale/protocols.md`,
+  `espresso_monitor/protocols.md`. Note commit `6c9f39de` (2026-07-30), which corrected four
+  timer-command checksums that most third-party libraries still ship wrong.
+- ACAIA and Felicita: [ESP32Arduino-BLEScale](https://github.com/isPointless/ESP32Arduino-BLEScale).
+  Treat as second-hand — its BooKoo section is what this document's was wrong from, and its
+  ACAIA framing is not the dialect `acaia_old` speaks.
 - BLE Specification: [Bluetooth SIG](https://www.bluetooth.com/specifications/specs/)
+
+> **A warning that applies to every protocol in this file.** These scales reject a malformed
+> command *silently* — the connection stays up and weights keep streaming, so the only
+> symptom is a button that does nothing. This has already cost this project one debugging
+> session: `acaia_old`'s `TARE_CMD` was written to match a comment's labels rather than the
+> checksum arithmetic, gained a length byte the scale does not expect, and dropped every
+> tare. Derive command frames from the checksum rule, never transcribe them, and add them to
+> the tests in `variegated-scale-codec`.

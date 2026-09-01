@@ -7,9 +7,10 @@ use trouble_host::attribute::Characteristic;
 use trouble_host::prelude::Uuid;
 
 use crate::acaia_old::{
-    types::{ScaleEvent, WeightMeasurement, ACAIA_OLD_SERVICE_UUID, ACAIA_OLD_CHAR_UUID, IDENTIFICATION_MSG, NOTIFICATION_REQUEST_MSG, TARE_CMD, HEARTBEAT_MSG},
+    types::{ScaleEvent, WeightMeasurement, ACAIA_OLD_SERVICE_UUID, ACAIA_OLD_CHAR_UUID, IDENTIFICATION_MSG, NOTIFICATION_REQUEST_MSG, TARE_CMD, HEARTBEAT_MSG, TIMER_START_CMD, TIMER_STOP_CMD, TIMER_RESET_CMD},
     Error,
 };
+pub use variegated_scale_codec::acaia_old::TimerOp;
 
 /// Notification stream for ACAIA Old protocol scale events
 ///
@@ -369,6 +370,33 @@ impl<'a, C: Controller, P: PacketPool> AcaiaOldGattClient<'a, C, P> {
             .await
             .map_err(|_| {
                 defmt::warn!("Failed to write tare command");
+                Error::WriteFailed
+            })?;
+
+        Ok(())
+    }
+
+    /// Drive the scale's own timer.
+    ///
+    /// ACAIA has no combined tare-and-start command, unlike BooKoo; a caller wanting both
+    /// sends [`Self::send_tare`] and then this with [`TimerOp::Start`]. The two writes are
+    /// issued from the same future as every other write in the connected scope, so they
+    /// cannot interleave with a heartbeat.
+    pub async fn send_timer(&self, op: TimerOp) -> Result<(), Error> {
+        let characteristic = self.ensure_characteristic().await?;
+
+        let frame: &[u8] = match op {
+            TimerOp::Start => &TIMER_START_CMD,
+            TimerOp::Stop => &TIMER_STOP_CMD,
+            TimerOp::Reset => &TIMER_RESET_CMD,
+        };
+
+        info!("Sending timer command");
+        self.client
+            .write_characteristic_without_response(&characteristic, frame)
+            .await
+            .map_err(|_| {
+                defmt::warn!("Failed to write timer command");
                 Error::WriteFailed
             })?;
 

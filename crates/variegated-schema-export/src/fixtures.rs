@@ -522,6 +522,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetShotUploadSettings(_) => {}
             SetTimezone(_) => {}
             SetGroupBrewLimit(..) => {}
+            ControlScaleTimer(..) => {}
         }
     }
 
@@ -733,6 +734,13 @@ fn machine_commands() -> Vec<MachineCommand> {
                 max_group_flow_rate: Some(2.5),
                 ..Default::default()
             }),
+        ),
+        // `TareAndStart` rather than `Start`: it is the last variant of
+        // `ScaleTimerCommand`, so a generated client that mis-encodes the nested enum's
+        // discriminant fails here rather than passing on the zero value by accident.
+        ControlScaleTimer(
+            ScaleSelector::GroupScale(0),
+            variegated_controller_types::ScaleTimerCommand::TareAndStart,
         ),
     ]
 }

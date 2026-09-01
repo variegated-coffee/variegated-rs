@@ -390,6 +390,18 @@ pub async fn start(
                                     ScaleOp::Tare => {
                                         log_info!("Received tare for scale 0x{:04X}", peripheral_id);
                                     }
+                                    ScaleOp::StartTimer => {
+                                        log_info!("Received timer start for scale 0x{:04X}", peripheral_id);
+                                    }
+                                    ScaleOp::StopTimer => {
+                                        log_info!("Received timer stop for scale 0x{:04X}", peripheral_id);
+                                    }
+                                    ScaleOp::ResetTimer => {
+                                        log_info!("Received timer reset for scale 0x{:04X}", peripheral_id);
+                                    }
+                                    ScaleOp::TareAndStartTimer => {
+                                        log_info!("Received tare and timer start for scale 0x{:04X}", peripheral_id);
+                                    }
                                 }
                                 // `immediate_publisher`, never `publish().await`: this
                                 // runs in the UART reader, where back-pressure stalls

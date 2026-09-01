@@ -336,11 +336,25 @@ impl<'a, M: RawMutex + Sync, const N: usize> ScaleController for GravityControll
         self.command_sender.try_send(GravityCommand::ReferenceWeightCalibration(weight_grams)).map_err(|_| ScaleError::CalibrationFailed)
     }
 
+    /// A load cell bolted to the machine has no display and no timer, so there is nothing
+    /// for this command to reach. Reported rather than silently accepted, on the same
+    /// grounds as `set_configuration` on the Bluetooth controller.
+    async fn control_timer(
+        &mut self,
+        _command: variegated_controller_types::ScaleTimerCommand,
+    ) -> Result<(), ScaleError> {
+        Err(ScaleError::TimerNotSupported)
+    }
+
     fn get_capabilities(&self) -> crate::scale::ScaleCapabilities {
         crate::scale::ScaleCapabilities {
             zero_calibration: true,
             reference_weight_calibration: true,
             supported_reference_weights: &[100], // Only 100g supported by hardware
+            // A load cell wired to the machine is not a scale with a display, so there is
+            // no timer for a command to reach. `control_timer`'s default body reports the
+            // same thing, and this is what lets a caller find out without trying.
+            timer: false,
         }
     }
 }

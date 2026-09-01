@@ -13,6 +13,8 @@ pub enum ScaleError {
     CommunicationError,
     CalibrationNotSupported,
     CalibrationFailed,
+    /// The fitted scale has no timer this firmware can drive.
+    TimerNotSupported,
 }
 
 pub struct ScaleConfiguration {
@@ -29,6 +31,14 @@ pub struct ScaleCapabilities {
     pub zero_calibration: bool,
     pub reference_weight_calibration: bool,
     pub supported_reference_weights: &'static [u32], // grams
+    /// Whether the scale has a timer this firmware can drive.
+    ///
+    /// Both Bluetooth protocols do; a load cell wired to the machine does not, because
+    /// there is no scale for a timer to run on. Reported rather than assumed so a panel or
+    /// a client can hide a control that would do nothing -- the same argument
+    /// `variegated-controller-lib`'s `scale_calibration` module makes for the two
+    /// calibration flags.
+    pub timer: bool,
 }
 
 #[async_trait]
@@ -37,6 +47,22 @@ pub trait ScaleController {
     async fn set_configuration(&mut self, configuration: &ScaleConfiguration) -> Result<(), ScaleError>;
     async fn zero_calibration(&mut self) -> Result<(), ScaleError>;
     async fn reference_weight_calibration(&mut self, weight_grams: u32) -> Result<(), ScaleError>;
+
+    /// Drive the scale's own timer.
+    ///
+    /// Required rather than defaulted, which is not the obvious choice: an implementation
+    /// without a timer only ever writes `Err(ScaleError::TimerNotSupported)`, and a default
+    /// body would spare it. But `#[async_trait]` puts a `Self: Send + Sync` bound on every
+    /// *provided* method, and this trait is used as `dyn ScaleController` -- so a default
+    /// body here stops `Group` compiling, with an error that names `Send` and not the
+    /// default body that asked for it. Two implementations, one of which is a single line,
+    /// is the cheaper side of that trade.
+    ///
+    /// Write-only, like the rest of the timer path -- nothing reads the elapsed time back.
+    async fn control_timer(
+        &mut self,
+        command: variegated_controller_types::ScaleTimerCommand,
+    ) -> Result<(), ScaleError>;
 
     fn get_supported_configuration(&mut self) -> SupportedConfigurationOptions;
     fn get_capabilities(&self) -> ScaleCapabilities;

@@ -86,6 +86,12 @@ pub const BLUETOOTH_DOSE_SCALE_1_PERIPHERAL_ID: u16 = 0xB5D0;
 /// sites so the contract is at least stated on the side that produces it.
 pub const BLUETOOTH_SCALE_ENDPOINT_WEIGHT: u8 = 0;
 pub const BLUETOOTH_SCALE_ENDPOINT_FLOW: u8 = 1;
+/// Battery charge, as a percentage.
+///
+/// Sent only by drivers whose scale reports one -- BooKoo puts it in every weight frame,
+/// ACAIA's older protocol has no equivalent. An endpoint that never arrives is how a
+/// driver says "not applicable"; there is no "unknown" value to send.
+pub const BLUETOOTH_SCALE_ENDPOINT_BATTERY: u8 = 2;
 
 // UART configuration for application processor
 pub fn uart_config() -> esp_hal::uart::Config {

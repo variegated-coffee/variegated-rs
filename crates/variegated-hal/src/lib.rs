@@ -366,6 +366,24 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             Ok(())
         }
     }
+
+    /// Drive the scale's own timer.
+    ///
+    /// `Ok(())` with no controller, matching every other method here. Note what that
+    /// means: a group with no scale reports success, so this cannot be used to discover
+    /// whether a timer exists. `ScaleCapabilities::timer` is the question to ask -- and it
+    /// is the same trap `scale_calibration`'s module docs describe for the two calibration
+    /// methods.
+    pub async fn scale_control_timer(
+        &mut self,
+        command: variegated_controller_types::ScaleTimerCommand,
+    ) -> Result<(), scale::ScaleError> {
+        if let Some(scale_controller) = &mut self.scale_controller {
+            scale_controller.control_timer(command).await
+        } else {
+            Ok(())
+        }
+    }
     
     pub async fn scale_set_configuration(&mut self, config: ScaleConfiguration) -> Result<(), scale::ScaleError> {
         if let Some(scale_controller) = &mut self.scale_controller {

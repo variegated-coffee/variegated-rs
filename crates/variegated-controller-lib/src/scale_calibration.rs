@@ -9,10 +9,15 @@
 //! | `variegated-hal`'s `GravityController` (local load cell) | yes | yes, at 100 g |
 //! | `variegated-hal`'s `BluetoothScaleController` | **no** | **no** |
 //!
-//! `ScaleOp` says why: *"Only `Tare` today, because it is the only one the ACAIA driver can
-//! perform -- there is no zero-calibration or reference-weight command in that protocol."* A
-//! Bluetooth scale is calibrated by its own vendor app, and this firmware has no command that
-//! would change that.
+//! `ScaleOp` says why: *"Taring and timer control, which every driver in this tree can
+//! perform. **Not** calibration: neither protocol has a zero-calibration or reference-weight
+//! command."* A Bluetooth scale is calibrated by its own vendor app, and this firmware has no
+//! command that would change that.
+//!
+//! Note that `ScaleOp` growing does not move this line. It gained timer control when the
+//! BooKoo driver was added, and a timer is not a calibration -- the table above is a
+//! statement about `zero_calibration` and `reference_weight_calibration` specifically, and
+//! both are still `no` for every Bluetooth scale.
 //!
 //! So on the GS3's default build, which takes its weight from a Bluetooth scale, both
 //! operations are unreachable -- and `Group::scale_zero_calibration` returns `Ok(())` when

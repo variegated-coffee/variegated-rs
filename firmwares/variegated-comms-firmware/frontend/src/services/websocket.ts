@@ -590,6 +590,26 @@ export class WebSocketService {
     });
   }
 
+  /**
+   * Drive the scale's own timer.
+   *
+   * Write-only: the timer runs on the scale and drives the scale's display, and nothing
+   * reads it back, so there is no state here to keep in sync and no response to await.
+   *
+   * Whether the fitted scale has a timer at all is a property of its driver -- both
+   * Bluetooth protocols do, a load cell wired to the machine does not -- and a scale
+   * without one logs the command and drops it.
+   */
+  controlScaleTimer(
+    groupIndex: number,
+    command: 'Start' | 'Stop' | 'Reset' | 'TareAndStart'
+  ): void {
+    this.sendMachineCommand({
+      type: 'ControlScaleTimer',
+      value: [{ type: 'GroupScale', value: groupIndex }, { type: command }]
+    });
+  }
+
   setSteamValveOpenness(steamWandIndex: number, openness: number): void {
     this.sendMachineCommand({
       type: 'SetSteamValveOpenness',

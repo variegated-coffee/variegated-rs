@@ -61,11 +61,16 @@ pub mod targets;
 pub use access::{ConfigurationAccess, CurveAction, TargetOutcome};
 pub use context::MachineCommandContext;
 pub use stores::Publish;
+use variegated_controller_types::ScaleTimerCommand;
 
-/// Which of the three calibration actions a scale command asks for.
+/// Which scale action a command asks for.
 ///
-/// The three arms differed only in the method called and the noun logged, on both machines --
+/// The arms differed only in the method called and the noun logged, on both machines --
 /// twelve near-identical lines per machine for what is one action with three values.
+///
+/// The four timer arms joined the original three when the BooKoo driver arrived. They are
+/// not calibrations, and grouping them here does not make them so: this enum is "things
+/// `scale_action` can dispatch", which is a narrower claim than the name suggests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScaleAction {
     /// Zero the reading against whatever is on the scale now.
@@ -74,6 +79,8 @@ pub enum ScaleAction {
     ZeroCalibrate,
     /// Record the span, against a known 100 g mass.
     CalibrateWith100g,
+    /// Drive the scale's own timer.
+    Timer(ScaleTimerCommand),
 }
 
 impl ScaleAction {
@@ -83,6 +90,10 @@ impl ScaleAction {
             Self::Tare => "taring",
             Self::ZeroCalibrate => "zero calibrating",
             Self::CalibrateWith100g => "100g calibrating",
+            Self::Timer(ScaleTimerCommand::Start) => "starting the timer on",
+            Self::Timer(ScaleTimerCommand::Stop) => "stopping the timer on",
+            Self::Timer(ScaleTimerCommand::Reset) => "resetting the timer on",
+            Self::Timer(ScaleTimerCommand::TareAndStart) => "taring and starting the timer on",
         }
     }
 }

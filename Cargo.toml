@@ -47,13 +47,18 @@ members = [
     "crates/variegated-board-cfg",
     "crates/variegated-board-cfg-tests",
 
-    # The ESP32-C6 comms side. The first six are portable no_std and would build for
+    # The ESP32-C6 comms side. The first seven are portable no_std and would build for
     # either architecture; only `variegated-comms-firmware` is riscv32-only, and it is the
     # reason for `default-members` below.
     "crates/variegated-comms-api-types",
     "crates/variegated-shot-upload",
     "crates/variegated-trouble-connection-manager",
     "crates/variegated-belka-portal-trouble-driver",
+    # The pure scale protocol codecs. A crate of its own precisely so it can be tested on a
+    # host: `variegated-scale-trouble-driver` is unconditionally `#![no_std]`, sets
+    # `harness = false`, and takes `defmt` non-optionally, so it cannot host a test binary
+    # at all. See that crate's docs for the full failure.
+    "crates/variegated-scale-codec",
     "crates/variegated-scale-trouble-driver",
     "crates/variegated-improv-trouble",
     "firmwares/variegated-comms-firmware",
@@ -64,8 +69,8 @@ members = [
 # nothing relevant. `default-members` is what keeps a bare `cargo build` meaning "the
 # RP2350 side", which is what it has always meant.
 #
-# The seven comms crates are deliberately *all* absent from this list, not just the
-# riscv-only firmware. Including the six portable ones would compile the whole BLE stack
+# The eight comms crates are deliberately *all* absent from this list, not just the
+# riscv-only firmware. Including the seven portable ones would compile the whole BLE stack
 # for thumbv8m on every build -- and `variegated-shot-upload` would build MbedTLS from
 # source for it, which is worse. Less obviously, resolver 2 unifies features across
 # one invocation's graph, so `variegated-comms-api-types` asking for

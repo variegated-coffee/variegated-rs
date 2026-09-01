@@ -71,6 +71,22 @@ run "variegated-comms-api-types" -p variegated-comms-api-types "$@"
 # the MbedTLS feature set change.
 run "variegated-shot-upload" -p variegated-shot-upload "$@"
 run "variegated-debug-codec" -p variegated-debug-codec "$@"
+# The Bluetooth scale protocol codecs: BooKoo's notification frames and reassembly, plus
+# the outgoing command frames for both BooKoo and ACAIA's older protocol.
+#
+# A crate of its own because `variegated-scale-trouble-driver` cannot host a test binary at
+# all -- it is unconditionally `#![no_std]`, sets `harness = false`, and takes `defmt`
+# non-optionally, so a host test target fails with "`#[panic_handler]` function required"
+# before it ever reaches defmt's linker script.
+#
+# The checksums are why this suite exists. **Both** protocols reject a malformed command
+# silently, with the scale still streaming weights, so the only symptom is a button that
+# does nothing -- which is how ACAIA's tare came to be broken for a while, and why the
+# frames here are computed rather than written out. Both protocols also have a published
+# source of wrong bytes: this repo's `ACAIA.md` gives pyacaia's framing with a length byte
+# the driver's dialect does not use, and BooKoo's own document had four wrong timer
+# checksums until 2026-07-30 which most third-party libraries still ship.
+run "variegated-scale-codec" -p variegated-scale-codec "$@"
 # The menu navigation model, shared by both firmwares. No `--no-default-features` needed:
 # this crate's `defmt` is opt-in precisely so that a plain `cargo test` links.
 run "variegated-menu" -p variegated-menu "$@"

@@ -92,6 +92,9 @@ pub enum BluetoothDriverKind {
     BelkaPortal,
     /// ACAIA scales speaking the older of the two ACAIA protocols.
     AcaiaOld,
+    /// BooKoo Themis scales: the Themis, the Themis Mini and the Themis Ultra, which share
+    /// one weight frame and one command set.
+    Bookoo,
 }
 
 /// One entry in the association list.

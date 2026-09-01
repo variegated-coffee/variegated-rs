@@ -55,7 +55,8 @@ export const ActuatorCapabilitySchema = enumType('ActuatorCapability', {
 
 export const BluetoothDriverKindSchema = enumType('BluetoothDriverKind', {
   BelkaPortal: unitVariant('BelkaPortal'),
-  AcaiaOld: unitVariant('AcaiaOld')
+  AcaiaOld: unitVariant('AcaiaOld'),
+  Bookoo: unitVariant('Bookoo')
 });
 
 export const BoilerControlModeSchema = enumType('BoilerControlMode', {
@@ -272,6 +273,13 @@ export const RoutineWriteErrorSchema = enumType('RoutineWriteError', {
 
 export const ScaleSelectorSchema = enumType('ScaleSelector', {
   GroupScale: newtypeVariant('GroupScale', u8())
+});
+
+export const ScaleTimerCommandSchema = enumType('ScaleTimerCommand', {
+  Start: unitVariant('Start'),
+  Stop: unitVariant('Stop'),
+  Reset: unitVariant('Reset'),
+  TareAndStart: unitVariant('TareAndStart')
 });
 
 export const ScheduleTriggerSchema = struct({
@@ -996,7 +1004,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   SetShotUploadConfig: newtypeVariant('SetShotUploadConfig', ShotUploadConfigSchema),
   SetShotUploadSettings: newtypeVariant('SetShotUploadSettings', ShotUploadSettingsSchema),
   SetTimezone: newtypeVariant('SetTimezone', TimezoneSettingSchema),
-  SetGroupBrewLimit: tupleVariant('SetGroupBrewLimit', u8(), GroupBrewLimitModeSchema, option(GroupBrewControlTargetValuesUpdateSchema))
+  SetGroupBrewLimit: tupleVariant('SetGroupBrewLimit', u8(), GroupBrewLimitModeSchema, option(GroupBrewControlTargetValuesUpdateSchema)),
+  ControlScaleTimer: tupleVariant('ControlScaleTimer', ScaleSelectorSchema, ScaleTimerCommandSchema)
 });
 
 export const QueryOutcomeSchema = enumType('QueryOutcome', {
@@ -1115,6 +1124,7 @@ export type RoutineSummary = InferType<typeof RoutineSummarySchema>;
 export type RoutineType = InferType<typeof RoutineTypeSchema>;
 export type RoutineWriteError = InferType<typeof RoutineWriteErrorSchema>;
 export type ScaleSelector = InferType<typeof ScaleSelectorSchema>;
+export type ScaleTimerCommand = InferType<typeof ScaleTimerCommandSchema>;
 export type ScheduleAction = InferType<typeof ScheduleActionSchema>;
 export type ScheduleItem = InferType<typeof ScheduleItemSchema>;
 export type ScheduleTrigger = InferType<typeof ScheduleTriggerSchema>;

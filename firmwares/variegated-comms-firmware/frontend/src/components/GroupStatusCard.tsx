@@ -86,6 +86,30 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
   };
 
   /*
+   * The scale's own timer, which runs on the scale and shows on its display. Not
+   * confirmed, unlike the two calibrations below: nothing here is destructive, and a timer
+   * started by mistake is corrected by pressing stop.
+   *
+   * The notices deliberately say "sent" rather than "started". This path is write-only --
+   * nothing reads the timer back -- so the firmware cannot know whether the scale acted,
+   * and a scale with no timer logs the command and drops it.
+   */
+  const handleTareAndStartTimer = () => {
+    send(
+      (ws) => ws.controlScaleTimer(index, 'TareAndStart'),
+      'Tare and timer start sent'
+    );
+  };
+
+  const handleStopTimer = () => {
+    send((ws) => ws.controlScaleTimer(index, 'Stop'), 'Timer stop sent');
+  };
+
+  const handleResetTimer = () => {
+    send((ws) => ws.controlScaleTimer(index, 'Reset'), 'Timer reset sent');
+  };
+
+  /*
    * Both calibrations are confirmed, and the confirmation states the physical precondition
    * rather than asking "are you sure". They overwrite a stored calibration, and getting
    * one wrong means every shot weight after it is wrong -- quietly, and by an amount
@@ -391,6 +415,25 @@ const GroupStatusCardComponent = ({ index, status }: GroupStatusCardProps) => {
             </Button>
             <Button variant="secondary" size="sm" onClick={() => void handleCalibrateScale100g()}>
               Calibrate 100 g
+            </Button>
+          </div>
+
+          {/* A second row, because these are the scale's own timer rather than its
+              weight -- and because putting five buttons on one line would make the tare
+              stop reading as the primary action.
+
+              "Tare and start" rather than a bare start: it is what BooKoo recommends,
+              it is the single command the protocol has for it, and it is what you
+              actually want at the beginning of a shot. */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: tokens.space.sm }}>
+            <Button variant="secondary" size="sm" onClick={() => void handleTareAndStartTimer()}>
+              Tare &amp; start timer
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void handleStopTimer()}>
+              Stop timer
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void handleResetTimer()}>
+              Reset timer
             </Button>
           </div>
         </div>

@@ -30,8 +30,8 @@ use embassy_sync::signal::Signal;
 use embassy_sync::watch::Sender as WatchSender;
 use variegated_controller_types::debug::{name, DebugEvent};
 use variegated_controller_types::{
-    ExternalPeripheralSensorReading, FlowRateType, PeripheralId, PeripheralStatusProvider,
-    PeripheralType, ScaleOp, WeightType,
+    BatteryLevelType, ExternalPeripheralSensorReading, FlowRateType, PeripheralId,
+    PeripheralStatusProvider, PeripheralType, ScaleOp, WeightType,
 };
 
 use crate::scale::{ScaleController, ScaleError};
@@ -58,6 +58,19 @@ pub const BLUETOOTH_SCALE_ENDPOINT_WEIGHT: u8 = 0;
 /// of espresso, a few percent, and consistently so on both sides.
 pub const BLUETOOTH_SCALE_ENDPOINT_FLOW: u8 = 1;
 
+/// Endpoint carrying the scale's battery charge, as a percentage.
+///
+/// Reported by BooKoo scales, which put it in every weight frame. ACAIA's older protocol
+/// does not report one, so this endpoint simply never arrives for those -- an absent
+/// endpoint is how a driver says "not applicable", and the numbering matches
+/// [`crate::external_sensor::belka::BELKA_ENDPOINT_BATTERY`] deliberately.
+///
+/// Routed to a watch only if [`BluetoothScale::with_battery_sender`] was called. Without
+/// one the reading is dropped in silence rather than warned about, because for a scale
+/// that reports battery on every frame at the notification rate, a warning per frame would
+/// bury the log.
+pub const BLUETOOTH_SCALE_ENDPOINT_BATTERY: u8 = 2;
+
 /// Message type for Bluetooth scale updates from the comms layer
 #[derive(Clone, Debug, Format)]
 pub enum BluetoothScaleUpdate {
@@ -81,6 +94,9 @@ pub struct BluetoothScale<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZ
     /// Output flow rate watch sender
     flow_sender: Option<WatchSender<'a, NoopRawMutex, SensorReading<FlowRateType>, N>>,
 
+    /// Output battery level watch sender, if anything is listening
+    battery_sender: Option<WatchSender<'a, NoopRawMutex, SensorReading<BatteryLevelType>, N>>,
+
     /// Signal for connection status (used by status provider)
     connected_signal: Option<&'a Signal<NoopRawMutex, bool>>,
 
@@ -102,6 +118,7 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
             update_receiver,
             weight_sender,
             flow_sender,
+            battery_sender: None,
             connected_signal: None,
             is_connected: false,
         }
@@ -109,6 +126,19 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
 
     pub fn with_connected_signal(mut self, signal: &'a Signal<NoopRawMutex, bool>) -> Self {
         self.connected_signal = Some(signal);
+        self
+    }
+
+    /// Route [`BLUETOOTH_SCALE_ENDPOINT_BATTERY`] to a watch.
+    ///
+    /// A builder rather than a fourth argument to [`Self::new`]: only some scales report a
+    /// battery at all, and threading a `None` through both espresso firmwares to say so
+    /// would change two call sites to express nothing.
+    pub fn with_battery_sender(
+        mut self,
+        sender: WatchSender<'a, NoopRawMutex, SensorReading<BatteryLevelType>, N>,
+    ) -> Self {
+        self.battery_sender = Some(sender);
         self
     }
 
@@ -182,6 +212,21 @@ impl<'a, M: RawMutex, const N: usize, const UPDATE_CHAN_SIZE: usize>
                     sender.send(SensorReading {
                         raw: value,
                         transformed: value,
+                    });
+                }
+            }
+            BLUETOOTH_SCALE_ENDPOINT_BATTERY => {
+                // Dropped in silence when nothing is listening, unlike the `_` arm below.
+                // A BooKoo sends this on every weight frame, so warning here would emit a
+                // line per notification for the entire life of the connection.
+                if let Some(ref sender) = self.battery_sender {
+                    sender.send(SensorReading {
+                        raw: value,
+                        // Clamped rather than cast bare: `as` on an out-of-range float is
+                        // a saturating conversion in Rust, but a negative or NaN value
+                        // would land on 0 silently, and this is a percentage that the
+                        // driver has already bounds-checked. Clamping states the range.
+                        transformed: value.clamp(0.0, 100.0) as BatteryLevelType,
                     });
                 }
             }
@@ -305,6 +350,28 @@ impl<'a, M: RawMutex + Sync, const N: usize> ScaleController
             .map_err(|_| ScaleError::TareFailed)
     }
 
+    /// Drive the scale's own timer, addressed the same way [`Self::tare`] is.
+    ///
+    /// Whether the scale can actually do this is the driver's business, not ours: both
+    /// protocols this firmware speaks have timer commands, and a peripheral associated
+    /// with a driver that did not would log the op and drop it. That asymmetry is why this
+    /// reports the send, not the outcome -- the link is one-way, and it always has been.
+    async fn control_timer(
+        &mut self,
+        command: variegated_controller_types::ScaleTimerCommand,
+    ) -> Result<(), ScaleError> {
+        use variegated_controller_types::ScaleTimerCommand;
+        let op = match command {
+            ScaleTimerCommand::Start => ScaleOp::StartTimer,
+            ScaleTimerCommand::Stop => ScaleOp::StopTimer,
+            ScaleTimerCommand::Reset => ScaleOp::ResetTimer,
+            ScaleTimerCommand::TareAndStart => ScaleOp::TareAndStartTimer,
+        };
+        self.command_sender
+            .try_send((self.peripheral_id, op))
+            .map_err(|_| ScaleError::CommunicationError)
+    }
+
     /// Not supported: the ACAIA protocol has no settings this maps onto.
     ///
     /// Reported honestly rather than swallowed as `Ok(())`, even though every caller
@@ -335,14 +402,21 @@ impl<'a, M: RawMutex + Sync, const N: usize> ScaleController
         Err(ScaleError::CalibrationNotSupported)
     }
 
-    /// Everything false: a Bluetooth scale is calibrated by its own vendor app, and
+    /// Both calibrations false: a Bluetooth scale is calibrated by its own vendor app, and
     /// this firmware has no command that would change that. `support_calibration` on
     /// the peripheral's `MachineDefinition` entry should agree.
+    ///
+    /// `timer` is true, and is the one thing here that is not a property of Bluetooth as
+    /// such: it is true because both protocols this firmware speaks happen to have timer
+    /// commands. A third driver without one would make this a per-driver answer, which
+    /// this type cannot currently express -- it is constructed from the controller, and
+    /// the controller does not know which driver its peripheral was associated with.
     fn get_capabilities(&self) -> crate::scale::ScaleCapabilities {
         crate::scale::ScaleCapabilities {
             zero_calibration: false,
             reference_weight_calibration: false,
             supported_reference_weights: &[],
+            timer: true,
         }
     }
 }

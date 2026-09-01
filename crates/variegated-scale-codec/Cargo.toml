@@ -1,0 +1,19 @@
+[package]
+name = "variegated-scale-codec"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The only dependency, and it is optional on purpose. `variegated-scale-trouble-driver`
+# takes `defmt` unconditionally, which is one of the four reasons that crate cannot host a
+# test binary (see this crate's docs). Repeating that mistake here would defeat the whole
+# point of splitting the codec out.
+defmt = { workspace = true, optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt"]
+# Nothing in this crate needs `std`; the feature exists so the host gate can name it
+# uniformly with the other codec crates if that ever changes.
+std = []

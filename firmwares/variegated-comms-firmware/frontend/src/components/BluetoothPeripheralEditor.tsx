@@ -8,6 +8,7 @@ const NAME_MAX_BYTES = 24;
 
 const DRIVERS: { kind: BluetoothDriverKind['type']; label: string; hint: string }[] = [
   { kind: 'AcaiaOld', label: 'ACAIA (older protocol)', hint: 'Lunar, Pearl and similar' },
+  { kind: 'Bookoo', label: 'BooKoo Themis', hint: 'Themis, Themis Mini and Themis Ultra' },
   { kind: 'BelkaPortal', label: 'Belka Portal', hint: 'Water sensor: conductivity, temperature' }
 ];
 

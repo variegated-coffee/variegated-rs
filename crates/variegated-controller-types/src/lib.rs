@@ -18,6 +18,7 @@ pub const MAX_FUNCTION_ROUTINES: usize = 16;
 pub type TemperatureType = f32; // Celsius
 pub type PressureType = f32; // Bar
 pub type WaterLevelType = u8; // Percent
+pub type BatteryLevelType = u8; // Percent
 pub type FlowRateType = f32; // ml/s
 pub type InputVolumeType = f32; // ml
 pub type WeightType = f32; // g

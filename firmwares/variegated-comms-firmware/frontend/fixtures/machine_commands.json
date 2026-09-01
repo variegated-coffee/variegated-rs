@@ -629,5 +629,13 @@
         "max_output_flow_rate": null
       }
     ]
+  },
+  {
+    "ControlScaleTimer": [
+      {
+        "GroupScale": 0
+      },
+      "TareAndStart"
+    ]
   }
 ]
