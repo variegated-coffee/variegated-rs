@@ -477,9 +477,10 @@ async fn open(
 enum Wake {
     /// The status deadline elapsed.
     StatusDue,
-    /// The machine changed mode, which is also "send a status" -- but this is the one path
-    /// [`MIN_STATUS_GAP`] floors, so it cannot share a variant with the deadline.
-    ModeChanged,
+    /// The machine changed mode, or started or stopped being busy. Both change which interval
+    /// applies, and this is the one path [`MIN_STATUS_GAP`] floors -- so it cannot share a
+    /// variant with the deadline.
+    ActivityChanged,
     /// The read finished. Leave the send loop so what it read can be acted on.
     Frame,
     /// The routine list changed.
@@ -544,7 +545,7 @@ async fn run(
     // Dropped rather than acted on. `Signal` is latching and nobody waits on it between
     // sessions, so a mode change during a reconnect would otherwise fire on this session's first
     // loop turn -- immediately after the status below, which already carries that mode.
-    channels::MACHINE_MODE_CHANGED.reset();
+    channels::MACHINE_ACTIVITY_CHANGED.reset();
 
     // When the machine last became busy, or `None`. Owned here so it survives the cadence being
     // recomputed, and reset by `next_status_deadline` the moment it stops being busy.
@@ -699,7 +700,7 @@ async fn run(
                                         // handler, yet only the mode change is floored.
                                         select(
                                             Timer::at(next_status_at),
-                                            channels::MACHINE_MODE_CHANGED.wait(),
+                                            channels::MACHINE_ACTIVITY_CHANGED.wait(),
                                         ),
                                         frame_done.wait(),
                                         // The two "something the machine holds has changed" arms,
@@ -713,7 +714,7 @@ async fn run(
                                     .await
                                     {
                                         Either4::First(Either::First(())) => Wake::StatusDue,
-                                        Either4::First(Either::Second(())) => Wake::ModeChanged,
+                                        Either4::First(Either::Second(())) => Wake::ActivityChanged,
                                         Either4::Second(()) => Wake::Frame,
                                         // `Lagged` is answered rather than ignored. A missed
                                         // publish means the thing changed and this task did not
@@ -747,27 +748,39 @@ async fn run(
                                 // machine is brewing that answer is one second -- which
                                 // `MIN_STATUS_GAP` would swallow whole.
                                 Wake::StatusDue => send_status_and_reschedule!(),
-                                // A mode change, which is the one send on this link driven by a
-                                // value the *controller* produces rather than by a clock or a
-                                // byte comparison. A controller that flapped between modes would
-                                // otherwise put one sealed record, one Durable Object wake and
-                                // one row written per flap onto someone's home internet
-                                // connection, with nothing here to stop it.
-                                Wake::ModeChanged => {
+                                // The machine changed mode, or started or stopped being busy.
+                                //
+                                // **Bringing the deadline forward is the important half, not the
+                                // send.** Nothing else recomputes the interval between statuses,
+                                // so without this a shot starting just after a status would sit
+                                // behind a deadline set a minute earlier, while the machine was
+                                // idle -- and be over before the first one-second status went
+                                // out. The one-second tier would have been unreachable in
+                                // practice for every shot shorter than the interval it replaced.
+                                Wake::ActivityChanged => {
+                                    // `min`, so this can only ever move the next status *earlier*.
+                                    // That is also what bounds it: the clamp cannot pull the
+                                    // deadline below the interval the machine's own state asks
+                                    // for, so a flapping `is_brewing` cannot produce anything
+                                    // faster than the busy cadence it is already entitled to.
+                                    let (deadline, defer) =
+                                        next_status_deadline(&mut busy_since).await;
+                                    asleep = defer;
+                                    next_status_at = next_status_at.min(deadline);
+
+                                    // And one right now, if the floor allows. A mode change is
+                                    // the one send on this link driven by a value the
+                                    // *controller* produces rather than by a clock or a byte
+                                    // comparison, and a controller that flapped would otherwise
+                                    // put one sealed record, one Durable Object wake and one row
+                                    // written per flap onto someone's home internet connection.
+                                    //
+                                    // Nothing is lost when the floor does suppress it: the clamp
+                                    // above has already booked the next status for whenever the
+                                    // new interval says, which for a machine that has just
+                                    // started brewing is a second from now.
                                     if last_status_sent_at.elapsed() >= MIN_STATUS_GAP {
                                         send_status_and_reschedule!();
-                                    } else {
-                                        // Suppressed by the floor. Come back when it lifts rather
-                                        // than recomputing a full interval -- a machine that has
-                                        // just gone *off* would otherwise have its change
-                                        // swallowed and report it ten minutes later.
-                                        //
-                                        // `min`, not assignment: a machine that is brewing has a
-                                        // deadline sooner than the floor, and pushing it out to
-                                        // the floor would make a mode change *slow the cadence
-                                        // down*.
-                                        next_status_at =
-                                            next_status_at.min(last_status_sent_at + MIN_STATUS_GAP);
                                     }
                                 }
                                 // The routine list changed -- somebody saved a routine, here or

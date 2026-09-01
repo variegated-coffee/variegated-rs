@@ -759,6 +759,26 @@ The decision itself is `status_interval_secs` and `defer_updates` in
 `variegated-comms-api-types`, not in the firmware's loop: that crate sets `harness = false`, so a
 rule kept beside the loop is one nothing can test.
 
+**A table of intervals is not enough to make the brewing tier happen, and the first attempt at
+this shipped without the part that does.** The uplink waits on an absolute deadline and only
+recomputes it when it sends a status. So a shot starting just after a status sits behind a
+deadline set a minute earlier, while the machine was idle — and is over before the first
+one-second status goes out. The one-second tier was unreachable in practice for every shot
+shorter than the interval it was replacing.
+
+What makes it work is an edge: `MACHINE_ACTIVITY_CHANGED`, raised by `cache_update_task` when
+either the mode or `Status::is_busy` changes, on which the uplink brings its next status forward
+to whatever the new interval asks for (`min`, so it can only ever move it earlier). Two
+properties worth keeping:
+
+- **The clamp is what bounds it, not a rate limiter.** It cannot pull the deadline below the
+  interval the machine's own state asks for, so a flapping `is_brewing` can produce nothing
+  faster than the busy cadence it is already entitled to.
+- **`STATUS_CACHE` is written before the signal is raised.** The uplink answers the signal by
+  reading that cache to decide which interval applies; signalling first leaves a window in which
+  it reads the previous status, concludes the machine is not busy, and keeps the deadline it had
+  — a shot reported once a minute instead of once a second, intermittently.
+
 **The keepalive in that last row had never fired.** It was
 `with_timeout(KEEPALIVE_INTERVAL, read_record(..))`, rebuilt every turn of a loop that the
 configuration republish woke every ten seconds — shorter than the twenty-second timeout, so it

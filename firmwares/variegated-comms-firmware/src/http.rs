@@ -93,7 +93,7 @@ use variegated_controller_types::shot_log::{ShotLogId, ShotLogStorageError};
 use crate::channels::{
     shot_log_request, ApplicationConfigurationSubscriber, ApplicationStatusSubscriber,
     MachineCommandSender, ShotLogReply, ShotLogRequest, CONFIG_CACHE, MACHINE_DEFINITION,
-    MACHINE_MODE_CHANGED, STATUS_CACHE,
+    MACHINE_ACTIVITY_CHANGED, STATUS_CACHE,
 };
 
 /// HTTP request handler
@@ -734,11 +734,15 @@ pub async fn cache_update_task(
     log_info!("Cache update task started");
     let checkin = crate::checkin::MONITOR.claim(crate::checkin::CheckinId::CacheUpdate);
 
-    // The mode the last status carried, for the edge the uplink cares about. Held here rather
-    // than compared against the cache, because the cache has already been overwritten by the
-    // time anyone else could look -- and because this task is the only reader of the status
-    // stream that is not already busy with something else.
-    let mut previous_mode: Option<MachineMode> = None;
+    // What the last status carried, for the edge the uplink cares about: its mode, and whether
+    // it was busy. Held here rather than compared against the cache, because the cache has
+    // already been overwritten by the time anyone else could look -- and because this task is
+    // the only reader of the status stream that is not already busy with something else.
+    //
+    // Both, because the uplink's status interval is a function of both. Watching only the mode
+    // meant the one-second brewing cadence could not engage: nothing woke the uplink when a
+    // shot started, so it stayed on whatever deadline it had set while the machine was idle.
+    let mut previous: Option<(MachineMode, bool)> = None;
 
     loop {
         checkin.good();
@@ -750,16 +754,28 @@ pub async fn cache_update_task(
         .await
         {
             Either::First(status) => {
-                let mode = status.mode;
+                // Sampled before the move into the cache below. `is_busy` reads two fields and
+                // allocates nothing, so this costs the same as reading the mode did.
+                let current = (status.mode, status.is_busy());
+
+                // **The cache is written before the signal is raised, and the order matters.**
+                // The uplink answers this signal by reading `STATUS_CACHE` to decide which
+                // interval now applies. Signalling first leaves a window -- whenever this task
+                // has to wait for the lock -- in which the uplink wakes, reads the *previous*
+                // status, concludes the machine is not busy, and goes back to the deadline it
+                // already had. That is a shot reported once a minute instead of once a second,
+                // intermittently, which is the worst way to be wrong about it.
+                {
+                    let mut cache = STATUS_CACHE.lock().await;
+                    *cache = Some(status);
+                }
+
                 // Only on a real change, and never on the first status of all: the uplink sends
                 // one the moment its session opens, so signalling here would only duplicate it.
-                if previous_mode.is_some_and(|was| was != mode) {
-                    MACHINE_MODE_CHANGED.signal(());
+                if previous.is_some_and(|was| was != current) {
+                    MACHINE_ACTIVITY_CHANGED.signal(());
                 }
-                previous_mode = Some(mode);
-
-                let mut cache = STATUS_CACHE.lock().await;
-                *cache = Some(status);
+                previous = Some(current);
             }
             Either::Second(config) => {
                 let mut cache = CONFIG_CACHE.lock().await;
