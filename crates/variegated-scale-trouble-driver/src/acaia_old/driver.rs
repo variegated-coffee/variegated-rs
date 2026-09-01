@@ -1,6 +1,5 @@
 use core::cell::RefCell;
 use defmt::{debug, info};
-use heapless;
 use variegated_trouble_connection_manager::{Connection, Controller, DeviceHandle, GattClient, PacketPool, Stack};
 use trouble_host::gatt::NotificationListener;
 use trouble_host::attribute::Characteristic;
@@ -11,15 +10,20 @@ use crate::acaia_old::{
     Error,
 };
 pub use variegated_scale_codec::acaia::TimerOp;
+use variegated_scale_codec::acaia::{Frame, Generation, Reassembler};
 
 /// Notification stream for ACAIA Old protocol scale events
 ///
 /// This type wraps a NotificationListener and provides parsed scale events.
 /// Note: You must keep the Connection and GattClient alive while using this stream.
+///
+/// Parsing lives in `variegated-scale-codec`, which can host tests; this crate cannot. See
+/// that crate's docs for why.
 pub struct ScaleNotificationStream<'a> {
     listener: NotificationListener<'a, 512>,
-    /// Buffer for accumulating fragmented BLE notifications
-    buffer: heapless::Vec<u8, 128>,
+    reassembler: Reassembler,
+    /// Latches the "this looks like a modern scale" warning below.
+    warned_modern: bool,
 }
 
 impl<'a> ScaleNotificationStream<'a> {
@@ -27,7 +31,16 @@ impl<'a> ScaleNotificationStream<'a> {
     fn new(listener: NotificationListener<'a, 512>) -> Self {
         Self {
             listener,
-            buffer: heapless::Vec::new(),
+            // **Pinned, not auto-detected.** This driver serves the pre-2021 protocol and
+            // nothing else -- the association's `BluetoothDriverKind` chose it -- so the
+            // generation is known and does not need guessing.
+            //
+            // It used to be guessed, per frame, by testing whether byte 2 was 0x0C or 0x08.
+            // In a legacy frame byte 2 is the weight's *low* byte, so about two values in
+            // 256 were routed into the modern branch and lost. At factor 2 those are
+            // 20.60 g and 31.75 g -- ordinary shot weights.
+            reassembler: Reassembler::new(Generation::Legacy),
+            warned_modern: false,
         }
     }
 
@@ -39,215 +52,65 @@ impl<'a> ScaleNotificationStream<'a> {
         loop {
             // Drain what is already buffered *before* awaiting.
             //
-            // `try_parse_buffer` returns on the first complete frame and leaves the
-            // remainder in place, so one notification carrying two frames leaves the
-            // second one sitting here. Awaiting first meant that second event was not
-            // returned until *another* notification arrived -- a full connection
-            // interval, 80 ms on this link, later.
+            // The reassembler returns on the first complete frame and leaves the remainder
+            // in place, so one notification carrying two frames leaves the second one
+            // sitting here. Awaiting first meant that second event was not returned until
+            // *another* notification arrived -- a full connection interval, 80 ms on this
+            // link, later.
             //
-            // For weight alone that is invisible: the value is still correct, just late.
-            // It stops being invisible once something differentiates the stream, because
-            // the late event is timestamped on arrival: one sample is stamped ~80 ms after
-            // it was really taken, and the sample after it gets a correspondingly short
+            // For weight alone that is invisible: the value is still correct, just late. It
+            // stops being invisible once something differentiates the stream, because the
+            // late event is timestamped on arrival: one sample is stamped ~80 ms after it
+            // was really taken, and the sample after it gets a correspondingly short
             // interval. A rate computed across either is wrong in opposite directions.
-            if let Some(event) = self.try_parse_buffer()? {
-                return Ok(event);
+            while let Some(frame) = self.reassembler.next_frame() {
+                match frame {
+                    Frame::Weight(w) => {
+                        return Ok(ScaleEvent::Weight(WeightMeasurement { weight: w.grams }));
+                    }
+                    // Timer, button, status and unrecognised frames are discarded here
+                    // exactly as they always were. `ScaleEvent` has one variant and the
+                    // slot loop matches it exhaustively; widening it is a separate change.
+                    other => debug!("Discarding ACAIA frame: {:?}", other),
+                }
             }
 
-            // Wait for next notification
             let notification = self.listener.next().await;
             let data: &[u8] = notification.as_ref();
 
-            // Append to buffer
-            if self.buffer.extend_from_slice(data).is_err() {
+            // Latched, and it has to be. The test below is the *ambiguous* one that used to
+            // route frames -- in a legacy frame byte 2 is the weight's low byte -- so on a
+            // perfectly healthy scale it fires for roughly 0.8% of samples, which at this
+            // notification rate would be several lines a minute forever. Once per
+            // connection is enough to tell someone their scale is not what the association
+            // says it is.
+            if !self.warned_modern
+                && data.len() >= 3
+                && data[0] == 0xEF
+                && data[1] == 0xDD
+                && (data[2] == 0x0C || data[2] == 0x08)
+            {
+                self.warned_modern = true;
+                defmt::warn!(
+                    "possible 2021+ frame on the pre-2021 ACAIA driver; if weights look \
+                     wrong, re-pair the scale as ACAIA (2021 and later). This can also be \
+                     a legacy weight whose low byte happens to collide."
+                );
+            }
+
+            if !self.reassembler.push(data) {
+                // Preserved: this driver tears the link down on overflow, where the BooKoo
+                // one warns and continues. Changing it is a separate decision, and moving
+                // the buffer into the codec made it easy to change by accident.
                 defmt::warn!("Buffer overflow, clearing buffer");
-                self.buffer.clear();
                 return Err(Error::BufferOverflow);
             }
-
-            defmt::debug!("Buffered {} bytes, total buffer size: {}", data.len(), self.buffer.len());
-            debug!("Data: {:?}", self.buffer);
         }
     }
 
-    /// Try to parse a complete frame from the buffer
-    ///
-    /// Returns Some(event) if a complete frame was parsed and consumed,
-    /// None if more data is needed, or an error for invalid data.
-    ///
-    /// Supports both NEW and OLD Acaia protocol formats:
-    /// - NEW: [0xEF, 0xDD, cmd, len, msg_type, payload...]
-    /// - OLD: [0xEF, 0xDD, weight_lo, weight_hi, ?, ?, scale, sign, ...]
-    fn try_parse_buffer(&mut self) -> Result<Option<ScaleEvent>, Error> {
-        // Find header position (0xEF 0xDD)
-        let header_pos = self.buffer.windows(2)
-            .position(|w| w[0] == 0xEF && w[1] == 0xDD);
-
-        let Some(start) = header_pos else {
-            // No header found yet
-            if self.buffer.len() > 64 {
-                // Buffer too large without header - likely garbage, clear it
-                defmt::warn!("No header in {} bytes, clearing buffer", self.buffer.len());
-                self.buffer.clear();
-            } else if !self.buffer.is_empty() {
-                // Keep buffering - header might come in next notification
-                defmt::debug!("No header yet in {} bytes, waiting for more data", self.buffer.len());
-            }
-            return Ok(None);
-        };
-
-        // Discard bytes before header (garbage data)
-        if start > 0 {
-            defmt::debug!("Discarding {} bytes before header", start);
-            // Shift buffer contents - drain is not available in heapless
-            let remaining = self.buffer.len() - start;
-            for i in 0..remaining {
-                self.buffer[i] = self.buffer[start + i];
-            }
-            self.buffer.truncate(remaining);
-        }
-
-        // Need at least 4 bytes to determine format
-        if self.buffer.len() < 4 {
-            defmt::debug!("Incomplete frame: have {} bytes, need at least 4", self.buffer.len());
-            return Ok(None);
-        }
-
-        // Detect NEW format: command byte is 0x0C (notification) or 0x08 (settings)
-        let is_new_format = self.buffer[2] == 0x0C || self.buffer[2] == 0x08;
-
-        if is_new_format {
-            // Check if byte 3-4 is another header (incomplete frame case)
-            // This happens when we receive [0xEF, 0xDD, 0x0C, 0xEF, 0xDD, ...]
-            if self.buffer.len() >= 5 && self.buffer[3] == 0xEF && self.buffer[4] == 0xDD {
-                // Incomplete frame - discard and move to next header
-                defmt::debug!("Discarding incomplete frame (found header at byte 3)");
-                self.consume_frame(3);
-                return Ok(None);
-            }
-
-            // NEW Acaia format: [header(2), cmd(1), len(1), payload(len)]
-            let command = self.buffer[2];
-            let payload_len = self.buffer[3] as usize;
-
-            // Sanity check: payload length should be reasonable (max ~20 bytes for scale data)
-            if payload_len > 32 {
-                defmt::warn!("Invalid payload length {}, skipping frame", payload_len);
-                self.consume_frame(4);
-                return Ok(None);
-            }
-
-            // Frame size: header(2) + cmd(1) + len(1) + payload + checksum(1)
-            // The scale sends 1 extra byte (checksum/suffix) not included in payload_len
-            // This matches the 13-byte packet format seen in Arduino library
-            let frame_len = 4 + payload_len + 1;
-
-            if self.buffer.len() < frame_len {
-                defmt::debug!("Incomplete NEW frame: have {} bytes, need {}", self.buffer.len(), frame_len);
-                return Ok(None);
-            }
-
-            let event = match command {
-                0x0C => {
-                    // Event notification - message type at byte 4
-                    if payload_len < 1 {
-                        self.consume_frame(frame_len);
-                        return Err(Error::InvalidFrameLength);
-                    }
-
-                    let msg_type = self.buffer[4];
-                    let event_payload = &self.buffer[5..frame_len];
-
-                    match msg_type {
-                        0x05 => {
-                            // Weight event
-                            defmt::debug!("NEW format weight: payload len={}", event_payload.len());
-                            WeightMeasurement::parse_new(event_payload)
-                                .map(ScaleEvent::Weight)?
-                        }
-                        0x07 => {
-                            // Timer event - skip
-                            defmt::info!("Skipping timer event");
-                            self.consume_frame(frame_len);
-                            return Ok(None);
-                        }
-                        0x08 => {
-                            // Button event - skip
-                            defmt::info!("Skipping button event");
-                            self.consume_frame(frame_len);
-                            return Ok(None);
-                        }
-                        0x0B => {
-                            // Heartbeat response - skip
-                            defmt::info!("Skipping heartbeat response");
-                            self.consume_frame(frame_len);
-                            return Ok(None);
-                        }
-                        _ => {
-                            defmt::info!("Unknown message type 0x{:02x}", msg_type);
-                            self.consume_frame(frame_len);
-                            return Ok(None);
-                        }
-                    }
-                }
-                0x08 => {
-                    // Settings message - skip
-                    defmt::info!("Skipping settings message");
-                    self.consume_frame(frame_len);
-                    return Ok(None);
-                }
-                _ => {
-                    defmt::info!("Unknown command 0x{:02x}", command);
-                    self.consume_frame(frame_len);
-                    return Ok(None);
-                }
-            };
-
-            self.consume_frame(frame_len);
-            Ok(Some(event))
-        } else {
-            // OLD Acaia format: [header(2), weight_lo, weight_hi, ?, ?, scale, sign, ...]
-            const MIN_OLD_FRAME: usize = 8;
-            const OLD_FRAME_LEN: usize = 10;
-
-            if self.buffer.len() < MIN_OLD_FRAME {
-                defmt::debug!("Incomplete OLD frame: have {} bytes, need at least {}", self.buffer.len(), MIN_OLD_FRAME);
-                return Ok(None);
-            }
-
-            // Determine frame length by looking for next header
-            let frame_len = if self.buffer.len() > 10 && self.buffer[10] == 0xEF {
-                10
-            } else if self.buffer.len() > 14 && self.buffer[14] == 0xEF {
-                14
-            } else {
-                OLD_FRAME_LEN.min(self.buffer.len())
-            };
-
-            let payload = &self.buffer[2..frame_len];
-
-            // Validate scale index
-            if payload.len() >= 6 && payload[4] > 4 {
-                defmt::info!("Skipping invalid OLD frame (scale_index={})", payload[4]);
-                self.consume_frame(frame_len);
-                return Ok(None);
-            }
-
-            let event = WeightMeasurement::parse_old(payload)
-                .map(ScaleEvent::Weight)?;
-
-            self.consume_frame(frame_len);
-            Ok(Some(event))
-        }
-    }
-
-    /// Remove processed bytes from the front of the buffer
-    fn consume_frame(&mut self, frame_len: usize) {
-        let remaining = self.buffer.len() - frame_len;
-        for i in 0..remaining {
-            self.buffer[i] = self.buffer[frame_len + i];
-        }
-        self.buffer.truncate(remaining);
+    /// Discard any partially-received frame, and the scale's reported display unit.
+    pub fn reset(&mut self) {
+        self.reassembler.reset();
     }
 }
 

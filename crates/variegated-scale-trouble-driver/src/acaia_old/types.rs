@@ -91,88 +91,17 @@ pub enum ScaleEvent {
 }
 
 /// Weight measurement from the scale
+///
+/// The parsing that used to live here is now
+/// `variegated_scale_codec::acaia::incoming`, which can be tested and this crate cannot.
+/// The two `parse_new`/`parse_old` methods were removed rather than left as thin wrappers:
+/// they encoded the pre-move behaviour, including a 16-bit read the modern path has since
+/// widened, so a caller who found them would have got the superseded answer with no
+/// indication anything was wrong.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct WeightMeasurement {
     /// Weight in grams
     pub weight: f32,
-}
-
-impl WeightMeasurement {
-    /// Parse weight measurement from NEW Acaia protocol payload
-    ///
-    /// NEW format event payload (after message type byte 0x05):
-    /// - Bytes 0-1: Raw weight as u16 little-endian
-    /// - Bytes 2-3: Unused
-    /// - Byte 4: Scale/unit index (0-4: units, tenths, hundredths, thousandths, ten-thousandths)
-    /// - Byte 5: Flags byte (bit 1 = negative)
-    pub fn parse_new(payload: &[u8]) -> Result<Self, crate::acaia_old::Error> {
-        if payload.len() < 6 {
-            return Err(crate::acaia_old::Error::InvalidFrameLength);
-        }
-
-        // Extract raw weight (bytes 0-1, little-endian)
-        let raw_weight = u16::from_le_bytes([payload[0], payload[1]]) as u32;
-
-        // Extract scale index (byte 4)
-        let scale_index = payload[4] as u32;
-
-        // Validate scale index (must be 0-4 to avoid overflow)
-        if scale_index > 4 {
-            defmt::warn!("Invalid scale index {}", scale_index);
-            return Err(crate::acaia_old::Error::ParseError);
-        }
-
-        // Extract sign from flags byte (byte 5, bit 1)
-        // NEW Acaia: bit 1 set = negative
-        let is_negative = (payload[5] & 0x02) != 0;
-
-        // Calculate divisor (10^scale_index)
-        let divisor = 10u32.pow(scale_index);
-
-        // Calculate final weight
-        let weight = (raw_weight as f32) / (divisor as f32);
-        let weight = if is_negative { -weight } else { weight };
-
-        Ok(Self { weight })
-    }
-
-    /// Parse weight measurement from OLD Acaia protocol payload
-    ///
-    /// Old Acaia frame format: [0xEF, 0xDD, weight_lo, weight_hi, ?, ?, scale, sign, ...]
-    /// Payload (starting at frame byte 2):
-    /// - Bytes 0-1: Raw weight as u16 little-endian
-    /// - Byte 4: Scale/unit index (0-4: units, tenths, hundredths, thousandths, ten-thousandths)
-    /// - Byte 5: Sign byte (0x00 = positive, non-zero = negative)
-    pub fn parse_old(payload: &[u8]) -> Result<Self, crate::acaia_old::Error> {
-        if payload.len() < 6 {
-            return Err(crate::acaia_old::Error::InvalidFrameLength);
-        }
-
-        // Extract raw weight (bytes 0-1, little-endian)
-        let raw_weight = u16::from_le_bytes([payload[0], payload[1]]) as u32;
-
-        // Extract scale index (byte 4)
-        let scale_index = payload[4] as u32;
-
-        // Validate scale index (must be 0-4 to avoid overflow)
-        if scale_index > 4 {
-            defmt::warn!("Invalid scale index {}", scale_index);
-            return Err(crate::acaia_old::Error::ParseError);
-        }
-
-        // Extract sign byte (byte 5)
-        // Old Acaia: 0x00 = positive, non-zero = negative
-        let is_negative = payload[5] != 0x00;
-
-        // Calculate divisor (10^scale_index)
-        let divisor = 10u32.pow(scale_index);
-
-        // Calculate final weight
-        let weight = (raw_weight as f32) / (divisor as f32);
-        let weight = if is_negative { -weight } else { weight };
-
-        Ok(Self { weight })
-    }
 }
 
