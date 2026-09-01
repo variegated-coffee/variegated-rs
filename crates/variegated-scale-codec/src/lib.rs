@@ -47,7 +47,7 @@
 //!
 //! Hence the rule this crate exists to enforce: **commands are computed, never
 //! transcribed**, and every command constant is asserted against its protocol's checksum
-//! rule by a test. See [`acaia_old::checksums`] and [`bookoo::checksum`].
+//! rule by a test. See [`acaia::checksums`] and [`bookoo::checksum`].
 
-pub mod acaia_old;
+pub mod acaia;
 pub mod bookoo;

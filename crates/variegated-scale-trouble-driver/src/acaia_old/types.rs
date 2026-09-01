@@ -1,5 +1,5 @@
 use trouble_host::prelude::*;
-use variegated_scale_codec::acaia_old as codec;
+use variegated_scale_codec::acaia as codec;
 
 /// Service UUID for ACAIA Old protocol (Weight Scale Service - standard UUID)
 pub const ACAIA_OLD_SERVICE_UUID: Uuid = Uuid::new_short(0x1820);
@@ -31,7 +31,7 @@ pub const ACAIA_OLD_CHAR_UUID: Uuid = Uuid::new_short(0x2a80);
 // add a command, derive it from the arithmetic above, not from `ACAIA.md`.
 //
 // That instruction is now enforced rather than merely written down. Every constant below
-// is *computed* by `variegated_scale_codec::acaia_old`, whose tests assert that each frame
+// is *computed* by `variegated_scale_codec::acaia`, whose tests assert that each frame
 // carries the checksums its own payload implies -- the exact assertion `TARE_CMD` failed.
 // The codec lives in its own crate because this one cannot host a test binary; see its
 // crate docs. The four handshake and tare frames are byte-for-byte what they always were,

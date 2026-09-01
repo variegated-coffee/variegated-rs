@@ -1,9 +1,11 @@
-//! Outgoing command frames for ACAIA's older protocol.
+//! Outgoing command frames for ACAIA scales, of either generation.
 //!
-//! Only the command half lives here. Notification parsing stays in
-//! `variegated-scale-trouble-driver`, which is where it already works; moving it would put
-//! a driver that runs on real machines at risk for no gain, since the bytes that have
-//! actually gone wrong in this protocol are the outgoing ones.
+//! **Nothing in this file is generation-specific.** A 2015 Pearl and a 2024 Pyxis accept the
+//! same bytes for tare, for all three timer operations, for the heartbeat, for the identity
+//! frame and for the notification request; the generations diverge on *incoming* framing and
+//! on GATT topology, neither of which is here. See the module docs on [`super`].
+//!
+//! Incoming frames are decoded by [`super::incoming`].
 //!
 //! # The framing, and the one byte that matters
 //!

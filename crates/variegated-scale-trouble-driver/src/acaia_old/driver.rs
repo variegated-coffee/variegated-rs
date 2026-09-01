@@ -10,7 +10,7 @@ use crate::acaia_old::{
     types::{ScaleEvent, WeightMeasurement, ACAIA_OLD_SERVICE_UUID, ACAIA_OLD_CHAR_UUID, IDENTIFICATION_MSG, NOTIFICATION_REQUEST_MSG, TARE_CMD, HEARTBEAT_MSG, TIMER_START_CMD, TIMER_STOP_CMD, TIMER_RESET_CMD},
     Error,
 };
-pub use variegated_scale_codec::acaia_old::TimerOp;
+pub use variegated_scale_codec::acaia::TimerOp;
 
 /// Notification stream for ACAIA Old protocol scale events
 ///
