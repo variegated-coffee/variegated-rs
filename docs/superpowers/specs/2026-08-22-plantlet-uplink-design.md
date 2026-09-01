@@ -492,6 +492,13 @@ back.
 > hour. The rule below replaces it. The original text and its reasoning are kept beneath, because
 > one of the three reasons was given up deliberately and should not be re-discovered as a
 > surprise.
+>
+> **Amended again**, by the four-tier cadence in §5.3. Nothing here needed changing: the twenty-five
+> minute lease is sized against the *longest* interval, which is still the 600 s idle one, and the
+> new tiers are all shorter. `the_idle_interval_leaves_room_inside_the_server_lease` in
+> `uplink_types.rs` is the joint that holds the two languages' constants together, and it is
+> unchanged. What did change underneath this section is that the keepalive ping it relies on now
+> actually fires — see §5.3.
 
 ```sql
 connected := connected_until IS NOT NULL
@@ -727,6 +734,42 @@ Extracting a shared handler is worth doing — but once both call sites exist an
 differences are visible, not speculatively before the second one is written.
 
 ### 5.3 Scheduling
+
+> **Amended.** The flat "every 10 minutes" below became the two-tier adaptive cadence recorded in
+> §4.4, and has since gained two more tiers and a rule about pushed updates. What the firmware
+> actually does now is the table immediately below; the original is kept under it.
+
+| trigger | sends |
+|---|---|
+| handshake complete | `Status`, then `RoutineList`, `MachineDefinition`, `Configuration` |
+| machine brewing, or running a routine | `Status` **every second** |
+| machine on, not busy | `Status` every 60 s |
+| machine off or in standby | `Status` every 600 s |
+| busy for over 5 minutes | falls back to the mode's interval — a failsafe against a stuck flag |
+| `MachineCommand` received | 5 × `Status`, 1 s apart, starting immediately |
+| machine mode changed | `Status`, floored at one per 5 s |
+| `RequestStatus` | `Status`, and resets the interval |
+| routine set changed | `RoutineList` — **held for the next `Status` while the machine is asleep** |
+| a setting changed | `Configuration`, if the bytes moved — held the same way |
+| `RequestRoutineList` / `RequestConfiguration` | that message, always, whatever the mode |
+| `ShotLogEvent::Stored` | `ShotLog`, by whichever transport §3 selects — never held |
+| every 20 s, unconditionally | a WebSocket ping, which wakes nothing on the server |
+
+The decision itself is `status_interval_secs` and `defer_updates` in
+`variegated-comms-api-types`, not in the firmware's loop: that crate sets `harness = false`, so a
+rule kept beside the loop is one nothing can test.
+
+**The keepalive in that last row had never fired.** It was
+`with_timeout(KEEPALIVE_INTERVAL, read_record(..))`, rebuilt every turn of a loop that the
+configuration republish woke every ten seconds — shorter than the twenty-second timeout, so it
+could never expire. Consequences, both fixed together with the cadence: a machine in `Off` or
+`PowerSaveStandby` sent nothing for ten minutes and was sent no pings, against a 120 s
+`SOCKET_TIMEOUT`, so its session was reset and reconnected every two minutes on a healthy
+network; and the same ten-second wake had been cancelling the in-flight `read_record` six times a
+minute, which is not cancel-safe. Anyone reading §4.4 would reasonably have assumed pings were
+going out all along. They were not.
+
+The original, superseded:
 
 | trigger | sends |
 |---|---|
