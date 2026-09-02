@@ -261,7 +261,8 @@ export const RoutineTypeSchema = enumType('RoutineType', {
   HeatUp: unitVariant('HeatUp'),
   UserDefined: unitVariant('UserDefined'),
   Cleaning: unitVariant('Cleaning'),
-  HardwareButtonMapped: unitVariant('HardwareButtonMapped')
+  HardwareButtonMapped: unitVariant('HardwareButtonMapped'),
+  UserDefinedUtility: unitVariant('UserDefinedUtility')
 });
 
 export const RoutineWriteErrorSchema = enumType('RoutineWriteError', {
