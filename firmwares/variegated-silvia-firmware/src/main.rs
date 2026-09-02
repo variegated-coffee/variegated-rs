@@ -856,7 +856,21 @@ async fn main_task(spawner: Spawner) -> ! {
     let input = pwm::Pwm::new_input(pump_p.pwm_tacho_out, pump_p.pin_tacho_out, Pull::Up, InputMode::FallingEdge, pwm_input_config);
 
     let pump_rpm_sig: &'static Watch<_, _, 3> = PUMP_RPM_SIGNAL.init(Watch::new());
-    let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(input, pump_rpm_sig.sender(), None, |v| (v * 60.0/32.0) as RPMType, |v| v);
+    let mut pump_frequency_counter = GpioTransformingFrequencyCounter::new(
+        input,
+        pump_rpm_sig.sender(),
+        None,
+        |v| (v * 60.0/32.0) as RPMType,
+        |v| v,
+        // 200 ms and no output averaging, matching the GS3's PIO counter on the same
+        // measurement. Resolution is ±1 pulse over the window whatever the speed, so this is
+        // ±9 rpm, and at 32 pulses per revolution even a slow pump puts plenty of edges in a
+        // fifth of a second. Nothing reads this signal yet -- `Group::new` below is passed
+        // `None` -- so the settings are here to match the other machine rather than because
+        // anything depends on them.
+        Duration::from_millis(200),
+        false,
+    );
 
     let pump = Box::new(variegated_hal::gpio::gpio_pwm_pump::GpioPwmPump::new(pump_pwm));
 
@@ -885,6 +899,14 @@ async fn main_task(spawner: Spawner) -> ! {
         Some(input_volume_sig.sender()),
         |hz| (hz * ML_PER_PULSE) as FlowRateType,
         |pulses| (pulses as f32 * ML_PER_PULSE) as InputVolumeType,
+        // 900 ms with output averaging on -- what this counter has always done, stated rather
+        // than changed. The ring is ten deep and the newest sample is stored before the
+        // lookback runs, so the old `from_secs(1)` only ever reached back nine ticks. This
+        // meter is fine enough (~0.0255 ml/pulse) that it would tolerate a shorter window,
+        // but the signal is the pump PID's process variable, so retuning it is a separate
+        // decision from giving the tacho its own.
+        Duration::from_millis(900),
+        true,
     );
 
     let group = Group::new(

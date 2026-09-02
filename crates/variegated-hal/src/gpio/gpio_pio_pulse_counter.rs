@@ -62,6 +62,29 @@ fn get_wrap_counter(pio_num: u8, sm_num: u8) -> &'static AtomicU32 {
     }
 }
 
+/// Number of (cumulative pulse count, timestamp) samples the ring retains.
+///
+/// Every array length, index wrap and [`MAX_MEASUREMENT_WINDOW`] derives from this. Nothing
+/// else in this file may spell the length out -- four separate copies of `10` is how the
+/// ring and the loop that scans it drift apart.
+const RING_LEN: usize = 10;
+
+/// Interval between counter samples, and so also the rate at which this counter publishes.
+const TICK_MILLIS: u64 = 100;
+
+/// [`TICK_MILLIS`] as a `Duration`. Kept alongside the integer because
+/// `Mul<u32> for Duration` is not `const fn` while `Duration::from_millis` is, so
+/// [`MAX_MEASUREMENT_WINDOW`] has to be computed from the integer.
+const TICK: Duration = Duration::from_millis(TICK_MILLIS);
+
+/// The longest trailing window the ring can actually serve.
+///
+/// `task` stores the new sample *before* it looks back, so once the ring is full the oldest
+/// reachable sample is `RING_LEN - 1` ticks old, not `RING_LEN`. That off-by-one is why the
+/// original `Duration::from_secs(1)` lookback in fact averaged over 900 ms -- the behaviour
+/// every existing caller was tuned against, so it is preserved rather than corrected.
+const MAX_MEASUREMENT_WINDOW: Duration =
+    Duration::from_millis(TICK_MILLIS * (RING_LEN as u64 - 1));
 
 pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance> {
     // `sm` and `dma_channel` are held, not used, and that is the point: they are the
@@ -79,8 +102,11 @@ pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: 
     total_pulses_signal: Option<Sender<'d, M, SensorReading<U>, N>>,
     frequency_transformer: F,
     total_transformer: G,
-    measurements: [(u64, Instant); 10],
+    measurements: [(u64, Instant); RING_LEN],
     measurement_index: usize,
+    /// Length of the trailing boxcar the published frequency is averaged over. `new` clamps
+    /// this to `TICK ..= MAX_MEASUREMENT_WINDOW`.
+    measurement_window: Duration,
     startup_time: Instant,
     startup_complete: bool,
     counter_ptr: *mut u32,
@@ -90,6 +116,17 @@ pub struct GpioPioTransformingPulseCounter<'d, P: Instance + 'static, const SM: 
 impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, T: Clone, U: Clone, F: Fn(f32) -> T, G: Fn(u64) -> U, const N: usize, C: dma::ChannelInstance>
     GpioPioTransformingPulseCounter<'d, P, SM, IRQ, M, T, U, F, G, N, C>
 {
+    /// `measurement_window` is the length of the trailing window the published frequency is
+    /// averaged over, and it is per instance because a single value cannot be right for two
+    /// inputs orders of magnitude apart in pulse rate. Resolution is `±1 pulse` over the
+    /// window regardless of the rate being measured, so a slow input needs a long window to
+    /// resolve anything while a fast one gains nothing from it and pays the whole width in
+    /// lag.
+    ///
+    /// Clamped to `100 ms ..= 900 ms`: below one tick there is no pair of samples to divide,
+    /// and above `RING_LEN - 1` ticks the ring holds nothing older to reach. Prefer a whole
+    /// multiple of 100 ms -- anything else lands midway between two samples, and which one
+    /// `find_measurement_near` picks is then ring order rather than intent.
     pub fn new(
         pio_common: &mut Common<'d, P>,
         mut sm: StateMachine<'d, P, SM>,
@@ -100,7 +137,19 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
         total_pulses_signal: Option<Sender<'d, M, SensorReading<U>, N>>,
         frequency_transformer: F,
         total_transformer: G,
+        measurement_window: Duration,
     ) -> Self {
+        debug_assert!(
+            measurement_window >= TICK && measurement_window <= MAX_MEASUREMENT_WINDOW,
+            "measurement_window is outside the range this ring can serve"
+        );
+        // Clamped as well as asserted, because the assert compiles to nothing in the release
+        // profile these firmwares ship. `new` runs during boot behind a panic handler that
+        // halts the machine, and a window a caller got wrong has a safe nearest answer -- the
+        // closest one the ring can actually serve. The `debug_assert` is what tells a
+        // developer; the clamp is what tells the pump.
+        let measurement_window = measurement_window.max(TICK).min(MAX_MEASUREMENT_WINDOW);
+
         // Get PIO instance number from the peripheral type
         let pio_num = if core::any::TypeId::of::<P>() == core::any::TypeId::of::<embassy_rp::peripherals::PIO0>() {
             0u8
@@ -230,8 +279,9 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
             total_pulses_signal,
             frequency_transformer,
             total_transformer,
-            measurements: [(0u64, now); 10],
+            measurements: [(0u64, now); RING_LEN],
             measurement_index: 0,
+            measurement_window,
             startup_time: now,
             startup_complete: false,
             counter_ptr,
@@ -265,8 +315,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
             best_measurement.1.duration_since(target)
         };
 
-        for i in 1..10 {
-            let measurement = self.measurements[i];
+        for &measurement in self.measurements.iter().skip(1) {
             let diff = if target > measurement.1 {
                 target.duration_since(measurement.1)
             } else {
@@ -307,7 +356,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
     async fn task(&mut self) {
         // DMA continuously updates the counter value from PIO FIFO
         // We handle both IRQ-based wrap detection and periodic measurements
-        let mut measurement_timer = Timer::after(Duration::from_millis(100));
+        let mut measurement_timer = Timer::after(TICK);
 
         loop {
             let irq_future = self.irq.wait();
@@ -319,7 +368,7 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                 }
                 Either::Second(_) => {
                     // Timer expired - take measurement
-                    measurement_timer = Timer::after(Duration::from_millis(100));
+                    measurement_timer = Timer::after(TICK);
 
                     let (measurement_instant, total_pulses) = self.read_total_pulses();
 
@@ -333,17 +382,34 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
 
                     // Store measurement
                     self.measurements[self.measurement_index] = (total_pulses, measurement_instant);
-                    self.measurement_index = (self.measurement_index + 1) % 10;
+                    self.measurement_index = (self.measurement_index + 1) % RING_LEN;
 
-                    // Calculate frequency from ~1 second of data
+                    // Calculate frequency over the configured window
                     let frequency = if self.startup_complete {
-                        let one_second_ago = measurement_instant - Duration::from_secs(1);
-                        let (start_pulses, start_time) = self.find_measurement_near(one_second_ago);
+                        // `checked_sub` rather than `-`, which panics on underflow. Today the
+                        // only thing preventing that is the lookback having been hardcoded
+                        // shorter than the two-second startup gate above; that was incidental,
+                        // and a per-instance window must not depend on it staying true.
+                        let window_start = measurement_instant
+                            .checked_sub(self.measurement_window)
+                            .unwrap_or(self.startup_time);
+                        let (start_pulses, start_time) = self.find_measurement_near(window_start);
 
                         let elapsed = measurement_instant.duration_since(start_time);
                         let elapsed_seconds = elapsed.as_micros() as f32 / 1_000_000.0;
 
-                        if elapsed_seconds >= 0.5 {
+                        // Was `elapsed_seconds >= 0.5`, against a lookback hardcoded to one
+                        // second: half the window asked for. It is still half the window, but
+                        // the window is per-instance now, so the floor has to scale with it.
+                        // An absolute half-second floor makes every window shorter than that
+                        // publish a literal 0.0 forever, which reads as a stopped pump.
+                        //
+                        // Compared in ticks rather than through the `f32` above so the
+                        // threshold is exact. In steady state the ring is a sample grid and
+                        // `elapsed` *is* the window, so this passes with a factor of two to
+                        // spare; it only bites while the ring is still filling, which is what
+                        // it was always for.
+                        if elapsed.as_ticks() * 2 >= self.measurement_window.as_ticks() {
                             // No plausibility ceiling here. There was one -- 1000 Hz,
                             // commented "for flow meter" -- but this driver is generic and
                             // the GS3 runs two of them: the flow meter on SM0 and the pump
@@ -356,6 +422,14 @@ impl<'d, P: Instance + 'static, const SM: usize, const IRQ: usize, M: RawMutex, 
                             // If noise ever needs bounding again, it belongs in a
                             // constructor parameter, per instance. A single constant cannot
                             // be right for both inputs.
+                            //
+                            // `measurement_window` is that parameter, arrived at for the same
+                            // reason from the other direction: the one-second window this
+                            // driver used to hardcode is what the flow meter needs to resolve
+                            // a few pulses, and it smeared the pump's ~930 ms spindown into
+                            // ~1.8 s in the shot log. Resolution is ±1 pulse over the window
+                            // whatever the rate, so the tacho gets the same accuracy from
+                            // 200 ms that the flow meter can only reach at 900 ms.
                             let pulse_count = total_pulses.saturating_sub(start_pulses);
                             pulse_count as f32 / elapsed_seconds
                         } else {

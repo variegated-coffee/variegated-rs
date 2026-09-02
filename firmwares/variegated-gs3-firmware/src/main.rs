@@ -2879,7 +2879,14 @@ async fn main_task(
         flow_meter_sig.sender(),
         Some(input_volume_sig.sender()),
         |pulses| (pulses / 2.79) as FlowRateType,  // Frequency to flow rate (Hz to ml/s, assuming 1 Hz = 1 ml/s)
-        |pulses| ((pulses as f64) / 2.79f64) as InputVolumeType  // Total pulses to ml
+        |pulses| ((pulses as f64) / 2.79f64) as InputVolumeType,  // Total pulses to ml
+        // 900 ms -- stated, not changed. It is what this counter has always averaged over:
+        // the ring is ten deep and the newest sample is stored before the lookback runs, so
+        // the old `from_secs(1)` only ever reached back nine ticks. It stays long because at
+        // 2.79 pulses/ml and the ~1.5 ml/s this machine actually runs the meter is only a few
+        // Hz, and because this signal is the pump PID's process variable in the flow-rate
+        // control modes, feeds the saturation detector and gates routine transitions.
+        Duration::from_millis(900),
     );
 
     // Pump tacho pulse counter using SM1 (replaces PWM-based frequency counter)
@@ -2898,7 +2905,14 @@ async fn main_task(
         pump_rpm_sig.sender(),
         Some(pump_volume_sig.sender()),
         |freq_hz| (freq_hz * 60.0 / 32.0) as RPMType,  // 32 pulses per revolution -> RPM
-        |pulses| pulses as InputVolumeType  // Total pulses (can be calibrated to volume later)
+        |pulses| pulses as InputVolumeType,  // Total pulses (can be calibrated to volume later)
+        // 200 ms. Resolution is ±1 pulse over the window whatever the speed, so this is
+        // ±9 rpm -- finer than the ~15 rpm step the 8-bit pump PWM can command, and even at
+        // the pump's 300 rpm minimum a fifth of a second still holds 32 pulses. The 900 ms
+        // the flow meter needs smeared this pump's real ~930 ms spindown into ~1.8 s in the
+        // shot log. Safe to shorten because `pump_rpm` feeds no control loop -- only
+        // `GroupStatus`, the shot log and the ESPHome sensor.
+        Duration::from_millis(200),
     );
 
     let group = Group::new(
