@@ -30,6 +30,7 @@ use crate::draw;
 use crate::geometry::{Window, hairline_v};
 use crate::palette;
 use crate::rhythm::{self, Stack};
+use crate::slots::{self, Annotation, Cell};
 use crate::type_scale;
 use crate::view::{ExitView, RoutineView};
 use crate::widgets;
@@ -52,15 +53,6 @@ const RIGHT_DX: i32 = SPINE_DIVIDER_DX + rhythm::RULE_WIDTH;
 
 /// Four step rows fit. Beyond that the window scrolls around the current step.
 const VISIBLE_STEPS: usize = 4;
-
-/// The second column of the values block: weight, beside time in step.
-const VALUES_SECOND_DX: i32 = RIGHT_DX + 104;
-
-/// Water in, on the row under the two big figures.
-///
-/// Further right than the values column above it: the pressure beside it carries its target
-/// as well, which is the longest run on this half of the panel.
-const WATER_DX: i32 = RIGHT_DX + 132;
 
 /// The exit bar.
 const EXIT_BAR_HEIGHT: i32 = 5;
@@ -237,6 +229,200 @@ where
     Ok(())
 }
 
+/// How precisely a reference value is drawn: one decimal less than the measurement it sits
+/// beside.
+///
+/// A target and a limit are numbers a person set, not readings -- nobody dials a cap to a
+/// hundredth of a millilitre per second -- and this is already how this panel treats the
+/// distinction: free-brewing draws its measured value at two decimals and the command beside
+/// it at one, for the same reason and in the same two quantities.
+///
+/// It also buys back about twelve pixels on a row that is 221 px wide and, at `MAX 4.00`,
+/// was missing the next data point by three.
+fn reference_decimals(quantity: crate::view::Quantity) -> usize {
+    quantity.decimals().saturating_sub(1)
+}
+
+/// Draw the annotation a role carries, after `x` on `baseline`.
+///
+/// On the label row rather than beside the figure. `8.39 BAR / 9.0` was already the longest
+/// run on this half of the panel at 19 px; at `PRIMARY_30` it overruns the 104 px column and
+/// puts the target through the slot beside it. In the label face it costs nothing and leaves
+/// the large figure to be a large figure.
+fn annotation<D>(
+    annotation: Annotation,
+    quantity: crate::view::Quantity,
+    x: i32,
+    baseline: i32,
+    target: &mut D,
+) where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let decimals = reference_decimals(quantity);
+    match annotation {
+        Annotation::Target(value) => {
+            draw::run(
+                &type_scale::LABEL,
+                format_args!("/ {value:.decimals$}"),
+                Point::new(x + rhythm::TIGHT, baseline),
+                VerticalPosition::Baseline,
+                palette::INK_MUTED,
+                target,
+            );
+        }
+        // `MAX`, not `/`, because a cap and a setpoint are different promises and the slot
+        // beside this one may well be carrying the other. Warn-coloured while it is actually
+        // holding the machine back: armed is a setting, binding is a thing that is happening,
+        // and this is the only place on the panel that difference can be seen.
+        Annotation::Limit { value, binding } => {
+            draw::run(
+                &type_scale::LABEL,
+                format_args!("MAX {value:.decimals$}"),
+                Point::new(x + rhythm::TIGHT, baseline),
+                VerticalPosition::Baseline,
+                if binding {
+                    palette::WARN
+                } else {
+                    palette::INK_MUTED
+                },
+                target,
+            );
+        }
+    }
+}
+
+/// How wide an annotation draws, including the gap before it.
+fn annotation_width(note: Annotation, quantity: crate::view::Quantity) -> i32 {
+    let decimals = reference_decimals(quantity);
+    let text = match note {
+        Annotation::Target(value) => draw::width(
+            &type_scale::LABEL,
+            format_args!("/ {value:.decimals$}"),
+        ),
+        Annotation::Limit { value, .. } => draw::width(
+            &type_scale::LABEL,
+            format_args!("MAX {value:.decimals$}"),
+        ),
+    };
+    rhythm::TIGHT + text
+}
+
+/// How wide a secondary cell needs.
+fn secondary_width(cell: &Cell) -> i32 {
+    let quantity = cell.offer.point.quantity();
+    widgets::value_width(
+        &type_scale::NUMBER_FLOOR,
+        cell.offer.value,
+        quantity.decimals(),
+    ) + rhythm::TIGHT
+        + draw::width(&type_scale::LABEL, format_args!("{}", quantity.unit_upper()))
+        + cell
+            .annotation
+            .map_or(0, |note| annotation_width(note, quantity))
+}
+
+/// The hero cell: its name over its figure, at the top of the ranking.
+fn hero_slot<D>(cell: &Cell, w: Window, rows: &Rows, x: i32, target: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let point = cell.offer.point;
+    let quantity = point.quantity();
+
+    let label_y = w.at(0, rows.label).y;
+    let after = draw::run(
+        &type_scale::LABEL,
+        format_args!("{}", point.label()),
+        Point::new(x, label_y),
+        VerticalPosition::Baseline,
+        palette::INK_MUTED,
+        target,
+    );
+    if let Some(note) = cell.annotation {
+        annotation(note, quantity, after, label_y, target);
+    }
+
+    let baseline = Point::new(x, w.at(0, rows.value).y);
+    let after = widgets::value(
+        &type_scale::PRIMARY_30,
+        cell.offer.value,
+        quantity.decimals(),
+        baseline,
+        VerticalPosition::Baseline,
+        palette::pen(quantity),
+        target,
+    )?;
+    draw::run(
+        &type_scale::UNIT_12,
+        format_args!("{}", quantity.unit_upper()),
+        Point::new(after + rhythm::TIGHT, baseline.y),
+        VerticalPosition::Baseline,
+        palette::INK_FAINT,
+        target,
+    );
+
+    Ok(())
+}
+
+/// A secondary cell: figure, unit, and a reference value where it carries one.
+///
+/// No name over it. Among the seven ranked points the unit is already unique -- `S`, `G`,
+/// `BAR`, `ML/S`, `MS/CM`, `C`, `ML` -- so a label would spend 40 to 80 px restating what the
+/// unit beside the figure has said, and this row does not have 80 px to spend. That is the
+/// same reason the row this replaces drew `8.39 BAR` and `46 ML IN` with no label at all.
+fn secondary_slot<D>(cell: &Cell, x: i32, baseline: i32, target: &mut D) -> Result<i32, D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let quantity = cell.offer.point.quantity();
+
+    let after = widgets::value(
+        &type_scale::NUMBER_FLOOR,
+        cell.offer.value,
+        quantity.decimals(),
+        Point::new(x, baseline),
+        VerticalPosition::Baseline,
+        palette::pen(quantity),
+        target,
+    )?;
+    let after = draw::run(
+        &type_scale::LABEL,
+        format_args!("{}", quantity.unit_upper()),
+        Point::new(after + rhythm::TIGHT, baseline),
+        VerticalPosition::Baseline,
+        palette::INK_FAINT,
+        target,
+    );
+    if let Some(note) = cell.annotation {
+        annotation(note, quantity, after, baseline, target);
+        return Ok(after + annotation_width(note, quantity));
+    }
+    Ok(after)
+}
+
+/// Draw the selected cells: one hero, then as many secondary cells as the row will hold.
+///
+/// # Why one hero rather than the two large figures this screen used to have
+///
+/// The right half is 221 px. Measured in the faces actually used, one `PRIMARY_30` figure
+/// with its unit is 98 px for `99.9 S` and 143 px for `12.00 BAR`, so two of them run from
+/// 197 px to 269 px: the pair fits only when both readings happen to be narrow, and which
+/// data points land there is now decided per frame rather than at design time. Sizing the
+/// columns off the live values instead would let a figure change size mid-shot as a reading
+/// crossed a digit, which is worse than a figure that is consistently smaller.
+///
+/// So the top of the ranking gets the big figure and the rest go to the row below it, at
+/// [`type_scale::NUMBER_FLOOR`] -- the size the type scale names as the floor for a number,
+/// not a new tier.
+///
+/// # Why the row is packed and fit-checked
+///
+/// Cells are laid left to right from what each one actually measures, divided by hairlines,
+/// exactly as `free_brew`'s bottom row is and for the same reason: a grid of equal columns
+/// puts the unit of one cell through the figure of the next as soon as the content varies.
+/// Because the content here varies by *step*, the row additionally stops early rather than
+/// overrunning -- a cell that will not fit is not drawn. The ranking is what makes that safe:
+/// the cell dropped is always the least important one on offer.
 fn values<D>(
     view: &RoutineView<'_>,
     w: Window,
@@ -246,92 +432,33 @@ fn values<D>(
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    for (dx, label, value, unit, pen) in [
-        (RIGHT_DX, "IN STEP", view.step_elapsed_s, "S", palette::INK),
-        (
-            VALUES_SECOND_DX,
-            "WEIGHT",
-            view.weight_g,
-            "G",
-            palette::PEN_WEIGHT,
-        ),
-    ] {
-        draw::run(
-            &type_scale::LABEL,
-            format_args!("{label}"),
-            w.at(dx, rows.label),
-            VerticalPosition::Baseline,
-            palette::INK_MUTED,
-            target,
-        );
-        let baseline = w.at(dx, rows.value);
-        let after = widgets::value(
-            &type_scale::PRIMARY_30,
-            value,
-            1,
-            baseline,
-            VerticalPosition::Baseline,
-            pen,
-            target,
-        )?;
-        draw::run(
-            &type_scale::UNIT_12,
-            format_args!("{unit}"),
-            Point::new(after + rhythm::TIGHT, baseline.y),
-            VerticalPosition::Baseline,
-            palette::INK_FAINT,
-            target,
-        );
+    let cells = slots::select(view);
+    let left = w.at(RIGHT_DX, 0).x;
+    let right = w.body_right();
+
+    let mut remaining = cells.iter().flatten();
+
+    if let Some(cell) = remaining.next() {
+        // Never fit-checked: the hero is alone on its row, and the widest cell this panel can
+        // build is narrower than the row. A check here could only ever suppress the most
+        // important figure on the screen.
+        hero_slot(cell, w, rows, left, target)?;
     }
 
-    // Pressure against what it was asked for, and water in.
-    let baseline = w.at(RIGHT_DX, rows.second);
-    let after = widgets::value(
-        &type_scale::SECONDARY_19,
-        view.pressure_bar,
-        2,
-        baseline,
-        VerticalPosition::Baseline,
-        palette::PEN_PRESSURE,
-        target,
-    )?;
-    let after = draw::run(
-        &type_scale::LABEL,
-        format_args!("BAR"),
-        Point::new(after + rhythm::TIGHT, baseline.y),
-        VerticalPosition::Baseline,
-        palette::INK_FAINT,
-        target,
-    );
-    if let Some(target_bar) = view.pressure_target {
-        draw::run(
-            &type_scale::LABEL,
-            format_args!("/ {target_bar:.1}"),
-            Point::new(after + rhythm::TIGHT, baseline.y),
-            VerticalPosition::Baseline,
-            palette::INK_MUTED,
-            target,
-        );
+    let baseline = w.at(0, rows.second).y;
+    let mut x = left;
+    let mut drawn = 0;
+    for cell in remaining {
+        let start = if drawn == 0 { x } else { x + rhythm::RULE_WIDTH };
+        if start + secondary_width(cell) > right {
+            break;
+        }
+        if drawn > 0 {
+            rhythm::divider(x, baseline, &type_scale::NUMBER_FLOOR, target)?;
+        }
+        x = secondary_slot(cell, start, baseline, target)?;
+        drawn += 1;
     }
-
-    let baseline = w.at(WATER_DX, rows.second);
-    let after = widgets::value(
-        &type_scale::SECONDARY_19,
-        view.water_in_ml,
-        0,
-        baseline,
-        VerticalPosition::Baseline,
-        palette::PEN_WATER_IN,
-        target,
-    )?;
-    draw::run(
-        &type_scale::LABEL,
-        format_args!("ML IN"),
-        Point::new(after + rhythm::TIGHT, baseline.y),
-        VerticalPosition::Baseline,
-        palette::INK_FAINT,
-        target,
-    );
 
     Ok(())
 }
@@ -364,25 +491,44 @@ where
             );
         }
         ExitView::Progress {
-            phrase: _,
+            point,
             current,
             target: threshold,
-            quantity,
         } => {
+            // Rank 1, and the only figure on this screen that is not in the grid. It reads
+            // `WEIGHT 6.2 / 8.0 G`: the point's name, so the footer says which quantity the
+            // bar under it is measuring, then where it is against where it has to get to.
+            //
+            // The module note above records that this condition was once stated three ways
+            // and was cut back to one. This is two -- the pair and the bar -- and the phrase
+            // stays gone. Deliberate: the threshold alone answers "what ends this step" but
+            // not "how far along am I", and the bar is five pixels tall.
+            let quantity = point.quantity();
+            let decimals = quantity.decimals();
+
             let after = draw::run(
                 &type_scale::LABEL,
-                format_args!("ENDS AT"),
+                format_args!("{}", point.label()),
                 baseline,
                 VerticalPosition::Baseline,
                 palette::INK_MUTED,
                 target,
             );
-            let after = draw::run(
+            let after = widgets::value(
                 &type_scale::NUMBER_FLOOR,
-                format_args!("{:.*}", quantity.decimals(), threshold),
-                Point::new(after + rhythm::GAP, baseline.y),
+                current,
+                decimals,
+                Point::new(after + rhythm::TIGHT, baseline.y),
                 VerticalPosition::Baseline,
-                palette::INK,
+                palette::pen(quantity),
+                target,
+            )?;
+            let after = draw::run(
+                &type_scale::LABEL,
+                format_args!("/ {threshold:.decimals$}"),
+                Point::new(after + rhythm::TIGHT, baseline.y),
+                VerticalPosition::Baseline,
+                palette::INK_MUTED,
                 target,
             );
             draw::run(

@@ -330,6 +330,7 @@ impl GraphicalDisplayState {
             self.shared_state.menu.wifi_pending,
             self.shared_state.menu_config(),
             self.shared_state.panel_origin(),
+            self.shared_state.panel_data_points(),
         );
         let ssid = MenuContext::wifi_ssid(&self.shared_state.status);
 

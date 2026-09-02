@@ -11,6 +11,7 @@
 //!
 //! Behind a feature so none of it reaches a firmware build.
 
+use crate::slots::{Annotation, DataPoint, DataPointMask, Offer, Role};
 use crate::trace::{Phase, ShotTrace};
 use crate::view::*;
 
@@ -222,7 +223,62 @@ pub const LONG_STEPS: [StepView<'static>; 7] = [
     },
 ];
 
+/// Everything a fully-equipped GS3 can measure, in ranked order.
+///
+/// The order is irrelevant to [`crate::slots::select`], which walks [`crate::slots::RANKED`]
+/// instead -- it is written this way so a reader can see what the ranking will do to it.
+pub const FULL_OFFERS: [Offer; 7] = [
+    Offer {
+        point: DataPoint::TotalTime,
+        value: Some(14.9),
+    },
+    Offer {
+        point: DataPoint::OutputWeight,
+        value: Some(7.1),
+    },
+    Offer {
+        point: DataPoint::GroupPressure,
+        value: Some(3.42),
+    },
+    Offer {
+        point: DataPoint::Flow,
+        value: Some(2.15),
+    },
+    Offer {
+        point: DataPoint::OutputConductivity,
+        value: Some(1.31),
+    },
+    Offer {
+        point: DataPoint::OutputTemperature,
+        value: Some(92.4),
+    },
+    Offer {
+        point: DataPoint::TotalInput,
+        value: Some(46.0),
+    },
+];
+
+/// A machine with neither scale nor conductivity probe: fewer offers than slots to fill.
+pub const SPARSE_OFFERS: [Offer; 3] = [
+    Offer {
+        point: DataPoint::TotalTime,
+        value: Some(14.9),
+    },
+    Offer {
+        point: DataPoint::GroupPressure,
+        value: Some(3.42),
+    },
+    Offer {
+        point: DataPoint::TotalInput,
+        value: Some(46.0),
+    },
+];
+
 /// Figure 6.4: step 2 of 4, ending at 8.0 g with 7.1 g in the cup.
+///
+/// Weight is the exit condition, so rule 1 keeps it out of the grid and the four slots go to
+/// the target, the limit, total time and -- pressure and flow both being spoken for -- output
+/// conductivity.
 pub fn routine() -> PanelView<'static> {
     PanelView {
         marks: HEALTHY,
@@ -230,17 +286,30 @@ pub fn routine() -> PanelView<'static> {
             name: "LEVER-LIKE",
             steps: &LEVER_LIKE_STEPS,
             current_step: 1,
-            step_elapsed_s: Some(6.2),
-            weight_g: Some(7.1),
-            pressure_bar: Some(3.42),
-            pressure_target: Some(3.5),
-            water_in_ml: Some(46.0),
             exit: ExitView::Progress {
-                phrase: "ENDS AT 8.0 G IN CUP",
+                point: DataPoint::OutputWeight,
                 current: Some(7.1),
                 target: 8.0,
-                quantity: Quantity::Weight,
             },
+            target: Some(Role {
+                offer: Offer {
+                    point: DataPoint::GroupPressure,
+                    value: Some(3.42),
+                },
+                annotation: Annotation::Target(3.5),
+            }),
+            limit: Some(Role {
+                offer: Offer {
+                    point: DataPoint::Flow,
+                    value: Some(2.15),
+                },
+                annotation: Annotation::Limit {
+                    value: 4.0,
+                    binding: false,
+                },
+            }),
+            offers: &FULL_OFFERS,
+            shown: DataPointMask::ALL,
         }),
         overlay: None,
     }
@@ -252,7 +321,6 @@ pub fn routine_scrolled() -> PanelView<'static> {
     if let StateView::Routine(ref mut routine) = view.state {
         routine.steps = &LONG_STEPS;
         routine.current_step = 5;
-        routine.step_elapsed_s = Some(19.4);
     }
     view
 }
@@ -263,10 +331,119 @@ pub fn routine_scrolled() -> PanelView<'static> {
 /// paraphrase. A fixture that used a longer sentence than the machine ever emits would be
 /// asserting about a panel that does not exist; a shorter one would let a real overrun
 /// through.
+///
+/// With nothing consumed by the exit, the grid is the target, the limit and then the ranking
+/// from the top -- so this is also the fixture where the largest number of distinct sources
+/// land on one row.
 pub fn routine_user_action() -> PanelView<'static> {
     let mut view = routine();
     if let StateView::Routine(ref mut routine) = view.state {
         routine.exit = ExitView::Phrase("ENDS ON A BUTTON PRESS");
+    }
+    view
+}
+
+/// A binding limit: the cap is what is holding the machine back, so it is warn-coloured.
+pub fn routine_binding_limit() -> PanelView<'static> {
+    let mut view = routine();
+    if let StateView::Routine(ref mut routine) = view.state {
+        routine.limit = Some(Role {
+            offer: Offer {
+                point: DataPoint::Flow,
+                value: Some(4.0),
+            },
+            annotation: Annotation::Limit {
+                value: 4.0,
+                binding: true,
+            },
+        });
+    }
+    view
+}
+
+/// A duty-controlled step: no target, no limit, so all four slots go to ranks 4 to 10.
+///
+/// Rule 3 in its most visible form -- nothing measures a pump duty, so there is no rank-2
+/// role and no gap where one would have been.
+pub fn routine_duty() -> PanelView<'static> {
+    let mut view = routine();
+    if let StateView::Routine(ref mut routine) = view.state {
+        routine.target = None;
+        routine.limit = None;
+        routine.exit = ExitView::Progress {
+            point: DataPoint::StepTime,
+            current: Some(6.2),
+            target: 12.0,
+        };
+    }
+    view
+}
+
+/// Every excludable point switched off, which pushes rank 10 into the grid.
+///
+/// What is left is total time and total input -- the two the operator cannot hide, because
+/// they are the machine's own arithmetic and no sensor displays them for itself -- plus the
+/// two roles, which rule 4 keeps regardless of the setting.
+pub fn routine_points_hidden() -> PanelView<'static> {
+    let mut view = routine();
+    if let StateView::Routine(ref mut routine) = view.state {
+        routine.shown = DataPointMask {
+            weight: false,
+            pressure: false,
+            flow: false,
+            conductivity: false,
+            output_temperature: false,
+        };
+    }
+    view
+}
+
+/// No scale, no probe, and nothing armed: three offers for four slots.
+///
+/// The fourth slot is simply not drawn. There is no placeholder, and this is the fixture that
+/// proves the secondary row's packing survives an odd number of cells.
+pub fn routine_sparse() -> PanelView<'static> {
+    let mut view = routine();
+    if let StateView::Routine(ref mut routine) = view.state {
+        routine.target = None;
+        routine.limit = None;
+        routine.offers = &SPARSE_OFFERS;
+        routine.exit = ExitView::Phrase("RUNS UNTIL STOPPED");
+    }
+    view
+}
+
+/// The widest content this screen can be asked to draw.
+///
+/// Not a shot anyone would pull -- it is the combination that puts the longest label, the
+/// longest unit and an annotation into the same four slots at once. `MS/CM` is the widest
+/// unit on the panel and `BLR PRESS` the longest label, and a limit's `MAX 12.00` is longer
+/// than any target's `/ 9.0`. If the overlap assertion holds here it holds everywhere.
+pub fn routine_widest() -> PanelView<'static> {
+    let mut view = routine();
+    if let StateView::Routine(ref mut routine) = view.state {
+        routine.exit = ExitView::Progress {
+            point: DataPoint::BoilerPressure,
+            current: Some(1.35),
+            target: 1.40,
+        };
+        routine.target = Some(Role {
+            offer: Offer {
+                point: DataPoint::OutputFlow,
+                value: Some(2.15),
+            },
+            annotation: Annotation::Target(12.00),
+        });
+        routine.limit = Some(Role {
+            offer: Offer {
+                point: DataPoint::GroupPressure,
+                value: Some(12.00),
+            },
+            annotation: Annotation::Limit {
+                value: 12.00,
+                binding: true,
+            },
+        });
     }
     view
 }
@@ -395,7 +572,7 @@ pub fn overlay_identify() -> PanelView<'static> {
 pub fn all<'a>(
     trace: &'a ShotTrace,
     aborted: &'a ShotTrace,
-) -> [(&'static str, PanelView<'a>); 18] {
+) -> [(&'static str, PanelView<'a>); 23] {
     [
         ("6.1-off", off()),
         ("6.1-standby", standby()),
@@ -410,6 +587,11 @@ pub fn all<'a>(
         ("6.4-routine", routine()),
         ("6.4-routine-scrolled", routine_scrolled()),
         ("6.4-routine-user-action", routine_user_action()),
+        ("6.4-routine-binding-limit", routine_binding_limit()),
+        ("6.4-routine-duty", routine_duty()),
+        ("6.4-routine-points-hidden", routine_points_hidden()),
+        ("6.4-routine-sparse", routine_sparse()),
+        ("6.4-routine-widest", routine_widest()),
         ("6.5-post", post(trace)),
         ("6.5-post-aborted", post_aborted(aborted)),
         ("6.5-post-no-scale", post_no_scale(trace)),

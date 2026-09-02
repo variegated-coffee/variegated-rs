@@ -1,4 +1,4 @@
-//! Where the GS3's panel content sits inside the bezel's aperture.
+//! Where the GS3's panel content sits inside the bezel's aperture, and what it may put there.
 
 #[cfg(feature = "sequential-storage")]
 use crc::{CRC_32_ISCSI, Crc};
@@ -61,6 +61,88 @@ impl Default for PanelOrigin {
     }
 }
 
+/// Which optional data points the GS3's routine screen may draw.
+///
+/// The screen fills four slots from a ranking, and these five are the ranks an operator can
+/// switch off -- every one of them a measurement whose sensor may well have a display of its
+/// own, in which case mirroring it on the panel spends a slot to say something already on the
+/// bench. Total time and total input are not here: they are the machine's own arithmetic and
+/// nothing else shows them.
+///
+/// **Off hides the rank, never the role.** A quantity the pump is currently targeting or
+/// capping, or the one the running step exits on, is drawn whatever this says -- those are
+/// what the machine is doing right now, not a reading the operator chose to follow.
+///
+/// A settings key of its own rather than a field on `Configuration`, for the reason
+/// [`PanelOrigin`] gives at length: that blob is postcard-positional with no version field, so
+/// appending to it silently resets every setpoint on the machine. This one has the same second
+/// reason too -- which figures are worth panel space depends on what is sitting next to the
+/// machine, so there is nothing for the wire to carry.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PanelDataPoints {
+    /// Weight in the cup.
+    pub weight: bool,
+    /// Pressure at the group.
+    pub pressure: bool,
+    /// Flow through the group.
+    pub flow: bool,
+    /// Conductivity leaving the group.
+    pub conductivity: bool,
+    /// Temperature leaving the group.
+    pub output_temperature: bool,
+}
+
+impl PanelDataPoints {
+    /// Everything on.
+    ///
+    /// A machine that has never been told otherwise shows what it can measure. The setting
+    /// exists to *remove* a figure the operator can already read elsewhere, so the default has
+    /// to be the state where nothing has been removed -- and a fresh machine's owner has not
+    /// yet said what is on their bench.
+    pub const DEFAULT: Self = Self {
+        weight: true,
+        pressure: true,
+        flow: true,
+        conductivity: true,
+        output_temperature: true,
+    };
+}
+
+impl Default for PanelDataPoints {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Mirrors the impl on [`PanelOrigin`]; see the note there.
+#[cfg(feature = "sequential-storage")]
+impl<'a> Value<'a> for PanelDataPoints {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        match to_slice_crc32(self, buffer, crc.digest()) {
+            Ok(bytes) => Ok(bytes.len()),
+            Err(postcard::Error::SerializeBufferFull) => Err(SerializationError::BufferTooSmall),
+            Err(_) => Err(SerializationError::InvalidData),
+        }
+    }
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError>
+    where
+        Self: Sized,
+    {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        match from_bytes_crc32(buffer, crc.digest()) {
+            Ok(value) => Ok((value, buffer.len())),
+            Err(_) => Err(SerializationError::InvalidFormat),
+        }
+    }
+}
+
 /// Mirrors the impl on `TimezoneSetting`; see the note there.
 #[cfg(feature = "sequential-storage")]
 impl<'a> Value<'a> for PanelOrigin {
@@ -113,5 +195,32 @@ mod tests {
         let written = origin.serialize_into(&mut buffer).unwrap();
         let (read, _) = PanelOrigin::deserialize_from(&buffer[..written]).unwrap();
         assert_eq!(read, origin);
+    }
+
+    /// A machine that has never been told otherwise draws everything it can measure.
+    #[test]
+    fn every_data_point_starts_on() {
+        let d = PanelDataPoints::default();
+        assert!(d.weight && d.pressure && d.flow && d.conductivity && d.output_temperature);
+    }
+
+    /// The same round trip, and for the same reason: a decode failure resets the operator's
+    /// choices to "show everything" without saying so.
+    #[cfg(feature = "sequential-storage")]
+    #[test]
+    fn the_data_points_survive_a_round_trip() {
+        // Deliberately not the default, and not all-off either -- a mixed value is the one a
+        // field-order mistake would scramble without changing the byte count.
+        let points = PanelDataPoints {
+            weight: false,
+            pressure: true,
+            flow: false,
+            conductivity: true,
+            output_temperature: false,
+        };
+        let mut buffer = [0u8; 32];
+        let written = points.serialize_into(&mut buffer).unwrap();
+        let (read, _) = PanelDataPoints::deserialize_from(&buffer[..written]).unwrap();
+        assert_eq!(read, points);
     }
 }

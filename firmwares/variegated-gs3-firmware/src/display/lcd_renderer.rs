@@ -431,6 +431,13 @@ impl LcdDisplayState {
             // row that vanished on one of the two panels would be worse than one that can
             // only be read there.
             self.shared_state.panel_origin(),
+            // The Display submenu appears here too, for the same reason: the menu's content
+            // is shared, and a row that existed on one panel and not the other would be a
+            // second tree to keep in step. What it gates is the TFT's routine screen -- this
+            // panel has two rows of sixteen characters and no ranking to apply it to -- but
+            // the switches are still the machine's, and this is where some owners will set
+            // them.
+            self.shared_state.panel_data_points(),
         );
 
         // An editor frame has no rows: its title names the quantity and the value is the

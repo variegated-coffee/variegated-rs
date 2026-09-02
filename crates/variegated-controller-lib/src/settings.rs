@@ -50,6 +50,13 @@ pub mod key {
     /// range -- a key allocated somewhere else is a key the next allocation cannot see, and
     /// two stores that pick the same number silently overwrite each other.
     pub const PANEL_ORIGIN: u8 = 5;
+    /// Which optional data points the GS3's routine screen may draw.
+    ///
+    /// A key of its own for the reasons [`PANEL_ORIGIN`] gives, both of which apply
+    /// unchanged: appending to the configuration blob would reset every setpoint on the
+    /// machine, and which figures are worth panel space depends on what hardware is sitting
+    /// beside it, so there is nothing here for the UART to carry.
+    pub const PANEL_DATA_POINTS: u8 = 6;
 }
 
 /// The flash range every settings store lives in.

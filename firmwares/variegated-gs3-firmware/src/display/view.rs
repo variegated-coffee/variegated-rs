@@ -19,11 +19,13 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use variegated_controller_lib::routine_progress::MeasurementSubject;
 use variegated_controller_types::{
-    DualBoilerSingleGroupControllerBoilers, GroupBrewControlMode, MachineMode, ParameterUnit,
-    RoutineExitCondition, SensorCapability, ShotState, SingleGroupControllerGroups,
-    COMMS_STATUS_STALE_AFTER,
+    panel::PanelDataPoints, DualBoilerSingleGroupControllerBoilers, GroupBrewControlMode,
+    GroupBrewLimitMode, MachineMode, ParameterUnit, RoutineExitCondition, SensorCapability,
+    ShotState, SingleGroupControllerGroups, COMMS_STATUS_STALE_AFTER,
 };
+use variegated_gs3_panel::slots::{Annotation, DataPoint, DataPointMask, Offer, Role};
 use variegated_gs3_panel::view::{
     Clock, Command, ExitView, FreeBrewView, HourMinute, IdleView, MarkState, NextEvent, OffView,
     Outcome, Overlay, PanelView, PostView, Quantity, Readiness, RoutineView, StateView, StepView,
@@ -52,6 +54,13 @@ pub struct Scratch {
     pub exit_phrase: String,
     /// One per routine step, in order.
     pub step_labels: Vec<String>,
+    /// The data points this machine can measure, with their live readings.
+    ///
+    /// Presence is the claim that the sensor *exists*, which is why it is decided from the
+    /// machine definition and not from whether the reading is `Some` this frame: a scale that
+    /// drops a sample would otherwise take its slot with it and hand it to the next candidate,
+    /// and the whole right half of the panel would reshuffle for one missed reading.
+    pub offers: Vec<Offer>,
     /// An estimate of the wait to a scheduled event, in minutes.
     pub wait_minutes: Option<u32>,
     /// Which day the next scheduled event falls on.
@@ -66,8 +75,11 @@ impl Scratch {
         self.routine_name.clear();
         self.exit_phrase.clear();
         self.step_labels.clear();
+        self.offers.clear();
         self.wait_minutes = None;
         self.day = "";
+
+        self.fill_offers(state);
 
         if let Some(now) = state.shared_state.status.current_local_time {
             // Uppercase, because every word on this panel is. `%b` is already ASCII in
@@ -94,6 +106,102 @@ impl Scratch {
             }
             self.exit_phrase = exit_phrase(state, routine);
         }
+    }
+
+    /// What this machine can measure, for the routine screen's ranking.
+    ///
+    /// Group-scoped on purpose, and `capability_available` is deliberately *not* what decides
+    /// it: that function ORs every boiler, tap and tank together, so asking it about
+    /// `Temperature` on a machine with two boilers answers `true` on any machine at all, and
+    /// the panel would offer a group output temperature that nothing measures. What the group
+    /// itself declares, plus a peripheral that declares it and is answering, is the question
+    /// actually being asked here.
+    fn fill_offers(&mut self, state: &GraphicalDisplayState) {
+        let status = &state.shared_state.status;
+        let group = status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index());
+        let brew = group.and_then(|g| g.current_brew.as_ref());
+
+        let fitted = |capability: SensorCapability| -> bool {
+            let Some(definition) = state.shared_state.machine_definition else {
+                // Before the first menu fetch there is no definition to ask. Falling back to
+                // "is it reporting" keeps the panel populated through the first seconds after
+                // a boot instead of blank; the definition arrives and takes over.
+                return false;
+            };
+            let on_the_group = definition
+                .groups
+                .get(&SingleGroupControllerGroups::SingleGroup.as_index())
+                .is_some_and(|g| g.sensors.contains(&capability));
+            let on_a_peripheral = definition.peripherals.iter().any(|(id, peripheral)| {
+                peripheral.capabilities.contains(&capability)
+                    && status
+                        .peripheral_status
+                        .peripherals
+                        .get(id)
+                        .is_some_and(|info| info.is_available)
+            });
+            on_the_group || on_a_peripheral
+        };
+
+        let known = state.shared_state.machine_definition.is_some();
+        let mut offer = |point: DataPoint,
+                         capability: Option<SensorCapability>,
+                         value: Option<f32>| {
+            // With no definition yet, a reading is the only evidence available that the sensor
+            // is there. With one, the declaration decides and a missing reading draws a dash.
+            let present = match capability {
+                None => true,
+                Some(capability) if known => fitted(capability),
+                Some(_) => value.is_some(),
+            };
+            if present {
+                self.offers.push(Offer { point, value });
+            }
+        };
+
+        // Rank 4. The routine's own clock, so nothing has to be fitted for it.
+        offer(
+            DataPoint::TotalTime,
+            None,
+            status
+                .routine_execution
+                .as_ref()
+                .and_then(|e| e.total_elapsed_time)
+                .map(|d| d.as_secs_f32()),
+        );
+        offer(
+            DataPoint::OutputWeight,
+            Some(SensorCapability::Weight),
+            group.and_then(|g| g.output_weight),
+        );
+        offer(
+            DataPoint::GroupPressure,
+            Some(SensorCapability::Pressure),
+            group.and_then(|g| g.pressure),
+        );
+        offer(
+            DataPoint::Flow,
+            Some(SensorCapability::InputFlowRate),
+            group.and_then(|g| g.input_flow_rate),
+        );
+        offer(
+            DataPoint::OutputConductivity,
+            Some(SensorCapability::ElectricalConductivity),
+            group.and_then(|g| g.output_electrical_conductivity),
+        );
+        offer(
+            DataPoint::OutputTemperature,
+            Some(SensorCapability::Temperature),
+            group.and_then(|g| g.output_temperature),
+        );
+        // Rank 10. Gated on the flow meter rather than on nothing: the volume is integrated
+        // from it, so a machine without one can never report this and would draw a permanent
+        // dash in a slot some other figure could have had.
+        offer(
+            DataPoint::TotalInput,
+            Some(SensorCapability::InputFlowRate),
+            brew.and_then(|b| b.brew_input_volume),
+        );
     }
 
     /// The step rows, borrowing [`Self::step_labels`].
@@ -246,6 +354,21 @@ fn level_mark(level: Option<u8>) -> MarkState {
         Some(level) if level > 0 => MarkState::Ok,
         Some(_) => MarkState::Attention,
         None => MarkState::Absent,
+    }
+}
+
+/// The panel's exclusion mask, from the stored setting.
+///
+/// Two types rather than one for the reason [`quantity`] and [`exit_point`] exist: the panel
+/// crate depends on nothing from the controller, and the stored form is a settings value that
+/// has to keep its field order across firmware versions.
+fn shown_points(stored: PanelDataPoints) -> DataPointMask {
+    DataPointMask {
+        weight: stored.weight,
+        pressure: stored.pressure,
+        flow: stored.flow,
+        conductivity: stored.conductivity,
+        output_temperature: stored.output_temperature,
     }
 }
 
@@ -460,22 +583,11 @@ pub fn panel_view<'a>(
                 current_step: execution
                     .and_then(|e| e.current_step)
                     .unwrap_or(0) as usize,
-                step_elapsed_s: execution
-                    .and_then(|e| e.step_elapsed_time)
-                    .map(|d| d.as_secs_f32()),
-                weight_g: group.and_then(|g| g.output_weight),
-                pressure_bar: group.and_then(|g| g.pressure),
-                pressure_target: group.and_then(|g| g.brew_control_target).and_then(|t| {
-                    matches!(
-                        t.mode,
-                        GroupBrewControlMode::Pressure | GroupBrewControlMode::PressureCurve
-                    )
-                    .then_some(t.value)
-                }),
-                water_in_ml: group
-                    .and_then(|g| g.current_brew.as_ref())
-                    .and_then(|brew| brew.brew_input_volume),
                 exit: exit_view(state, scratch),
+                target: target_role(group),
+                limit: limit_role(group),
+                offers: &scratch.offers,
+                shown: shown_points(state.shared_state.panel_data_points()),
             })
         }
 
@@ -545,6 +657,88 @@ fn readiness(
     }
 }
 
+/// Which data point a brew-control mode drives, or `None` where it drives nothing measurable.
+///
+/// The duty modes and `FullOn` are the `None`s that matter: a duty is a command with nothing
+/// downstream measuring it, so it is not a data point and must not take a slot. Exhaustive
+/// rather than `_`, so a mode added later is a compile error here instead of a figure that
+/// silently stops appearing.
+fn target_point(mode: GroupBrewControlMode) -> Option<DataPoint> {
+    match mode {
+        GroupBrewControlMode::Pressure | GroupBrewControlMode::PressureCurve => {
+            Some(DataPoint::GroupPressure)
+        }
+        GroupBrewControlMode::GroupFlowRate | GroupBrewControlMode::GroupFlowRateCurve => {
+            Some(DataPoint::Flow)
+        }
+        GroupBrewControlMode::OutputFlowRate | GroupBrewControlMode::OutputFlowRateCurve => {
+            Some(DataPoint::OutputFlow)
+        }
+        GroupBrewControlMode::FixedDutyCycle
+        | GroupBrewControlMode::FixedDutyCycleCurve
+        | GroupBrewControlMode::FullOn
+        | GroupBrewControlMode::Off => None,
+    }
+}
+
+/// Which data point a limit caps, or `None` when nothing is armed.
+fn limit_point(mode: GroupBrewLimitMode) -> Option<DataPoint> {
+    match mode {
+        GroupBrewLimitMode::MaxPressure => Some(DataPoint::GroupPressure),
+        GroupBrewLimitMode::MaxGroupFlowRate => Some(DataPoint::Flow),
+        GroupBrewLimitMode::MaxOutputFlowRate => Some(DataPoint::OutputFlow),
+        GroupBrewLimitMode::Unlimited => None,
+    }
+}
+
+/// The live reading behind a data point, for a role's figure.
+fn reading(
+    group: Option<&variegated_controller_types::GroupStatus>,
+    point: DataPoint,
+) -> Option<f32> {
+    let group = group?;
+    match point {
+        DataPoint::GroupPressure => group.pressure,
+        DataPoint::Flow => group.input_flow_rate,
+        DataPoint::OutputFlow => group.output_flow_rate,
+        DataPoint::OutputWeight => group.output_weight,
+        DataPoint::OutputConductivity => group.output_electrical_conductivity,
+        DataPoint::OutputTemperature => group.output_temperature,
+        // Nothing else can currently be a target or a limit; the ranked points come from
+        // `fill_offers` with their own readings.
+        _ => None,
+    }
+}
+
+/// What the pump is being driven towards. Rank 2.
+fn target_role(group: Option<&variegated_controller_types::GroupStatus>) -> Option<Role> {
+    let control = group?.brew_control_target?;
+    let point = target_point(control.mode)?;
+    Some(Role {
+        offer: Offer {
+            point,
+            value: reading(group, point),
+        },
+        annotation: Annotation::Target(control.value),
+    })
+}
+
+/// The ceiling armed on a quantity the pump is not controlling. Rank 3.
+fn limit_role(group: Option<&variegated_controller_types::GroupStatus>) -> Option<Role> {
+    let limit = group?.brew_limit.as_ref()?;
+    let point = limit_point(limit.mode)?;
+    Some(Role {
+        offer: Offer {
+            point,
+            value: reading(group, point),
+        },
+        annotation: Annotation::Limit {
+            value: limit.value,
+            binding: limit.binding,
+        },
+    })
+}
+
 /// The exit footer, with its progress if the condition has any.
 fn exit_view<'a>(state: &GraphicalDisplayState, scratch: &'a Scratch) -> ExitView<'a> {
     let phrase = scratch.exit_phrase.as_str();
@@ -560,12 +754,33 @@ fn exit_view<'a>(state: &GraphicalDisplayState, scratch: &'a Scratch) -> ExitVie
         Some(routine),
     ) {
         Some(progress) => ExitView::Progress {
-            phrase,
+            point: exit_point(progress.subject),
             current: progress.current,
             target: progress.target,
-            quantity: quantity(progress.unit),
         },
         None => ExitView::Phrase(phrase),
+    }
+}
+
+/// The panel's vocabulary for what a condition watches, from the controller's.
+///
+/// The two vocabularies are separate because the panel crate depends on nothing from the
+/// controller -- that is what lets it be host-tested -- so this is the one place they meet,
+/// exactly as [`quantity`] is for units.
+fn exit_point(subject: MeasurementSubject) -> DataPoint {
+    match subject {
+        MeasurementSubject::StepTime => DataPoint::StepTime,
+        MeasurementSubject::BrewTime => DataPoint::TotalTime,
+        MeasurementSubject::BoilerTemperature => DataPoint::BoilerTemperature,
+        MeasurementSubject::BoilerPressure => DataPoint::BoilerPressure,
+        MeasurementSubject::GroupInputFlow => DataPoint::Flow,
+        MeasurementSubject::GroupPressure => DataPoint::GroupPressure,
+        MeasurementSubject::WaterTapFlow => DataPoint::WaterTapFlow,
+        MeasurementSubject::OutputWeight => DataPoint::OutputWeight,
+        MeasurementSubject::InputVolume => DataPoint::TotalInput,
+        MeasurementSubject::OutputConductivity => DataPoint::OutputConductivity,
+        MeasurementSubject::ExtractionRate => DataPoint::ExtractionRate,
+        MeasurementSubject::ExtractedSolids => DataPoint::ExtractedSolids,
     }
 }
 

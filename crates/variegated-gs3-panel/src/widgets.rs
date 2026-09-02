@@ -211,6 +211,18 @@ where
     Ok(())
 }
 
+/// How wide [`value`] will draw, without drawing it.
+///
+/// For a caller that has to decide whether a cell fits before committing to it. It must stay
+/// in step with [`value`]'s two branches -- the same format string, and the dash's own width
+/// for a missing reading -- which is why it lives here rather than at the call site.
+pub fn value_width(font: &Face, value: Option<f32>, decimals: usize) -> i32 {
+    match value {
+        Some(v) => draw::width(font, format_args!("{:.*}", decimals, v)),
+        None => type_scale::NO_READING_WIDTH as i32,
+    }
+}
+
 /// Draw a number, or the dash that stands for one nothing is reporting.
 ///
 /// Returns the x the next run starts at, so a unit follows either without moving.

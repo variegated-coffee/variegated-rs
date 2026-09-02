@@ -41,6 +41,7 @@ pub mod marks;
 pub mod overlays;
 pub mod palette;
 pub mod rhythm;
+pub mod slots;
 pub mod states;
 pub mod trace;
 pub mod type_scale;
@@ -51,6 +52,7 @@ use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
 
 pub use geometry::Window;
+pub use slots::{Annotation, DataPoint, DataPointMask, Offer, Role};
 pub use trace::{Phase, ShotTrace};
 pub use view::{
     Clock, Command, ExitView, FreeBrewView, HourMinute, IdleView, Mark, MarkState, NextEvent,

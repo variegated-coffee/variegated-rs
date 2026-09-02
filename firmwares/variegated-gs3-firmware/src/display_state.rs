@@ -129,6 +129,9 @@ pub struct DisplayState {
     menu_config: Option<crate::menu::MenuConfig>,
     /// Where the panel's content sits. See [`Self::panel_origin`].
     panel_origin: variegated_controller_types::panel::PanelOrigin,
+    /// Which optional data points the routine screen may draw. See
+    /// [`Self::panel_data_points`].
+    panel_data_points: variegated_controller_types::panel::PanelDataPoints,
     /// The Bluetooth associations, for the Bluetooth submenu.
     ///
     /// Cloned out of the published `Configuration` rather than borrowed from it: this task
@@ -161,6 +164,7 @@ impl DisplayState {
             dose_popup_until: None,
             menu_config: None,
             panel_origin: variegated_controller_types::panel::PanelOrigin::DEFAULT,
+            panel_data_points: variegated_controller_types::panel::PanelDataPoints::DEFAULT,
             bluetooth: None,
             schedules: None,
         }
@@ -170,8 +174,18 @@ impl DisplayState {
     pub fn update_menu_config(&mut self, snapshot: crate::menu::MenuConfigSnapshot) {
         self.menu_config = Some(snapshot.config);
         self.panel_origin = snapshot.panel_origin;
+        self.panel_data_points = snapshot.panel_data_points;
         self.bluetooth = Some(snapshot.bluetooth);
         self.schedules = Some(snapshot.schedules);
+    }
+
+    /// Which optional data points the routine screen may draw.
+    ///
+    /// Non-`Option` for the reason [`Self::panel_origin`] is: the shipped default is a real
+    /// answer -- show everything measurable -- so the frames before the button task has
+    /// published are not a state the panel has to represent.
+    pub fn panel_data_points(&self) -> variegated_controller_types::panel::PanelDataPoints {
+        self.panel_data_points
     }
 
     /// Where the panel's content sits inside the bezel's aperture.

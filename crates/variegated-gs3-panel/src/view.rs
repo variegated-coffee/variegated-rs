@@ -17,6 +17,8 @@
 //! off-state clock sets `21:58` in a 49 px face and `55` in a 14 px one, which cannot be done
 //! to a string that already reads `21:58:55`.
 
+use crate::slots::{DataPoint, DataPointMask, Offer, Role};
+
 /// A status mark's condition. See section 5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -310,17 +312,18 @@ impl Quantity {
 /// What ends the current routine step.
 #[derive(Clone, Copy, Debug)]
 pub enum ExitView<'a> {
-    /// A condition with something to show progress against.
+    /// A condition with something to show progress against. Rank 1: the footer draws it, and
+    /// [`crate::slots::select`] keeps its data point out of the grid.
     Progress {
-        /// The condition as a phrase, e.g. `ENDS AT 8.0 G IN CUP`.
-        phrase: &'a str,
+        /// What is being watched. Names the figure, picks its pen through
+        /// [`DataPoint::quantity`], and is what rule 1 dedupes on -- so a boiler-pressure
+        /// exit does not consume the group's pressure slot.
+        point: DataPoint,
         /// Where the quantity is now. `None` when nothing is reporting it -- the bar then
         /// draws empty rather than full, and the figure reads as no reading.
         current: Option<f32>,
         /// Where it has to get to.
         target: f32,
-        /// Which quantity is being watched. Picks the bar's pen.
-        quantity: Quantity,
     },
     /// A condition that cannot show progress -- a user action, or never. The phrase stands
     /// alone and no bar is drawn, rather than a bar that would always read zero.
@@ -328,6 +331,11 @@ pub enum ExitView<'a> {
 }
 
 /// Routine execution: where am I, and what ends this step.
+///
+/// The four figures on the right are **not** fixed. This is the bag [`crate::slots::select`]
+/// chooses them from: rank 1 is `exit`, ranks 2 and 3 are `target` and `limit`, and ranks 4
+/// to 10 are whichever of `offers` this machine can measure. See [`crate::slots`] for the
+/// rules, including why an absent role reserves no space.
 #[derive(Clone, Copy, Debug)]
 pub struct RoutineView<'a> {
     /// The routine's name, uppercase.
@@ -337,18 +345,25 @@ pub struct RoutineView<'a> {
     pub steps: &'a [StepView<'a>],
     /// Which step is running, as an index into `steps`.
     pub current_step: usize,
-    /// Time in the current step.
-    pub step_elapsed_s: Option<f32>,
-    /// In the cup.
-    pub weight_g: Option<f32>,
-    /// At the group.
-    pub pressure_bar: Option<f32>,
-    /// What the pump is being driven towards, when that is a pressure.
-    pub pressure_target: Option<f32>,
-    /// This brew's water in.
-    pub water_in_ml: Option<f32>,
-    /// What ends this step.
+    /// What ends this step. Rank 1.
     pub exit: ExitView<'a>,
+    /// What the pump is being driven towards. Rank 2.
+    ///
+    /// `None` where the step commands nothing, or commands a pump duty -- a duty has nothing
+    /// downstream measuring it, so it is not a data point and reserves no slot.
+    pub target: Option<Role>,
+    /// The ceiling armed on a quantity the pump is not controlling. Rank 3. `None` when
+    /// nothing is armed.
+    pub limit: Option<Role>,
+    /// The data points this machine can measure, for ranks 4 to 10.
+    ///
+    /// Presence here is the claim that the sensor exists, decided from declared capability
+    /// rather than from whether it is reporting this frame; a fitted but silent one belongs
+    /// here with a `None` value and draws a dash. Order does not matter --
+    /// [`crate::slots::RANKED`] fixes the priority.
+    pub offers: &'a [Offer],
+    /// Which of the excludable points the operator wants drawn. Roles ignore it.
+    pub shown: DataPointMask,
 }
 
 /// How a shot ended.

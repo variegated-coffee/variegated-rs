@@ -30,6 +30,45 @@ use variegated_controller_types::{
 
 use crate::routine::resolve_parameter_value;
 
+/// What a condition is watching, as opposed to what it is measured in.
+///
+/// [`ParameterUnit`] cannot answer this. Three conditions report `Bar` and two of them are a
+/// boiler while one is the group; two report `MillilitersPerSecond` from three different
+/// places. A renderer that has to decide whether the exit condition is *the same quantity it
+/// is already showing somewhere else* needs the distinction, and deriving it from the unit is
+/// exactly the guess that would put a boiler's pressure and the group's into one figure.
+///
+/// Here rather than in each renderer for the reason the module exists at all: three screens
+/// wrote their own version of this `match` and the three disagreed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum MeasurementSubject {
+    /// Time in the current step.
+    StepTime,
+    /// Time since the brew started.
+    BrewTime,
+    /// A boiler's temperature.
+    BoilerTemperature,
+    /// A boiler's pressure.
+    BoilerPressure,
+    /// Flow into the group.
+    GroupInputFlow,
+    /// Pressure at the group.
+    GroupPressure,
+    /// Flow at a water tap.
+    WaterTapFlow,
+    /// Weight in the cup.
+    OutputWeight,
+    /// Volume in, since the brew started.
+    InputVolume,
+    /// Conductivity leaving the group.
+    OutputConductivity,
+    /// Conductivity times output flow.
+    ExtractionRate,
+    /// Solids in the cup so far.
+    ExtractedSolids,
+}
+
 /// Where a step stands against its exit condition.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExitProgress {
@@ -42,6 +81,8 @@ pub struct ExitProgress {
     /// What the two numbers are measured in, so a renderer can label them without a second
     /// `match` on the condition.
     pub unit: ParameterUnit,
+    /// Which quantity, of the several that share a unit, is being watched.
+    pub subject: MeasurementSubject,
 }
 
 /// The current value and target for a step's exit condition, or `None` when the condition
@@ -71,6 +112,7 @@ pub fn exit_condition_progress(
                 .map(|d| d.as_secs_f32()),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Seconds,
+            subject: MeasurementSubject::StepTime,
         }),
 
         // A brew timer, measured from when the group started rather than from the step.
@@ -81,6 +123,7 @@ pub fn exit_condition_progress(
                 .map(|b| b.brew_time.as_secs_f32()),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Seconds,
+            subject: MeasurementSubject::BrewTime,
         }),
 
         // Waiting for a person. Nothing to measure.
@@ -112,6 +155,7 @@ fn state_progress(
             current: boiler_status(status, *boiler).and_then(|b| b.temperature),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Celsius,
+            subject: MeasurementSubject::BoilerTemperature,
         }),
 
         StateCondition::BoilerPressureAbove(boiler, target)
@@ -119,6 +163,7 @@ fn state_progress(
             current: boiler_status(status, *boiler).and_then(|b| b.pressure),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Bar,
+            subject: MeasurementSubject::BoilerPressure,
         }),
 
         StateCondition::GroupInputFlowRateAbove(group, target)
@@ -126,6 +171,7 @@ fn state_progress(
             current: status.get_group_status(*group).and_then(|g| g.input_flow_rate),
             target: resolve(target, status, routine),
             unit: ParameterUnit::MillilitersPerSecond,
+            subject: MeasurementSubject::GroupInputFlow,
         }),
 
         StateCondition::GroupPressureAbove(group, target)
@@ -133,6 +179,7 @@ fn state_progress(
             current: status.get_group_status(*group).and_then(|g| g.pressure),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Bar,
+            subject: MeasurementSubject::GroupPressure,
         }),
 
         // `current` is always `None`: `WaterTapStatus` carries only `is_dispensing`, so the
@@ -145,6 +192,7 @@ fn state_progress(
             current: None,
             target: resolve(target, status, routine),
             unit: ParameterUnit::MillilitersPerSecond,
+            subject: MeasurementSubject::WaterTapFlow,
         }),
 
         StateCondition::OutputWeightAbove(group, target)
@@ -152,6 +200,7 @@ fn state_progress(
             current: status.get_group_status(*group).and_then(|g| g.output_weight),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Grams,
+            subject: MeasurementSubject::OutputWeight,
         }),
 
         // Volume *since the brew started*, which the group status already reports
@@ -163,6 +212,7 @@ fn state_progress(
                 .and_then(|b| b.brew_input_volume),
             target: resolve(target, status, routine),
             unit: ParameterUnit::Milliliters,
+            subject: MeasurementSubject::InputVolume,
         }),
 
         StateCondition::GroupOutputConductivityAbove(group, target)
@@ -172,6 +222,7 @@ fn state_progress(
                 .and_then(|g| g.output_electrical_conductivity),
             target: resolve(target, status, routine),
             unit: ParameterUnit::MillisiemensPerCentimeter,
+            subject: MeasurementSubject::OutputConductivity,
         }),
 
         StateCondition::GroupExtractionRateAbove(group, target)
@@ -179,6 +230,7 @@ fn state_progress(
             current: status.get_group_status(*group).and_then(|g| g.extraction_rate),
             target: resolve(target, status, routine),
             unit: ParameterUnit::ExtractionRate,
+            subject: MeasurementSubject::ExtractionRate,
         }),
 
         // The only one of the three that lives on `BrewStatus` rather than `GroupStatus`,
@@ -193,6 +245,7 @@ fn state_progress(
                 .and_then(|b| b.extracted_solids),
             target: resolve(target, status, routine),
             unit: ParameterUnit::ExtractedSolids,
+            subject: MeasurementSubject::ExtractedSolids,
         }),
     }
 }
@@ -552,5 +605,72 @@ mod tests {
 
         assert_eq!(progress.current, None);
         assert_eq!(progress.target, 3.0);
+    }
+
+    /// The subject is what the unit cannot say.
+    ///
+    /// Five conditions here report one of two units between them, and a renderer that decided
+    /// "is this the quantity I am already showing?" from the unit would fold a boiler's
+    /// pressure into the group's, and a tap's flow into the group's. Both are readings of
+    /// different physical things that happen to be measured in the same units.
+    #[test]
+    fn conditions_sharing_a_unit_do_not_share_a_subject() {
+        let status = status_running();
+
+        let subject_of = |condition: StateCondition| {
+            exit_condition_progress(
+                &RoutineExitCondition::StateConditionMet(condition),
+                &status,
+                None,
+            )
+            .expect("this condition reports progress")
+            .subject
+        };
+
+        let bar = [
+            subject_of(StateCondition::BoilerPressureAbove(0, ParameterValue::Static(1.0))),
+            subject_of(StateCondition::GroupPressureAbove(0, ParameterValue::Static(9.0))),
+        ];
+        assert_eq!(bar[0], MeasurementSubject::BoilerPressure);
+        assert_eq!(bar[1], MeasurementSubject::GroupPressure);
+        assert_ne!(bar[0], bar[1], "a boiler is not the group");
+
+        let ml_s = [
+            subject_of(StateCondition::GroupInputFlowRateAbove(
+                0,
+                ParameterValue::Static(2.0),
+            )),
+            subject_of(StateCondition::WaterTapFlowRateAbove(
+                0,
+                ParameterValue::Static(3.0),
+            )),
+        ];
+        assert_eq!(ml_s[0], MeasurementSubject::GroupInputFlow);
+        assert_eq!(ml_s[1], MeasurementSubject::WaterTapFlow);
+        assert_ne!(ml_s[0], ml_s[1], "a tap is not the group");
+    }
+
+    /// The two timers are measured in seconds from different clocks, and the panel shows one
+    /// of them as a data point in its own right -- so telling them apart is the difference
+    /// between "time in step" appearing twice and appearing once.
+    #[test]
+    fn the_two_timers_have_different_subjects() {
+        let status = status_running();
+
+        let step = exit_condition_progress(
+            &RoutineExitCondition::After(ParameterValue::Static(12.0)),
+            &status,
+            None,
+        )
+        .expect("a step timer reports progress");
+        let brew = exit_condition_progress(
+            &RoutineExitCondition::AfterDurationRelativeToStart(ParameterValue::Static(30.0)),
+            &status,
+            None,
+        )
+        .expect("a brew timer reports progress");
+
+        assert_eq!(step.subject, MeasurementSubject::StepTime);
+        assert_eq!(brew.subject, MeasurementSubject::BrewTime);
     }
 }

@@ -20,7 +20,7 @@ use embassy_time::{Duration, Instant};
 use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameter};
 use variegated_controller_lib::scale_calibration::ScaleCalibration;
 use variegated_controller_types::bluetooth::BluetoothPeripheralList;
-use variegated_controller_types::panel::PanelOrigin;
+use variegated_controller_types::panel::{PanelDataPoints, PanelOrigin};
 use variegated_controller_types::{
     BoilerIndex, GroupBrewControlMode, ImprovState, MachineCommand, MachineMode, RoutineIndex,
     Status, TemperatureType,
@@ -106,6 +106,8 @@ pub enum MenuId {
     EditPanelOriginX,
     /// The same, vertically.
     EditPanelOriginY,
+    /// Which optional data points the routine screen may draw. One toggle per point.
+    Display,
     /// Scale actions: tare, and calibration where the fitted scale supports it.
     Scale,
     /// What the radio is connected to. Read-only.
@@ -158,6 +160,7 @@ impl MenuId {
             | MenuId::Settings
             | MenuId::Routines
             | MenuId::RoutineParameters(_)
+            | MenuId::Display
             | MenuId::Scale
             | MenuId::WifiInfo
             | MenuId::Bluetooth
@@ -207,6 +210,22 @@ pub enum MenuItemKind {
     /// The one machine state with no other route from this panel: the `{5,3}` chord reaches
     /// `On` and `Off` only.
     Standby,
+    /// Opens the data-point submenu.
+    OpenDisplay,
+    /// Toggles whether the routine screen may draw the weight in the cup.
+    ///
+    /// These five act in place, like a Bluetooth row. They change nothing about the machine --
+    /// only what the panel spends its four slots on -- which is why they are stored panel-side
+    /// and carry no `MachineCommand`, exactly as [`Self::PanelOriginX`] does.
+    ShowWeight,
+    /// Toggles the group pressure.
+    ShowPressure,
+    /// Toggles the flow through the group.
+    ShowFlow,
+    /// Toggles the conductivity leaving the group.
+    ShowConductivity,
+    /// Toggles the temperature leaving the group.
+    ShowOutputTemperature,
     /// Opens the scale submenu.
     OpenScale,
     /// Opens the Wi-Fi info submenu.
@@ -319,6 +338,7 @@ const SETTINGS_ITEMS: &[MenuItem] = &[
     MenuItem { label: "Wi-Fi Setup", kind: MenuItemKind::WifiProvisioning },
     MenuItem { label: "Wi-Fi Info", kind: MenuItemKind::OpenWifiInfo },
     MenuItem { label: "Bluetooth", kind: MenuItemKind::OpenBluetooth },
+    MenuItem { label: "Display", kind: MenuItemKind::OpenDisplay },
     // Last, and not because they matter least: this list is ordered "the numbers you change
     // while tasting first", and where the bezel sits is set once and then never again.
     //
@@ -341,6 +361,24 @@ const SCALE_ITEMS: &[MenuItem] = &[
     MenuItem { label: "Cal 100 g", kind: MenuItemKind::ScaleCalibrate100g },
 ];
 
+/// Which optional data points the routine screen may draw. `ON` means shown.
+///
+/// **Ordered by the ranking they gate**, so the list reads in the order the panel will
+/// consider them rather than alphabetically or by how interesting they are. Only the five a
+/// sensor might display for itself are here: total time and total input are the machine's own
+/// arithmetic and nothing else shows them, so there is nothing to switch off.
+///
+/// Switching one off hides that quantity's *rank*, never its role. A pressure the pump is
+/// currently targeting is drawn whether or not `Pressure` is `ON`, because that is what the
+/// machine is doing rather than a reading the operator chose to follow.
+const DISPLAY_ITEMS: &[MenuItem] = &[
+    MenuItem { label: "Weight", kind: MenuItemKind::ShowWeight },
+    MenuItem { label: "Pressure", kind: MenuItemKind::ShowPressure },
+    MenuItem { label: "Flow", kind: MenuItemKind::ShowFlow },
+    MenuItem { label: "Conductivity", kind: MenuItemKind::ShowConductivity },
+    MenuItem { label: "Out temp", kind: MenuItemKind::ShowOutputTemperature },
+];
+
 /// Read-only. Every value here comes from `comms_status`, which is a latch.
 const WIFI_INFO_ITEMS: &[MenuItem] = &[
     MenuItem { label: "SSID", kind: MenuItemKind::WifiSsid },
@@ -349,8 +387,14 @@ const WIFI_INFO_ITEMS: &[MenuItem] = &[
 ];
 
 /// Every fixed row in this file, for the width assertion below.
-const ALL_ITEM_TABLES: &[&[MenuItem]] =
-    &[ROOT_ITEMS, SETTINGS_ITEMS, SCALE_ITEMS, WIFI_INFO_ITEMS, SCHEDULE_ITEM_ITEMS];
+const ALL_ITEM_TABLES: &[&[MenuItem]] = &[
+    ROOT_ITEMS,
+    SETTINGS_ITEMS,
+    SCALE_ITEMS,
+    WIFI_INFO_ITEMS,
+    SCHEDULE_ITEM_ITEMS,
+    DISPLAY_ITEMS,
+];
 
 /// Twelve characters, and this is checked at compile time rather than trusted.
 ///
@@ -400,6 +444,7 @@ fn fixed_items(menu: MenuId, data: &MenuData) -> &'static [MenuItem] {
         MenuId::Settings => SETTINGS_ITEMS,
         MenuId::Scale => scale_items(data),
         MenuId::WifiInfo => WIFI_INFO_ITEMS,
+        MenuId::Display => DISPLAY_ITEMS,
         // `ScheduleItem` deliberately does not route through here. Its rows are
         // `MenuRow::ScheduleField`, not plain `MenuRow::Item`, because two of the three read
         // something out of the schedule and `value`/`info_value` see only a row.
@@ -630,7 +675,7 @@ pub enum MenuRow<'a> {
 /// How many rows a menu has, including every piece of chrome.
 pub fn row_count(menu: MenuId, data: &MenuData) -> usize {
     match menu {
-        MenuId::Root | MenuId::Settings | MenuId::Scale | MenuId::WifiInfo => {
+        MenuId::Root | MenuId::Settings | MenuId::Scale | MenuId::WifiInfo | MenuId::Display => {
             fixed_items(menu, data).len()
         }
         MenuId::Routines => data.routines.map_or(0, |rows| rows.len()),
@@ -673,7 +718,7 @@ pub fn geometry(menu: MenuId, data: &MenuData) -> ListGeometry {
 /// The row at `index`, or `None` past the end.
 pub fn row<'a>(menu: MenuId, index: usize, data: &MenuData<'a>) -> Option<MenuRow<'a>> {
     match menu {
-        MenuId::Root | MenuId::Settings | MenuId::WifiInfo => {
+        MenuId::Root | MenuId::Settings | MenuId::WifiInfo | MenuId::Display => {
             fixed_items(menu, data).get(index).map(MenuRow::Item)
         }
         MenuId::Scale => fixed_items(menu, data).get(index).map(|item| MenuRow::ScaleAction {
@@ -804,6 +849,7 @@ pub fn title<'a>(menu: MenuId, data: &MenuData<'a>) -> &'a str {
         MenuId::EditPanelOriginX => "Screen X",
         MenuId::EditPanelOriginY => "Screen Y",
         MenuId::Scale => "Scale",
+        MenuId::Display => "Display",
         MenuId::WifiInfo => "Wi-Fi Info",
         MenuId::Bluetooth => "Bluetooth",
         MenuId::Schedules => "Schedules",
@@ -971,6 +1017,13 @@ pub struct MenuContext {
     /// ceiling there is always a defensible value: the shipped default, before flash has been
     /// read at all. A row that read `n/a` for a setting that always exists would be lying.
     pub panel_origin: PanelOrigin,
+    /// Which optional data points the routine screen may draw.
+    ///
+    /// Here for [`Self::panel_origin`]'s reasons, all three of them: its own settings key, so
+    /// `MenuConfig::from_configuration` cannot build it; always a defensible value, so no row
+    /// ever reads `n/a`; and nothing about the machine, so it has no business on
+    /// `Configuration`.
+    pub data_points: PanelDataPoints,
 }
 
 /// What the Wi-Fi info screen reports, once staleness has been ruled out.
@@ -991,6 +1044,7 @@ impl MenuContext {
         wifi_pending: bool,
         config: MenuConfig,
         panel_origin: PanelOrigin,
+        data_points: PanelDataPoints,
     ) -> Self {
         // Absent *or* stale reads as "nothing to report" -- see the note on `wifi`. A
         // `comms_status` with no age has never been received at all.
@@ -1015,6 +1069,7 @@ impl MenuContext {
             }),
             config,
             panel_origin,
+            data_points,
         }
     }
 
@@ -1111,6 +1166,11 @@ const UNAVAILABLE: &str = "n/a";
 /// on, this means connect the scale. Four characters, which is the value field's width.
 const NO_SENSOR: &str = "sens";
 
+/// A switch, as the value column says it. The same two words every toggle in this menu uses.
+fn on_off(enabled: bool) -> MenuValue {
+    MenuValue::Text(if enabled { "ON" } else { "OFF" })
+}
+
 /// The value column, or `None` for a row that has no value.
 pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
     match row {
@@ -1180,11 +1240,23 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
             MenuItemKind::WifiSsid | MenuItemKind::WifiRssi | MenuItemKind::WifiIp => {
                 ctx.wifi.is_none().then_some(MenuValue::Text(UNAVAILABLE))
             }
+            // Never `n/a`: like the origin rows above, these always have a value, because the
+            // shipped default is one. `ON` means the routine screen may draw that quantity on
+            // its own rank -- it is drawn regardless while the pump is targeting or capping
+            // it, which is a state of the machine rather than a preference.
+            MenuItemKind::ShowWeight => Some(on_off(ctx.data_points.weight)),
+            MenuItemKind::ShowPressure => Some(on_off(ctx.data_points.pressure)),
+            MenuItemKind::ShowFlow => Some(on_off(ctx.data_points.flow)),
+            MenuItemKind::ShowConductivity => Some(on_off(ctx.data_points.conductivity)),
+            MenuItemKind::ShowOutputTemperature => {
+                Some(on_off(ctx.data_points.output_temperature))
+            }
             // The three schedule field kinds are reached only as `MenuRow::ScheduleField`,
             // below, which is what carries the schedule their values come from. A bare
             // `MenuRow::Item` with one of these kinds is a row this file did not build.
             MenuItemKind::OpenSettings
             | MenuItemKind::OpenRoutines
+            | MenuItemKind::OpenDisplay
             | MenuItemKind::OpenScale
             | MenuItemKind::OpenWifiInfo
             | MenuItemKind::OpenBluetooth
@@ -1384,6 +1456,14 @@ pub enum MenuActivation {
         /// What to change about it.
         change: ScheduleChange,
     },
+    /// Flip one of the routine screen's data-point switches.
+    ///
+    /// Not a [`Self::Command`]: there is no `MachineCommand` behind it and there should not
+    /// be. This changes nothing about the machine -- only what the panel spends its four
+    /// slots on -- so it is panel-local state with a settings key of its own, and the button
+    /// task owns it exactly as it owns [`PanelOrigin`]. Sending it over the UART would put a
+    /// display preference on a wire three other consumers have to decode.
+    ToggleDataPoint(DataPointSwitch),
     /// Close the menu, then run this routine. In that order, and the order is the point:
     /// see the note on the variant's only caller.
     RunRoutine(RoutineIndex),
@@ -1391,6 +1471,43 @@ pub enum MenuActivation {
     Pop,
     /// Refused. The menu stays exactly where it is.
     Refuse,
+}
+
+/// Which of the five data-point switches a row flips.
+///
+/// A field selector rather than the panel crate's `DataPoint`: what is being named here is a
+/// field of the stored [`PanelDataPoints`], and only five of the panel's data points have
+/// one. Naming the stored field means [`apply`](DataPointSwitch::apply) is total, where a
+/// `DataPoint` would need an arm for a dozen points that have no switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub enum DataPointSwitch {
+    /// Weight in the cup.
+    Weight,
+    /// Pressure at the group.
+    Pressure,
+    /// Flow through the group.
+    Flow,
+    /// Conductivity leaving the group.
+    Conductivity,
+    /// Temperature leaving the group.
+    OutputTemperature,
+}
+
+impl DataPointSwitch {
+    /// Flip this switch in a stored setting.
+    ///
+    /// Here rather than at the call site so the button task cannot flip a different field
+    /// from the one the row's value column just read.
+    pub fn toggle(self, points: &mut PanelDataPoints) {
+        let field = match self {
+            DataPointSwitch::Weight => &mut points.weight,
+            DataPointSwitch::Pressure => &mut points.pressure,
+            DataPointSwitch::Flow => &mut points.flow,
+            DataPointSwitch::Conductivity => &mut points.conductivity,
+            DataPointSwitch::OutputTemperature => &mut points.output_temperature,
+        };
+        *field = !*field;
+    }
 }
 
 /// Five minutes -- unchanged from the button-6 hold this replaces. Long enough to fetch a
@@ -1477,6 +1594,22 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
         MenuRow::Item(item) => match item.kind {
             MenuItemKind::OpenSettings => MenuActivation::Enter(MenuId::Settings),
             MenuItemKind::OpenRoutines => MenuActivation::Enter(MenuId::Routines),
+            MenuItemKind::OpenDisplay => MenuActivation::Enter(MenuId::Display),
+            // Act in place, like a Bluetooth row: there is nothing to confirm and nothing to
+            // dial, and the value column beside the row is the feedback.
+            MenuItemKind::ShowWeight => {
+                MenuActivation::ToggleDataPoint(DataPointSwitch::Weight)
+            }
+            MenuItemKind::ShowPressure => {
+                MenuActivation::ToggleDataPoint(DataPointSwitch::Pressure)
+            }
+            MenuItemKind::ShowFlow => MenuActivation::ToggleDataPoint(DataPointSwitch::Flow),
+            MenuItemKind::ShowConductivity => {
+                MenuActivation::ToggleDataPoint(DataPointSwitch::Conductivity)
+            }
+            MenuItemKind::ShowOutputTemperature => {
+                MenuActivation::ToggleDataPoint(DataPointSwitch::OutputTemperature)
+            }
             MenuItemKind::WifiProvisioning => MenuActivation::Command(match ctx.improv {
                 ImprovState::Stopped => MachineCommand::OpenWifiProvisioningWindow {
                     duration_ms: PROVISIONING_WINDOW_MS,
@@ -1760,6 +1893,7 @@ pub fn confirm_editor(menu: MenuId, value: f32, config: &MenuConfig) -> Option<M
         | MenuId::Routines
         | MenuId::RoutineParameters(_)
         | MenuId::Scale
+        | MenuId::Display
         | MenuId::WifiInfo
         | MenuId::Bluetooth
         | MenuId::Schedules
@@ -1949,6 +2083,12 @@ pub struct MenuConfigSnapshot {
     /// It rides this watch rather than getting one of its own because it changes about as
     /// often as a machine is installed, and the display tasks already take this one.
     pub panel_origin: PanelOrigin,
+    /// Which optional data points the routine screen may draw.
+    ///
+    /// Here for [`Self::panel_origin`]'s reasons exactly: its own settings key, so
+    /// `MenuConfig::from_configuration` cannot build it, and it changes rarely enough that a
+    /// watch of its own would be one more thing to keep in step for no gain.
+    pub panel_data_points: PanelDataPoints,
     /// The Bluetooth associations, for that submenu's rows. At most four.
     pub bluetooth: BluetoothPeripheralList,
     /// Every stored schedule, for [`MenuId::Schedules`] and the menus below it.

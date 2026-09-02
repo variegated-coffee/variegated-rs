@@ -110,7 +110,7 @@ use crate::menu::{
 use variegated_controller_lib::routine::{Routine, RoutineRepository as RoutineRepositoryTrait};
 use variegated_controller_lib::schedule::ScheduleStore as ScheduleStoreTrait;
 use variegated_controller_types::Configuration;
-use variegated_controller_types::panel::PanelOrigin;
+use variegated_controller_types::panel::{PanelDataPoints, PanelOrigin};
 // The panel origin's store is reached through the trait, like every other settings store.
 use variegated_controller_lib::settings::SettingsStorage;
 use variegated_machine_menu::{
@@ -308,6 +308,15 @@ pub struct ButtonEventHandler {
     /// The same shape as `schedules_dirty` and for the same reason: the press is handled in a
     /// synchronous function and the store is behind an async mutex.
     panel_origin_dirty: bool,
+    /// Which optional data points the routine screen may draw.
+    ///
+    /// Owned here for [`Self::panel_origin`]'s reasons exactly: its own settings key, no
+    /// `MachineCommand`, and nothing the controller needs to know. Before flash has been read
+    /// it is the shipped default, which draws everything measurable -- so a machine that has
+    /// never been told otherwise shows the same panel it always did.
+    panel_data_points: PanelDataPoints,
+    /// Whether [`Self::panel_data_points`] has changed and has not been written to flash yet.
+    panel_data_points_dirty: bool,
     /// The Bluetooth associations, for the Bluetooth submenu's rows.
     ///
     /// Kept beside the projection rather than in it because it is a list of rows rather than
@@ -368,6 +377,8 @@ impl ButtonEventHandler {
             menu_config: crate::menu::MenuConfig::default(),
             panel_origin: PanelOrigin::DEFAULT,
             panel_origin_dirty: false,
+            panel_data_points: PanelDataPoints::DEFAULT,
+            panel_data_points_dirty: false,
             bluetooth: None,
             button_3_hold_start: None,
             button_5_hold_start: None,
@@ -522,6 +533,16 @@ impl ButtonEventHandler {
         self.panel_origin = origin;
     }
 
+    /// The data-point switches, if they have changed since they were last written to flash.
+    fn take_dirty_panel_data_points(&mut self) -> Option<PanelDataPoints> {
+        core::mem::take(&mut self.panel_data_points_dirty).then_some(self.panel_data_points)
+    }
+
+    /// Seed the switches from flash, at startup.
+    fn set_panel_data_points(&mut self, points: PanelDataPoints) {
+        self.panel_data_points = points;
+    }
+
     /// Apply a change to this task's own copy of a schedule row.
     ///
     /// **Applied locally as well as sent**, because the controller takes up to a status period
@@ -554,6 +575,7 @@ impl ButtonEventHandler {
         crate::menu::MenuConfigSnapshot {
             config: self.menu_config,
             panel_origin: self.panel_origin,
+            panel_data_points: self.panel_data_points,
             bluetooth: self.bluetooth.clone().unwrap_or_default(),
             schedules: self.schedules.clone().unwrap_or_default(),
         }
@@ -605,20 +627,26 @@ impl ButtonEventHandler {
 
         // Read `improv` first, then let it retire an outstanding request: a change in either
         // direction is the confirmation we were waiting for.
-        let improv =
-            MenuContext::from_status(status, false, self.menu_config, self.panel_origin).improv;
+        let improv = MenuContext::from_status(
+            status,
+            false,
+            self.menu_config,
+            self.panel_origin,
+            self.panel_data_points,
+        )
+        .improv;
         if let Some(request) = self.wifi_request {
             if !request.is_outstanding(improv, Instant::now()) {
                 self.wifi_request = None;
             }
         }
-        self.menu_context =
-            MenuContext::from_status(
-                status,
-                self.wifi_request.is_some(),
-                self.menu_config,
-                self.panel_origin,
-            );
+        self.menu_context = MenuContext::from_status(
+            status,
+            self.wifi_request.is_some(),
+            self.menu_config,
+            self.panel_origin,
+            self.panel_data_points,
+        );
 
         // The menu is a full-screen takeover, and the machine can become busy underneath it --
         // a schedule can start a routine, and so can the comms processor. The busy condition is
@@ -993,6 +1021,22 @@ impl ButtonEventHandler {
                 }
                 vec![]
             }
+            // Flipped here and now, unlike a schedule change: the whole value is three bytes
+            // this task already owns, so there is no store to read before applying it. The
+            // dirty flag is what defers the *write*, for the reason `panel_origin_dirty`
+            // exists -- this is a synchronous function and the store is behind an async mutex.
+            //
+            // `menu_context` is updated too, not just the field. The context is rebuilt from
+            // `Status`, which arrives at 10 Hz and knows nothing about this setting, so
+            // without this the row the user just pressed would keep reading its old value for
+            // up to a status period -- which is exactly the dead-button reading this menu's
+            // "announce the refusal before the press" rule exists to avoid.
+            MenuActivation::ToggleDataPoint(switch) => {
+                switch.toggle(&mut self.panel_data_points);
+                self.panel_data_points_dirty = true;
+                self.menu_context.data_points = self.panel_data_points;
+                vec![]
+            }
             // Resolved in the task loop, which can await the store. Nothing is sent from here:
             // building the command needs the stored `ScheduleItem`, and taking the store's
             // lock in the event path is what this defers.
@@ -1246,6 +1290,9 @@ pub async fn button_controller_task(
     // its own, no `MachineCommand`, and nothing outside this firmware's own screens has any
     // use for it. Passed like the two stores above, and created in the same place.
     panel_origin_store: &'static crate::PanelOriginStoreMutex,
+    // Which data points the routine screen may draw. Owned here for the trim's reasons, and
+    // created in the same place.
+    panel_data_points_store: &'static crate::PanelDataPointsStoreMutex,
     checkin: variegated_checkin::CheckinHandle,
     menu_sender: MenuSender,
     menu_config_sender: crate::menu::MenuConfigSender,
@@ -1272,6 +1319,18 @@ pub async fn button_controller_task(
         .unwrap_or_default();
     defmt::info!("Panel origin: {}, {}", origin.x, origin.y);
     handler.set_panel_origin(origin);
+
+    // The data-point switches, read the same way and for the same reason: a machine that has
+    // been told to stop drawing its weight should not draw it for the first ten seconds after
+    // every boot. A read failure is "nothing stored yet", which is the default -- everything
+    // on.
+    let data_points = panel_data_points_store
+        .lock()
+        .await
+        .load_settings()
+        .await
+        .unwrap_or_default();
+    handler.set_panel_data_points(data_points);
 
     // The last projection sent to the displays, so an unchanged republish costs nothing. It
     // starts at the trim's publish above rather than at `None`, which is what makes that
@@ -1437,6 +1496,21 @@ pub async fn button_controller_task(
             let mut store = panel_origin_store.lock().await;
             if let Err(e) = store.save_settings(&origin).await {
                 defmt::error!("Failed to save panel origin: {}", e);
+            }
+            let snapshot = handler.menu_config_snapshot();
+            if Some(&snapshot) != menu_config_published.as_ref() {
+                menu_config_sender.send(snapshot.clone());
+                menu_config_published = Some(snapshot);
+            }
+        }
+
+        // The data-point switches, on the press that flipped one. There is no confirm step to
+        // wait for -- the row acts in place, like a Bluetooth toggle -- so the press is the
+        // commit, and a flash write per press is what a toggle costs.
+        if let Some(points) = handler.take_dirty_panel_data_points() {
+            let mut store = panel_data_points_store.lock().await;
+            if let Err(e) = store.save_settings(&points).await {
+                defmt::error!("Failed to save panel data points: {}", e);
             }
             let snapshot = handler.menu_config_snapshot();
             if Some(&snapshot) != menu_config_published.as_ref() {
