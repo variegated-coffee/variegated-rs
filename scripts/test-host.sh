@@ -166,5 +166,27 @@ run "variegated-board-cfg-tests" -p variegated-board-cfg-tests "$@"
 # wrong base makes the block watch a pin nobody chose, and nothing says so.
 run "variegated-rp-pio" -p variegated-rp-pio "$@"
 
+# `variegated-cli`, which lives *beside* this repository rather than inside it, and is its
+# own cargo workspace -- so none of the `run` invocations above have ever compiled a line of
+# it, even though it depends on these crates by path through a symlink and tracks them live.
+#
+# **That gap has now cost two bugs.** The note on `variegated-comms-api-types` above records
+# the first: a hand-copied mirror in this crate drifted past `ShotLogEvent` with nothing
+# noticing. The second was appending scale drivers to `BluetoothDriverKind` -- this crate
+# holds a hand-written list of driver names and maps a menu index straight onto the enum,
+# with a test pinning the two together. That test broke, and nothing ran it.
+#
+# Its own `cargo test` needs no host target: unlike this repository, it has no `.cargo`
+# config defaulting to thumbv8m.
+#
+# Skipped rather than failed when the directory is absent, so a lone `variegated-rs` checkout
+# still passes the gate -- the same courtesy `variegated-exfat-format`'s `fsck` test extends.
+CLI="$REPO/../variegated-cli"
+if [ -d "$CLI" ]; then
+    echo "=== variegated-cli"
+    (cd "$CLI" && cargo test "$@") || RC=1
+else
+    echo "=== variegated-cli (skipped: not checked out beside this repository)"
+fi
 
 exit $RC

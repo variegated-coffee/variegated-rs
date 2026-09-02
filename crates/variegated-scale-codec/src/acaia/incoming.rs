@@ -11,16 +11,25 @@
 //! `ACAIA.md` and `SCALE_PROTOCOLS.md` disagree with each other and with the code, and why
 //! the tests below assert against real captures rather than against either document.
 //!
-//! # Generation is a constructor argument, not a guess
+//! # Generation: pinned when it is known, and *validated* when it is not
 //!
-//! The shipping driver used to decide per frame, by testing whether byte 2 was `0x0C` or
-//! `0x08`. **That test is ambiguous**: in a legacy frame byte 2 is the weight's *low* byte,
-//! so roughly two values in 256 -- about 0.8% of samples -- were routed into the modern
-//! branch, where byte 3 (the weight's high byte) was read as a length. At factor 2 the
-//! colliding values are ordinary shot weights: 20.60 g is `0x080C` and 31.75 g is `0x0C67`.
+//! The transport does not settle the framing. There are ACAIA scales that serve the
+//! pre-2021 GATT -- service `0x1820`, one characteristic both ways -- and nevertheless send
+//! modern frames over it, so a driver chosen from `BluetoothDriverKind::AcaiaOld` cannot
+//! simply assume legacy framing. [`Reassembler::new_autodetecting`] exists for that case and
+//! is what the pre-2021 driver uses.
 //!
-//! A driver always knows its generation, because it comes from the association's
-//! `BluetoothDriverKind`. So [`Reassembler::new`] takes it and the ambiguous test is gone.
+//! **Detection is by checksum, not by one byte.** The original driver tested whether byte 2
+//! was `0x0C` or `0x08`, which is ambiguous: in a legacy frame byte 2 is the weight's *low*
+//! byte, so roughly two values in 256 -- about 0.8% of samples -- were misrouted. At factor 2
+//! the colliding values are ordinary shot weights.
+//!
+//! Replacing that test with pinning was worse, not better: it broke every scale that speaks
+//! modern framing over the old transport, which then read the frame header `0C 08` as a
+//! little-endian weight and reported a constant 2060 raw. So the test is now: does this look
+//! like a modern frame *and does its checksum verify*. A legacy frame has to survive both a
+//! 1-in-128 byte collision and a 1-in-65536 checksum to be misread, and the decision is made
+//! per frame, so a fluke costs one sample rather than the session.
 
 use super::command::{checksums, MAGIC1, MAGIC2};
 
@@ -541,9 +550,11 @@ fn legacy_frame_len(data: &[u8]) -> usize {
 pub struct Reassembler {
     buf: [u8; Self::CAPACITY],
     len: usize,
-    generation: Generation,
+    /// `None` means decide per frame, by validation. See [`Reassembler::new_autodetecting`].
+    generation: Option<Generation>,
     unit: WeightUnit,
     discarded: u32,
+    saw_modern: bool,
 }
 
 impl Reassembler {
@@ -555,18 +566,51 @@ impl Reassembler {
     /// Preserved from the shipping driver.
     const MAX_BYTES_WITHOUT_HEADER: usize = 64;
 
-    /// A reassembler for one generation.
+    /// A reassembler pinned to one generation.
     ///
-    /// There is deliberately no auto-detecting constructor; see the module docs for the
-    /// ambiguity that removed.
+    /// Use this when the transport settles the framing, which it does for the 2021+ GATT:
+    /// nothing that serves the vendor service speaks legacy framing.
     pub const fn new(generation: Generation) -> Self {
         Self {
             buf: [0; Self::CAPACITY],
             len: 0,
-            generation,
+            generation: Some(generation),
             unit: WeightUnit::Gram,
             discarded: 0,
+            saw_modern: false,
         }
+    }
+
+    /// A reassembler that decides each frame's generation by validating it.
+    ///
+    /// Necessary for the pre-2021 GATT, which does **not** settle the framing: some scales
+    /// serve `0x1820` with one characteristic both ways and still send modern frames over
+    /// it. Pinning such a scale to legacy makes it read the frame header `0C 08` as a
+    /// little-endian weight and report a constant 2060 raw, which is how this was found.
+    ///
+    /// A frame is treated as modern only if its command byte is one this codec decodes, its
+    /// length byte is sane, **and its checksum verifies**. Legacy frames carry no checksum,
+    /// so they essentially never pass; the one-byte test this replaces misrouted about 0.8%
+    /// of legacy samples.
+    pub const fn new_autodetecting() -> Self {
+        Self {
+            buf: [0; Self::CAPACITY],
+            len: 0,
+            generation: None,
+            unit: WeightUnit::Gram,
+            discarded: 0,
+            saw_modern: false,
+        }
+    }
+
+    /// Whether a modern frame has ever been decoded on this stream.
+    ///
+    /// Only meaningful on an auto-detecting reassembler, where it means the scale is sending
+    /// modern frames over the older transport — worth telling the user once, because
+    /// re-pairing as the 2021+ driver would additionally give them battery and unit
+    /// correction.
+    pub fn saw_modern(&self) -> bool {
+        self.saw_modern
     }
 
     /// Discard everything buffered, and forget the display unit.
@@ -628,7 +672,19 @@ impl Reassembler {
                 return None;
             }
 
-            let parsed = match self.generation {
+            let generation = match self.generation {
+                Some(pinned) => pinned,
+                None => match self.sniff() {
+                    Sniff::Modern => Generation::Modern,
+                    Sniff::Legacy => Generation::Legacy,
+                    // Looks modern but the frame is not all here yet. Waiting is the whole
+                    // point: committing to legacy now would consume ten bytes of what may
+                    // be a thirteen-byte modern frame and desynchronise the stream.
+                    Sniff::NeedMore => return None,
+                },
+            };
+
+            let parsed = match generation {
                 Generation::Modern => self.next_modern(),
                 Generation::Legacy => self.next_legacy(),
             };
@@ -636,6 +692,9 @@ impl Reassembler {
             match parsed {
                 Step::Yield(frame, consumed) => {
                     self.consume(consumed);
+                    if matches!(generation, Generation::Modern) {
+                        self.saw_modern = true;
+                    }
                     if let Frame::Status(status) = frame {
                         self.unit = status.unit;
                     }
@@ -663,6 +722,39 @@ impl Reassembler {
             self.len = 0;
         }
         None
+    }
+
+    /// Decide, for the frame at the head of the buffer, which framing it is.
+    ///
+    /// Called only when the generation is not pinned. The buffer is known to start with the
+    /// magic and to hold at least four bytes.
+    ///
+    /// The command-byte prefilter is not redundant with the checksum, and removing it would
+    /// be a bug. A legacy frame whose weight fits in one byte has a zero high byte, which
+    /// read as a length gives an empty checksummed region and an expected pair of `(0, 0)` —
+    /// so any legacy frame with a small weight and a zero at byte 4 would "verify" as a
+    /// five-byte modern frame. Requiring a command byte this codec actually decodes, and a
+    /// length of at least two, is what keeps that from happening.
+    fn sniff(&self) -> Sniff {
+        if self.buf[2] != CMD_EVENT && self.buf[2] != CMD_STATUS {
+            return Sniff::Legacy;
+        }
+
+        let len = self.buf[3];
+        if len < 2 || len > MAX_INCOMING_LEN {
+            return Sniff::Legacy;
+        }
+
+        let total = modern_frame_len(len);
+        if self.len < total {
+            return Sniff::NeedMore;
+        }
+
+        if verify_modern(&self.buf[..total]).is_ok() {
+            Sniff::Modern
+        } else {
+            Sniff::Legacy
+        }
     }
 
     fn next_modern(&mut self) -> Step {
@@ -726,6 +818,16 @@ impl Reassembler {
         self.discarded = self.discarded.saturating_add(n as u32);
         self.consume(n);
     }
+}
+
+/// What [`Reassembler::sniff`] concluded about the frame at the head of the buffer.
+enum Sniff {
+    /// Command byte, length and checksum all agree that this is a modern frame.
+    Modern,
+    /// It is not a modern frame, so treat it as legacy.
+    Legacy,
+    /// It could be a modern frame but not all of it has arrived.
+    NeedMore,
 }
 
 /// What one pass over the buffer decided.
@@ -986,6 +1088,142 @@ mod tests {
         };
         assert_eq!(w.raw, 0x080C);
         assert!((w.grams - 20.60).abs() < 1e-3, "got {}", w.grams);
+    }
+
+    // --- Auto-detection: the regression that made this necessary, from both sides ---
+
+    /// Build the 13-byte modern weight frame that a real scale on the old transport sends.
+    ///
+    /// Thirteen bytes rather than [`REAL_WEIGHT`]'s seventeen: that capture carries a
+    /// trailing timer record, and this one does not. The difference matters for the
+    /// regression below, because it is what decides whether the legacy parser *misreads*
+    /// the frame or merely skips it.
+    fn modern_weight_frame(raw: u32, factor: u8, flags: u8) -> [u8; 13] {
+        let v = raw.to_le_bytes();
+        let region = [0x08u8, MSG_WEIGHT, v[0], v[1], v[2], v[3], factor, flags];
+        let (c1, c2) = checksums(&region);
+        [
+            MAGIC1, MAGIC2, CMD_EVENT, region[0], region[1], region[2], region[3], region[4],
+            region[5], region[6], region[7], c1, c2,
+        ]
+    }
+
+    /// The bug this constructor exists for.
+    ///
+    /// An ACAIA that serves the pre-2021 GATT but sends modern frames.
+    #[test]
+    fn a_modern_frame_on_the_old_transport_decodes_as_modern() {
+        let frame = modern_weight_frame(500, 1, 0);
+        let mut r = Reassembler::new_autodetecting();
+        assert!(r.push(&frame));
+
+        let Some(Frame::Weight(w)) = r.next_frame() else {
+            panic!("a modern frame must be recognised even when the transport is the old one");
+        };
+        assert!((w.grams - 50.0).abs() < 1e-3, "got {}", w.grams);
+        assert!(r.saw_modern());
+    }
+
+    /// The same frame pinned to legacy, reproducing the reported symptom exactly.
+    ///
+    /// The legacy parser reads bytes 2-3 -- the command and length of a modern frame,
+    /// `0C 08` -- as a little-endian weight, giving a **constant** raw of 2060 whatever the
+    /// scale actually weighs. Byte 6, which is really the weight's second value byte, is
+    /// read as the decimal factor, so the reported number is 2060.0 g, 206.0 g or 20.6 g
+    /// depending on the true weight. Those are precisely the three values that were
+    /// reported from hardware.
+    ///
+    /// Kept as a test so the failure stays recognisable if anyone is tempted to pin again.
+    #[test]
+    fn pinning_a_modern_frame_to_legacy_reproduces_the_constant_2060() {
+        for (raw, expected_factor, expected_grams) in
+            [(500u32, 1u8, 206.0f32), (100, 0, 2060.0), (700, 2, 20.60)]
+        {
+            let frame = modern_weight_frame(raw, 1, 0);
+            let mut r = Reassembler::new(Generation::Legacy);
+            assert!(r.push(&frame));
+
+            let Some(Frame::Weight(w)) = r.next_frame() else {
+                panic!("expected the misparse for raw {raw}");
+            };
+            assert_eq!(w.raw, 0x080C, "the header read as a weight is always 2060");
+            assert_eq!(w.factor, expected_factor, "raw {raw}");
+            assert!(
+                (w.grams - expected_grams).abs() < 1e-2,
+                "raw {raw}: got {} want {expected_grams}",
+                w.grams
+            );
+        }
+    }
+
+    /// The other side: auto-detection must not undo the ambiguity fix. A genuine legacy
+    /// weight whose low byte collides with a command byte still decodes as legacy, because
+    /// it cannot produce a valid modern checksum.
+    #[test]
+    fn a_colliding_legacy_weight_still_decodes_as_legacy() {
+        let mut r = Reassembler::new_autodetecting();
+        // Raw 0x080C = 2060 at factor 2 = 20.60 g -- byte 2 is 0x0C, which is what the old
+        // one-byte test misrouted on.
+        let frame = [0xEF, 0xDD, 0x0C, 0x08, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+        assert!(r.push(&frame));
+        assert!(r.push(&frame));
+
+        let Some(Frame::Weight(w)) = r.next_frame() else {
+            panic!("a legacy weight must not be eaten by the modern path");
+        };
+        assert_eq!(w.raw, 0x080C);
+        assert!((w.grams - 20.60).abs() < 1e-3, "got {}", w.grams);
+        assert!(!r.saw_modern());
+    }
+
+    /// The prefilter's reason for existing.
+    ///
+    /// A legacy weight below 256 raw has a zero high byte. Read as a length that gives an
+    /// empty checksummed region and an expected pair of `(0, 0)`, so without the
+    /// command-byte test any such frame with a zero at byte 4 would "verify" as a five-byte
+    /// modern frame and be consumed wrongly.
+    #[test]
+    fn a_small_legacy_weight_is_not_mistaken_for_an_empty_modern_frame() {
+        let mut r = Reassembler::new_autodetecting();
+        // Raw 0x0064 = 100 at factor 1 = 10.0 g, with zeros where a modern frame would
+        // have its length and first payload byte.
+        let frame = [0xEF, 0xDD, 0x64, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
+        assert!(r.push(&frame));
+
+        let Some(Frame::Weight(w)) = r.next_frame() else {
+            panic!("expected a legacy weight");
+        };
+        assert_eq!(w.raw, 100);
+        assert!((w.grams - 10.0).abs() < 1e-3, "got {}", w.grams);
+    }
+
+    /// A partially-arrived modern frame must not be committed to legacy, which would
+    /// consume ten bytes of a thirteen-byte frame and desynchronise everything after it.
+    #[test]
+    fn a_partial_modern_frame_waits_rather_than_falling_back() {
+        let mut r = Reassembler::new_autodetecting();
+        assert!(r.push(&REAL_WEIGHT[..12]));
+        assert!(r.next_frame().is_none());
+
+        assert!(r.push(&REAL_WEIGHT[12..]));
+        let Some(Frame::Weight(w)) = r.next_frame() else {
+            panic!("expected the frame once it was complete");
+        };
+        assert!((w.grams - 175.9).abs() < 1e-3);
+    }
+
+    /// A stream of modern frames over the old transport keeps working, frame after frame --
+    /// the decision is per frame, so nothing depends on latching.
+    #[test]
+    fn auto_detection_holds_across_a_stream() {
+        let mut r = Reassembler::new_autodetecting();
+        for _ in 0..5 {
+            assert!(r.push(&REAL_WEIGHT));
+            let Some(Frame::Weight(w)) = r.next_frame() else {
+                panic!("every frame in the stream must decode");
+            };
+            assert!((w.grams - 175.9).abs() < 1e-3);
+        }
     }
 
     // --- The legacy length heuristic, off-by-one included ---

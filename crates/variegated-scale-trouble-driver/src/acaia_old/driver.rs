@@ -10,7 +10,7 @@ use crate::acaia_old::{
     Error,
 };
 pub use variegated_scale_codec::acaia::TimerOp;
-use variegated_scale_codec::acaia::{Frame, Generation, Reassembler};
+use variegated_scale_codec::acaia::{Frame, Reassembler};
 
 /// Notification stream for ACAIA Old protocol scale events
 ///
@@ -31,15 +31,20 @@ impl<'a> ScaleNotificationStream<'a> {
     fn new(listener: NotificationListener<'a, 512>) -> Self {
         Self {
             listener,
-            // **Pinned, not auto-detected.** This driver serves the pre-2021 protocol and
-            // nothing else -- the association's `BluetoothDriverKind` chose it -- so the
-            // generation is known and does not need guessing.
+            // **Auto-detecting, and it has to be.** The old GATT does not settle the
+            // framing: there are ACAIA scales that serve `0x1820` with one characteristic
+            // both ways and still send *modern* frames over it.
             //
-            // It used to be guessed, per frame, by testing whether byte 2 was 0x0C or 0x08.
-            // In a legacy frame byte 2 is the weight's *low* byte, so about two values in
-            // 256 were routed into the modern branch and lost. At factor 2 those are
-            // 20.60 g and 31.75 g -- ordinary shot weights.
-            reassembler: Reassembler::new(Generation::Legacy),
+            // Pinning this to `Generation::Legacy` broke exactly those scales. The legacy
+            // parser read the modern frame header `0C 08` as a little-endian weight and
+            // reported a constant 2060 raw -- surfacing as 2060.0 g, 206.0 g or 20.6 g
+            // depending on which byte it mistook for the decimal factor.
+            //
+            // Detection is by checksum rather than by the single header byte the original
+            // code tested, so it also keeps the fix that pinning was meant to deliver: a
+            // legacy weight whose low byte collides with a command byte no longer gets
+            // misrouted, because it cannot produce a valid modern checksum.
+            reassembler: Reassembler::new_autodetecting(),
             warned_modern: false,
         }
     }
@@ -78,23 +83,17 @@ impl<'a> ScaleNotificationStream<'a> {
             let notification = self.listener.next().await;
             let data: &[u8] = notification.as_ref();
 
-            // Latched, and it has to be. The test below is the *ambiguous* one that used to
-            // route frames -- in a legacy frame byte 2 is the weight's low byte -- so on a
-            // perfectly healthy scale it fires for roughly 0.8% of samples, which at this
-            // notification rate would be several lines a minute forever. Once per
-            // connection is enough to tell someone their scale is not what the association
-            // says it is.
-            if !self.warned_modern
-                && data.len() >= 3
-                && data[0] == 0xEF
-                && data[1] == 0xDD
-                && (data[2] == 0x0C || data[2] == 0x08)
-            {
+            // Reported once per connection, on the reassembler's own verdict rather than on
+            // a guess: it says a frame's checksum actually verified as modern. Weights are
+            // correct either way -- that is what auto-detection is for -- but the 2021+
+            // driver additionally surfaces battery and corrects a scale set to ounces, so a
+            // user seeing this has something to gain by re-pairing.
+            if !self.warned_modern && self.reassembler.saw_modern() {
                 self.warned_modern = true;
-                defmt::warn!(
-                    "possible 2021+ frame on the pre-2021 ACAIA driver; if weights look \
-                     wrong, re-pair the scale as ACAIA (2021 and later). This can also be \
-                     a legacy weight whose low byte happens to collide."
+                info!(
+                    "this ACAIA sends 2021-style frames over the older transport; weights \
+                     are handled correctly, but re-pairing it as ACAIA (2021 and later) \
+                     would also report battery and correct ounce readings"
                 );
             }
 
