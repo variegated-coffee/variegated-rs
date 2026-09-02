@@ -154,16 +154,27 @@ impl ScanSink for ScanPrinter {
 /// Weakest signal worth reporting, in dBm.
 ///
 /// A filter, not a preference: reports below this never reach the application processor,
-/// which keeps both the UART and the sixteen-entry result list for devices the user could
-/// plausibly be holding. Without it a scan in a flat returns every phone, watch and
-/// television in range, and the scale the user actually wants can be crowded out of a
-/// bounded list by furniture.
+/// which keeps both the UART and the sixteen-entry result list
+/// ([`variegated_controller_types::bluetooth::MAX_DISCOVERED_BLUETOOTH_PERIPHERALS`])
+/// for devices the user could plausibly be
+/// holding. Without it a scan in a flat returns every phone, watch and television in range,
+/// and the scale the user actually wants can be crowded out of a bounded list by furniture.
 ///
-/// -80 dBm is deliberately generous. A peripheral sitting on the machine reads around -50
-/// and one in the same room rarely falls below -70, so this discards a great deal of
-/// noise while leaving a wide margin against a scale in an awkward spot or behind a
-/// portafilter.
-const MIN_REPORTED_RSSI: i8 = -80;
+/// -70 dBm is roughly "in this room". A peripheral sitting on the machine reads around -50,
+/// and -70 is about where the same room stops and the next one begins.
+///
+/// **This is the only thing protecting that bounded list, which is why it is not generous.**
+/// `merge_scan_report` does not evict: once sixteen devices are in, a seventeenth is dropped
+/// and counted, so the list is first-come-first-served. In a flat full of phones, watches and
+/// televisions the slots fill with whatever advertised first, and the scale someone is
+/// standing next to can be locked out of its own pick-list.
+///
+/// The trade this makes is real and worth stating: the previous -80 existed as margin for a
+/// scale in an awkward spot -- in a drawer, behind a portafilter, on the far side of a
+/// boiler. Such a scale may now fall below the floor and never appear. **If a scale that is
+/// definitely powered on does not show up in a scan, this constant is the first thing to
+/// revisit**, and moving it back to -80 costs nothing but list pressure.
+const MIN_REPORTED_RSSI: i8 = -70;
 
 /// Which driver, if any, claims a service this device advertised.
 ///
