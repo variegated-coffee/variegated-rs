@@ -187,6 +187,12 @@ pub struct DiscoveredBluetoothPeripheral {
 /// A pick-list, not a census. `Status` is already the largest message on the link, and
 /// a user choosing their scale out of a list is not helped by the ninetieth device in
 /// range.
+///
+/// **The best sixteen, not the first sixteen.** `merge_scan_report` evicts, ranking
+/// recognised devices above unrecognised ones and stronger signals above weaker: without
+/// that the list was first-come-first-served, and in a crowded room the slots filled with
+/// whatever advertised first while the scale the user was standing next to could not get in
+/// at all.
 pub const MAX_DISCOVERED_BLUETOOTH_PERIPHERALS: usize = 16;
 
 /// Discovery state, as surfaced in [`crate::Status`].

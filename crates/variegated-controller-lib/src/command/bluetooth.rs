@@ -135,36 +135,109 @@ pub fn start_scan<M: RawMutex>(
     }
 }
 
+/// Where a device sits in the pick-list: **recognised first, then strongest signal first.**
+///
+/// Lower sorts earlier. `suggested_driver.is_none()` rather than `is_some()` because `false
+/// < true`, so recognised devices come first; [`core::cmp::Reverse`] on the RSSI because a
+/// stronger signal is a larger (less negative) number and should sort earlier.
+///
+/// The address is a final tiebreak, and it is not decoration. Without it two devices at the
+/// same RSSI and the same recognition compare equal, and an unstable sort may put them in
+/// either order -- so the list could reshuffle under the user's finger on any report, for no
+/// reason they could see. With it the order is a total function of the contents.
+///
+/// This is the same rule the web UI sorts by. The duplication is deliberate: this copy
+/// decides which devices are *kept*, which the UI cannot do because it only ever sees the
+/// survivors.
+fn scan_rank(
+    device: &DiscoveredBluetoothPeripheral,
+) -> (bool, core::cmp::Reverse<i8>, [u8; 6]) {
+    (
+        device.suggested_driver.is_none(),
+        core::cmp::Reverse(device.rssi),
+        device.address,
+    )
+}
+
 /// Fold one report from the comms processor into the discovered list.
 ///
 /// **Merged, not replaced.** The comms processor reports a device more than once on purpose:
 /// a name and a set of service UUIDs usually arrive in different advertising reports -- the
 /// name in the scan response, the UUIDs in the advertisement -- and each is forwarded when it
 /// adds something. Overwriting would keep whichever came last and throw away the other half.
+///
+/// **The list holds the best sixteen, not the first sixteen.** It used to simply refuse a
+/// device once full, which made discovery first-come-first-served: in a flat full of phones,
+/// watches and televisions the slots filled with whatever advertised first, and the scale the
+/// user was standing next to could be locked out of its own pick-list with no way to reach
+/// it. Now a device that ranks above the current worst evicts it -- so a recognised scale
+/// arriving seventeenth still gets in, and what it displaces is the weakest anonymous device
+/// in the room.
+///
+/// The RSSI floor on the comms processor is the other half of this and still matters: it
+/// keeps the far-away devices from reaching here at all, which is cheaper than admitting and
+/// then evicting them.
 pub fn merge_scan_report(
     status: &mut BluetoothScanStatus,
     device: DiscoveredBluetoothPeripheral,
 ) {
-    match status.discovered.iter_mut().find(|d| d.address == device.address) {
-        Some(existing) => {
+    // The index rather than a `&mut`, so the borrow ends before the arms below need to read
+    // the list's length and its other entries.
+    let existing = status
+        .discovered
+        .iter()
+        .position(|d| d.address == device.address);
+
+    match existing {
+        Some(index) => {
+            let existing = &mut status.discovered[index];
             if !device.name.is_empty() {
                 existing.name = device.name;
             }
             if device.suggested_driver.is_some() {
+                // This can promote a device out of the unrecognised group, which is why the
+                // sort below runs on every report and not only on insertion.
                 existing.suggested_driver = device.suggested_driver;
             }
             // `rssi` is deliberately left at the first sighting, matching what the field
             // claims. It ranks the list; it is not a measurement, and re-reading it per
             // report would make the order jump around while the user is reading it.
         }
+        None if status.discovered.len() < status.discovered.capacity() => {
+            // Cannot fail: the guard above is exactly the condition `push` checks.
+            let _ = status.discovered.push(device);
+        }
         None => {
-            if status.discovered.push(device).is_err() {
-                // Counted where the UI already looks for "results were lost", rather than in
-                // a log nobody reads mid-scan.
-                status.reports_dropped = status.reports_dropped.saturating_add(1);
+            let worst = status
+                .discovered
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, existing)| scan_rank(existing))
+                .map(|(index, _)| index);
+
+            // Counted whichever way it goes. Something *was* lost -- either this device or
+            // the one it displaced -- and the count is what tells the user the list is not
+            // the whole room. Where the UI already looks, rather than a log nobody reads
+            // mid-scan.
+            status.reports_dropped = status.reports_dropped.saturating_add(1);
+
+            if let Some(worst) = worst {
+                let worst_rank = scan_rank(&status.discovered[worst]);
+                // Strictly better, so a device that ties with the worst entry does not
+                // displace it. Ties would otherwise thrash: two equal devices could take
+                // turns evicting each other on every report.
+                if scan_rank(&device) < worst_rank {
+                    status.discovered[worst] = device;
+                }
             }
         }
     }
+
+    // Sorted here rather than in the consumer, so the bound above and the order the user
+    // sees are the same rule -- "the best sixteen" is only meaningful if something defines
+    // best. Sixteen entries, and the order is a pure function of the contents, so this
+    // neither costs anything nor makes the list move for its own sake.
+    status.discovered.sort_unstable_by_key(scan_rank);
 }
 
 /// `UpdateBluetoothScan` -- progress relayed from the comms processor.
@@ -196,13 +269,157 @@ mod tests {
     use variegated_controller_types::bluetooth::{BluetoothDriverKind, BluetoothName};
 
     fn device(address: u8, name: &str, driver: Option<BluetoothDriverKind>) -> DiscoveredBluetoothPeripheral {
+        device_at(address, name, driver, -50)
+    }
+
+    fn device_at(
+        address: u8,
+        name: &str,
+        driver: Option<BluetoothDriverKind>,
+        rssi: i8,
+    ) -> DiscoveredBluetoothPeripheral {
         DiscoveredBluetoothPeripheral {
             address: [address; 6],
             address_random: false,
             name: BluetoothName::try_from(name).expect("the test names are short enough"),
-            rssi: -50,
+            rssi,
             suggested_driver: driver,
         }
+    }
+
+    /// Fill the list with unrecognised devices at a uniform signal strength.
+    fn fill_with_unrecognised(status: &mut BluetoothScanStatus, rssi: i8) {
+        let capacity = status.discovered.capacity();
+        for address in 0..capacity {
+            merge_scan_report(status, device_at(address as u8, "junk", None, rssi));
+        }
+        assert_eq!(status.discovered.len(), capacity);
+    }
+
+    fn holds(status: &BluetoothScanStatus, address: u8) -> bool {
+        status.discovered.iter().any(|d| d.address == [address; 6])
+    }
+
+    /// The whole point of the eviction: a scale that advertises seventeenth still gets in.
+    ///
+    /// It is *weaker* than everything already in the list, deliberately -- recognition beats
+    /// signal, because a recognised peripheral is the thing the user opened this list to
+    /// find and an anonymous television is not.
+    #[test]
+    fn a_recognised_device_evicts_an_unrecognised_one_even_when_weaker() {
+        let mut status = BluetoothScanStatus::default();
+        fill_with_unrecognised(&mut status, -60);
+
+        merge_scan_report(
+            &mut status,
+            device_at(200, "Pyxis", Some(BluetoothDriverKind::AcaiaNew), -80),
+        );
+
+        assert!(holds(&status, 200), "the recognised scale was refused");
+        assert_eq!(status.discovered[0].address, [200; 6], "and it should rank first");
+        assert_eq!(status.discovered.len(), status.discovered.capacity());
+    }
+
+    /// Within a group, a stronger signal displaces a weaker one.
+    #[test]
+    fn a_stronger_device_evicts_a_weaker_one_of_the_same_kind() {
+        let mut status = BluetoothScanStatus::default();
+        fill_with_unrecognised(&mut status, -60);
+
+        merge_scan_report(&mut status, device_at(200, "closer", None, -40));
+
+        assert!(holds(&status, 200));
+        assert_eq!(status.discovered[0].address, [200; 6]);
+    }
+
+    /// And the converse, which is what stops a distant room from evicting the kitchen.
+    #[test]
+    fn a_weaker_device_is_refused_when_the_list_is_full() {
+        let mut status = BluetoothScanStatus::default();
+        fill_with_unrecognised(&mut status, -50);
+
+        merge_scan_report(&mut status, device_at(200, "far away", None, -70));
+
+        assert!(!holds(&status, 200), "a weaker device should not displace anything");
+        assert_eq!(status.reports_dropped, 1);
+    }
+
+    /// A tie does not displace, because ties would thrash: two equal devices could take
+    /// turns evicting each other on every report, and the list would never settle.
+    #[test]
+    fn a_tie_does_not_displace_the_incumbent() {
+        let mut status = BluetoothScanStatus::default();
+        fill_with_unrecognised(&mut status, -50);
+        let before = status.discovered.clone();
+
+        // Address 200 sorts *after* every incumbent on the tiebreak, so it ranks worse.
+        merge_scan_report(&mut status, device_at(200, "identical", None, -50));
+
+        assert_eq!(status.discovered, before, "the list moved for a device it kept out");
+        assert_eq!(status.reports_dropped, 1);
+    }
+
+    /// Eviction is still a loss, and the counter is what tells the user the list is not the
+    /// whole room. It moves whichever device ends up discarded.
+    #[test]
+    fn eviction_counts_as_a_dropped_report() {
+        let mut status = BluetoothScanStatus::default();
+        fill_with_unrecognised(&mut status, -60);
+
+        merge_scan_report(&mut status, device_at(200, "closer", None, -40));
+
+        assert_eq!(status.reports_dropped, 1);
+    }
+
+    /// Recognition arriving in a later report promotes the device, which is why the sort
+    /// runs on every report rather than only on insertion.
+    #[test]
+    fn recognition_promotes_a_device_up_the_list() {
+        let mut status = BluetoothScanStatus::default();
+        merge_scan_report(&mut status, device_at(1, "loud telly", None, -40));
+        merge_scan_report(&mut status, device_at(2, "quiet scale", None, -75));
+        assert_eq!(status.discovered[0].address, [1; 6], "strongest first, so far");
+
+        merge_scan_report(
+            &mut status,
+            device_at(2, "", Some(BluetoothDriverKind::Bookoo), -75),
+        );
+
+        assert_eq!(
+            status.discovered[0].address,
+            [2; 6],
+            "once recognised it should outrank a stronger anonymous device"
+        );
+    }
+
+    /// The order itself: recognised first, then by descending signal.
+    #[test]
+    fn the_list_is_ordered_recognised_first_then_by_signal() {
+        let mut status = BluetoothScanStatus::default();
+        merge_scan_report(&mut status, device_at(1, "", None, -30));
+        merge_scan_report(&mut status, device_at(2, "", Some(BluetoothDriverKind::Bookoo), -70));
+        merge_scan_report(&mut status, device_at(3, "", None, -50));
+        merge_scan_report(&mut status, device_at(4, "", Some(BluetoothDriverKind::AcaiaNew), -60));
+
+        let order: heapless::Vec<u8, 8> =
+            status.discovered.iter().map(|d| d.address[0]).collect();
+        assert_eq!(order.as_slice(), &[4, 2, 1, 3]);
+    }
+
+    /// Two devices that tie on both recognition and signal must land in a defined order, or
+    /// the list reshuffles under the user's finger on any report for no visible reason.
+    #[test]
+    fn a_tie_is_broken_deterministically_by_address() {
+        let mut first = BluetoothScanStatus::default();
+        merge_scan_report(&mut first, device_at(7, "", None, -55));
+        merge_scan_report(&mut first, device_at(3, "", None, -55));
+
+        let mut second = BluetoothScanStatus::default();
+        merge_scan_report(&mut second, device_at(3, "", None, -55));
+        merge_scan_report(&mut second, device_at(7, "", None, -55));
+
+        assert_eq!(first.discovered, second.discovered, "insertion order leaked into the list");
+        assert_eq!(first.discovered[0].address, [3; 6]);
     }
 
     /// A later report with no name does not blank the name already stored.
