@@ -13,6 +13,16 @@ pub enum RoutineType {
     UserDefined,
     Cleaning,
     HardwareButtonMapped,
+    /// A routine its owner wrote that operates the machine rather than making coffee -- a
+    /// group rinse, a purge, a flush.
+    ///
+    /// Runs exactly as [`RoutineType::UserDefined`] does; nothing on the machine treats it
+    /// differently. The distinction is downstream: `UserDefined` is somebody's espresso
+    /// routine, and this is somebody's *utility* routine, so the shots it produces are the
+    /// machine being operated and a shot library can keep them out of the list of what was
+    /// pulled recently. Only the author knows which one they wrote, which is why this is a
+    /// declaration rather than something inferred from what the routine does.
+    UserDefinedUtility,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -49,10 +59,15 @@ pub struct Routine {
 /// The routine encoding this firmware writes and accepts.
 ///
 /// Starts at 4, not 1. `Routine` had no version field before this, so the first byte of a
-/// legacy encoding is `routine_type`'s postcard discriminant -- 0..=3, for the four
-/// [`RoutineType`] variants. Any value of 4 or more is therefore unreachable by a
-/// pre-version routine, which makes `version != ROUTINE_FORMAT_VERSION` a sound rejection
-/// rather than a guess.
+/// legacy encoding is `routine_type`'s postcard discriminant. [`RoutineType`] had four
+/// variants for as long as routines were written without a version field, so that byte is
+/// 0..=3 in every one of them -- a variant appended since cannot appear in a legacy
+/// encoding, because it did not exist to be written. Any value of 4 or more is therefore
+/// unreachable by a pre-version routine, which makes `version != ROUTINE_FORMAT_VERSION` a
+/// sound rejection rather than a guess.
+///
+/// Note that the bound is a fact about what was written, not about how many variants
+/// [`RoutineType`] has today. Appending to that enum does not weaken it.
 ///
 /// This matters because the CRC cannot catch a legacy routine: it is computed over the same
 /// bytes it always was, so it still validates. Without a version check, postcard would
@@ -74,10 +89,11 @@ pub struct Routine {
 /// invalidates them for real: they are refused at load rather than mis-decoded, and have to
 /// be re-created. That is the trade this constant exists to make explicit.
 ///
-/// # Why the limit commands did *not* bump this
+/// # Why appending enum variants does *not* bump this
 ///
 /// "Bump on any change to the encoding" is written conservatively above, and appending
-/// variants to [`RoutineCommand`] is the case where it is worth being precise instead.
+/// variants to an enum reachable from `Routine` -- [`RoutineCommand`] and [`RoutineType`]
+/// are both cases this has come up for -- is where it is worth being precise instead.
 /// Appending leaves every existing encoding **byte-identical**: postcard writes an enum as
 /// its declaration-order discriminant, so a routine that names none of the new variants
 /// encodes exactly as it did before. Nothing already in flash decodes differently.
@@ -92,6 +108,9 @@ pub struct Routine {
 /// additive change. So: append freely and leave this alone; bump when a field is added,
 /// removed or reordered anywhere reachable from `Routine`, or when a variant is inserted
 /// rather than appended.
+///
+/// [`RoutineType::UserDefinedUtility`] was appended under version 5 on exactly this
+/// reasoning, and is the reason the paragraph above no longer names only `RoutineCommand`.
 pub const ROUTINE_FORMAT_VERSION: u16 = 5;
 
 #[cfg(feature = "defmt")]
