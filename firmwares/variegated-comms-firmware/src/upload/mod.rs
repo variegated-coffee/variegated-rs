@@ -624,7 +624,13 @@ async fn attempt_upload(
     // the original heap exhaustion an inference rather than a reading.
     let heap_before = crate::debug::snapshot::heap_free();
 
-    let head = noise::request_head(url.path, url.host, content_length, sender.handshake());
+    let head = noise::request_head(
+        url.path,
+        url.host,
+        content_length,
+        sender.handshake(),
+        variegated_comms_api_types::uplink_types::UPLINK_SCHEMA_VERSION,
+    );
     let outcome = body::send_sealed(&mut socket, &mut source, &mut sender, id, first, &head).await;
 
     log_info!(

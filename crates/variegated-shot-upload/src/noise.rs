@@ -370,6 +370,22 @@ pub fn frame_schedule(total: u32) -> Option<(u32, u32)> {
 /// not, and a server reading one name is a server that cannot be wrong about which it got.
 pub const HANDSHAKE_HEADER: &str = "X-Variegated-Noise";
 
+/// Which uplink schema version the body is encoded against.
+///
+/// The uplink carries no version byte -- both ends are reachable, so a mismatch was meant to
+/// show up as a refused handshake rather than as a field on every message. That reasoning
+/// holds for the *protocol* and not for the *schema*: a schema version is not a property of
+/// the connection either end negotiates, it is a property of the firmware on one end, and
+/// the receiver has no other way to learn it.
+///
+/// Sent on both transports -- this head and the WebSocket upgrade -- because a receiver that
+/// trusts the header must not silently fall back on one of them.
+///
+/// **Absent means version 1.** Machines in the field predate this header, and the two
+/// schemas differ only by appended variants, so reading an old machine as v1 is correct
+/// rather than merely tolerant.
+pub const SCHEMA_HEADER: &str = "X-Variegated-Uplink-Schema";
+
 /// The request head for a Noise body.
 ///
 /// **No `Authorization` header.** The device's static public key is the credential and it
@@ -395,6 +411,10 @@ pub fn request_head(
     host: &str,
     content_length: u32,
     handshake: &[u8],
+    // Passed rather than read from `UPLINK_SCHEMA_VERSION` here, so this crate does not take
+    // a dependency on `variegated-comms-api-types` for one number. The caller is the comms
+    // firmware, which already links it.
+    schema_version: u32,
 ) -> heapless::String<512> {
     use core::fmt::Write as _;
     let mut head = heapless::String::new();
@@ -405,6 +425,7 @@ pub fn request_head(
          Content-Type: application/vnd.variegated.uplink\r\n\
          Content-Length: {content_length}\r\n\
          Connection: close\r\n\
+         {SCHEMA_HEADER}: {schema_version}\r\n\
          {HANDSHAKE_HEADER}: "
     );
     let _ = crate::base64::write_base64_url(&mut head, handshake);
@@ -645,7 +666,7 @@ mod tests {
             NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &hello).unwrap();
         let declared = sender.content_length(total).unwrap();
         let handshake = sender.handshake().to_vec();
-        let head = request_head("/api/noise-upload", "plantlet.example", declared, &handshake);
+        let head = request_head("/api/noise-upload", "plantlet.example", declared, &handshake, 2);
 
         let mut source = Source { bytes: plaintext(total), chunk: PLAINTEXT_CHUNK };
         let first = block_on(source.chunk(id(), 0)).unwrap();
@@ -860,7 +881,7 @@ mod tests {
     fn the_head_carries_no_authorization_header() {
         // The property that makes a plaintext scheme acceptable at all.
         let handshake = [0x5au8; HANDSHAKE_LEN as usize];
-        let head = request_head("/api/noise-upload", "plantlet.example", 1234, &handshake);
+        let head = request_head("/api/noise-upload", "plantlet.example", 1234, &handshake, 2);
         assert!(!head.to_ascii_lowercase().contains("authorization"));
         assert!(head.contains("Content-Length: 1234\r\n"));
         assert!(head.contains("application/vnd.variegated.uplink"));
@@ -875,7 +896,7 @@ mod tests {
     #[test]
     fn the_head_carries_the_handshake_and_fits() {
         let handshake = [0x5au8; HANDSHAKE_LEN as usize];
-        let head = request_head("/api/noise-upload", "plantlet.example", 4_194_304, &handshake);
+        let head = request_head("/api/noise-upload", "plantlet.example", 4_194_304, &handshake, 2);
 
         let mut expected = alloc::string::String::new();
         crate::base64::write_base64_url(&mut expected, &handshake).unwrap();
@@ -883,6 +904,29 @@ mod tests {
         assert!(head.contains(HANDSHAKE_HEADER));
         // Complete: a truncated head would be missing the blank line that ends it.
         assert!(head.ends_with("\r\n\r\n"), "the head must be terminated");
+        assert!(head.len() < 512, "head was {} bytes of 512", head.len());
+    }
+
+    /// The head declares which uplink schema the body is encoded against.
+    ///
+    /// Without it the receiver has to guess, and guessing wrong is not a decode error but a
+    /// *wrong* decode -- postcard is positional, so a discriminant the reader's schema does
+    /// not have is the best case and a variant that means something else is the worst.
+    ///
+    /// This is the machine's half of that contract. The other half is
+    /// `firmwares/variegated-comms-firmware/src/uplink/http.rs`, which sends the same header
+    /// on the WebSocket upgrade -- both transports or neither, since a receiver that trusts
+    /// the header would otherwise silently fall back to v1 on one of them.
+    #[test]
+    fn the_head_declares_the_schema_version() {
+        let handshake = [0x5au8; HANDSHAKE_LEN as usize];
+        let head = request_head("/api/noise-upload", "plantlet.example", 1024, &handshake, 2);
+
+        assert!(head.contains(SCHEMA_HEADER));
+        assert!(
+            head.contains("X-Variegated-Uplink-Schema: 2\r\n"),
+            "the version must be the value, not merely present: {head}"
+        );
         assert!(head.len() < 512, "head was {} bytes of 512", head.len());
     }
 
@@ -895,7 +939,7 @@ mod tests {
         let mut sender =
             NoiseSender::begin(&keys(), Ephemeral::from_bytes(EPHEMERAL), &hello).unwrap();
         let declared = sender.content_length(total).unwrap();
-        let head = request_head("/x", "h", declared, sender.handshake());
+        let head = request_head("/x", "h", declared, sender.handshake(), 2);
         let mut source = Source { bytes: plaintext(total), chunk: 512 };
         let first = block_on(source.chunk(id(), 0)).unwrap();
         let mut sink = Sink(Vec::new());

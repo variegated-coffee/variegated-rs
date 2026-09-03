@@ -37,7 +37,25 @@ use variegated_shot_upload::uplink::{IK_MSG1_LEN, IK_MSG2_LEN};
 ///
 /// The handshake is 102 bytes, so 136 characters encoded. A `heapless::String` rather than a
 /// heap allocation because it lives only for the length of one write.
-const REQUEST_LEN: usize = 512;
+///
+/// **Sized against the worst case rather than the usual one**, because the overflow is not
+/// loud: `write!` into a full `heapless::String` returns an error that this module maps to
+/// `Err(())`, which reads as "the uplink would not connect" rather than as "the request did
+/// not fit". Worked through, with the endpoint bounded by `SHOT_UPLOAD_ENDPOINT_LEN` = 255:
+///
+/// | part | bytes |
+/// |---|---|
+/// | request line and `Host`, sharing one 255-char endpoint between path and host | ~278 |
+/// | `Upgrade`, `Connection`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key` | 113 |
+/// | `X-Variegated-Uplink-Schema` | 31 |
+/// | `X-Variegated-Noise` and the encoded handshake | 158 |
+/// | the blank line | 2 |
+/// | **total** | **~582** |
+///
+/// It was 512, which a maximal endpoint already overflowed before the schema header was
+/// added -- the previous figure counted a short host. 640 leaves room for one more header of
+/// this size.
+const REQUEST_LEN: usize = 640;
 
 /// The largest frame header RFC 6455 can produce with a mask: 2 + 8 + 4.
 const MAX_FRAME_HEADER: usize = 14;
@@ -99,7 +117,13 @@ pub async fn upgrade(
          Connection: Upgrade\r\n\
          Sec-WebSocket-Version: 13\r\n\
          Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\
+         {}: {}\r\n\
          {}: ",
+        // Both transports declare the schema, or neither may be trusted: a receiver that
+        // reads this header on the POST and not here would silently fall back to v1 for
+        // every socket session. The POST's half is `noise::request_head`.
+        variegated_shot_upload::noise::SCHEMA_HEADER,
+        variegated_comms_api_types::uplink_types::UPLINK_SCHEMA_VERSION,
         variegated_shot_upload::noise::HANDSHAKE_HEADER
     )
     .map_err(|_| ())?;
