@@ -237,6 +237,7 @@ async fn esp_transceiver_task(
     dispatcher: &'static ExternalDeviceDispatcher,
     debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>,
     scale_command_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::ScaleOp), 4>>,
+    brew_sensor_command_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::BrewSensorOp), 4>>,
     bluetooth_scan_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u16, 2>>,
     wifi_credentials_receiver: Option<embassy_sync::watch::Receiver<'static, SyncSendRawMutex, StoredWifiCredentials, 2>>,
     wifi_provisioning_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u32, 2>>,
@@ -283,7 +284,7 @@ async fn esp_transceiver_task(
     // means "the link task is being woken", not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver),
+        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver),
     ).await;
 }
 
@@ -1159,6 +1160,11 @@ static BLUETOOTH_GROUP_1_SCALE_STATUS_PROVIDER: StaticCell<BluetoothScaleStatusP
 // controller's future, the receiver inside the transceiver task.
 #[cfg(feature = "bluetooth-group-1-scale")]
 static BLUETOOTH_SCALE_COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::ScaleOp), 4>> = StaticCell::new();
+
+/// The same, for the Belka Portal's display: sender on the controller's future, receiver
+/// inside the transceiver task.
+#[cfg(feature = "belka")]
+static BELKA_COMMAND_CHANNEL: StaticCell<Channel<SyncSendRawMutex, (variegated_controller_types::PeripheralId, variegated_controller_types::BrewSensorOp), 4>> = StaticCell::new();
 
 static EXTERNAL_DEVICE_DISPATCHER: StaticCell<ExternalDeviceDispatcher> = StaticCell::new();
 
@@ -2435,6 +2441,12 @@ async fn main_task(
     let bluetooth_scale_command_channel: &'static Channel<_, _, 4> =
         BLUETOOTH_SCALE_COMMAND_CHANNEL.init(Channel::new());
 
+    // The same shape for the Belka Portal's display. Gated on `belka` rather than on the
+    // scale feature: the two peripherals are independent, and a machine can have either.
+    #[cfg(feature = "belka")]
+    let belka_command_channel: &'static Channel<_, _, 4> =
+        BELKA_COMMAND_CHANNEL.init(Channel::new());
+
     #[cfg(feature = "bluetooth-group-1-scale")]
     let bluetooth_group_1_scale = BluetoothScale::new(
         BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID,
@@ -2975,6 +2987,15 @@ async fn main_task(
         Some(pump_rpm_sig.receiver().unwrap()),
         #[cfg(not(feature = "gear-pump"))]
         None,
+        // The Belka Portal's display. The same peripheral id the dispatcher above routes
+        // its readings by, so a command and a measurement address the Portal the same way.
+        #[cfg(feature = "belka")]
+        Some(Box::new(variegated_hal::ChannelBrewSensorCommands::new(
+            BELKA_PERIPHERAL_ID,
+            belka_command_channel.sender(),
+        ))),
+        #[cfg(not(feature = "belka"))]
+        None,
     );
 
     // Create water tap with dual boiler mechanism
@@ -3387,7 +3408,12 @@ async fn main_task(
     #[cfg(not(feature = "bluetooth-group-1-scale"))]
     let scale_command_receiver = None;
 
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition.clone(), routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")))));
+    #[cfg(feature = "belka")]
+    let brew_sensor_command_receiver = Some(belka_command_channel.receiver());
+    #[cfg(not(feature = "belka"))]
+    let brew_sensor_command_receiver = None;
+
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition.clone(), routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")))));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]

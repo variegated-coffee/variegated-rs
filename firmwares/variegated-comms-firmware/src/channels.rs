@@ -9,7 +9,7 @@ use embassy_sync::watch::Watch;
 use portable_atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
 use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
-use variegated_controller_types::{CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineDeleteOutcome, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
+use variegated_controller_types::{BrewSensorOp, CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineDeleteOutcome, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
     ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogList, ShotLogListEntry, ShotLogListRequest,
     ShotLogStorageError,
@@ -280,6 +280,28 @@ pub static BLE_RECONNECT_REQUEST: Signal<CriticalSectionRawMutex, u16> = Signal:
 pub static SCALE_COMMAND_CHANNEL: PubSubChannel<
     CriticalSectionRawMutex,
     (PeripheralId, ScaleOp),
+    4,
+    MAX_BLUETOOTH_PERIPHERALS,
+    1,
+> = PubSubChannel::new();
+
+/// Commands for a brew sensor's own display -- today the Belka Portal's graph view.
+///
+/// Sized and reasoned about exactly as [`SCALE_COMMAND_CHANNEL`] above: one subscriber per
+/// slot, taken for the life of the slot task, four deep so two operations in flight cannot
+/// collapse into one silently.
+///
+/// A channel of its own rather than a widened `ScaleOp`. The two peripherals share no
+/// vocabulary -- a Portal has no weight to zero and a scale has no screen to switch -- and
+/// keeping them apart means a slot running one driver cannot be handed the other's operation
+/// in the first place.
+///
+/// The same staleness rule applies and is handled the same way: the Belka loop drains its
+/// subscriber once connected, so a "show the graph" raised while the Portal was away cannot
+/// fire minutes later, after the shot it belonged to has finished.
+pub static BREW_SENSOR_COMMAND_CHANNEL: PubSubChannel<
+    CriticalSectionRawMutex,
+    (PeripheralId, BrewSensorOp),
     4,
     MAX_BLUETOOTH_PERIPHERALS,
     1,

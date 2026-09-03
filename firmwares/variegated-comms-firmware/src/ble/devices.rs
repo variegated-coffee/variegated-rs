@@ -3,15 +3,16 @@
 use bt_hci::controller::ExternalController;
 use variegated_log::{log_error, log_info};
 use embassy_futures::join::join;
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
+use embassy_sync::pubsub::Subscriber;
 use embassy_sync::watch::Watch;
 use embassy_time::{Duration, Timer};
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
-use variegated_belka_portal_trouble_driver::BelkaPortalDriver;
-use variegated_controller_types::ExternalPeripheralSensorReading;
+use variegated_belka_portal_trouble_driver::{BelkaPortalDriver, HIDE_GRAPH, SHOW_GRAPH};
+use variegated_controller_types::{BrewSensorOp, ExternalPeripheralSensorReading};
 use variegated_controller_types::debug::DebugEvent;
 use crate::debug::bus;
 use variegated_trouble_connection_manager::BleConnectionManager;
@@ -21,8 +22,8 @@ use crate::ble::scale_slot::{run_scale_slot, AcaiaNew, AcaiaOld, Bookoo};
 use crate::ble::scanner::ScanPrinter;
 use crate::ble::status;
 use crate::channels::{
-    BLE_RECONNECT_REQUEST, BLE_SCAN_REQUEST, BT_ASSOCIATIONS, SCALE_COMMAND_CHANNEL,
-    SENSOR_READING_CAPACITY,
+    BLE_RECONNECT_REQUEST, BLE_SCAN_REQUEST, BREW_SENSOR_COMMAND_CHANNEL, BT_ASSOCIATIONS,
+    SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
 };
 use variegated_trouble_connection_manager::ScanRequest;
 use variegated_controller_types::bluetooth::{
@@ -181,6 +182,12 @@ pub async fn ble_slot_task(
         .subscriber()
         .expect("the scale command channel is sized for one subscriber per slot");
 
+    // The same, for the same reason. Held for the life of the task even on a slot that ends
+    // up running a scale, which costs a subscriber slot the channel is sized for.
+    let mut brew_sensor_commands = BREW_SENSOR_COMMAND_CHANNEL
+        .subscriber()
+        .expect("the brew sensor command channel is sized for one subscriber per slot");
+
     let mut current: Option<BluetoothSlotAssignment> = None;
 
     // Indexed by the peripheral slot this instance was given. Four instances of this task
@@ -276,6 +283,7 @@ pub async fn ble_slot_task(
                         assignment.id,
                         slot,
                         sensor_sender,
+                        &mut brew_sensor_commands,
                     )
                     .await
                 }
@@ -423,6 +431,14 @@ async fn belka_measurement_loop(
     peripheral_id: PeripheralId,
     slot: usize,
     sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
+    brew_sensor_commands: &mut Subscriber<
+        'static,
+        CriticalSectionRawMutex,
+        (PeripheralId, BrewSensorOp),
+        4,
+        MAX_BLUETOOTH_PERIPHERALS,
+        1,
+    >,
 ) {
     Timer::after(Duration::from_millis(300)).await;
     loop {
@@ -464,18 +480,28 @@ async fn belka_measurement_loop(
                     match gatt.subscribe().await {
                         Ok(mut stream) => {
                             log_info!("Successfully subscribed to Belka Portal measurements");
+
+                            // Discard anything raised while the Portal was away, exactly as
+                            // the scale slot does. A "show the graph" queued during a
+                            // disconnect belongs to a shot that has almost certainly ended,
+                            // and replaying it here would leave the Portal on a graph of
+                            // nothing with no second command coming to take it down.
+                            while brew_sensor_commands.try_next_message_pure().is_some() {}
+
                             loop {
-                                // Race between getting next measurement and checking connection status
-                                match select(
+                                // Race between getting next measurement, checking connection
+                                // status, and a command for this peripheral's display.
+                                match select3(
                                     stream.next(),
                                     async {
                                         Timer::after(Duration::from_secs(1)).await;
                                         let device_handle = handle.register_device(belka_address);
                                         let driver = BelkaPortalDriver::new(device_handle, stack);
                                         driver.is_connected().await
-                                    }
+                                    },
+                                    brew_sensor_commands.next_message_pure(),
                                 ).await {
-                                    Either::First(result) => {
+                                    Either3::First(result) => {
                                         match result {
                                             Ok(measurement) => {
                                                /* log_info!(
@@ -515,11 +541,28 @@ async fn belka_measurement_loop(
                                             }
                                         }
                                     }
-                                    Either::Second(is_connected) => {
+                                    Either3::Second(is_connected) => {
                                         if !is_connected {
                                             log_info!("Connection lost during measurements, exiting");
                                             status::set_slot_connected(slot, false);
                                             break;
+                                        }
+                                    }
+                                    Either3::Third((target, op)) => {
+                                        // Every slot subscribes to the one channel, so the id
+                                        // is what says the command was meant for this Portal.
+                                        if target != peripheral_id {
+                                            continue;
+                                        }
+                                        let payload = match op {
+                                            BrewSensorOp::ShowGraph => &SHOW_GRAPH,
+                                            BrewSensorOp::HideGraph => &HIDE_GRAPH,
+                                        };
+                                        // Acknowledged, so a refusal is visible here and
+                                        // nowhere else -- the Portal never reports whether it
+                                        // understood the payload, only that it arrived.
+                                        if let Err(e) = gatt.write_command(payload).await {
+                                            log_error!("Failed to write Belka command: {:?}", e);
                                         }
                                     }
                                 }

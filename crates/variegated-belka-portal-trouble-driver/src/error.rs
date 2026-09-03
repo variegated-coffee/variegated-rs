@@ -12,6 +12,11 @@ pub enum Error {
     ReadFailed,
     /// Failed to subscribe to notifications
     SubscribeFailed,
+    /// Failed to write to a characteristic
+    ///
+    /// The write this reports is acknowledged, so this means the Portal refused it or the link
+    /// went -- not that the payload was misunderstood, which nothing reports.
+    WriteFailed,
     /// Invalid data length received
     InvalidDataLength,
     /// Failed to parse measurement data
@@ -28,6 +33,7 @@ impl core::fmt::Display for Error {
             Error::CharacteristicNotFound => write!(f, "Characteristic not found"),
             Error::ReadFailed => write!(f, "Failed to read from characteristic"),
             Error::SubscribeFailed => write!(f, "Failed to subscribe to notifications"),
+            Error::WriteFailed => write!(f, "Failed to write to characteristic"),
             Error::InvalidDataLength => write!(f, "Invalid data length"),
             Error::ParseError => write!(f, "Failed to parse measurement data"),
             Error::GattError => write!(f, "GATT operation failed"),

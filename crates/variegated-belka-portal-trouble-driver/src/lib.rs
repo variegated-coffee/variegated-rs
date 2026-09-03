@@ -14,7 +14,10 @@ mod types;
 
 pub use driver::{BelkaGattClient, BelkaPortalDriver, MeasurementNotificationStream};
 pub use error::Error;
-pub use types::{Measurements, BELKA_SERVICE_UUID, MEASUREMENT_CHAR_UUID};
+pub use types::{
+    Measurements, BELKA_SERVICE_UUID, COMMAND_CHAR_UUID, HIDE_GRAPH, MEASUREMENT_CHAR_UUID,
+    SHOW_GRAPH,
+};
 
 /// Re-export connection manager types for convenience
 pub use variegated_trouble_connection_manager::{

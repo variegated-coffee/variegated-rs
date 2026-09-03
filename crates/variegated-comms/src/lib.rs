@@ -21,6 +21,7 @@ use variegated_controller_types::shot_upload::ShotUploadConfig;
 use variegated_controller_types::wifi::StoredWifiCredentials;
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage,
+    BrewSensorOp,
     CommsProcessorToApplicationProcessorMessage,
     Configuration,
     MachineCommand,
@@ -446,6 +447,11 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // wraps rather than translates -- and it is `(PeripheralId, ScaleOp)` rather than a
     // bare op because one machine can carry several scales.
     scale_command_receiver: Option<ChannelReceiver<'static, SM, (PeripheralId, ScaleOp), 4>>,
+    // The same shape for a brew sensor owned by the comms processor -- today the Belka
+    // Portal's display. `None` on a machine with no such sensor, which is every machine but
+    // the GS3.
+    brew_sensor_command_receiver:
+        Option<ChannelReceiver<'static, SM, (PeripheralId, BrewSensorOp), 4>>,
     // Accepted Bluetooth scan requests, carrying the duration in milliseconds. `None` on
     // a machine whose controller was not given the matching sender, in which case the
     // controller refuses scan requests rather than this arm dropping them.
@@ -1374,6 +1380,10 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                     }
                 }
             },
+            // The two peripheral-command arms, paired so that `join4` keeps its arity --
+            // nesting is free, as the note on the fourth slot below explains. They are
+            // together because they are the same job for two different peripherals.
+            join(
             async {
                 // Scale commands bound for a scale the comms processor owns.
                 //
@@ -1408,6 +1418,32 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                     }
                 }
             },
+            async {
+                // The same arm again for a brew sensor's display. `None` on every machine
+                // but the GS3, where it parks forever exactly as the scale arm above does.
+                //
+                // A separate channel rather than a widened `ScaleOp`: the two peripherals
+                // share no vocabulary, and the wire keeps them apart for the same reason.
+                let Some(receiver) = brew_sensor_command_receiver else {
+                    core::future::pending::<()>().await;
+                    return;
+                };
+
+                loop {
+                    let (peripheral_id, op) = receiver.receive().await;
+
+                    // `send().await`, like the scale arm: this is machine traffic, arriving
+                    // twice a shot, and belongs on the same footing as `Status`.
+                    let response = ApplicationProcessorToCommsProcessorMessage::BrewSensorCommand(peripheral_id, op);
+                    if let Ok(output) = to_allocvec_cobs(&response) {
+                        let _ = tx_sender.send(output).await;
+                        info!("Sent brew sensor command to ESP32 for peripheral {}", peripheral_id);
+                    } else {
+                        info!("Failed to serialize brew sensor command");
+                    }
+                }
+            },
+            ),
             // `join4` is embassy-futures' maximum arity, so the fourth slot carries four
             // futures nested rather than one. Nesting is free -- a `join` polls both arms
             // on every wake exactly as a hypothetical `join7` would -- and it keeps the

@@ -341,6 +341,17 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
     /// [`ExternalPeripheralSensorReading`], so commands and measurements address a
     /// scale the same way in both directions.
     ScaleCommand(PeripheralId, ScaleOp),
+    /// An operation on a brew sensor owned by the comms processor.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::ScaleCommand`].
+    ///
+    /// A sibling of that variant rather than another [`ScaleOp`]: a Belka Portal is not a
+    /// scale, and `ScaleOp`'s own doc is explicit about what it covers. Until now
+    /// `ScaleCommand` was the only peripheral-directed message in this enum; this is the
+    /// second, and it carries a [`PeripheralId`] for the same reason -- there is no default
+    /// peripheral, and the id is the one the readings already travel under in
+    /// [`ExternalPeripheralSensorReading`].
+    BrewSensorCommand(PeripheralId, BrewSensorOp),
     /// The current Bluetooth peripheral associations.
     ///
     /// Appended, not inserted -- see the note on
@@ -549,4 +560,29 @@ pub enum ScaleOp {
     /// happened -- see the note on `variegated_hal::scale::ScaleCapabilities`, which already
     /// records that this type cannot express a per-driver answer.
     SetDose(f32),
+}
+
+/// An operation on a brew sensor, as carried by
+/// [`ApplicationProcessorToCommsProcessorMessage::BrewSensorCommand`].
+///
+/// What the Belka Portal shows on its own display, and nothing else. It is a separate
+/// vocabulary from [`ScaleOp`] because the two peripherals share nothing: a Portal has no
+/// weight to zero and no timer to run, and a scale has no screen to switch.
+///
+/// **Write-only, and less answerable than the scale's.** The write itself is acknowledged --
+/// unlike the scale commands, which are fire-and-forget -- but the acknowledgement covers
+/// receipt, not comprehension. Nothing tells the machine which view the Portal is actually
+/// showing, so this is a request rather than a setting, and the firmware keeps no model of the
+/// answer.
+///
+/// Append, never insert.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrewSensorOp {
+    /// Switch the display to its graph view, for the duration of a shot.
+    ShowGraph,
+    /// Leave it.
+    HideGraph,
 }

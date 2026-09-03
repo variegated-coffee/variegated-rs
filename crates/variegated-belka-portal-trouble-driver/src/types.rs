@@ -6,6 +6,40 @@ pub const BELKA_SERVICE_UUID: Uuid = Uuid::new_short(0x7400);
 /// Measurement characteristic UUID (short UUID 0x7410)
 pub const MEASUREMENT_CHAR_UUID: Uuid = Uuid::new_short(0x7410);
 
+/// Command characteristic UUID (short UUID 0x7420)
+///
+/// Written, never read or subscribed. The Portal acknowledges the *write* and nothing else --
+/// there is no reply saying a command was understood, so a payload it does not recognise is
+/// indistinguishable from one it never received.
+pub const COMMAND_CHAR_UUID: Uuid = Uuid::new_short(0x7420);
+
+/// Switch the Portal's display to its graph view.
+///
+/// # These are bytes, not a number
+///
+/// **Do not turn this into a `u32`, and do not "fix" the byte order.** It is written here as
+/// the four bytes that are known to work, in the order they went out on the wire.
+///
+/// The provenance: typed into nRF Connect's write field, which sends the bytes as entered, and
+/// observed in Apple PacketLogger as `Write Request - Handle:0x002F - Value: 4000 012D` on a
+/// write the Portal acted on.
+///
+/// The temptation to swap them is real, because the Portal's *notification* payload is three
+/// little-endian `f32`s -- see [`Measurements::parse`] -- so a reader who assumes the device is
+/// little-endian throughout would reach for `0x2D, 0x01, 0x00, 0x40` and be wrong. A command
+/// characteristic is not obliged to share an encoding with a measurement characteristic, and
+/// this one does not.
+///
+/// Nothing downstream can catch the mistake. There is no acknowledgement of meaning, no
+/// echo, and no error: the Portal would simply keep showing the wrong screen.
+pub const SHOW_GRAPH: [u8; 4] = [0x40, 0x00, 0x01, 0x2D];
+
+/// Leave the graph view. See [`SHOW_GRAPH`] for why this is a byte array.
+///
+/// One byte apart from its opposite, which is worth knowing when reading a capture: a
+/// transposition between the two is a single-bit difference and looks like nothing at a glance.
+pub const HIDE_GRAPH: [u8; 4] = [0x40, 0x00, 0x01, 0x2E];
+
 /// Measurements from the Belka Portal device
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]

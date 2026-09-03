@@ -188,7 +188,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)),
+        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver)),
     ).await;
 }
 
@@ -924,7 +924,10 @@ async fn main_task(spawner: Spawner) -> ! {
         // pump_rpm_sensor. This machine has a tacho -- `pump_rpm_sig` above, on PWM input
         // capture -- but wiring it is untested on this hardware and deliberately out of
         // scope here. Passing it is a one-line change when someone can verify it.
-        None
+        None,
+        // brew_sensor_commands. This machine has no Belka Portal and no `belka` feature, so
+        // the controller's graph calls drop here.
+        None,
     );
 
     // Create peripheral registry and register peripherals

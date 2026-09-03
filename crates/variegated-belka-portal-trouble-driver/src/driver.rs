@@ -4,7 +4,7 @@ use trouble_host::gatt::NotificationListener;
 use trouble_host::attribute::Characteristic;
 use trouble_host::prelude::Uuid;
 
-use crate::{types::{Measurements, BELKA_SERVICE_UUID, MEASUREMENT_CHAR_UUID}, Error};
+use crate::{types::{Measurements, BELKA_SERVICE_UUID, COMMAND_CHAR_UUID, MEASUREMENT_CHAR_UUID}, Error};
 
 /// Notification stream for Belka Portal measurements
 ///
@@ -108,6 +108,37 @@ impl<'a, C: Controller, P: PacketPool> BelkaGattClient<'a, C, P> {
         info!("We have the data, let's parse it.");
 
         Measurements::parse(&data)
+    }
+
+    /// Write a command to the Portal's command characteristic.
+    ///
+    /// The payloads are in [`crate::SHOW_GRAPH`] and [`crate::HIDE_GRAPH`], and their doc
+    /// comments explain why they are byte arrays rather than numbers.
+    ///
+    /// **An acknowledged write**, unlike the BooKoo command path's write-without-response.
+    /// That is not a preference: the only capture of this characteristic working is a
+    /// `Write Request`, so it is the one form known to be accepted. `Ok(())` therefore means
+    /// the Portal acknowledged receiving the bytes -- it says nothing about whether it
+    /// understood them, because no part of this protocol reports that.
+    pub async fn write_command(&self, payload: &[u8]) -> Result<(), Error> {
+        let services = self
+            .client
+            .services_by_uuid(&BELKA_SERVICE_UUID)
+            .await
+            .map_err(|_| Error::WriteFailed)?;
+
+        let service = services.first().ok_or(Error::ServiceNotFound)?.clone();
+
+        let characteristic: Characteristic<Uuid> = self
+            .client
+            .characteristic_by_uuid(&service, &COMMAND_CHAR_UUID)
+            .await
+            .map_err(|_| Error::CharacteristicNotFound)?;
+
+        self.client
+            .write_characteristic(&characteristic, payload)
+            .await
+            .map_err(|_| Error::WriteFailed)
     }
 
     /// Subscribe to measurement notifications

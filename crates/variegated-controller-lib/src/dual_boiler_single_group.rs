@@ -1539,6 +1539,11 @@ impl<
             // tagged and no brew followed.
             let dose = self.pending_annotations.dose_weight();
             self.group.apply_brew_start_actions(actions, dose).await;
+
+            // Unconditional, unlike the actions above: a brew sensor that can show a graph
+            // should show it while there is something to graph, and there is no setting for
+            // it. A machine with no such sensor drops this.
+            self.group.set_brew_sensor_graph(true);
         } else {
             log_info!("start_brewing() called but group_brewing already true - skipping baseline capture");
         }
@@ -1594,6 +1599,11 @@ impl<
             // has visibly stopped pouring should not still be counting.
             let actions = self.configuration.persistent.group.brew_actions;
             self.group.apply_brew_stop_actions(actions).await;
+
+            // The other half. This is also the abort path, so a shot stopped early takes the
+            // graph down with it rather than leaving the Portal on a screen about a shot that
+            // is no longer happening.
+            self.group.set_brew_sensor_graph(false);
 
             // The scale's zero tracking is deliberately *not* re-enabled here. It used to
             // be, and with a settle read two seconds out that is actively wrong: a scale

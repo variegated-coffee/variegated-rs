@@ -1339,6 +1339,10 @@ impl<
         // See the note at the dual-boiler's matching call for why this is read first.
         let dose = self.pending_annotations.dose_weight();
         self.group.apply_brew_start_actions(actions, dose).await;
+        // See the dual-boiler's matching call. No machine running this firmware has a brew
+        // sensor today, so this drops -- it is here so the two controllers do not drift, and
+        // so that fitting one would simply work.
+        self.group.set_brew_sensor_graph(true);
     }
 
     async fn stopped_brewing(&mut self) {
@@ -1375,6 +1379,7 @@ impl<
         // the same flag either way.
         let actions = self.configuration.persistent.brew_actions;
         self.group.apply_brew_stop_actions(actions).await;
+        self.group.set_brew_sensor_graph(false);
 
         // The scale's idle configuration is restored by `take_settled_output`, after the
         // settle read, rather than here -- see the equivalent note in

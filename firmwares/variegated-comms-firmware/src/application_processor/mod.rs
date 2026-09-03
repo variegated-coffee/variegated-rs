@@ -23,7 +23,7 @@ use crate::channels::{
     ApplicationStatusPublisher, ApplicationConfigurationPublisher, ApplicationRoutinePublisher,
     ShotLogEventPublisher,
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
-    ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
+    BREW_SENSOR_COMMAND_CHANNEL, ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
     ImprovReport, IMPROV_REPORT_CHANNEL,
     SHOT_UPLOAD_CONFIG, SHOT_UPLOAD_CONFIG_RECEIVED,
@@ -413,6 +413,18 @@ pub async fn start(
                                 // oldest entry, which for a latest-wins op is the right
                                 // loss.
                                 SCALE_COMMAND_CHANNEL
+                                    .immediate_publisher()
+                                    .publish_immediate((peripheral_id, op));
+                            }
+                            ApplicationProcessorToCommsProcessorMessage::BrewSensorCommand(peripheral_id, op) => {
+                                log_info!(
+                                    "Received brew sensor command {:?} for peripheral 0x{:04X}",
+                                    op,
+                                    peripheral_id
+                                );
+                                // `immediate_publisher` for the reason given on the scale
+                                // arm above, which applies unchanged.
+                                BREW_SENSOR_COMMAND_CHANNEL
                                     .immediate_publisher()
                                     .publish_immediate((peripheral_id, op));
                             }

@@ -219,7 +219,77 @@ pub struct Group<'a, M: RawMutex, const N: usize> {
     /// Group-scoped rather than machine-scoped because the pump serves the group, and
     /// because this is the level `GroupStatus` is assembled at. A dual-group machine with
     /// one pump per group would want it here too.
-    pub pump_rpm_sensor: Option<Receiver<'a, M, SensorReading<RPMType>, N>>
+    pub pump_rpm_sensor: Option<Receiver<'a, M, SensorReading<RPMType>, N>>,
+    /// Where to send commands for the brew sensor's own display, on machines with one.
+    ///
+    /// **A sender rather than a controller object**, unlike [`Self::scale_controller`]. The
+    /// brew sensor's readings arrive here as plain receivers -- there is no trait behind them
+    /// and only one implementation to reach -- so a `Box<dyn>` would be ceremony around a
+    /// channel. The peripheral id travels with each command for the reason the scale's does:
+    /// a machine may carry more than one.
+    pub brew_sensor_commands: Option<Box<dyn BrewSensorCommands>>,
+}
+
+/// Somewhere to send commands for a brew sensor's own display.
+///
+/// **A trait object for the reason [`scale::ScaleController`] is one**, and it is not
+/// stylistic: the channel that carries these to the comms processor is guarded by a different
+/// `RawMutex` from the one [`Group`] is generic over, and a concrete sender here would tie the
+/// two together. Boxing erases it, exactly as the scale path already does.
+///
+/// Synchronous, unlike `ScaleController`: the only implementation pushes onto a channel and
+/// does not wait, so there is nothing to await and no `#[async_trait]` bound to carry.
+pub trait BrewSensorCommands {
+    /// Ask the sensor to show its graph, or to stop.
+    ///
+    /// Cannot fail in any way the caller could act on. The command crosses to another
+    /// processor and out over BLE; what became of it is not knowable from here.
+    fn set_graph(&self, showing: bool);
+}
+
+/// A [`BrewSensorCommands`] that pushes onto the channel the comms transceiver drains.
+///
+/// Generic over the channel's mutex rather than the group's, which is the whole point of the
+/// trait above.
+pub struct ChannelBrewSensorCommands<M: RawMutex + 'static> {
+    peripheral_id: PeripheralId,
+    sender: embassy_sync::channel::Sender<
+        'static,
+        M,
+        (PeripheralId, variegated_controller_types::BrewSensorOp),
+        4,
+    >,
+}
+
+impl<M: RawMutex + 'static> ChannelBrewSensorCommands<M> {
+    /// The peripheral id must be the one the sensor's *readings* arrive under, or the comms
+    /// processor will route the command to a slot that is not listening for it.
+    pub fn new(
+        peripheral_id: PeripheralId,
+        sender: embassy_sync::channel::Sender<
+            'static,
+            M,
+            (PeripheralId, variegated_controller_types::BrewSensorOp),
+            4,
+        >,
+    ) -> Self {
+        Self { peripheral_id, sender }
+    }
+}
+
+impl<M: RawMutex + 'static> BrewSensorCommands for ChannelBrewSensorCommands<M> {
+    fn set_graph(&self, showing: bool) {
+        use variegated_controller_types::BrewSensorOp;
+
+        let op = if showing {
+            BrewSensorOp::ShowGraph
+        } else {
+            BrewSensorOp::HideGraph
+        };
+        // `try_send`, matching the scale path: a full queue means something is already badly
+        // wrong, and a brew must not block behind a display command.
+        let _ = self.sender.try_send((self.peripheral_id, op));
+    }
 }
 
 impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
@@ -235,7 +305,8 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         output_weight_sensor: Option<Receiver<'a, M, SensorReading<WeightType>, N>>,
         output_temperature_sensor: Option<Receiver<'a, M, SensorReading<TemperatureType>, N>>,
         output_electrical_conductivity_sensor: Option<Receiver<'a, M, SensorReading<ECType>, N>>,
-        pump_rpm_sensor: Option<Receiver<'a, M, SensorReading<RPMType>, N>>
+        pump_rpm_sensor: Option<Receiver<'a, M, SensorReading<RPMType>, N>>,
+        brew_sensor_commands: Option<Box<dyn BrewSensorCommands>>,
     ) -> Self {
         Self {
             brew_mechanism,
@@ -250,6 +321,22 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
             output_temperature_sensor,
             output_electrical_conductivity_sensor,
             pump_rpm_sensor,
+            brew_sensor_commands,
+        }
+    }
+
+    /// Ask the brew sensor to show its graph while a shot pours, or to stop.
+    ///
+    /// **Not part of [`Self::apply_brew_start_actions`]**, which is the *configured* set of
+    /// things done to the scale. This is neither configured nor about the scale: the operator
+    /// has no say in it, and it addresses a different peripheral.
+    ///
+    /// Silent when there is no sink, like every other optional here. `try_send` rather than an
+    /// await, matching the scale path -- a full queue means something is already badly wrong,
+    /// and a brew must not block behind a display command.
+    pub fn set_brew_sensor_graph(&mut self, showing: bool) {
+        if let Some(commands) = &self.brew_sensor_commands {
+            commands.set_graph(showing);
         }
     }
 
