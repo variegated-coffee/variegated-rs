@@ -346,6 +346,15 @@ impl<'a, M: RawMutex + Sync, const N: usize> ScaleController for GravityControll
         Err(ScaleError::TimerNotSupported)
     }
 
+    /// Same reasoning as the timer above: no display, nothing to put a dose on.
+    ///
+    /// This is the one implementation that can answer the question definitively. A Bluetooth
+    /// scale returns `Ok(())` because the send is all that side knows about; a load cell is
+    /// wired to this board, so "it cannot" is a fact rather than a guess.
+    async fn set_dose(&mut self, _grams: f32) -> Result<(), ScaleError> {
+        Err(ScaleError::DoseSyncNotSupported)
+    }
+
     fn get_capabilities(&self) -> crate::scale::ScaleCapabilities {
         crate::scale::ScaleCapabilities {
             zero_calibration: true,

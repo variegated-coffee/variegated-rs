@@ -241,8 +241,15 @@ pub enum MenuItemKind {
     AutoTare,
     /// Toggles whether a brew starts by resetting and starting the scale's own timer.
     ///
-    /// Absent entirely on a machine whose scale has no timer -- see [`SCALE_ITEMS_NO_TIMER`].
+    /// Greyed where the fitted scale has no timer -- see [`SCALE_ITEMS`] for why greyed
+    /// rather than hidden.
     AutoTimer,
+    /// Toggles whether a brew starts by telling the scale the dry dose.
+    ///
+    /// **Never greyed**, unlike the row above it: only BooKoo's Themis Ultra has the command,
+    /// and nothing here can tell an Ultra from a Themis Mini, so there is no capability to
+    /// consult. A scale that does not understand the frame ignores it in silence.
+    AutoDose,
     /// Tares the group scale.
     ScaleTare,
     /// Zero-calibrates the group scale. Only offered where the fitted scale supports it.
@@ -366,40 +373,35 @@ const SETTINGS_ITEMS: &[MenuItem] = &[
 /// lists already use: the row you change while tasting is above the row you press with a
 /// portafilter in your hand.
 ///
-/// The two calibration rows are sliced off the end when the fitted scale cannot perform them
-/// -- see [`scale_items`]. They are last precisely so that this is a truncation rather than a
-/// filter: dropping a row from the middle would renumber the ones after it, and the button
-/// task and both renderers resolve a selection index against this list independently.
+/// # Hidden or greyed, and why this list uses both
 ///
-/// `Auto-timer` is the row that cannot be handled that way, because it sits above rows that
-/// survive it, so it gets [`SCALE_ITEMS_NO_TIMER`] rather than a filter. Two tables is the
-/// price of every menu list staying a `&'static` subslice.
+/// The distinction is **position, not permanence**, which is the thing that took two goes to
+/// get right here.
+///
+/// The two calibration rows are *hidden* where the fitted scale cannot perform them, and that
+/// works because they are a **suffix**: [`scale_items`] returns a shorter subslice and every
+/// row above keeps its index. A row dropped from the middle would renumber the ones after it,
+/// and the button task and both renderers resolve a selection index against this list
+/// independently.
+///
+/// `Auto-timer` is in the middle, so it is *greyed* instead -- it reads `n/a` and refuses.
+/// That is also what MENU-STRUCTURE.md concluded for `Brew press` after trying the other way:
+/// "Hiding makes the Settings list change length under the user." Hiding it cost a second
+/// static table, and a second gated row in the middle would have cost four.
+///
+/// `Auto-dose` is never greyed at all, because nothing can answer the question. Only BooKoo's
+/// Themis Ultra takes a dose, and no part of this firmware can tell an Ultra from a Themis
+/// Mini -- so the row is offered everywhere and the operator decides.
 const SCALE_ITEMS: &[MenuItem] = &[
     MenuItem { label: "Auto-tare", kind: MenuItemKind::AutoTare },
     MenuItem { label: "Auto-timer", kind: MenuItemKind::AutoTimer },
+    MenuItem { label: "Auto-dose", kind: MenuItemKind::AutoDose },
     MenuItem { label: "Tare", kind: MenuItemKind::ScaleTare },
     MenuItem { label: "Zero cal", kind: MenuItemKind::ScaleZeroCalibrate },
     MenuItem { label: "Cal 100 g", kind: MenuItemKind::ScaleCalibrate100g },
 ];
 
-/// [`SCALE_ITEMS`] for a machine whose scale has no timer to drive -- a load cell wired to the
-/// drip tray, which has no display for one to run on.
-///
-/// Hidden rather than greyed, for the reason the calibration rows are: it is a permanent
-/// property of the fitted hardware, and a row that can never become available is a control
-/// that can only ever disappoint.
-///
-/// **Must stay in step with [`SCALE_ITEMS`] except for that one row**, and specifically must
-/// keep the same two calibration rows last -- `scale_items` truncates both tables by the same
-/// count.
-const SCALE_ITEMS_NO_TIMER: &[MenuItem] = &[
-    MenuItem { label: "Auto-tare", kind: MenuItemKind::AutoTare },
-    MenuItem { label: "Tare", kind: MenuItemKind::ScaleTare },
-    MenuItem { label: "Zero cal", kind: MenuItemKind::ScaleZeroCalibrate },
-    MenuItem { label: "Cal 100 g", kind: MenuItemKind::ScaleCalibrate100g },
-];
-
-/// How many rows at the end of both scale tables are the calibration pair.
+/// How many rows at the end of [`SCALE_ITEMS`] are the calibration pair.
 const SCALE_CALIBRATION_ROWS: usize = 2;
 
 /// Which optional data points the routine screen may draw. `ON` means shown.
@@ -432,7 +434,6 @@ const ALL_ITEM_TABLES: &[&[MenuItem]] = &[
     ROOT_ITEMS,
     SETTINGS_ITEMS,
     SCALE_ITEMS,
-    SCALE_ITEMS_NO_TIMER,
     WIFI_INFO_ITEMS,
     SCHEDULE_ITEM_ITEMS,
     DISPLAY_ITEMS,
@@ -472,11 +473,10 @@ const _: () = {
 /// disappoint. Contrast the scale merely being switched off, which *is* greyed -- that one
 /// has a fix, and the row is where it gets said.
 fn scale_items(data: &MenuData) -> &'static [MenuItem] {
-    let table = if data.scale_timer { SCALE_ITEMS } else { SCALE_ITEMS_NO_TIMER };
     if data.scale_calibration.is_offered() {
-        table
+        SCALE_ITEMS
     } else {
-        &table[..table.len() - SCALE_CALIBRATION_ROWS]
+        &SCALE_ITEMS[..SCALE_ITEMS.len() - SCALE_CALIBRATION_ROWS]
     }
 }
 
@@ -772,15 +772,24 @@ pub fn row<'a>(menu: MenuId, index: usize, data: &MenuData<'a>) -> Option<MenuRo
         }
         MenuId::Scale => fixed_items(menu, data).get(index).map(|item| MenuRow::ScaleAction {
             item,
-            // Two different questions, and conflating them would be wrong in both
-            // directions. Calibration asks whether *this* scale can calibrate and is live;
-            // tare asks only whether a scale is answering, because every scale in this tree
-            // can tare. Gating tare on the calibration answer would grey it on the GS3's
-            // default Bluetooth scale, which tares perfectly well.
-            available: if item.kind.is_calibration() {
-                data.scale_calibration.is_available()
-            } else {
-                data.scale_present
+            // Four different questions, and conflating any two would be wrong in both
+            // directions.
+            //
+            // Calibration asks whether *this* scale can calibrate and is live. Tare-the-action
+            // asks only whether a scale is answering, because every scale in this tree can
+            // tare -- gating it on the calibration answer would grey it on the GS3's default
+            // Bluetooth scale, which tares perfectly well.
+            //
+            // The brew-action settings ask neither. They record what the *next* shot should
+            // do, which an operator can decide with the scale switched off or before pairing
+            // one, so liveness is irrelevant to them: `Auto-tare` is always available, and
+            // `Auto-timer` consults only whether the fitted scale has a timer at all.
+            // `Auto-dose` has no question to ask -- see `MenuItemKind::AutoDose`.
+            available: match item.kind {
+                MenuItemKind::AutoTare | MenuItemKind::AutoDose => true,
+                MenuItemKind::AutoTimer => data.scale_timer,
+                kind if kind.is_calibration() => data.scale_calibration.is_available(),
+                _ => data.scale_present,
             },
         }),
         MenuId::Bluetooth => data.bluetooth?.get(index).map(|association| {
@@ -1229,6 +1238,26 @@ fn on_off(enabled: bool) -> MenuValue {
     MenuValue::Text(if enabled { "ON" } else { "OFF" })
 }
 
+/// Flip one brew action and send the whole set back.
+///
+/// The whole set, not the one bit, because that is the shape of
+/// [`MachineCommand::SetGroupBrewActions`] -- a per-flag command would let a client that knew
+/// about two actions clear the third it had never heard of.
+///
+/// Refused until the current set is known, for `BrewMode`'s reason: a toggle needs a "this"
+/// before it can mean "not this", and guessing would write a set the operator never saw. The
+/// value column already reads `n/a` in that state, so the refusal was announced before the
+/// press.
+fn toggle_brew_action(ctx: &MenuContext, action: BrewActions) -> MenuActivation {
+    match ctx.config.brew_actions {
+        Some(actions) => MenuActivation::Command(MachineCommand::SetGroupBrewActions(
+            GROUP,
+            actions.with(action, !actions.contains(action)),
+        )),
+        None => MenuActivation::Refuse,
+    }
+}
+
 /// The value column, or `None` for a row that has no value.
 pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
     match row {
@@ -1302,17 +1331,6 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
             // shipped default is one. `ON` means the routine screen may draw that quantity on
             // its own rank -- it is drawn regardless while the pump is targeting or capping
             // it, which is a state of the machine rather than a preference.
-            // `n/a` until the first `Configuration`, matching `BrewMode` two rows' worth
-            // above: this row says what the machine will do at the start of the next shot,
-            // and "off" is a claim rather than an absence.
-            MenuItemKind::AutoTare => Some(match ctx.config.brew_actions {
-                Some(actions) => on_off(actions.tare()),
-                None => MenuValue::Text(UNAVAILABLE),
-            }),
-            MenuItemKind::AutoTimer => Some(match ctx.config.brew_actions {
-                Some(actions) => on_off(actions.reset_and_start_timer()),
-                None => MenuValue::Text(UNAVAILABLE),
-            }),
             MenuItemKind::ShowWeight => Some(on_off(ctx.data_points.weight)),
             MenuItemKind::ShowPressure => Some(on_off(ctx.data_points.pressure)),
             MenuItemKind::ShowFlow => Some(on_off(ctx.data_points.flow)),
@@ -1323,7 +1341,13 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
             // The three schedule field kinds are reached only as `MenuRow::ScheduleField`,
             // below, which is what carries the schedule their values come from. A bare
             // `MenuRow::Item` with one of these kinds is a row this file did not build.
-            MenuItemKind::OpenSettings
+            // The three brew-action toggles are reached only as `MenuRow::ScaleAction`, which
+            // is what carries whether the fitted scale can do the thing. A bare
+            // `MenuRow::Item` with one of these kinds is a row this file did not build.
+            MenuItemKind::AutoTare
+            | MenuItemKind::AutoTimer
+            | MenuItemKind::AutoDose
+            | MenuItemKind::OpenSettings
             | MenuItemKind::OpenRoutines
             | MenuItemKind::OpenDisplay
             | MenuItemKind::OpenScale
@@ -1360,8 +1384,29 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
             _ => None,
         },
         // Only ever "switched off" -- an unsupporting scale has no calibration row at all.
-        MenuRow::ScaleAction { available: false, .. } => Some(MenuValue::Text(NO_SENSOR)),
-        MenuRow::ScaleAction { .. } => None,
+        // The Scale submenu holds two kinds of row and they read differently. A *setting*
+        // shows the state it is in; an *action* has no state and shows only why it cannot be
+        // pressed.
+        MenuRow::ScaleAction { item, available } => match item.kind {
+            MenuItemKind::AutoTare
+            | MenuItemKind::AutoTimer
+            | MenuItemKind::AutoDose => Some(match (available, ctx.config.brew_actions) {
+                // The fitted scale cannot do it -- `n/a`, not `sens`: the fix is a different
+                // scale, not switching this one on.
+                (false, _) => MenuValue::Text(UNAVAILABLE),
+                // `n/a` until the first `Configuration`, matching `BrewMode`: this row says
+                // what the machine will do at the start of the next shot, and "off" is a
+                // claim rather than an absence.
+                (true, None) => MenuValue::Text(UNAVAILABLE),
+                (true, Some(actions)) => on_off(match item.kind {
+                    MenuItemKind::AutoTimer => actions.reset_and_start_timer(),
+                    MenuItemKind::AutoDose => actions.sync_dose(),
+                    _ => actions.tare(),
+                }),
+            }),
+            _ if !available => Some(MenuValue::Text(NO_SENSOR)),
+            _ => None,
+        },
         // Say why the row will not do anything before it is pressed, rather than closing the
         // menu and leaving the machine cold. See `activate`.
         MenuRow::Run { .. } if ctx.mode != MachineMode::On => Some(MenuValue::Text(UNAVAILABLE)),
@@ -1682,27 +1727,6 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
             MenuItemKind::OpenSettings => MenuActivation::Enter(MenuId::Settings),
             MenuItemKind::OpenRoutines => MenuActivation::Enter(MenuId::Routines),
             MenuItemKind::OpenDisplay => MenuActivation::Enter(MenuId::Display),
-            // Refused until the current set is known, for `BrewMode`'s reason: a toggle needs
-            // a "this" before it can mean "not this", and guessing would write a set the
-            // operator never saw. The value column already reads `n/a`, so the refusal was
-            // announced before the press.
-            MenuItemKind::AutoTare => match ctx.config.brew_actions {
-                Some(actions) => MenuActivation::Command(MachineCommand::SetGroupBrewActions(
-                    GROUP,
-                    actions.with(BrewActions::TARE, !actions.tare()),
-                )),
-                None => MenuActivation::Refuse,
-            },
-            MenuItemKind::AutoTimer => match ctx.config.brew_actions {
-                Some(actions) => MenuActivation::Command(MachineCommand::SetGroupBrewActions(
-                    GROUP,
-                    actions.with(
-                        BrewActions::RESET_AND_START_TIMER,
-                        !actions.reset_and_start_timer(),
-                    ),
-                )),
-                None => MenuActivation::Refuse,
-            },
             // Act in place, like a Bluetooth row: there is nothing to confirm and nothing to
             // dial, and the value column beside the row is the feedback.
             MenuItemKind::ShowWeight => {
@@ -1794,10 +1818,15 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
             MenuItemKind::ScaleTare => {
                 MenuActivation::Command(MachineCommand::TareGroupScale(GROUP))
             }
-            // Reached only through `MenuRow::ScaleCalibration`, which carries the liveness
-            // gate. A bare `Item` with one of these kinds would be a row this file did not
-            // build, so refusing is the safe reading.
-            MenuItemKind::ScaleZeroCalibrate | MenuItemKind::ScaleCalibrate100g => {
+            // Reached only through `MenuRow::ScaleAction`, which carries the gate each of
+            // them needs -- liveness for the calibration pair, the fitted scale's timer for
+            // `AutoTimer`. A bare `Item` with one of these kinds would be a row this file did
+            // not build, so refusing is the safe reading.
+            MenuItemKind::ScaleZeroCalibrate
+            | MenuItemKind::ScaleCalibrate100g
+            | MenuItemKind::AutoTare
+            | MenuItemKind::AutoTimer
+            | MenuItemKind::AutoDose => {
                 MenuActivation::Refuse
             }
             // Nothing to activate. Refused rather than silently ignored so the press is at
@@ -1827,15 +1856,34 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
         // command sent to a disconnected Bluetooth scale is discarded on the far side -- so
         // the press would report nothing and do nothing.
         MenuRow::ScaleAction { available: false, .. } => MenuActivation::Refuse,
-        MenuRow::ScaleAction { item, .. } => MenuActivation::Command(match item.kind {
-            MenuItemKind::ScaleZeroCalibrate => MachineCommand::ZeroCalibrateGroupScale(GROUP),
+        MenuRow::ScaleAction { item, .. } => match item.kind {
+            // The settings. Each flips one bit and writes the whole set back.
+            MenuItemKind::AutoTare => toggle_brew_action(ctx, BrewActions::TARE),
+            MenuItemKind::AutoTimer => {
+                toggle_brew_action(ctx, BrewActions::RESET_AND_START_TIMER)
+            }
+            MenuItemKind::AutoDose => toggle_brew_action(ctx, BrewActions::SYNC_DOSE),
+
+            // The actions.
+            MenuItemKind::ScaleZeroCalibrate => {
+                MenuActivation::Command(MachineCommand::ZeroCalibrateGroupScale(GROUP))
+            }
             // 100 g is the only reference weight the hardware supports -- see
             // `GravityController::get_capabilities`, whose `supported_reference_weights` is
             // `&[100]` and which refuses anything else.
-            MenuItemKind::ScaleCalibrate100g => MachineCommand::CalibrateGroupScale100g(GROUP),
-            // `ScaleTare`, and anything else that ever joins `SCALE_ITEMS`.
-            _ => MachineCommand::TareGroupScale(GROUP),
-        }),
+            MenuItemKind::ScaleCalibrate100g => {
+                MenuActivation::Command(MachineCommand::CalibrateGroupScale100g(GROUP))
+            }
+            MenuItemKind::ScaleTare => {
+                MenuActivation::Command(MachineCommand::TareGroupScale(GROUP))
+            }
+
+            // **Refused, not tared.** This arm used to be `_ => TareGroupScale`, on the
+            // reasoning that anything joining `SCALE_ITEMS` would be an action. Two settings
+            // rows then joined it and silently tared the scale when pressed. A row this file
+            // did not build refuses, the way an unbuilt `ScheduleField` does.
+            _ => MenuActivation::Refuse,
+        },
 
         // Selecting a routine **never runs it** -- it always opens the parameter screen, even
         // for a routine with no parameters, where that screen is a single "Run routine" row.

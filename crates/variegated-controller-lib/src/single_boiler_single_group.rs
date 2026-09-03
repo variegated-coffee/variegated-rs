@@ -1336,7 +1336,9 @@ impl<
             smoothing: Some(true)
         }).await;
         let actions = self.configuration.persistent.brew_actions;
-        self.group.apply_brew_start_actions(actions).await;
+        // See the note at the dual-boiler's matching call for why this is read first.
+        let dose = self.pending_annotations.dose_weight();
+        self.group.apply_brew_start_actions(actions, dose).await;
     }
 
     async fn stopped_brewing(&mut self) {

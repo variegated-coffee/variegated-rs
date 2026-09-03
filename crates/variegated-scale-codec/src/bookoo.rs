@@ -4,6 +4,17 @@
 //! `01`-`08` are byte-identical. The Ultra adds two further notification types, both
 //! handled here: `0x0F` powder weight and `0x0D` automatic-mode events.
 //!
+//! **One outgoing command is Ultra-only**: [`Command::SetPowderWeight`], opcode `0x0D`. The
+//! mini document has no such opcode, so a Themis or a Mini ignores the frame -- and since
+//! nothing in this protocol acknowledges a command, a caller cannot tell that apart from a
+//! frame that was never received. Nothing here can distinguish the three models either: they
+//! share a service UUID and advertise no model or firmware string this firmware reads.
+//!
+//! The five commands the Ultra document defines and this module does not implement are `0x09`
+//! calibration, `0x0B` auto-mode stop condition, `0x15` shutdown and `0x25` reset
+//! auto-shutdown countdown. The last is worth knowing about: BooKoo recommends sending it
+//! periodically to stop the scale sleeping mid-session.
+//!
 //! Source: BooKoo's own specification at
 //! <https://github.com/BooKooCode/OpenSource>, files `bookoo_mini_scale/protocols.md`
 //! and `bookoo_ultra_scale/protocols.md`.
@@ -306,6 +317,23 @@ pub enum Command {
     /// rather than a real asymmetry, but it is unverified against hardware. If smoothing
     /// does not take effect on a real scale, this is the first thing to try moving.
     FlowSmoothing(bool),
+    /// Tell the scale the dry dose, in tenths of a gram.
+    ///
+    /// **The first command here the three models do not share.** `01`-`08` are byte-identical
+    /// across the Themis, Themis Mini and Themis Ultra; `0x0D` appears only in the Ultra's
+    /// document, and only from firmware V3.2.4 beta / V4.0.0 release. A Themis or a Mini has
+    /// no such opcode and ignores the frame, which is indistinguishable from a scale that
+    /// simply did not receive it -- nothing in this protocol acknowledges a command.
+    ///
+    /// The value is **grams times ten**, so 18.5 g is `185`, and the protocol's range is
+    /// 0.1-999.0 g -- `1..=9990`. [`Command::set_powder_weight`] is the way to build one from
+    /// grams; this variant is public so the range can be asserted at the boundary rather than
+    /// only at the constructor.
+    ///
+    /// Unlike every other parameter here the value spans two bytes, DATA2 high and DATA3 low.
+    /// It is the scale's own ratio arithmetic this feeds, and the number the Ultra echoes back
+    /// in a [`TYPE_POWDER`] notification.
+    SetPowderWeight(u16),
 }
 
 impl Command {
@@ -320,7 +348,42 @@ impl Command {
             Self::ResetTimer => [0x06, 0x00, 0x00],
             Self::TareAndStartTimer => [0x07, 0x00, 0x00],
             Self::FlowSmoothing(on) => [0x08, on as u8, 0x00],
+            Self::SetPowderWeight(tenths) => {
+                [0x0D, (tenths >> 8) as u8, (tenths & 0xFF) as u8]
+            }
         }
+    }
+
+    /// The lowest dose the protocol can carry: 0.1 g.
+    pub const MIN_POWDER_TENTHS: u16 = 1;
+
+    /// The highest: 999.0 g.
+    pub const MAX_POWDER_TENTHS: u16 = 9990;
+
+    /// A [`Command::SetPowderWeight`] for a dose in grams, or `None` outside 0.1-999.0 g.
+    ///
+    /// The range check lives here rather than at the call site because it is the *protocol's*
+    /// range, not the machine's: a dose of zero is a perfectly reasonable thing for a
+    /// controller to hold and not a value this frame can express. Refusing is the honest
+    /// answer -- clamping would put a number on the scale's display that nobody chose, and
+    /// the scale acknowledges nothing, so the caller would never learn it had happened.
+    ///
+    /// Rounded rather than truncated, for the reason `duty_cycle_from_editor` gives about the
+    /// pump: a tenth is the finest step this carries, and truncation would turn 18.499999 into
+    /// 18.4 and make a scale disagree with a display showing the same number.
+    pub fn set_powder_weight(grams: f32) -> Option<Self> {
+        if !grams.is_finite() || grams <= 0.0 {
+            return None;
+        }
+        // `f32::round` is std-only and this crate is `no_std`, so half-up by construction --
+        // which is what `round` does over the positive range the guard above has already
+        // narrowed to. The `as` cast saturates rather than wrapping, so a huge value lands
+        // above the ceiling and is refused rather than becoming a small dose.
+        let tenths = (grams * 10.0 + 0.5) as u32;
+        if tenths < Self::MIN_POWDER_TENTHS as u32 || tenths > Self::MAX_POWDER_TENTHS as u32 {
+            return None;
+        }
+        Some(Self::SetPowderWeight(tenths as u16))
     }
 
     /// The full six-byte frame, checksum included.
@@ -486,6 +549,11 @@ mod tests {
             Command::AutoOffMinutes(30),
             Command::FlowSmoothing(true),
             Command::FlowSmoothing(false),
+            // Both ends of the powder range: it is the only command whose parameter spans two
+            // bytes, so it is the only one where a checksum could come apart on the high byte
+            // alone -- 9990 is the only value here with a non-zero DATA2.
+            Command::SetPowderWeight(Command::MIN_POWDER_TENTHS),
+            Command::SetPowderWeight(Command::MAX_POWDER_TENTHS),
         ];
 
         for command in commands {
@@ -544,6 +612,74 @@ mod tests {
             Command::AutoOffMinutes(30).encode(),
             [0x03, 0x0A, 0x03, 0x00, 0x1E, 0x14]
         );
+        // 18.5 g. The one command with a two-byte parameter, so this is also the only
+        // assertion here that would catch a byte-swapped value -- and a swapped one encodes a
+        // dose of 4744.7 g, which the scale would accept as readily as the right answer.
+        assert_eq!(
+            Command::SetPowderWeight(185).encode(),
+            [0x03, 0x0A, 0x0D, 0x00, 0xB9, 0xBD]
+        );
+        // 999.0 g, the top of the range and the only value whose high byte is non-zero.
+        assert_eq!(
+            Command::SetPowderWeight(9990).encode(),
+            [0x03, 0x0A, 0x0D, 0x27, 0x06, 0x25]
+        );
+    }
+
+    /// The protocol's range, enforced where the protocol is.
+    ///
+    /// Not a duplicate of either test above: those assert what a *valid* command encodes to,
+    /// this asserts which grams become a command at all. The zero case is the one that
+    /// matters in practice -- a controller holding no dose reads it as `0.0`, and a scale
+    /// showing a dose of nothing would be worse than a scale showing none.
+    #[test]
+    fn a_dose_outside_the_protocols_range_is_refused() {
+        assert_eq!(Command::set_powder_weight(0.0), None);
+        assert_eq!(Command::set_powder_weight(-1.0), None);
+        assert_eq!(Command::set_powder_weight(999.1), None);
+        assert_eq!(Command::set_powder_weight(f32::NAN), None);
+        assert_eq!(Command::set_powder_weight(f32::INFINITY), None);
+
+        assert_eq!(
+            Command::set_powder_weight(0.1),
+            Some(Command::SetPowderWeight(1))
+        );
+        assert_eq!(
+            Command::set_powder_weight(999.0),
+            Some(Command::SetPowderWeight(9990))
+        );
+        assert_eq!(
+            Command::set_powder_weight(18.5),
+            Some(Command::SetPowderWeight(185))
+        );
+    }
+
+    /// Rounded, not truncated. A tenth is the finest step this frame carries, so 18.56 g must
+    /// not become the 18.5 a truncating encoder would send while a display beside it reads
+    /// 18.6.
+    ///
+    /// **Deliberately clear of the half-way points.** `18.55` is not representable in `f32` --
+    /// the nearest value is a shade *below* it -- so asserting which way it goes would be
+    /// testing the float literal rather than the rounding, and would read as a bug the first
+    /// time someone changed the type.
+    #[test]
+    fn a_dose_is_rounded_to_the_nearest_tenth() {
+        assert_eq!(
+            Command::set_powder_weight(18.54),
+            Some(Command::SetPowderWeight(185))
+        );
+        assert_eq!(
+            Command::set_powder_weight(18.56),
+            Some(Command::SetPowderWeight(186))
+        );
+        // Rounding up must not smuggle a value past the ceiling.
+        assert_eq!(
+            Command::set_powder_weight(999.04),
+            Some(Command::SetPowderWeight(9990))
+        );
+        assert_eq!(Command::set_powder_weight(999.2), None);
+        // Nor may a value far above it wrap into a plausible dose.
+        assert_eq!(Command::set_powder_weight(1.0e9), None);
     }
 
     /// The four values that were wrong in BooKoo's document until commit `6c9f39de`, and

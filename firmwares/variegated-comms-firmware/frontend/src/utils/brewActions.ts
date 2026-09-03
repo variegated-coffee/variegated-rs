@@ -14,6 +14,14 @@
 export const BREW_ACTION_TARE = 1 << 0;
 /** Return the scale's own timer to zero and start it running. Bit 1. */
 export const BREW_ACTION_RESET_AND_START_TIMER = 1 << 1;
+/**
+ * Tell the scale the dry dose, so it can show it and compute its own ratio. Bit 2.
+ *
+ * Only BooKoo's Themis Ultra has the command, and nothing in the firmware can tell an Ultra
+ * from a Themis Mini — so this is offered on every machine and a scale that does not
+ * understand it ignores it in silence.
+ */
+export const BREW_ACTION_SYNC_DOSE = 1 << 2;
 
 /** Whether the set includes an action. */
 export function hasBrewAction(actions: number, action: number): boolean {
@@ -37,5 +45,6 @@ export function describeBrewActions(actions: number): string {
   if (hasBrewAction(actions, BREW_ACTION_RESET_AND_START_TIMER)) {
     chosen.push('Reset and start timer');
   }
+  if (hasBrewAction(actions, BREW_ACTION_SYNC_DOSE)) chosen.push('Sync dose');
   return chosen.length > 0 ? chosen.join(', ') : 'Nothing';
 }

@@ -1530,7 +1530,15 @@ impl<
                 smoothing: Some(true)
             }).await;
             let actions = self.configuration.persistent.group.brew_actions;
-            self.group.apply_brew_start_actions(actions).await;
+            // Read before the call rather than inside it: `pending_annotations` and `group`
+            // are both fields of `self`, and the borrow checker will not have one held across
+            // a `&mut self.group` method.
+            //
+            // Whatever is here is what the shot will be logged with, so the scale and the log
+            // cannot disagree -- including when it is stale, which it can be if a dose was
+            // tagged and no brew followed.
+            let dose = self.pending_annotations.dose_weight();
+            self.group.apply_brew_start_actions(actions, dose).await;
         } else {
             log_info!("start_brewing() called but group_brewing already true - skipping baseline capture");
         }

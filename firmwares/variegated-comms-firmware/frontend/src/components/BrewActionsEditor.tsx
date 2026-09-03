@@ -2,6 +2,7 @@ import { useState } from 'preact/hooks';
 import { Button, tokens } from '@variegated-coffee/ui';
 import {
   BREW_ACTION_RESET_AND_START_TIMER,
+  BREW_ACTION_SYNC_DOSE,
   BREW_ACTION_TARE,
   hasBrewAction,
   withBrewAction,
@@ -31,6 +32,11 @@ const ACTIONS: { value: number; label: string; hint: string }[] = [
     value: BREW_ACTION_RESET_AND_START_TIMER,
     label: 'Reset and start timer',
     hint: "the scale's own timer, on its display. Scales without one ignore this",
+  },
+  {
+    value: BREW_ACTION_SYNC_DOSE,
+    label: 'Sync dose',
+    hint: 'send the dose to the scale so it can show a ratio. Only a BooKoo Themis Ultra accepts this, and the machine cannot tell one from a Mini — so it is offered here and quietly ignored by scales that lack it',
   },
 ];
 

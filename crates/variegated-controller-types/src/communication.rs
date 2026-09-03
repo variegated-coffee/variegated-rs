@@ -534,4 +534,19 @@ pub enum ScaleOp {
     ResetTimer,
     /// Zero the scale and start its timer. One command on BooKoo, two writes on ACAIA.
     TareAndStartTimer,
+    /// Tell the scale the dry dose, in grams, so it can show it and compute its own ratio.
+    ///
+    /// **Appended**, per the note above.
+    ///
+    /// Grams rather than the tenths BooKoo's frame carries, because this enum is the
+    /// protocol-neutral vocabulary -- the scaling and the 0.1-999.0 g range are one protocol's
+    /// and belong in its codec.
+    ///
+    /// **Not every scale can do this**, and unlike the timer that is not a difference the
+    /// drivers can absorb: only BooKoo's Ultra defines the command, ACAIA has no equivalent,
+    /// and a load cell has no display to put it on. A driver that cannot do it drops the op.
+    /// Nothing in either protocol acknowledges a command, so a caller cannot learn which
+    /// happened -- see the note on `variegated_hal::scale::ScaleCapabilities`, which already
+    /// records that this type cannot express a per-driver answer.
+    SetDose(f32),
 }

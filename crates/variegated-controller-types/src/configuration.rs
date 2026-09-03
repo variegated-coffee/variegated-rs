@@ -350,6 +350,19 @@ impl BrewActions {
     pub const TARE: Self = Self(1 << 0);
     /// Return the scale's own timer to zero and start it running.
     pub const RESET_AND_START_TIMER: Self = Self(1 << 1);
+    /// Tell the scale the dry dose, so it can show it and compute its own ratio.
+    ///
+    /// A free bit in a byte already carrying two, so adding it changed no stored encoding and
+    /// reset nothing -- which is the whole reason this is a bitfield rather than a struct of
+    /// `bool`s. Five bits remain.
+    ///
+    /// **Unlike the other two, this one may do nothing on the fitted scale.** Only BooKoo's
+    /// Themis Ultra defines the command, and no part of this firmware can tell an Ultra from a
+    /// Themis Mini -- they share a service UUID and advertise no model string anyone reads. So
+    /// the setting is offered everywhere and the operator decides; a scale that does not
+    /// understand the frame ignores it, silently, because nothing in these protocols
+    /// acknowledges a command.
+    pub const SYNC_DOSE: Self = Self(1 << 2);
 
     /// Whether every action in `other` is in this set.
     pub const fn contains(self, other: Self) -> bool {
@@ -369,6 +382,11 @@ impl BrewActions {
     /// Reset and start the scale's timer at brew start.
     pub const fn reset_and_start_timer(self) -> bool {
         self.contains(Self::RESET_AND_START_TIMER)
+    }
+
+    /// Push the dry dose to the scale at brew start.
+    pub const fn sync_dose(self) -> bool {
+        self.contains(Self::SYNC_DOSE)
     }
 
     /// Whether anything at all happens.
@@ -490,7 +508,13 @@ mod tests {
             BrewActions::NONE,
             BrewActions::TARE,
             BrewActions::RESET_AND_START_TIMER,
+            BrewActions::SYNC_DOSE,
             BrewActions::TARE.with(BrewActions::RESET_AND_START_TIMER, true),
+            // Every bit set at once, which is the value most likely to grow a second byte if
+            // the representation ever changed underneath this.
+            BrewActions::TARE
+                .with(BrewActions::RESET_AND_START_TIMER, true)
+                .with(BrewActions::SYNC_DOSE, true),
         ] {
             let encoded = postcard::to_slice(&actions, &mut buffer).unwrap();
             assert_eq!(encoded.len(), 1, "{actions:?} must encode as one byte");
@@ -515,20 +539,28 @@ mod tests {
         assert!(!tare.reset_and_start_timer());
     }
 
-    /// Each bit answers for itself, and neither answers for the empty set.
+    /// Each bit answers for itself, and none answers for the empty set.
     #[test]
     fn each_action_is_independent() {
-        let both = BrewActions::NONE
+        let all = BrewActions::NONE
             .with(BrewActions::TARE, true)
-            .with(BrewActions::RESET_AND_START_TIMER, true);
-        assert!(both.tare() && both.reset_and_start_timer());
+            .with(BrewActions::RESET_AND_START_TIMER, true)
+            .with(BrewActions::SYNC_DOSE, true);
+        assert!(all.tare() && all.reset_and_start_timer() && all.sync_dose());
 
-        let timer_only = both.with(BrewActions::TARE, false);
-        assert!(!timer_only.tare() && timer_only.reset_and_start_timer());
+        let timer_only = all
+            .with(BrewActions::TARE, false)
+            .with(BrewActions::SYNC_DOSE, false);
+        assert!(!timer_only.tare() && timer_only.reset_and_start_timer() && !timer_only.sync_dose());
+
+        // Clearing the middle bit must not disturb the ones either side of it.
+        let outer = all.with(BrewActions::RESET_AND_START_TIMER, false);
+        assert!(outer.tare() && !outer.reset_and_start_timer() && outer.sync_dose());
 
         assert!(BrewActions::NONE.is_empty());
         assert!(!BrewActions::NONE.tare());
         assert!(!BrewActions::NONE.reset_and_start_timer());
+        assert!(!BrewActions::NONE.sync_dose());
         assert!(!BrewActions::TARE.is_empty());
     }
 }

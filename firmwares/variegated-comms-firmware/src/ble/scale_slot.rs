@@ -54,7 +54,7 @@ use variegated_scale_trouble_driver::bookoo::{
 };
 use variegated_controller_types::bluetooth::MAX_BLUETOOTH_PERIPHERALS;
 use variegated_controller_types::{ExternalPeripheralSensorReading, PeripheralId, ScaleOp};
-use variegated_log::{log_error, log_info};
+use variegated_log::{log_error, log_info, log_warn};
 
 use crate::ble::status;
 use crate::channels::SENSOR_READING_CAPACITY;
@@ -645,6 +645,14 @@ impl ScaleSession for AcaiaOldSession<'_> {
                 Ok(()) => self.gatt.send_timer(AcaiaTimerOp::Start).await,
                 Err(e) => Err(e),
             },
+            // ACAIA has no dose command in either generation. Dropped rather than
+            // approximated: there is nothing to approximate it with, and the setting that
+            // sends this is offered on every machine precisely because no part of this
+            // firmware can tell in advance which scale will be listening.
+            ScaleOp::SetDose(_) => {
+                log_info!("ACAIA has no dose command; ignoring SetDose");
+                Ok(())
+            }
         };
 
         if let Err(e) = result {
@@ -816,6 +824,11 @@ impl ScaleSession for AcaiaNewSession<'_> {
                 Ok(()) => self.gatt.send_timer(AcaiaTimerOp::Start).await,
                 Err(e) => Err(e),
             },
+            // No dose command in this generation either -- see the note on the older one.
+            ScaleOp::SetDose(_) => {
+                log_info!("ACAIA has no dose command; ignoring SetDose");
+                Ok(())
+            }
         };
 
         if let Err(e) = result {
@@ -944,6 +957,19 @@ impl ScaleSession for BookooSession<'_> {
             ScaleOp::ResetTimer => BookooCommand::ResetTimer,
             // One atomic command here, where ACAIA needs two writes.
             ScaleOp::TareAndStartTimer => BookooCommand::TareAndStartTimer,
+            // The only protocol in this tree with the command -- and only the Ultra, from
+            // firmware V3.2.4b. A Themis or a Mini has no `0x0D` and drops the frame, which
+            // is why nothing here waits for anything.
+            //
+            // A dose outside the protocol's 0.1-999.0 g yields no command at all rather than
+            // a clamped one: the scale would show a number nobody chose and never say so.
+            ScaleOp::SetDose(grams) => match BookooCommand::set_powder_weight(grams) {
+                Some(command) => command,
+                None => {
+                    log_warn!("BooKoo: a dose of {} g is outside 0.1-999.0 g, not sent", grams);
+                    return;
+                }
+            },
         };
 
         if let Err(e) = self.gatt.send_command(command).await {

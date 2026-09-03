@@ -15,6 +15,13 @@ pub enum ScaleError {
     CalibrationFailed,
     /// The fitted scale has no timer this firmware can drive.
     TimerNotSupported,
+    /// The fitted scale cannot be told a dose.
+    ///
+    /// Rarer than [`Self::TimerNotSupported`] and less knowable: only BooKoo's Ultra defines
+    /// the command, and nothing in this firmware can tell an Ultra from a Themis Mini. So this
+    /// is returned by drivers that certainly cannot -- a load cell has no display to put a
+    /// dose on -- while a Bluetooth scale that merely ignores the frame returns `Ok(())`.
+    DoseSyncNotSupported,
 }
 
 pub struct ScaleConfiguration {
@@ -63,6 +70,17 @@ pub trait ScaleController {
         &mut self,
         command: variegated_controller_types::ScaleTimerCommand,
     ) -> Result<(), ScaleError>;
+
+    /// Tell the scale the dry dose, in grams.
+    ///
+    /// Required rather than defaulted for the reason [`Self::control_timer`] gives about
+    /// `#[async_trait]` and `dyn`.
+    ///
+    /// Write-only, like the timer, and less answerable than it: the only protocol with this
+    /// command acknowledges nothing, and the three models that speak it are
+    /// indistinguishable. `Ok(())` means the frame was handed to the link, not that a scale
+    /// acted on it.
+    async fn set_dose(&mut self, grams: f32) -> Result<(), ScaleError>;
 
     fn get_supported_configuration(&mut self) -> SupportedConfigurationOptions;
     fn get_capabilities(&self) -> ScaleCapabilities;

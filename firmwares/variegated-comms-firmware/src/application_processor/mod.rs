@@ -402,6 +402,9 @@ pub async fn start(
                                     ScaleOp::TareAndStartTimer => {
                                         log_info!("Received tare and timer start for scale 0x{:04X}", peripheral_id);
                                     }
+                                    ScaleOp::SetDose(grams) => {
+                                        log_info!("Received dose {} g for scale 0x{:04X}", grams, peripheral_id);
+                                    }
                                 }
                                 // `immediate_publisher`, never `publish().await`: this
                                 // runs in the UART reader, where back-pressure stalls

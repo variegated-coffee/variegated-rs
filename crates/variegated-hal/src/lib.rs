@@ -376,28 +376,39 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
     /// firmwares have forked badly and that most of one's substantive lines appear verbatim
     /// in the other; a new branch copied into both is that, starting again.
     ///
-    /// **The timer goes before the tare, and the order is not cosmetic.** Starting the timer
-    /// takes the scale no time at all. Taring does take time, and a scale occasionally goes
-    /// *unresponsive* while it happens -- so a timer command sent after a tare is not merely
+    /// **The tare goes last, and the order is not cosmetic.** Starting a timer and setting a
+    /// number take the scale no time at all. Taring does take time, and a scale occasionally
+    /// goes *unresponsive* while it happens -- so a command sent after a tare is not merely
     /// late, it is a command that may arrive while the scale is not listening and be lost. The
-    /// cheap, reliable one goes first.
+    /// cheap, reliable ones go first.
     ///
     /// Reset and start are sent separately rather than as
     /// [`ScaleTimerCommand::TareAndStart`]. That variant looks like the obvious shortcut and
     /// is not: it does not reset, which is half of what the setting promises, and ACAIA has no
     /// such command anyway -- the BLE slot already synthesizes it as two writes.
     ///
+    /// `dose` is whatever the machine currently believes the dry dose to be, and `None` is
+    /// skipped in silence: a shot nobody weighed is not an error, and there is no number to
+    /// send. What reaches the scale is one protocol's command that most scales do not have --
+    /// see `ScaleOp::SetDose`.
+    ///
     /// Failures are dropped, like the `let _ =` this replaces. A scale that will not tare is
     /// not a reason to refuse a shot, and the operator can see the weight on the panel.
     pub async fn apply_brew_start_actions(
         &mut self,
         actions: variegated_controller_types::BrewActions,
+        dose: Option<f32>,
     ) {
         use variegated_controller_types::ScaleTimerCommand;
 
         if actions.reset_and_start_timer() {
             let _ = self.scale_control_timer(ScaleTimerCommand::Reset).await;
             let _ = self.scale_control_timer(ScaleTimerCommand::Start).await;
+        }
+        if actions.sync_dose()
+            && let Some(grams) = dose
+        {
+            let _ = self.scale_set_dose(grams).await;
         }
         if actions.tare() {
             let _ = self.scale_tare().await;
@@ -436,6 +447,19 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
     ) -> Result<(), scale::ScaleError> {
         if let Some(scale_controller) = &mut self.scale_controller {
             scale_controller.control_timer(command).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Tell the scale the dry dose, in grams.
+    ///
+    /// `Ok(())` with no controller, matching every other method here -- and here the silence
+    /// runs deeper than usual, because even *with* a controller a success only means the frame
+    /// was sent. Most scales cannot do this and none of them say so.
+    pub async fn scale_set_dose(&mut self, grams: f32) -> Result<(), scale::ScaleError> {
+        if let Some(scale_controller) = &mut self.scale_controller {
+            scale_controller.set_dose(grams).await
         } else {
             Ok(())
         }

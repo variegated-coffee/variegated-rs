@@ -372,6 +372,19 @@ impl<'a, M: RawMutex + Sync, const N: usize> ScaleController
             .map_err(|_| ScaleError::CommunicationError)
     }
 
+    /// Sent for any Bluetooth scale, and honestly reporting only the send.
+    ///
+    /// Unlike the timer above, this is *not* something both protocols can do -- only BooKoo's
+    /// Ultra defines it, ACAIA has no equivalent, and a Themis Mini is indistinguishable from
+    /// an Ultra from here or anywhere else. `Ok(())` therefore means the op reached the link,
+    /// which is all this side has ever been able to say; the slot drops it for a protocol that
+    /// cannot do it, and a Mini ignores an opcode it has never heard of.
+    async fn set_dose(&mut self, grams: f32) -> Result<(), ScaleError> {
+        self.command_sender
+            .try_send((self.peripheral_id, ScaleOp::SetDose(grams)))
+            .map_err(|_| ScaleError::CommunicationError)
+    }
+
     /// Not supported: the ACAIA protocol has no settings this maps onto.
     ///
     /// Reported honestly rather than swallowed as `Ok(())`, even though every caller
