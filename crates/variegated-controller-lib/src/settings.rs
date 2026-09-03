@@ -57,6 +57,18 @@ pub mod key {
     /// machine, and which figures are worth panel space depends on what hardware is sitting
     /// beside it, so there is nothing here for the UART to carry.
     pub const PANEL_DATA_POINTS: u8 = 6;
+    /// Bluetooth bonds -- the keys from a completed pairing.
+    ///
+    /// A key of its own rather than a field on [`BLUETOOTH_ASSOCIATIONS`], for the reason
+    /// [`TIMEZONE`] gives: appending a field to that record would make every stored copy
+    /// fail to deserialize, and `load_settings` maps that to `Default` -- silently dropping
+    /// every pairing on the machine to buy one field.
+    ///
+    /// This exists because the comms processor has no flash. It holds a bond only until it
+    /// reboots, while the device on the other side holds its half indefinitely, so without
+    /// somewhere to put this the two ends disagree about a key after every reset -- which
+    /// fails the reconnection rather than falling back to pairing.
+    pub const BLUETOOTH_BONDS: u8 = 7;
 }
 
 /// The flash range every settings store lives in.
@@ -117,6 +129,7 @@ pub fn machine_stores<'a, M, T, ConfigT>(
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::wifi::StoredWifiCredentials>,
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::shot_upload::ShotUploadConfig>,
     SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::timezone::TimezoneSetting>,
+    SequentialStorageSettingsStorage<'a, M, T, variegated_controller_types::bluetooth::BluetoothBonds>,
 )
 where
     M: RawMutex,
@@ -152,6 +165,16 @@ where
             flash,
             SETTINGS_RANGE,
             key::TIMEZONE,
+        ),
+        // Owned by the transceiver rather than by the controller, unlike the associations
+        // above. The controller gates on an association and publishes it inside
+        // `Configuration`; it has no use for the keys at all. The transceiver already owns
+        // the routine repository and writes to it, so this is that arrangement again --
+        // and it keeps a second store generic off both controllers.
+        SequentialStorageSettingsStorage::new_with_key(
+            flash,
+            SETTINGS_RANGE,
+            key::BLUETOOTH_BONDS,
         ),
     )
 }

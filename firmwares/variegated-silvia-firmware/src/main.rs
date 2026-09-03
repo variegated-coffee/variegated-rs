@@ -134,7 +134,7 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
-async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>, shot_upload_config_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, ShotUploadConfig, 2>, shot_log_query_sender: Option<embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogQuery, 1>>, shot_log_reply_receiver: Option<embassy_sync::channel::Receiver<'static, NoopRawMutex, ShotLogReply, 1>>, shot_log_event_receiver: Option<embassy_sync::channel::Receiver<'static, NoopRawMutex, variegated_controller_types::ShotLogEvent, 2>>, input_command_sender: embassy_sync::channel::Sender<'static, NoopRawMutex, InputCommand, 4>) {
+async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSubscriber, configuration_receiver: ConfigurationSubscriber, routine_repository: &'static RoutineRepository, command_sender: embassy_sync::channel::Sender<'static, embassy_sync::blocking_mutex::raw::NoopRawMutex, variegated_controller_types::MachineCommand, 10>, machine_definition: MachineDefinition, debug_command_sender: embassy_sync::channel::Sender<'static, CriticalSectionRawMutex, DebugCommand, 4>, bluetooth_scan_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u16, 2>, wifi_credentials_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, StoredWifiCredentials, 2>, wifi_provisioning_receiver: embassy_sync::channel::Receiver<'static, NoopRawMutex, u32, 2>, shot_upload_config_receiver: embassy_sync::watch::Receiver<'static, NoopRawMutex, ShotUploadConfig, 2>, shot_log_query_sender: Option<embassy_sync::channel::Sender<'static, NoopRawMutex, ShotLogQuery, 1>>, shot_log_reply_receiver: Option<embassy_sync::channel::Receiver<'static, NoopRawMutex, ShotLogReply, 1>>, shot_log_event_receiver: Option<embassy_sync::channel::Receiver<'static, NoopRawMutex, variegated_controller_types::ShotLogEvent, 2>>, input_command_sender: embassy_sync::channel::Sender<'static, NoopRawMutex, InputCommand, 4>, bond_store: &'static BondStoreMutex) {
     // One binding for both the UART and the debug relay's byte budget, so the two cannot
     // drift apart.
     //
@@ -188,7 +188,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver), Some(input_command_sender)),
+        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver), Some(input_command_sender), Some(bond_store)),
     ).await;
 }
 
@@ -332,6 +332,13 @@ type RoutineRepository = Mutex<NoopRawMutex, RoutineRepositoryType>;
 ///
 /// `NoopRawMutex` like everything else on this board: one executor, one core.
 type ScheduleStoreType = SequentialStorageScheduleStore<'static, NoopRawMutex, SettingsFlashType>;
+/// Bluetooth pairing keys, in the settings range under a key of their own.
+///
+/// Handed to the transceiver rather than to the controller: the controller gates on an
+/// *association* and publishes it inside `Configuration`, but has no use for the keys. See
+/// the note on `bond_store` in `esp_transceiver_main`.
+type BondStoreType = variegated_controller_lib::settings::SequentialStorageSettingsStorage<'static, NoopRawMutex, SettingsFlashType, variegated_controller_types::bluetooth::BluetoothBonds>;
+type BondStoreMutex = Mutex<NoopRawMutex, BondStoreType>;
 type ScheduleStoreMutex = Mutex<NoopRawMutex, ScheduleStoreType>;
 type AdsMutex = Mutex<NoopRawMutex, ADS124S08<SpiDevice<'static, NoopRawMutex, Spi<'static, InternalSpiBusPeripheralsSpi, Async>, Output<'static>>, Input<'static>, Delay>>;
 type GravityMutex = Mutex<NoopRawMutex, Gravity<I2cDevice<'static, NoopRawMutex, I2c<'static, QwiicI2cBusPeripheralsI2C, i2c::Async>>>>;
@@ -517,6 +524,7 @@ static COMMAND_CHANNEL: StaticCell<Channel<NoopRawMutex, MachineCommand, 10>> = 
 /// controller sends and the transceiver drains; both live on this board's single
 /// executor, so `NoopRawMutex` matches `COMMAND_CHANNEL` above.
 static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<NoopRawMutex, u16, 2>> = StaticCell::new();
+static BOND_STORE: StaticCell<BondStoreMutex> = StaticCell::new();
 /// Accepted provisioning-window requests, carrying the duration in milliseconds; zero
 /// means close. One channel for both, so a close cannot overtake the open it cancels.
 static WIFI_PROVISIONING_CHANNEL: StaticCell<Channel<NoopRawMutex, u32, 2>> = StaticCell::new();
@@ -761,10 +769,10 @@ async fn main_task(spawner: Spawner) -> ! {
     let flash = W25q32jv::new(flash_spi_dev, hold, wp).unwrap();
     let flash = SETTINGS_FLASH_MUTEX.init(Mutex::new(flash));
 
-    // All four stores, over one flash range keyed by `settings::key`. The range and the
+    // All six stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
     // `variegated_controller_lib::settings::machine_stores`.
-    let (mut settings_storage, bluetooth_store, wifi_store, shot_upload_store, mut timezone_store) =
+    let (mut settings_storage, bluetooth_store, wifi_store, shot_upload_store, mut timezone_store, bond_store) =
         variegated_controller_lib::settings::machine_stores::<
             _,
             _,
@@ -798,6 +806,7 @@ async fn main_task(spawner: Spawner) -> ! {
 
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
     let input_command_channel = INPUT_COMMAND_CHANNEL.init(Channel::new());
+    let bond_store_ref = BOND_STORE.init(Mutex::new(bond_store));
     let wifi_provisioning_channel = WIFI_PROVISIONING_CHANNEL.init(Channel::new());
     let wifi_credentials_watch = WIFI_CREDENTIALS_WATCH.init(Watch::new());
     let shot_upload_config_watch = SHOT_UPLOAD_CONFIG_WATCH.init(Watch::new());
@@ -1334,7 +1343,7 @@ async fn main_task(spawner: Spawner) -> ! {
     #[cfg(not(feature = "sd-card-pio-spi"))]
     let (sd_query_sender, sd_reply_receiver, sd_event_receiver) = (None, None, None);
 
-    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition.clone(), debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver"), sd_query_sender, sd_reply_receiver, sd_event_receiver, input_command_channel.sender()).unwrap());
+    spawner.spawn(esp_transceiver_task(esp_p, status_channel.subscriber().unwrap(), configuration_channel.subscriber().unwrap(), routine_repository_ref, command_channel.sender(), machine_definition.clone(), debug_command_sender, bluetooth_scan_channel.receiver(), wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver"), wifi_provisioning_channel.receiver(), shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver"), sd_query_sender, sd_reply_receiver, sd_event_receiver, input_command_channel.sender(), bond_store_ref).unwrap());
 
     #[cfg(feature = "sd-card-pio-spi")]
     spawner.spawn(

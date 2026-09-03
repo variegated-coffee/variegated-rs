@@ -45,6 +45,8 @@ use variegated_debug::bus;
 use embassy_sync::channel::{Channel, Receiver as ChannelReceiver, Sender};
 use postcard::accumulator::{CobsAccumulator, FeedResult};
 use variegated_controller_lib::routine::{self, RoutineRepository};
+use variegated_controller_lib::settings::SettingsStorage;
+use variegated_controller_types::bluetooth::BluetoothBonds;
 use variegated_controller_lib::shot_log_query::{ShotLogQuery, ShotLogReply};
 use variegated_controller_lib::external_sensor_dispatcher::ExternalSensorDispatcher;
 use variegated_timekeeping::TimeKeeper;
@@ -429,7 +431,7 @@ fn forward_shot_log_query<M: embassy_sync::blocking_mutex::raw::RawMutex, SM: em
 /// caller's to choose: `variegated_debug::usb_cdc::CommandSink` fixes it to
 /// `CriticalSectionRawMutex`, and injected commands from both transports have to
 /// converge on that one channel.
-pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, SM: embassy_sync::blocking_mutex::raw::RawMutex, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
+pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, SM: embassy_sync::blocking_mutex::raw::RawMutex, BS: SettingsStorage<BluetoothBonds>, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
     mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
     mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
     // The baud rate `uart_tx`/`uart_rx` were configured with -- see the note on
@@ -497,6 +499,21 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     // owns; routing them through the controller would need either a second copy of that
     // state or a second UI.
     input_command_sender: Option<Sender<'static, SM, InputCommand, 4>>,
+    // The stored Bluetooth bonds. `None` on a machine with no bond store, in which case
+    // `RequestBluetoothBonds` goes unanswered and the comms processor keeps asking -- the
+    // honest outcome, and the same one `wifi_credentials_receiver` gives, since answering
+    // an empty list would say "nothing is bonded" and stop the retry forever.
+    //
+    // Owned here rather than by the controller, and reached directly rather than through
+    // `command_sender`. That is a departure from how Wi-Fi credentials are stored, and it is
+    // deliberate: the controller gates on a Bluetooth *association* and publishes it inside
+    // `Configuration`, but it has no use for the pairing keys. Routing them through it would
+    // mean a new `MachineCommand` -- which also travels the debug wire, so it would cost a
+    // `DEBUG_PROTOCOL_VERSION` bump -- plus a second store generic on both controllers, all
+    // to reach a value neither controller reads. This task already owns `routine_repository`
+    // and writes to it on `RoutineWriteChunk`, so a store it owns outright is not a new idea
+    // here.
+    bond_store: Option<&'static embassy_sync::mutex::Mutex<SM, BS>>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -1243,6 +1260,94 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                 CommsProcessorToApplicationProcessorMessage::WifiProvisioningIdentify => {
                                     if command_sender.try_send(MachineCommand::IdentifyMachine).is_err() {
                                         info!("Dropped an identify request: command channel full");
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::RequestBluetoothBonds => {
+                                    // Pruned against the current associations before it goes
+                                    // out. A bond for a device the user has disassociated is
+                                    // not merely untidy: there are only
+                                    // `MAX_BLUETOOTH_PERIPHERALS` slots, so dead keys can
+                                    // fill the list and leave a genuinely new pairing with
+                                    // nowhere to be stored.
+                                    //
+                                    // Done here rather than when the association is removed
+                                    // because the controller is what handles the removal, and
+                                    // it does not own this store. This arm runs at every boot
+                                    // of the comms processor, which is often enough for a
+                                    // list that is at most four entries long.
+                                    let associated: Option<heapless::Vec<[u8; 6], { variegated_controller_types::bluetooth::MAX_BLUETOOTH_PERIPHERALS }>> =
+                                        last_sent_config.lock(|cell| {
+                                            cell.borrow().as_ref().map(|boxed_config| {
+                                                boxed_config
+                                                    .bluetooth_peripherals
+                                                    .iter()
+                                                    .map(|association| association.address)
+                                                    .collect()
+                                            })
+                                        });
+
+                                    match (&bond_store, associated) {
+                                        // No configuration published yet means the
+                                        // association list is unknown, and pruning against an
+                                        // unknown list would delete every bond on the
+                                        // machine. Left unanswered instead: the comms
+                                        // processor retries, and by then the controller has
+                                        // published.
+                                        (Some(_), None) => {
+                                            info!("Deferred bonds: no configuration published yet");
+                                        }
+                                        (Some(store), Some(associated)) => {
+                                            let mut store = store.lock().await;
+                                            let mut bonds = store
+                                                .load_settings()
+                                                .await
+                                                .unwrap_or_default();
+                                            let dropped = bonds.retain_associated(&associated);
+                                            if dropped > 0 {
+                                                info!("Dropped {} bond(s) with no association", dropped);
+                                                if store.save_settings(&bonds).await.is_err() {
+                                                    info!("Failed to store pruned bonds");
+                                                }
+                                            }
+
+                                            let response =
+                                                ApplicationProcessorToCommsProcessorMessage::BluetoothBonds(
+                                                    bonds,
+                                                );
+                                            match to_allocvec_cobs(&response) {
+                                                Ok(output) => {
+                                                    let _ = tx_sender.send(output).await;
+                                                    info!("Sent Bluetooth bonds to ESP32");
+                                                }
+                                                Err(_) => info!("Failed to serialize Bluetooth bonds"),
+                                            }
+                                        }
+                                        (None, _) => {
+                                            info!("Ignored a bond request: no bond store on this machine");
+                                        }
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(bond) => {
+                                    // Sent once, immediately after pairing, with no reply and
+                                    // no retry -- so a failure here is the difference between
+                                    // a dial that survives a reboot and one that has to be
+                                    // paired again. Logged loudly for that reason.
+                                    match &bond_store {
+                                        Some(store) => {
+                                            let mut store = store.lock().await;
+                                            let mut bonds =
+                                                store.load_settings().await.unwrap_or_default();
+                                            if bonds.upsert(bond) {
+                                                if store.save_settings(&bonds).await.is_err() {
+                                                    info!("Failed to store a Bluetooth bond");
+                                                } else {
+                                                    info!("Stored a Bluetooth bond");
+                                                }
+                                            } else {
+                                                info!("Dropped a Bluetooth bond: no free slot");
+                                            }
+                                        }
+                                        None => info!("Dropped a Bluetooth bond: no bond store"),
                                     }
                                 }
                                 CommsProcessorToApplicationProcessorMessage::InputEvent(id, command) => {

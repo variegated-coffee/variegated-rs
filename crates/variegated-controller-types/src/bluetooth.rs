@@ -253,6 +253,25 @@ impl BluetoothBonds {
         self.0.push(bond).is_ok()
     }
 
+    /// Drop every bond whose device is not in `addresses`, returning how many went.
+    ///
+    /// The count is what tells a caller whether the list needs writing back, so that a
+    /// prune which changes nothing costs no flash cycle.
+    ///
+    /// Pruning is necessary rather than tidy: there are only [`MAX_BLUETOOTH_PERIPHERALS`]
+    /// slots, so keys left behind by devices the user has removed can fill the list and
+    /// leave a genuinely new pairing with nowhere to be stored.
+    ///
+    /// **Never call this with an association list you are not sure of.** An empty slice
+    /// means "nothing is associated" and drops every bond on the machine, which is right
+    /// when the user really has removed everything and catastrophic when it merely stands
+    /// for "the associations have not been loaded yet".
+    pub fn retain_associated(&mut self, addresses: &[[u8; 6]]) -> usize {
+        let before = self.0.len();
+        self.0.retain(|bond| addresses.contains(&bond.address));
+        before - self.0.len()
+    }
+
     /// Remove the bond for `address`, returning whether there was one.
     pub fn remove(&mut self, address: [u8; 6]) -> bool {
         match self.0.iter().position(|b| b.address == address) {
@@ -580,6 +599,39 @@ mod tests {
             BluetoothBonds::deserialize_from(&buf[..written]).expect("deserialize");
         assert_eq!(decoded, bonds);
         assert_eq!(read, written);
+    }
+
+    /// Bonds for devices that are no longer associated are dropped.
+    ///
+    /// Not tidiness: there are only `MAX_BLUETOOTH_PERIPHERALS` slots, so keys for devices
+    /// the user has removed can fill the list and leave a genuinely new pairing with
+    /// nowhere to go.
+    #[test]
+    fn pruning_drops_bonds_with_no_association() {
+        let kept = [0x11; 6];
+        let removed = [0x22; 6];
+
+        let mut bonds = BluetoothBonds::default();
+        bonds.upsert(BluetoothBond { address: kept, ..Default::default() });
+        bonds.upsert(BluetoothBond { address: removed, ..Default::default() });
+
+        assert_eq!(bonds.retain_associated(&[kept]), 1);
+        assert_eq!(bonds.0.len(), 1);
+        assert_eq!(bonds.0[0].address, kept);
+    }
+
+    /// Pruning against the same set changes nothing and reports nothing.
+    ///
+    /// The caller writes to flash only when this reports a removal, so a wrong answer here
+    /// is a flash write on every boot of the comms processor.
+    #[test]
+    fn pruning_against_an_unchanged_set_removes_nothing() {
+        let address = [0x11; 6];
+        let mut bonds = BluetoothBonds::default();
+        bonds.upsert(BluetoothBond { address, ..Default::default() });
+
+        assert_eq!(bonds.retain_associated(&[address]), 0);
+        assert_eq!(bonds.0.len(), 1);
     }
 
     /// A bond replaces the one for the same device rather than accumulating beside it.

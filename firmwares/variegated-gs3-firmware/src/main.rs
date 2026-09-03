@@ -242,6 +242,7 @@ async fn esp_transceiver_task(
     wifi_credentials_receiver: Option<embassy_sync::watch::Receiver<'static, SyncSendRawMutex, StoredWifiCredentials, 2>>,
     wifi_provisioning_receiver: Option<embassy_sync::channel::Receiver<'static, SyncSendRawMutex, u32, 2>>,
     shot_upload_config_receiver: Option<embassy_sync::watch::Receiver<'static, SyncSendRawMutex, ShotUploadConfig, 2>>,
+    bond_store: &'static BondStoreMutex,
 ) {
     // One binding for both the UART and the debug relay's byte budget, so the two
     // cannot drift apart: the budget is a fraction of the link, and a stale figure
@@ -284,7 +285,7 @@ async fn esp_transceiver_task(
     // means "the link task is being woken", not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver, Some(INPUT_COMMAND_CHANNEL.sender())),
+        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver, Some(INPUT_COMMAND_CHANNEL.sender()), Some(bond_store)),
     ).await;
 }
 
@@ -493,6 +494,13 @@ type ShotUploadStoreType = SequentialStorageSettingsStorage<'static, SyncSendRaw
 /// again; only the payload type and the key differ.
 type TimezoneStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, TimezoneSetting>;
 
+/// Bluetooth pairing keys, in the same settings range under a key of their own.
+///
+/// Handed to the transceiver rather than to the controller, which is the one store here that
+/// is: the controller gates on an *association* and publishes it inside `Configuration`, but
+/// has no use for the keys themselves. See the note on `bond_store` in `esp_transceiver_main`.
+type BondStoreType = SequentialStorageSettingsStorage<'static, SyncSendRawMutex, SettingsFlashType, variegated_controller_types::bluetooth::BluetoothBonds>;
+
 /// Where the panel's content sits inside the bezel's aperture, in the same settings range
 /// under a key of its own.
 ///
@@ -516,6 +524,7 @@ type RoutineRepositoryMutex = Mutex<SyncSendRawMutex, RoutineRepositoryType>;
 type ScheduleStoreMutex = Mutex<SyncSendRawMutex, ScheduleStoreType>;
 type SettingsStorageMutex = Mutex<SyncSendRawMutex, SettingsStorageType>;
 type BluetoothStoreMutex = Mutex<SyncSendRawMutex, BluetoothStoreType>;
+type BondStoreMutex = Mutex<SyncSendRawMutex, BondStoreType>;
 type WifiStoreMutex = Mutex<SyncSendRawMutex, WifiStoreType>;
 type ShotUploadStoreMutex = Mutex<SyncSendRawMutex, ShotUploadStoreType>;
 type TimezoneStoreMutex = Mutex<SyncSendRawMutex, TimezoneStoreType>;
@@ -1190,6 +1199,7 @@ static SETTINGS_STORAGE: StaticCell<SettingsStorageMutex> = StaticCell::new();
 static PANEL_ORIGIN_STORE: StaticCell<PanelOriginStoreMutex> = StaticCell::new();
 static PANEL_DATA_POINTS_STORE: StaticCell<PanelDataPointsStoreMutex> = StaticCell::new();
 static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
+static BOND_STORE: StaticCell<BondStoreMutex> = StaticCell::new();
 /// Accepted scan requests, carrying the duration in milliseconds. The controller sends
 /// and `esp_transceiver_main` drains, so this crosses cores the same way
 /// `BLUETOOTH_SCALE_COMMAND_CHANNEL` does -- hence `SyncSendRawMutex`.
@@ -2615,10 +2625,10 @@ async fn main_task(
         variegated_controller_lib::WATCHDOG_TIMEOUT.as_millis()
     );
 
-    // All four stores, over one flash range keyed by `settings::key`. The range and the
+    // All six stores, over one flash range keyed by `settings::key`. The range and the
     // reasoning about why these are keys rather than ranges of their own are
     // `variegated_controller_lib::settings::machine_stores`.
-    let (settings_storage, bluetooth_store, wifi_store, shot_upload_store, timezone_store) =
+    let (settings_storage, bluetooth_store, wifi_store, shot_upload_store, timezone_store, bond_store) =
         variegated_controller_lib::settings::machine_stores::<
             SyncSendRawMutex,
             SettingsFlashType,
@@ -2686,6 +2696,7 @@ async fn main_task(
 
     // Bluetooth associations, at a key of their own in the settings range.
     let bluetooth_store_ref = BLUETOOTH_STORE.init(Mutex::new(bluetooth_store));
+    let bond_store_ref = BOND_STORE.init(Mutex::new(bond_store));
     let bluetooth_scan_channel = BLUETOOTH_SCAN_CHANNEL.init(Channel::new());
 
     let wifi_store_ref = WIFI_STORE.init(Mutex::new(wifi_store));
@@ -3424,7 +3435,7 @@ async fn main_task(
     #[cfg(not(feature = "belka"))]
     let brew_sensor_command_receiver = None;
 
-    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition.clone(), routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")))));
+    spawner.spawn(unwrap!(esp_transceiver_task(esp_p, esp_status_receiver, esp_configuration_receiver, esp_command_sender, machine_definition.clone(), routine_repository_ref, external_device_dispatcher, debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, Some(bluetooth_scan_channel.receiver()), Some(wifi_credentials_watch.receiver().expect("the credentials watch is sized for this receiver")), Some(wifi_provisioning_channel.receiver()), Some(shot_upload_config_watch.receiver().expect("the upload config watch is sized for this receiver")), bond_store_ref)));
 
     // Spawn the Belka Portal device task
     #[cfg(feature = "belka")]
