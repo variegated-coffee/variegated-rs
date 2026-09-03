@@ -45,7 +45,7 @@ use embassy_rp::pio::Pio;
 use embassy_sync::pubsub::{PubSubChannel, Subscriber};
 use futures::future::join_all;
 
-use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog, ShotLogDayFilter, ShotLogEvent, ShotLogListEntry, ShotLogListRequest};
+use variegated_controller_types::{Configuration, DutyCycleType, FlowRateType, InputCommand, InputVolumeType, MachineCommand, MachineDefinition, PressureType, RPMType, RoutineIndex, Status, StorageCommand, TemperatureType, WaterLevelType, BoilerDefinition, GroupDefinition, BoilerType, SensorCapability, ActuatorCapability, ControlModeCapability, PeripheralDefinition, PeripheralType, WaterTapDefinition, TankDefinition, WeightType, ShotLog, ShotLogDayFilter, ShotLogEvent, ShotLogListEntry, ShotLogListRequest};
 // Only the PWM steam valve build declares a steam wand or drives a solenoid through one.
 // These stay on their own `use` lines rather than joining the lists above precisely so the
 // cfg can be attached -- a name folded into an ungated list becomes an unused import in a
@@ -284,7 +284,7 @@ async fn esp_transceiver_task(
     // means "the link task is being woken", not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver),
+        esp_transceiver_main(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, Some(dispatcher), debug_command_sender, scale_command_receiver, brew_sensor_command_receiver, bluetooth_scan_receiver, shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, wifi_credentials_receiver, wifi_provisioning_receiver, shot_upload_config_receiver, Some(INPUT_COMMAND_CHANNEL.sender())),
     ).await;
 }
 
@@ -1198,6 +1198,17 @@ static BLUETOOTH_STORE: StaticCell<BluetoothStoreMutex> = StaticCell::new();
 /// press queued rather than dropped, and depth beyond that would only let stale requests
 /// pile up behind a scan already running.
 static BLUETOOTH_SCAN_CHANNEL: StaticCell<Channel<SyncSendRawMutex, u16, 2>> = StaticCell::new();
+/// UI commands from a Bluetooth input device, filled by `esp_transceiver_main` and drained
+/// by `button_controller_task`.
+///
+/// A plain `static` rather than a `StaticCell` for the same reason as
+/// `SHOT_LOG_QUERY_CHANNEL`: `Channel::new()` is `const`, and this way both ends reach it
+/// without a parameter on either `#[embassy_executor::task]` signature.
+///
+/// Depth 4 because the sampler on the far side already batches a turn into one message, so
+/// what arrives here is a handful of deliberate gestures rather than a report stream. A
+/// deeper queue would only let a backlog build that the user has stopped waiting for.
+static INPUT_COMMAND_CHANNEL: Channel<SyncSendRawMutex, InputCommand, 4> = Channel::new();
 static WIFI_STORE: StaticCell<WifiStoreMutex> = StaticCell::new();
 static SHOT_UPLOAD_STORE: StaticCell<ShotUploadStoreMutex> = StaticCell::new();
 static TIMEZONE_STORE: StaticCell<TimezoneStoreMutex> = StaticCell::new();

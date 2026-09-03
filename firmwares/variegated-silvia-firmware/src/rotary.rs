@@ -1,5 +1,5 @@
 use defmt::{info, warn, Format};
-use embassy_futures::select::{select4, Either4};
+use embassy_futures::select::{select, select4, Either, Either4};
 use embassy_rp::peripherals::PIO0;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -7,7 +7,7 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, InputCommand, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use variegated_machine_menu::{
@@ -483,11 +483,38 @@ pub async fn handle_menu_item_activation(
     new_state
 }
 
+/// One thing for the controller to act on.
+///
+/// This exists so that an event the encoder produced and an identical one injected from a
+/// Bluetooth input device reach the same code. Before it, the four sources were `Either4`
+/// variants matched inline; naming them means a fifth source can *become* one of the first
+/// two rather than needing its own copy of what they do -- which for the press would have
+/// meant duplicating some four hundred lines of UI state machine.
+enum RotaryEvent {
+    /// The encoder moved, or a dial reported that it did.
+    Rotation(Direction),
+    /// The encoder was pressed, or a dial's Activate arrived.
+    Press,
+    Status(Status),
+    Configuration(Configuration),
+}
+
 pub(crate) struct RotaryController<'a, C, const N: usize> where
     C: InputPin + Wait,
 {
     rotary: PioEncoder<'a, PIO0, 0>,
     button: C,
+    /// UI commands from a Bluetooth input device the comms processor owns.
+    input_receiver: embassy_sync::channel::Receiver<'a, NoopRawMutex, InputCommand, 4>,
+    /// Injected rotation not yet acted on, signed; positive is clockwise.
+    ///
+    /// A count rather than a queue of events because one `Increment` can carry up to 255
+    /// steps, and they are spent one per loop iteration so that each moves the UI exactly
+    /// as one encoder detent would. Anything else would need the state machine below to
+    /// understand a step count, which is precisely what synthesizing events avoids.
+    pending_rotation: i32,
+    /// Injected presses not yet acted on.
+    pending_presses: u8,
     command_sender: Sender<'a, NoopRawMutex, MachineCommand, N>,
     ui_status_sender: Sender<'a, NoopRawMutex, UIStatus, N>,
     status: UIStatus,
@@ -511,13 +538,17 @@ where
         routine_repository: &'static RoutineRepository,
         status_receiver: StatusSubscriber,
         configuration_receiver: ConfigurationSubscriber,
+        input_receiver: embassy_sync::channel::Receiver<'a, NoopRawMutex, InputCommand, 4>,
     ) -> Self {
         let mut status = UIStatus::default();
         status.manual_brew_parameters = ManualBrewParameters::new();
-        
+
         Self {
             rotary,
             button,
+            input_receiver,
+            pending_rotation: 0,
+            pending_presses: 0,
             command_sender,
             ui_status_sender,
             status,
@@ -535,14 +566,79 @@ where
         self.ui_status_sender.send(self.status.clone()).await;
 
         loop {
-            let either4 = select4(
-                self.rotary.read(),
-                self.button.wait_for_falling_edge(),
-                self.status_receiver.next_message_pure(),
-                self.configuration_receiver.next_message_pure()
-            ).await;
-            match either4 {
-                Either4::First(direction) => {
+            // An injected event, if one is owed, before waiting for a physical one.
+            //
+            // Rotation is spent before presses so that an Activate sent during a turn acts
+            // on the row the turn arrived at, rather than on the one it started from.
+            let event = if self.pending_rotation != 0 {
+                let direction = if self.pending_rotation > 0 {
+                    Direction::Clockwise
+                } else {
+                    Direction::CounterClockwise
+                };
+                self.pending_rotation -= self.pending_rotation.signum();
+                RotaryEvent::Rotation(direction)
+            } else if self.pending_presses > 0 {
+                self.pending_presses -= 1;
+                RotaryEvent::Press
+            } else {
+                // Nested rather than a `select5`, which embassy does not have. The four
+                // original sources keep their shape so that this reads as "the encoder, or
+                // an injected command" rather than as five equals.
+                match select(
+                    select4(
+                        self.rotary.read(),
+                        self.button.wait_for_falling_edge(),
+                        self.status_receiver.next_message_pure(),
+                        self.configuration_receiver.next_message_pure(),
+                    ),
+                    self.input_receiver.receive(),
+                )
+                .await
+                {
+                    Either::First(Either4::First(direction)) => RotaryEvent::Rotation(direction),
+                    Either::First(Either4::Second(_)) => RotaryEvent::Press,
+                    Either::First(Either4::Third(status)) => RotaryEvent::Status(status),
+                    Either::First(Either4::Fourth(configuration)) => {
+                        RotaryEvent::Configuration(configuration)
+                    }
+                    Either::Second(command) => {
+                        info!("Input command: {:?}", command);
+                        match command {
+                            // Physical, not semantic: `Increment` is a clockwise detent
+                            // because that is the gesture it stands for, and what clockwise
+                            // then *means* is each screen's business -- the same question
+                            // the encoder itself asks. Note this firmware's polarity is not
+                            // uniform across screens; that is pre-existing, and a dial
+                            // inherits it exactly as a hand on the knob does.
+                            InputCommand::Increment(steps) => {
+                                self.pending_rotation += steps as i32
+                            }
+                            InputCommand::Decrement(steps) => {
+                                self.pending_rotation -= steps as i32
+                            }
+                            InputCommand::Activate => {
+                                self.pending_presses = self.pending_presses.saturating_add(1)
+                            }
+                            // The encoder has one falling edge and no hold gesture, so this
+                            // machine has no "back" and no separate "open the menu" -- a
+                            // press already enters the menu from idle. Ignored rather than
+                            // approximated: inventing a gesture the physical control does
+                            // not have would give the dial a UI the knob cannot reach.
+                            InputCommand::Return | InputCommand::Menu => {
+                                info!("Input: ignored, this machine has no such gesture")
+                            }
+                            InputCommand::Custom(index) => {
+                                info!("Input: custom {} is not bound to anything", index)
+                            }
+                        }
+                        continue;
+                    }
+                }
+            };
+
+            match event {
+                RotaryEvent::Rotation(direction) => {
                     // Rotary encoder was turned
                 match &mut self.status.state {
                     UIState::Idle(substate) => {
@@ -651,7 +747,7 @@ where
 
                 self.ui_status_sender.send(self.status.clone()).await;
                 }
-                Either4::Second(_) => {
+                RotaryEvent::Press => {
                     // Button was pressed
                 match &self.status.state {
                     UIState::Idle(substate) => {
@@ -1132,7 +1228,7 @@ where
 
                 Timer::after_millis(300).await;
                 }
-                Either4::Third(status_update) => {
+                RotaryEvent::Status(status_update) => {
                     // Status update received - handle automatic UI switching
                     self.current_status = status_update;
                     
@@ -1174,7 +1270,7 @@ where
                     // Update previous brewing state for next iteration
                     self.previous_brewing_state = current_brewing;
                 }
-                Either4::Fourth(configuration_update) => {
+                RotaryEvent::Configuration(configuration_update) => {
                     // Configuration update received - store the latest configuration
                     self.current_configuration = Some(configuration_update);
                     info!("Configuration updated");

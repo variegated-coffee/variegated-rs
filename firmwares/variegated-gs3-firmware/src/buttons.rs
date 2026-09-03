@@ -95,7 +95,8 @@ use embassy_sync::channel::Sender;
 use variegated_rp235x_atomic_raw_mutex::AtomicRawMutex;
 use embassy_time::{Instant, Timer};
 use variegated_controller_types::{
-    MachineCommand, MachineMode, RoutineIndex, ScaleSelector, SingleGroupControllerGroups, Status,
+    InputCommand, MachineCommand, MachineMode, RoutineIndex, ScaleSelector,
+    SingleGroupControllerGroups, Status,
 };
 use variegated_mcp23017::{Mcp23017, Port, InterruptMode};
 use variegated_buttons::{
@@ -732,6 +733,71 @@ impl ButtonEventHandler {
         }
     }
 
+    /// Open the menu, if the machine is in a state to have one opened.
+    ///
+    /// Shared by the button-5 hold and by [`InputCommand::Menu`] from a Bluetooth input
+    /// device, so that a dial cannot reach a menu the panel would have refused. The busy
+    /// check is deliberately here rather than at either call site: it is checked when the
+    /// menu is actually opened, because 1.5 s is long enough for a schedule to have started
+    /// a routine since the gesture began.
+    pub fn open_menu(&mut self) {
+        if self.machine_is_busy() {
+            defmt::info!("Menu: refused, the machine is busy");
+        } else {
+            defmt::info!("Menu: opened");
+            self.menu = GsMenu::open(MenuId::Root);
+        }
+    }
+
+    /// Handle a UI command from an input device the comms processor owns.
+    ///
+    /// Synthesizes the panel event that means the same thing and feeds it to
+    /// [`Self::handle_event`], rather than acting on the menu directly. That is what makes
+    /// a dial mean on each screen exactly what the panel means on it -- including on the
+    /// idle screen, where `-` and `+` run routines 0 and 1, because that is what those
+    /// buttons do there. Reimplementing the dispatch here would be a second UI that drifts
+    /// from the first.
+    ///
+    /// Nothing in here asks whether the menu is open, and nothing should: the panel's
+    /// vocabulary is the same on every screen, and which screen is showing is
+    /// `handle_event`'s business.
+    pub fn handle_input_command(
+        &mut self,
+        command: InputCommand,
+        now: Instant,
+    ) -> Vec<MachineCommand> {
+        let (buttons, repeats) = match command {
+            // Buttons 1 and 2 are marked `-` and `+` on the panel, which is the whole
+            // mapping: less/previous and more/next.
+            InputCommand::Decrement(steps) => (SET_ROUTINE_0, steps),
+            InputCommand::Increment(steps) => (SET_ROUTINE_1, steps),
+            InputCommand::Activate => (SET_ROUTINE_2, 1),
+            InputCommand::Return => (SET_ROUTINE_3, 1),
+            InputCommand::Menu => {
+                // Not a press: the menu opens on a *hold*, which is why this command exists
+                // at all. Synthesizing a press of button 5 would toggle the brew instead.
+                self.open_menu();
+                return Vec::new();
+            }
+            InputCommand::Custom(index) => {
+                // Reserved, and carried this far so that giving it a meaning later is not a
+                // wire-format change. Logged so a key that does nothing is still visibly
+                // arriving rather than looking like a dead device.
+                defmt::info!("Input: custom {} is not bound to anything", index);
+                return Vec::new();
+            }
+        };
+
+        // One event per step. The far side batches a turn into a count precisely so this
+        // link carries one message instead of many -- but the menu moves one row per press,
+        // so the count has to be spent here.
+        let mut commands = Vec::new();
+        for _ in 0..repeats {
+            commands.extend(self.handle_event(ButtonEvent::Press(buttons), now));
+        }
+        commands
+    }
+
     /// Handle a button event and return the appropriate machine command
     pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Vec<MachineCommand> {
         // The menu captures the six panel buttons. Routed here rather than inside `handle_press`
@@ -1275,12 +1341,7 @@ impl ButtonEventHandler {
                 self.button_5_hold_start = None;
                 // Checked here rather than when the deadline was armed: 1.5 s is long enough for
                 // a schedule to have started a routine in the meantime.
-                if self.machine_is_busy() {
-                    defmt::info!("Menu: refused, the machine is busy");
-                } else {
-                    defmt::info!("Menu: opened");
-                    self.menu = GsMenu::open(MenuId::Root);
-                }
+                self.open_menu();
                 return None;
             }
         }
@@ -1568,6 +1629,27 @@ pub async fn button_controller_task(
         // that is refused outright is never confirmed by any `Status`, and its deadline is
         // the only thing that retires it.
         handler.tick(Instant::now());
+
+        // UI commands from a Bluetooth input device, drained rather than selected on.
+        //
+        // The loop below already wakes at least every 10 ms, so a non-blocking drain here
+        // costs a dial at most that much latency -- imperceptible against a gesture -- and
+        // keeps this task's single `select` reading as "the panel", which is what it is
+        // about. Widening it to a `select3` would mean a third arm that has nothing to do
+        // with the MCP23017 either arm is there to read.
+        //
+        // Drained to empty rather than one per iteration: a fast turn arrives as one
+        // message carrying several steps, and `handle_input_command` spends them all, so
+        // leaving any queued would show up as the menu still scrolling after the dial has
+        // stopped.
+        while let Ok(command) = crate::INPUT_COMMAND_CHANNEL.try_receive() {
+            defmt::debug!("Input command: {:?}", command);
+            for machine_command in handler.handle_input_command(command, Instant::now()) {
+                if command_sender.try_send(machine_command).is_err() {
+                    defmt::warn!("Failed to send command - channel full");
+                }
+            }
+        }
 
         // Wait for either button interrupt or timeout for state machine updates
         let button_state_opt = match select(

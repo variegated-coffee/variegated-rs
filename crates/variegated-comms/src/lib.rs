@@ -24,6 +24,7 @@ use variegated_controller_types::{
     BrewSensorOp,
     CommsProcessorToApplicationProcessorMessage,
     Configuration,
+    InputCommand,
     MachineCommand,
     MachineDefinition,
     PeripheralId,
@@ -486,6 +487,16 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
     shot_upload_config_receiver: Option<
         embassy_sync::watch::Receiver<'static, SM, ShotUploadConfig, 2>,
     >,
+    // UI commands from an input device the comms processor owns -- a Bluetooth dial. `None`
+    // on a machine whose input task was not given the matching receiver, in which case the
+    // arm logs and drops rather than silently succeeding.
+    //
+    // This goes to the *input* task rather than onto `command_sender`, and that is the whole
+    // reason it is a channel of its own. A `MachineCommand` reaches the controller, but
+    // `Decrement` and `Activate` only mean anything against the menu state the input task
+    // owns; routing them through the controller would need either a second copy of that
+    // state or a second UI.
+    input_command_sender: Option<Sender<'static, SM, InputCommand, 4>>,
 ) {
 
     // Use a channel to coordinate sending between the tasks
@@ -1232,6 +1243,29 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                                 CommsProcessorToApplicationProcessorMessage::WifiProvisioningIdentify => {
                                     if command_sender.try_send(MachineCommand::IdentifyMachine).is_err() {
                                         info!("Dropped an identify request: command channel full");
+                                    }
+                                }
+                                CommsProcessorToApplicationProcessorMessage::InputEvent(id, command) => {
+                                    // The id is deliberately not forwarded. It exists on the
+                                    // wire so a second input device costs an association
+                                    // rather than another message, but every input device
+                                    // drives the same one UI -- two dials on a machine should
+                                    // both work, not take turns -- so there is nothing here
+                                    // to route on.
+                                    match &input_command_sender {
+                                        Some(sender) => {
+                                            // Dropped rather than awaited, like every other
+                                            // arm in this loop: blocking the UART reader to
+                                            // deliver a keypress would stall the link for
+                                            // status and shot data too. A lost step on a
+                                            // dial is a step the user simply turns again.
+                                            if sender.try_send(command).is_err() {
+                                                info!("Dropped an input command from 0x{:04X}: channel full", id);
+                                            }
+                                        }
+                                        None => {
+                                            info!("Ignored an input command from 0x{:04X}: no input sink on this machine", id);
+                                        }
                                     }
                                 }
                                 _ => {
