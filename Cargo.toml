@@ -60,6 +60,9 @@ members = [
     # at all. See that crate's docs for the full failure.
     "crates/variegated-scale-codec",
     "crates/variegated-scale-trouble-driver",
+    # The Ulanzi dial's report decoding and rotation sampling, split out from its driver for
+    # exactly the reason above.
+    "crates/variegated-ulanzi-codec",
     "crates/variegated-improv-trouble",
     "firmwares/variegated-comms-firmware",
 ]
