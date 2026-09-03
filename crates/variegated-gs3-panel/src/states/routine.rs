@@ -270,14 +270,19 @@ fn annotation<D>(
                 target,
             );
         }
-        // `MAX`, not `/`, because a cap and a setpoint are different promises and the slot
+        // `<`, not `/`, because a cap and a setpoint are different promises and the slot
         // beside this one may well be carrying the other. Warn-coloured while it is actually
         // holding the machine back: armed is a setting, binding is a thing that is happening,
         // and this is the only place on the panel that difference can be seen.
+        //
+        // The glyph rather than the word `MAX`: it is 25 px narrower on a row that is 221 px
+        // wide, and on the commonest profile shape in this tree -- pressure control with a
+        // flow cap -- that 25 px is the difference between four data points on the screen and
+        // three. A cap is the one relation where the mathematical symbol is not jargon.
         Annotation::Limit { value, binding } => {
             draw::run(
                 &type_scale::LABEL,
-                format_args!("MAX {value:.decimals$}"),
+                format_args!("<{value:.decimals$}"),
                 Point::new(x + rhythm::TIGHT, baseline),
                 VerticalPosition::Baseline,
                 if binding {
@@ -299,10 +304,9 @@ fn annotation_width(note: Annotation, quantity: crate::view::Quantity) -> i32 {
             &type_scale::LABEL,
             format_args!("/ {value:.decimals$}"),
         ),
-        Annotation::Limit { value, .. } => draw::width(
-            &type_scale::LABEL,
-            format_args!("MAX {value:.decimals$}"),
-        ),
+        Annotation::Limit { value, .. } => {
+            draw::width(&type_scale::LABEL, format_args!("<{value:.decimals$}"))
+        }
     };
     rhythm::TIGHT + text
 }
