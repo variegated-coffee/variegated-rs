@@ -12,6 +12,16 @@ pub enum PeripheralType {
     FlowMeter,
     LevelSensor,
     BrewSensor,
+    /// A device that drives the machine's UI rather than measuring anything.
+    ///
+    /// The odd one out on this enum: every type above it names something a
+    /// [`crate::machine_definition::SensorCapability`] describes and that reports readings,
+    /// and an input device does neither. It is a peripheral all the same because everything
+    /// else about it is one -- it occupies a role, it is associated with a Bluetooth device
+    /// through the same UI, and its connection status is reported the same way.
+    ///
+    /// Appended after `BrewSensor`; see the note on `BluetoothDriverKind`.
+    InputDevice,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -45,6 +55,29 @@ pub trait PeripheralStatusProvider {
     fn get_peripheral_id(&self) -> PeripheralId;
     fn get_peripheral_type(&self) -> PeripheralType;
     fn is_available(&self) -> bool;
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod tests {
+    use super::*;
+
+    /// `InputDevice` went on the end, and `BrewSensor` did not move.
+    ///
+    /// This enum reaches further than the link: it is inside `Status.peripheral_status`, it
+    /// is exported to the firmware frontend's generated schema, and it is frozen into the
+    /// uplink schema the cloud reads. A renumbering here is wrong in four places at once.
+    #[test]
+    fn the_input_device_type_is_appended_after_brew_sensor() {
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            postcard::to_slice(&PeripheralType::BrewSensor, &mut buf).expect("serialize")[0],
+            4
+        );
+        assert_eq!(
+            postcard::to_slice(&PeripheralType::InputDevice, &mut buf).expect("serialize")[0],
+            5
+        );
+    }
 }
 
 /// Which scale a command means.

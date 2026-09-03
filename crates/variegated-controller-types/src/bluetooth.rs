@@ -105,6 +105,16 @@ pub enum BluetoothDriverKind {
     /// Note that a Lunar 2021 with AL008 hardware speaks the *older* protocol, so the model
     /// year does not settle which of the two a scale needs.
     AcaiaNew,
+    /// Ulanzi D100H: a BLE HID dial with seven keys, driving the machine's UI.
+    ///
+    /// The first driver on this enum that is not a sensor, and the first that needs an
+    /// **encrypted** link: it speaks HID over GATT, whose report characteristics are
+    /// readable only after pairing. Every driver above it connects to an open peripheral
+    /// and subscribes, which is why the slot loop this one runs is not the scale loop with
+    /// a different protocol.
+    ///
+    /// Appended, never inserted -- see the note above.
+    UlanziD100H,
 }
 
 /// One entry in the association list.
@@ -152,6 +162,108 @@ pub struct BluetoothPeripheralAssociation {
 
 pub type BluetoothPeripheralList =
     heapless::Vec<BluetoothPeripheralAssociation, MAX_BLUETOOTH_PERIPHERALS>;
+
+/// How strong a bonded link is.
+///
+/// A mirror of the LE security mode 1 levels, and only those: modes 2 and 3 describe data
+/// signing and broadcast codes, neither of which a connection bond can carry, so mirroring
+/// them would be inventing states this type can never hold.
+///
+/// **Append, never insert** -- this is stored in flash.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BluetoothSecurityLevel {
+    /// No authentication and no encryption.
+    #[default]
+    Level1,
+    /// Unauthenticated pairing with encryption -- what Just Works produces, and therefore
+    /// what a keypad-less, display-less dial can reach.
+    Level2,
+    /// Authenticated pairing with encryption.
+    Level3,
+    /// Authenticated LE Secure Connections with a 128-bit key.
+    Level4,
+}
+
+/// The keys from one completed pairing.
+///
+/// A mirror of the Bluetooth stack's own bond type rather than that type itself, for the
+/// reason [`BluetoothPeripheralAssociation::address`] is a `[u8; 6]`: the stack belongs to
+/// the comms processor, and the processor that owns the flash this is written to has no
+/// Bluetooth stack to take a type from.
+///
+/// This exists because the comms processor has no persistent storage. It holds the bond
+/// only until it reboots, while the device on the other side holds its half indefinitely --
+/// so without somewhere to put this, every reset leaves the two sides disagreeing about a
+/// key, which fails the reconnection rather than falling back to pairing.
+///
+/// **Append, never insert.**
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BluetoothBond {
+    /// The peer's identity address -- the one it distributed during pairing, which is not
+    /// necessarily the address it was discovered at.
+    pub address: [u8; 6],
+    /// Whether `address` is a random static address rather than a public one.
+    pub address_random: bool,
+    /// The Long Term Key. The secret; everything else here is bookkeeping around it.
+    pub long_term_key: u128,
+    /// The peer's Identity Resolving Key, if it distributed one.
+    ///
+    /// Present only for a device that advertises with a resolvable private address, and
+    /// required to recognise such a device across address changes. `None` is the ordinary
+    /// case for a peripheral with a fixed address.
+    pub identity_resolving_key: Option<u128>,
+    /// The level the bond was formed at.
+    pub security_level: BluetoothSecurityLevel,
+}
+
+pub type BluetoothBondList = heapless::Vec<BluetoothBond, MAX_BLUETOOTH_PERIPHERALS>;
+
+/// The bond list as it is stored in flash.
+///
+/// A newtype for the same reason [`BluetoothAssociations`] is one: `sequential_storage`'s
+/// `Value` is a foreign trait and `heapless::Vec` a foreign type.
+///
+/// Kept apart from [`BluetoothAssociations`] rather than added as a field on an
+/// association, because these blobs carry no version and no migration: appending a field to
+/// the association record makes every stored copy fail to deserialize and fall back to
+/// `Default`, which would silently drop every pairing a user already has. A second key
+/// costs nothing by comparison.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BluetoothBonds(pub BluetoothBondList);
+
+impl BluetoothBonds {
+    /// Insert or replace the bond for `address`.
+    ///
+    /// Replacing is the only sensible reading of a second pairing with the same device:
+    /// the new keys are the live ones and the old are already worthless. Returns `false`
+    /// if the list is full and the address was not already present.
+    pub fn upsert(&mut self, bond: BluetoothBond) -> bool {
+        if let Some(existing) = self.0.iter_mut().find(|b| b.address == bond.address) {
+            *existing = bond;
+            return true;
+        }
+        self.0.push(bond).is_ok()
+    }
+
+    /// Remove the bond for `address`, returning whether there was one.
+    pub fn remove(&mut self, address: [u8; 6]) -> bool {
+        match self.0.iter().position(|b| b.address == address) {
+            Some(index) => {
+                self.0.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 /// A device seen during a discovery scan.
 ///
@@ -445,6 +557,127 @@ impl BluetoothAssociations {
 mod tests {
     use super::*;
 
+    /// The bond list survives the store's own encode/decode, CRC included.
+    ///
+    /// Distinct from the postcard round trip above: this is the path the settings store
+    /// actually uses, and it is the one that has to reject a corrupted blob rather than
+    /// hand back plausible-looking keys.
+    #[cfg(all(feature = "serde", feature = "sequential-storage"))]
+    #[test]
+    fn the_bond_list_round_trips_through_the_settings_store() {
+        let mut bonds = BluetoothBonds::default();
+        bonds.upsert(BluetoothBond {
+            address: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            address_random: true,
+            long_term_key: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+            identity_resolving_key: None,
+            security_level: BluetoothSecurityLevel::Level2,
+        });
+
+        let mut buf = [0u8; 2048];
+        let written = bonds.serialize_into(&mut buf).expect("serialize");
+        let (decoded, read) =
+            BluetoothBonds::deserialize_from(&buf[..written]).expect("deserialize");
+        assert_eq!(decoded, bonds);
+        assert_eq!(read, written);
+    }
+
+    /// A bond replaces the one for the same device rather than accumulating beside it.
+    ///
+    /// Four slots is the whole budget, and re-pairing a device that is already bonded is
+    /// ordinary -- it is what happens whenever the device is reset. Appending instead of
+    /// replacing would fill the list with dead keys for one dial.
+    #[test]
+    fn re_pairing_a_device_replaces_its_bond() {
+        let mut bonds = BluetoothBonds::default();
+        let address = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        bonds.upsert(BluetoothBond {
+            address,
+            long_term_key: 1,
+            ..Default::default()
+        });
+        bonds.upsert(BluetoothBond {
+            address,
+            long_term_key: 2,
+            ..Default::default()
+        });
+
+        assert_eq!(bonds.0.len(), 1);
+        assert_eq!(bonds.0[0].long_term_key, 2);
+    }
+
+    /// A bond survives the trip to flash and back.
+    ///
+    /// The keys are the whole point: a bond that round-trips with a corrupted LTK is worse
+    /// than no bond at all, because the dial keeps its half and the reconnection fails on a
+    /// key mismatch rather than falling back to pairing.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_bond_round_trips() {
+        let bond = BluetoothBond {
+            address: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            address_random: true,
+            long_term_key: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+            identity_resolving_key: Some(0xdead_beef_dead_beef_dead_beef_dead_beef),
+            security_level: BluetoothSecurityLevel::Level2,
+        };
+
+        let mut buf = [0u8; 128];
+        let encoded = postcard::to_slice(&bond, &mut buf).expect("serialize");
+        let decoded: BluetoothBond = postcard::from_bytes(encoded).expect("deserialize");
+        assert_eq!(decoded, bond);
+    }
+
+    /// A full bond list clears the settings store's fixed read buffer.
+    ///
+    /// `SequentialStorageSettingsStorage` deserializes through a `[u8; 2048]`, and a blob
+    /// that outgrows it fails to load and falls back to `Default` -- which for this type
+    /// means every pairing silently disappears on the next boot. Worst case here is every
+    /// slot bonded with a resolvable peer, so every optional key present.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_full_bond_list_fits_the_settings_read_buffer() {
+        let mut bonds = BluetoothBonds::default();
+        for slot in 0..MAX_BLUETOOTH_PERIPHERALS {
+            assert!(bonds.0
+                .push(BluetoothBond {
+                    address: [0xff; 6],
+                    address_random: true,
+                    long_term_key: u128::MAX,
+                    identity_resolving_key: Some(u128::MAX),
+                    security_level: BluetoothSecurityLevel::Level4,
+                })
+                .is_ok(), "slot {slot} did not fit the list");
+        }
+
+        let mut buf = [0u8; 2048];
+        let encoded = postcard::to_slice(&bonds, &mut buf).expect("a full list must fit 2048");
+        assert!(
+            encoded.len() < 2048,
+            "a full bond list is {} bytes, against a 2048-byte read buffer",
+            encoded.len()
+        );
+    }
+
+    /// The Ulanzi driver went on the end, and `AcaiaNew` did not move.
+    ///
+    /// This kind travels inside the stored association list as well as over the link, so a
+    /// renumbering does not merely mis-decode a message -- it re-points every association
+    /// already in flash at a different driver.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn the_ulanzi_driver_is_appended_after_acaia_new() {
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            postcard::to_slice(&BluetoothDriverKind::AcaiaNew, &mut buf).expect("serialize")[0],
+            3
+        );
+        assert_eq!(
+            postcard::to_slice(&BluetoothDriverKind::UlanziD100H, &mut buf).expect("serialize")[0],
+            4
+        );
+    }
+
     fn association(
         id: PeripheralId,
         address_last_byte: u8,
@@ -616,6 +849,34 @@ impl<'a> Value<'a> for BluetoothAssociations {
             // `from_bytes_crc32` reads the whole slice, the trailing four bytes being
             // the CRC, and the slice handed in is exactly what `serialize_into`
             // produced.
+            Ok(value) => Ok((value, buffer.len())),
+            Err(_) => Err(SerializationError::InvalidFormat),
+        }
+    }
+}
+
+#[cfg(feature = "sequential-storage")]
+impl<'a> Value<'a> for BluetoothBonds {
+    fn serialize_into(&self, buffer: &mut [u8]) -> Result<usize, SerializationError> {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        match to_slice_crc32(self, buffer, crc.digest()) {
+            Ok(bytes) => Ok(bytes.len()),
+            Err(postcard::Error::SerializeBufferFull) => Err(SerializationError::BufferTooSmall),
+            Err(_) => Err(SerializationError::InvalidData),
+        }
+    }
+
+    fn deserialize_from(buffer: &'a [u8]) -> Result<(Self, usize), SerializationError>
+    where
+        Self: Sized,
+    {
+        let crc = Crc::<u32>::new(&CRC_32_ISCSI);
+
+        // The CRC matters more here than it does for the association list. A bit flipped
+        // in an address costs a failed connection and is obvious; a bit flipped in a Long
+        // Term Key produces a bond that is structurally valid and simply never works.
+        match from_bytes_crc32(buffer, crc.digest()) {
             Ok(value) => Ok((value, buffer.len())),
             Err(_) => Err(SerializationError::InvalidFormat),
         }

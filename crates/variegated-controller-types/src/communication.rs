@@ -258,6 +258,89 @@ pub enum CommsProcessorToApplicationProcessorMessage {
     /// from one that succeeded. `RemoveRoutine` stays on the wire for the debug CLI, which
     /// has no reply path to want.
     DeleteRoutine(RoutineIndex),
+    /// A UI command from an input device the comms processor owns.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// This does not travel as a [`MachineCommand`], despite that being the enum for
+    /// "something happened, do this". A `MachineCommand` reaches the *controller*, and
+    /// these have to reach the input task, which is where the menu state a `-` or a
+    /// `Select` means anything against actually lives. Routing them through the controller
+    /// would mean either duplicating that state or handing the controller a second copy of
+    /// the UI, and `MachineCommand` also travels the debug wire, so widening it costs a
+    /// [`crate::debug::DEBUG_PROTOCOL_VERSION`] bump for a message that wire has no use for.
+    ///
+    /// The [`PeripheralId`] travels for the reason a sensor reading carries one: a second
+    /// input device then costs an association, not another message.
+    InputEvent(PeripheralId, InputCommand),
+    /// Ask for the stored Bluetooth bonds.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Sent at boot and repeated until answered, for the same reason
+    /// [`Self::RequestBluetoothPeripherals`] is: the comms processor has no persistent
+    /// storage, so the application processor's copy is the only one. It carries the same
+    /// trap too -- **an empty list is a complete answer**, so the retry has to stop on
+    /// receipt rather than on the list being non-empty. A machine whose only paired device
+    /// is an unbonded scale would otherwise ask forever.
+    RequestBluetoothBonds,
+    /// A bond that has just been formed, on its way to flash.
+    ///
+    /// Appended, not inserted -- see the note on [`Self::DebugCommand`].
+    ///
+    /// Sent once, by the side that did the pairing. There is no reply and no retry: the
+    /// only cost of losing one is that the next reboot re-pairs, which is the behaviour
+    /// this message exists to avoid rather than a failure it has to survive.
+    BluetoothBondStored(crate::bluetooth::BluetoothBond),
+}
+
+/// What an input device asks the machine's UI to do.
+///
+/// Semantic rather than physical. Each control firmware maps these onto whatever its own
+/// input hardware would have produced -- the GS3 onto the panel button that means the same
+/// thing, the Silvia onto an encoder detent -- so one dial means on each machine what that
+/// machine's own controls mean, and neither firmware grows a second UI.
+///
+/// This is deliberately the panel's vocabulary and not the menu's. `-`, `+`, Select and
+/// Return are what the buttons *mean*; every screen reads that one vocabulary against
+/// whatever it is showing, and the idle screen -- which reads them as "run routine 0-3" --
+/// is one screen's reading of it rather than a mode. So nothing here has to know whether a
+/// menu is open, and no injection site branches on it.
+///
+/// **Append-only**, for the reason given on
+/// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputCommand {
+    /// `n` steps in the "more / next" direction -- the GS3's `+`, a clockwise detent.
+    ///
+    /// Batched by the comms processor rather than sent one per step. The first device is a
+    /// *stepless* dial, so a quick turn produces a burst of reports at whatever rate the
+    /// wheel is moving; forwarding each one would spend a link frame per report and hand
+    /// the UI a backlog it works through after the user has stopped turning.
+    Increment(u8),
+    /// `n` steps in the "less / previous" direction. See [`Self::Increment`].
+    Decrement(u8),
+    /// Confirm, select, enter -- the GS3's button 3, the Silvia's encoder press.
+    Activate,
+    /// Back out one level. The GS3's button 4; **ignored on the Silvia**, whose encoder has
+    /// one falling edge and no gesture to hang a second meaning on.
+    Return,
+    /// Open the menu -- what holding the GS3's button 5 does.
+    ///
+    /// A command of its own because the menu opens on a *hold*, and a device that sends
+    /// discrete commands has no hold to send. Without it a dial could only ever reach the
+    /// idle screen's reading of the vocabulary. Ignored on the Silvia, where the encoder
+    /// press already enters the menu from idle and [`Self::Activate`] therefore covers it.
+    Menu,
+    /// Reserved. Carried and logged, bound to nothing.
+    ///
+    /// Here now rather than later so that giving it a meaning is not a wire-format change.
+    /// The first device has four keys beyond those the variants above account for, so the
+    /// question this answers is already real; what it should *do* is not settled.
+    Custom(u8),
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -509,6 +592,20 @@ pub enum ApplicationProcessorToCommsProcessorMessage {
         index: RoutineIndex,
         outcome: RoutineDeleteOutcome,
     },
+    /// The stored Bluetooth bonds.
+    ///
+    /// Appended, never inserted -- postcard encodes an enum as its declaration-order
+    /// discriminant and this link carries no version byte.
+    ///
+    /// The answer to [`CommsProcessorToApplicationProcessorMessage::RequestBluetoothBonds`],
+    /// and also sent unsolicited when the set changes -- which in practice means when an
+    /// association is removed and its bond goes with it, since the comms processor is the
+    /// side that adds them.
+    ///
+    /// Sent as a whole list rather than one bond at a time because that makes the message
+    /// idempotent: the receiver installs exactly what it is given and forgets what it had,
+    /// so a bond removed here cannot survive on the far side.
+    BluetoothBonds(crate::bluetooth::BluetoothBonds),
 }
 
 /// An operation on a scale, as carried by
@@ -585,4 +682,149 @@ pub enum BrewSensorOp {
     ShowGraph,
     /// Leave it.
     HideGraph,
+}
+
+#[cfg(all(test, feature = "serde", feature = "std"))]
+mod tests {
+    use super::*;
+
+    /// The link's own round trip, for the one message an input device sends.
+    ///
+    /// The length is pinned rather than merely observed, for the reason
+    /// [`crate::shot_upload`]'s round-trip test pins its own: this frame crosses a
+    /// `CobsAccumulator<4096>` at both ends, and a change to its size is a wire-format
+    /// change worth being told about.
+    #[test]
+    fn an_input_event_round_trips_the_link() {
+        let msg = CommsProcessorToApplicationProcessorMessage::InputEvent(
+            0xBA1D,
+            InputCommand::Increment(3),
+        );
+
+        let mut buf = [0u8; 64];
+        let encoded = postcard::to_slice(&msg, &mut buf).expect("serialize");
+        assert_eq!(encoded.len(), 6);
+
+        let decoded: CommsProcessorToApplicationProcessorMessage =
+            postcard::from_bytes(encoded).expect("deserialize");
+        match decoded {
+            CommsProcessorToApplicationProcessorMessage::InputEvent(id, command) => {
+                assert_eq!(id, 0xBA1D);
+                assert_eq!(command, InputCommand::Increment(3));
+            }
+            _ => panic!("decoded to the wrong variant"),
+        }
+    }
+
+    /// `InputEvent` is variant 20, and `DeleteRoutine` is still 19.
+    ///
+    /// postcard encodes an enum as its declaration-order discriminant and this link carries
+    /// no version byte, so a variant inserted rather than appended silently mis-decodes
+    /// every message after it on a peer built from another commit. Pinning the last two
+    /// catches an insertion anywhere ahead of them, which is the whole of that failure
+    /// mode; it does not catch two payload variants being swapped with each other.
+    #[test]
+    fn appending_input_event_did_not_renumber_the_link() {
+        let mut buf = [0u8; 64];
+
+        let delete =
+            CommsProcessorToApplicationProcessorMessage::DeleteRoutine(RoutineIndex::Function(0));
+        assert_eq!(
+            postcard::to_slice(&delete, &mut buf).expect("serialize")[0],
+            19
+        );
+
+        let input = CommsProcessorToApplicationProcessorMessage::InputEvent(
+            0xBA1D,
+            InputCommand::Activate,
+        );
+        assert_eq!(
+            postcard::to_slice(&input, &mut buf).expect("serialize")[0],
+            20
+        );
+    }
+
+    /// The bond exchange went on the end of both enums.
+    ///
+    /// Three variants across two directions, so three chances to renumber a link that has
+    /// no version byte to catch it.
+    #[test]
+    fn the_bond_messages_are_appended_to_both_directions() {
+        use crate::bluetooth::{BluetoothBond, BluetoothBonds};
+
+        let mut buf = [0u8; 256];
+
+        let request = CommsProcessorToApplicationProcessorMessage::RequestBluetoothBonds;
+        assert_eq!(
+            postcard::to_slice(&request, &mut buf).expect("serialize")[0],
+            21
+        );
+
+        let stored = CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(
+            BluetoothBond::default(),
+        );
+        assert_eq!(
+            postcard::to_slice(&stored, &mut buf).expect("serialize")[0],
+            22
+        );
+
+        let bonds =
+            ApplicationProcessorToCommsProcessorMessage::BluetoothBonds(BluetoothBonds::default());
+        assert_eq!(
+            postcard::to_slice(&bonds, &mut buf).expect("serialize")[0],
+            23
+        );
+    }
+
+    /// A stored bond survives the link itself, not just postcard.
+    ///
+    /// The keys are why this is worth its own test: the comms processor sends this once,
+    /// immediately after pairing, and nothing re-sends it. A bond mangled here is not
+    /// noticed until the next reboot fails to reconnect.
+    #[test]
+    fn a_stored_bond_round_trips_the_link() {
+        use crate::bluetooth::{BluetoothBond, BluetoothSecurityLevel};
+
+        let bond = BluetoothBond {
+            address: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            address_random: true,
+            long_term_key: u128::MAX,
+            identity_resolving_key: Some(1),
+            security_level: BluetoothSecurityLevel::Level2,
+        };
+        let msg = CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(bond);
+
+        let mut buf = [0u8; 256];
+        let encoded = postcard::to_slice(&msg, &mut buf).expect("serialize");
+        let decoded: CommsProcessorToApplicationProcessorMessage =
+            postcard::from_bytes(encoded).expect("deserialize");
+        match decoded {
+            CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(got) => {
+                assert_eq!(got, bond)
+            }
+            _ => panic!("decoded to the wrong variant"),
+        }
+    }
+
+    /// The command vocabulary's own discriminants.
+    ///
+    /// Same reasoning as the enum that carries it: this is append-only, and `Custom` in
+    /// particular is reserved, so it must keep its position while it means nothing.
+    #[test]
+    fn the_input_command_discriminants_are_pinned() {
+        let cases: [(InputCommand, u8); 6] = [
+            (InputCommand::Increment(1), 0),
+            (InputCommand::Decrement(1), 1),
+            (InputCommand::Activate, 2),
+            (InputCommand::Return, 3),
+            (InputCommand::Menu, 4),
+            (InputCommand::Custom(0), 5),
+        ];
+
+        let mut buf = [0u8; 16];
+        for (command, discriminant) in cases {
+            let encoded = postcard::to_slice(&command, &mut buf).expect("serialize");
+            assert_eq!(encoded[0], discriminant, "{command:?} moved");
+        }
+    }
 }
