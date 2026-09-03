@@ -1336,7 +1336,7 @@ impl<
             smoothing: Some(true)
         }).await;
         let actions = self.configuration.persistent.brew_actions;
-        self.group.apply_brew_actions(actions).await;
+        self.group.apply_brew_start_actions(actions).await;
     }
 
     async fn stopped_brewing(&mut self) {
@@ -1366,6 +1366,13 @@ impl<
         self.shot_state.stop();
 
         self.finish_manual_shot_log();
+
+        // Stop the timer this firmware started -- see the equivalent note in
+        // `dual_boiler_single_group::stop_brewing` for why it is here rather than after the
+        // settle read. Inert on this machine's load cell, which has no timer, and gated on
+        // the same flag either way.
+        let actions = self.configuration.persistent.brew_actions;
+        self.group.apply_brew_stop_actions(actions).await;
 
         // The scale's idle configuration is restored by `take_settled_output`, after the
         // settle read, rather than here -- see the equivalent note in

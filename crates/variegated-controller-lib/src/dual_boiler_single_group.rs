@@ -1530,7 +1530,7 @@ impl<
                 smoothing: Some(true)
             }).await;
             let actions = self.configuration.persistent.group.brew_actions;
-            self.group.apply_brew_actions(actions).await;
+            self.group.apply_brew_start_actions(actions).await;
         } else {
             log_info!("start_brewing() called but group_brewing already true - skipping baseline capture");
         }
@@ -1580,6 +1580,12 @@ impl<
             self.finish_manual_shot_log();
 
             self.group.set_brewing_state(false, HexadecimalDutyCycleType::OFF).await;
+
+            // Stop the timer this firmware started. Here rather than after the settle read
+            // two seconds out: the number the timer is showing is the shot, and a shot that
+            // has visibly stopped pouring should not still be counting.
+            let actions = self.configuration.persistent.group.brew_actions;
+            self.group.apply_brew_stop_actions(actions).await;
 
             // The scale's zero tracking is deliberately *not* re-enabled here. It used to
             // be, and with a settle read two seconds out that is actively wrong: a scale

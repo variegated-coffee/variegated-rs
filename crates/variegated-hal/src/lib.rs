@@ -376,26 +376,50 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
     /// firmwares have forked badly and that most of one's substantive lines appear verbatim
     /// in the other; a new branch copied into both is that, starting again.
     ///
-    /// Order is tare, then reset, then start, and the timer's two commands are sent
-    /// separately rather than as [`ScaleTimerCommand::TareAndStart`]. That variant looks like
-    /// the obvious shortcut and is not: it does not reset, which is half of what the setting
-    /// promises, and ACAIA has no such command anyway -- the BLE slot already synthesizes it
-    /// as two writes.
+    /// **The timer goes before the tare, and the order is not cosmetic.** Starting the timer
+    /// takes the scale no time at all. Taring does take time, and a scale occasionally goes
+    /// *unresponsive* while it happens -- so a timer command sent after a tare is not merely
+    /// late, it is a command that may arrive while the scale is not listening and be lost. The
+    /// cheap, reliable one goes first.
+    ///
+    /// Reset and start are sent separately rather than as
+    /// [`ScaleTimerCommand::TareAndStart`]. That variant looks like the obvious shortcut and
+    /// is not: it does not reset, which is half of what the setting promises, and ACAIA has no
+    /// such command anyway -- the BLE slot already synthesizes it as two writes.
     ///
     /// Failures are dropped, like the `let _ =` this replaces. A scale that will not tare is
     /// not a reason to refuse a shot, and the operator can see the weight on the panel.
-    pub async fn apply_brew_actions(
+    pub async fn apply_brew_start_actions(
         &mut self,
         actions: variegated_controller_types::BrewActions,
     ) {
         use variegated_controller_types::ScaleTimerCommand;
 
-        if actions.tare() {
-            let _ = self.scale_tare().await;
-        }
         if actions.reset_and_start_timer() {
             let _ = self.scale_control_timer(ScaleTimerCommand::Reset).await;
             let _ = self.scale_control_timer(ScaleTimerCommand::Start).await;
+        }
+        if actions.tare() {
+            let _ = self.scale_tare().await;
+        }
+    }
+
+    /// The other half: stop the timer this firmware started.
+    ///
+    /// Gated on the same flag that started it, so the machine only ever stops a timer it is
+    /// responsible for. A scale whose timer the operator started by hand keeps running, which
+    /// is the behaviour of a machine that was never asked to touch it.
+    ///
+    /// There is no counterpart for the tare -- a tare has no end -- so this is a one-armed
+    /// mirror of [`Self::apply_brew_start_actions`] rather than a symmetric one.
+    pub async fn apply_brew_stop_actions(
+        &mut self,
+        actions: variegated_controller_types::BrewActions,
+    ) {
+        use variegated_controller_types::ScaleTimerCommand;
+
+        if actions.reset_and_start_timer() {
+            let _ = self.scale_control_timer(ScaleTimerCommand::Stop).await;
         }
     }
 
