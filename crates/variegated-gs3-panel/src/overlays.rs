@@ -58,7 +58,35 @@ where
         Overlay::Provisioning { line } => provisioning(line, w, floor, target),
         Overlay::Activity { label } => activity(label, w, floor, target),
         Overlay::Dose { grams } => dose(*grams, w, floor, target),
+        Overlay::Refused { line } => refused(line, w, floor, target),
     }
+}
+
+/// Something the machine would not do.
+///
+/// The same band and the same single line as [`activity`], in the warn colour instead of ink.
+/// That difference is the whole of it: the two say opposite kinds of thing about the machine,
+/// and the panel has exactly one colour that means "this is not going the way you expected"
+/// -- the one a binding limit and a red status mark already use.
+///
+/// No icon and no border. Both were considered and neither survives the argument the module
+/// header makes about the activity box: a ruled box holding one word reads as a fault in the
+/// display rather than a message from the machine, and this panel has no glyph the operator
+/// has been taught to read as a warning.
+fn refused<D>(line: &str, w: Window, floor: i32, target: &mut D) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let baseline = band(w, &type_scale::STATE_WORD, floor, target)?;
+    draw::run(
+        &type_scale::STATE_WORD,
+        format_args!("{line}"),
+        Point::new(w.text_left(), baseline),
+        VerticalPosition::Baseline,
+        palette::WARN,
+        target,
+    );
+    Ok(())
 }
 
 /// Paint an opaque band across the top of the window, and return its top.

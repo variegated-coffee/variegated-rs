@@ -77,8 +77,53 @@ pub fn delete_shot_log<M: RawMutex>(
 /// `group_index` here, because both machines have exactly one group and the check was written
 /// twice.
 ///
-/// **Refused rather than guessed when there is no reading.** A dose silently recorded from the
-/// wrong place is worse than no dose at all, because nothing downstream can tell it was wrong.
+/// Why a dose cannot be taken from a scale reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum DoseRefusal {
+    /// Nothing is reporting a weight: no scale paired, or one that has stopped answering.
+    NoReading,
+    /// A scale is reporting, and reporting nothing on it.
+    NothingOnScale,
+}
+
+impl DoseRefusal {
+    /// A phrase for a log line. Panels word this themselves; they have a width budget and a
+    /// house style, and neither is this crate's business.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            DoseRefusal::NoReading => "no scale reading to take",
+            DoseRefusal::NothingOnScale => "the scale reads nothing on it",
+        }
+    }
+}
+
+/// Whether a scale reading can be recorded as a dose, and why not.
+///
+/// **One rule, called from two sides.** The controller applies it so that no client can store
+/// a dose of zero, and the GS3's button task applies it *before* sending the command so that a
+/// refused gesture can say something -- a capture that is refused produces no state change, so
+/// there is nothing for a display to notice afterwards.
+///
+/// `<= 0.0`, not `== 0.0`. A scale reads slightly negative after something is lifted off it,
+/// and drifts a little either side of zero when empty; all of that is the same "there is
+/// nothing on the scale" as far as a dose is concerned, and treating only exact zero as empty
+/// would let `-0.05 g` through as a dose.
+///
+/// NaN is refused too, by falling through the comparison: `NaN <= 0.0` is false, so it is
+/// caught by the `is_finite` guard rather than stored as a dose no arithmetic can use.
+pub fn dose_refusal(weight: Option<variegated_controller_types::WeightType>) -> Option<DoseRefusal> {
+    match weight {
+        None => Some(DoseRefusal::NoReading),
+        Some(grams) if !grams.is_finite() => Some(DoseRefusal::NoReading),
+        Some(grams) if grams <= 0.0 => Some(DoseRefusal::NothingOnScale),
+        Some(_) => None,
+    }
+}
+
+/// **Refused rather than guessed when there is nothing to weigh** -- see [`dose_refusal`]. A
+/// dose silently recorded from the wrong place is worse than no dose at all, because nothing
+/// downstream can tell it was wrong.
 pub fn tag_dose_from_scale(
     pending: &mut ShotAnnotations,
     scale: variegated_controller_types::ScaleSelector,
@@ -98,10 +143,12 @@ pub fn tag_dose_from_scale(
         }
     }
 
-    let Some(grams) = weight else {
-        log_warn!("TagDoseFromScale: {:?} has no reading to take", scale);
+    if let Some(refusal) = dose_refusal(weight) {
+        log_warn!("TagDoseFromScale: {:?} -- {}", scale, refusal.reason());
         return;
-    };
+    }
+    // `dose_refusal` has already rejected `None`.
+    let grams = weight.unwrap_or_default();
 
     match pending.set(ShotAnnotationKey::DoseWeight, ShotAnnotationValue::Number(grams)) {
         Ok(()) => log_info!("Dose tagged from {:?}: {} g", scale, grams),
@@ -403,5 +450,47 @@ mod tests {
         // The second shot has the second yield, and the first kept its own.
         assert_eq!(logger.latest_log().unwrap().metadata.final_weight_grams, Some(36.0));
         assert_eq!(logger.get_log(0).unwrap().metadata.final_weight_grams, Some(18.0));
+    }
+
+    /// The boundary the two refusal messages are decided on.
+    ///
+    /// `-0.1` is the case that motivates `<= 0.0` rather than `== 0.0`: a scale sits slightly
+    /// either side of zero when empty, and after something is lifted off it reads negative
+    /// outright. All of it is "nothing on the scale", and an exact-zero test would let a
+    /// negative dose through.
+    #[test]
+    fn a_dose_is_refused_when_there_is_nothing_to_weigh() {
+        assert_eq!(dose_refusal(None), Some(DoseRefusal::NoReading));
+        assert_eq!(dose_refusal(Some(0.0)), Some(DoseRefusal::NothingOnScale));
+        assert_eq!(dose_refusal(Some(-0.1)), Some(DoseRefusal::NothingOnScale));
+        assert_eq!(dose_refusal(Some(-12.0)), Some(DoseRefusal::NothingOnScale));
+
+        assert_eq!(dose_refusal(Some(18.5)), None);
+        // The smallest reading a scale in this tree can report is still a dose. Refusing a
+        // real measurement because it is small would be a different bug from the one this
+        // guard exists for.
+        assert_eq!(dose_refusal(Some(0.1)), None);
+    }
+
+    /// NaN is not a dose. It would otherwise be stored and then poison every ratio computed
+    /// from it, which is the kind of value that is far easier to refuse than to trace.
+    #[test]
+    fn a_dose_is_refused_for_a_reading_that_is_not_a_number() {
+        assert_eq!(dose_refusal(Some(f32::NAN)), Some(DoseRefusal::NoReading));
+        assert_eq!(dose_refusal(Some(f32::INFINITY)), Some(DoseRefusal::NoReading));
+    }
+
+    /// The controller applies the same rule the panel does, so a dose of zero cannot be
+    /// stored by a client that skipped the gesture -- the web UI sends this command too.
+    #[test]
+    fn the_controller_refuses_a_zero_reading() {
+        use variegated_controller_types::{ScaleSelector, ShotAnnotationKey};
+
+        let mut pending = ShotAnnotations::new();
+        tag_dose_from_scale(&mut pending, ScaleSelector::GroupScale(0), 0, Some(0.0));
+        assert!(pending.get(&ShotAnnotationKey::DoseWeight).is_none());
+
+        tag_dose_from_scale(&mut pending, ScaleSelector::GroupScale(0), 0, Some(18.5));
+        assert!(pending.get(&ShotAnnotationKey::DoseWeight).is_some());
     }
 }

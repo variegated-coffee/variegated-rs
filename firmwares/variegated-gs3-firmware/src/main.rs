@@ -3206,6 +3206,10 @@ async fn main_task(
             // field is declared and serialised but read nowhere yet, so both were
             // `false` by default rather than by intent.
             via_comms_mcu: true,
+            // Unlike calibration, both Bluetooth protocols do drive a timer, and
+            // `BluetoothScaleController::get_capabilities` reports `timer: true`. This has
+            // to agree with it for the same reason `support_calibration` does.
+            support_timer: true,
         };
         let _ = machine_definition.add_peripheral(BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID, scale_def);
     }
@@ -3223,6 +3227,8 @@ async fn main_task(
             capabilities: portal_capabilities,
             support_calibration: false,
             via_comms_mcu: true,
+            // Not a scale and has no timer. `false` here is a statement, not a default.
+            support_timer: false,
         };
         let _ = machine_definition.add_peripheral(BELKA_PERIPHERAL_ID, scale_def);
     }

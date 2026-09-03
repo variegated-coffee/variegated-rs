@@ -128,6 +128,13 @@ const ROUTINE_BUTTON_3: usize = 3;    // Button 4 (Pin 3) - Triggers routine 3
 const BREWING_BUTTON: usize = 4;      // Button 5 (Pin 4)
 const WATER_TAP_BUTTON: usize = 5;    // Button 6 (Pin 5)
 
+/// How long a refused gesture is announced for.
+///
+/// The same five seconds `DISPLAY_POPUP_DURATION_MS` gives a captured dose, and deliberately
+/// the same: the two are the two possible outcomes of one gesture, and an operator who has
+/// learned how long the confirmation stays up should not find the refusal behaving differently.
+const NOTICE_DURATION: embassy_time::Duration = embassy_time::Duration::from_millis(5000);
+
 const MP_PADDLE_SWITCH_BUTTON: usize = 6;
 
 const ON_BOARD_BUTTON: usize = 7;
@@ -317,6 +324,14 @@ pub struct ButtonEventHandler {
     panel_data_points: PanelDataPoints,
     /// Whether [`Self::panel_data_points`] has changed and has not been written to flash yet.
     panel_data_points_dirty: bool,
+    /// The group scale's live reading, for the dose-capture gate.
+    ///
+    /// Kept here rather than reached for, like every other projection on this task: a `Status`
+    /// is far too large to hold, and this is the one number the button 6 hold needs in order
+    /// to know whether the gesture can work at all.
+    group_weight: Option<variegated_controller_types::WeightType>,
+    /// A refusal waiting to be published to the displays. See [`crate::menu::Notice`].
+    notice: Option<crate::menu::Notice>,
     /// The Bluetooth associations, for the Bluetooth submenu's rows.
     ///
     /// Kept beside the projection rather than in it because it is a list of rows rather than
@@ -379,6 +394,8 @@ impl ButtonEventHandler {
             panel_origin_dirty: false,
             panel_data_points: PanelDataPoints::DEFAULT,
             panel_data_points_dirty: false,
+            group_weight: None,
+            notice: None,
             bluetooth: None,
             button_3_hold_start: None,
             button_5_hold_start: None,
@@ -472,6 +489,8 @@ impl ButtonEventHandler {
                 self.machine_definition,
                 &self.peripheral_status,
             ),
+            // Not live -- see the note at the display task's matching call.
+            scale_timer: crate::menu::scale_timer(self.machine_definition),
             bluetooth: self.bluetooth.as_ref(),
             schedules: self.schedules.as_ref(),
             brew_target_unit: crate::menu::brew_target_unit(&self.menu_config),
@@ -625,6 +644,13 @@ impl ButtonEventHandler {
         // rebuilt, not per frame.
         self.peripheral_status = status.peripheral_status.clone();
 
+        // The live weight, for the dose-capture gate. `None` covers both "no scale paired"
+        // and "paired and not answering", which want the same message: there is nothing to
+        // weigh, go and look at the scale.
+        self.group_weight = status
+            .get_group_status(SingleGroupControllerGroups::SingleGroup.as_index())
+            .and_then(|group| group.output_weight);
+
         // Read `improv` first, then let it retire an outstanding request: a change in either
         // direction is the confirmation we were waiting for.
         let improv = MenuContext::from_status(
@@ -702,6 +728,7 @@ impl ButtonEventHandler {
             wifi_pending: self.wifi_request.is_some(),
             editor: self.editor,
             values: self.values,
+            notice: self.notice,
         }
     }
 
@@ -1262,6 +1289,24 @@ impl ButtonEventHandler {
             let held = now.saturating_duration_since(started).as_millis();
             if held >= DOSE_TAG_HOLD_MS - HOLD_EVENT_OFFSET_MS {
                 self.button_6_hold_start = None;
+
+                // Refused here rather than at the controller, which is the only place it can
+                // be *said*. The controller applies the same rule -- see
+                // `command::shot::dose_refusal` -- but a refusal there stores nothing, and
+                // storing nothing produces no `Status` change for a display to notice. A
+                // three-second hold that leaves the panel exactly as it was is
+                // indistinguishable from a broken button.
+                if let Some(refusal) =
+                    variegated_controller_lib::command::shot::dose_refusal(self.group_weight)
+                {
+                    defmt::info!("Button 6 held - dose refused: {}", refusal.reason());
+                    self.notice = Some(crate::menu::Notice {
+                        refusal,
+                        until: now + NOTICE_DURATION,
+                    });
+                    return None;
+                }
+
                 defmt::info!("Button 6 held - tagging the dose from the group scale");
                 return Some(MachineCommand::TagDoseFromScale(ScaleSelector::GroupScale(
                     SingleGroupControllerGroups::SingleGroup.as_index(),

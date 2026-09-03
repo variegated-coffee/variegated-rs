@@ -1330,11 +1330,13 @@ impl<
         // everything from the previous shot, including its peak flow and pressure trough.
         self.shot_state.start();
         self.boiler_pid.ki.accumulate += 50.0; // Initial accumulation to compensate for initial temperature drop
+        // Not a brew action -- see the note at the dual-boiler's matching call site.
         let _ = self.group.scale_set_configuration(ScaleConfiguration {
             zero_tracking: Some(false),
             smoothing: Some(true)
         }).await;
-        let _ = self.group.scale_tare().await;
+        let actions = self.configuration.persistent.brew_actions;
+        self.group.apply_brew_actions(actions).await;
     }
 
     async fn stopped_brewing(&mut self) {

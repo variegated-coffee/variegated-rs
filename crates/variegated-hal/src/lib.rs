@@ -367,6 +367,38 @@ impl<'a, M: RawMutex, const N: usize> Group<'a, M, N> {
         }
     }
 
+    /// Do whatever the configuration says happens to the scale when a brew starts.
+    ///
+    /// **Here rather than in each controller.** Both of them opened a brew with the same two
+    /// calls in the same order -- `scale_set_configuration` then an unconditional
+    /// `scale_tare` -- and turning that into a configurable set at both call sites would have
+    /// written the branch twice. This crate's own README makes the point that the two
+    /// firmwares have forked badly and that most of one's substantive lines appear verbatim
+    /// in the other; a new branch copied into both is that, starting again.
+    ///
+    /// Order is tare, then reset, then start, and the timer's two commands are sent
+    /// separately rather than as [`ScaleTimerCommand::TareAndStart`]. That variant looks like
+    /// the obvious shortcut and is not: it does not reset, which is half of what the setting
+    /// promises, and ACAIA has no such command anyway -- the BLE slot already synthesizes it
+    /// as two writes.
+    ///
+    /// Failures are dropped, like the `let _ =` this replaces. A scale that will not tare is
+    /// not a reason to refuse a shot, and the operator can see the weight on the panel.
+    pub async fn apply_brew_actions(
+        &mut self,
+        actions: variegated_controller_types::BrewActions,
+    ) {
+        use variegated_controller_types::ScaleTimerCommand;
+
+        if actions.tare() {
+            let _ = self.scale_tare().await;
+        }
+        if actions.reset_and_start_timer() {
+            let _ = self.scale_control_timer(ScaleTimerCommand::Reset).await;
+            let _ = self.scale_control_timer(ScaleTimerCommand::Start).await;
+        }
+    }
+
     /// Drive the scale's own timer.
     ///
     /// `Ok(())` with no controller, matching every other method here. Note what that

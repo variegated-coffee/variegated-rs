@@ -235,6 +235,9 @@ impl DisplayState {
                 self.machine_definition,
                 &self.status.peripheral_status,
             ),
+            // Not live, unlike the two above: whether the fitted scale *has* a timer cannot
+            // change while the machine runs, only whether it is answering can.
+            scale_timer: crate::menu::scale_timer(self.machine_definition),
             bluetooth: self.bluetooth.as_ref(),
             schedules: self.schedules.as_ref(),
             brew_target_unit: crate::menu::brew_target_unit(&self.menu_config()),
@@ -268,6 +271,20 @@ impl DisplayState {
     /// The dose it is showing.
     pub fn dose_popup_weight(&self) -> Option<f32> {
         self.previous_dose_weight
+    }
+
+    /// A refusal that should still be on screen.
+    ///
+    /// **The deadline comes from the button task and is compared here**, which is why nothing
+    /// takes this down: the notice rides on `MenuSnapshot` and stays there after it expires,
+    /// so a second publish would be needed to clear it and there is nothing to publish. Each
+    /// display simply stops drawing it, exactly as `dose_popup_active` decides for itself
+    /// whether the popup is still up.
+    ///
+    /// Both tasks read the same `Instant` from the same clock, so the two panels take it down
+    /// together.
+    pub fn active_notice(&self) -> Option<crate::menu::Notice> {
+        self.menu.notice.filter(|notice| Instant::now() < notice.until)
     }
 
     /// What the machine is doing right now, if it is worth an overlay.

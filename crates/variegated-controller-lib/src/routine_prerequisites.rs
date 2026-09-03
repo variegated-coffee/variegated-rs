@@ -180,6 +180,9 @@ mod tests {
                 capabilities: scale_caps,
                 support_calibration: false,
                 via_comms_mcu: true,
+                // A Bluetooth scale: no calibration, but it does drive a timer. Irrelevant to
+                // every assertion here, which is about capabilities rather than controls.
+                support_timer: true,
             },
         );
 
@@ -194,6 +197,7 @@ mod tests {
                 capabilities: probe_caps,
                 support_calibration: false,
                 via_comms_mcu: true,
+                support_timer: false,
             },
         );
 

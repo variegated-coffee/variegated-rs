@@ -1071,6 +1071,11 @@ async fn main_task(spawner: Spawner) -> ! {
             capabilities: scale_capabilities,
             support_calibration: true,
             via_comms_mcu: false,
+            // The opposite way round from a Bluetooth scale on both counts: a load cell wired
+            // to the machine calibrates but has no display, so there is no timer to run.
+            // `GravityController::get_capabilities` reports `timer: false` and
+            // `control_timer` returns `TimerNotSupported`; this has to agree.
+            support_timer: false,
         };
         let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
     }

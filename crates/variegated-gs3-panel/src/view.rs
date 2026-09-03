@@ -420,6 +420,21 @@ pub enum Overlay<'a> {
         /// Grams.
         grams: f32,
     },
+    /// Something the machine would not do, and why.
+    ///
+    /// **The panel's only error surface**, and it exists because a refused gesture changes
+    /// nothing: the machine that could not take a dose looks exactly like the machine that was
+    /// never asked, and a three-second hold with no result reads as a broken button.
+    ///
+    /// Drawn in the warn colour rather than the ink every other overlay uses. That is the one
+    /// thing separating it from [`Self::Activity`], which is the same shape and says the
+    /// opposite kind of thing -- an announcement that something is happening, against a
+    /// statement that something did not.
+    Refused {
+        /// What was refused, e.g. `NO SCALE`. Uppercase ASCII, and short: it shares a band
+        /// with nothing but must fit the window's width.
+        line: &'a str,
+    },
 }
 
 /// One of the five states.

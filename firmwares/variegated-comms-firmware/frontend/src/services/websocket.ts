@@ -738,6 +738,19 @@ export class WebSocketService {
     });
   }
 
+  /**
+   * What the machine does to a group's scale when a brew starts.
+   *
+   * `actions` is the bitfield from `utils/brewActions`, not a list: the firmware stores it in
+   * one byte and the schema carries it as a newtype over `u8`.
+   */
+  setGroupBrewActions(groupIndex: number, actions: number): void {
+    this.sendMachineCommand({
+      type: 'SetGroupBrewActions',
+      value: [groupIndex, actions]
+    });
+  }
+
   setBluetoothPeripheralEnabled(peripheralId: number, enabled: boolean): void {
     this.sendMachineCommand({
       type: 'SetBluetoothPeripheralEnabled',

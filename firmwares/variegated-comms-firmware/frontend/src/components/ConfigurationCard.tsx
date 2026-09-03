@@ -1,5 +1,6 @@
 import { memo } from 'preact/compat';
 import { Badge, Button, Reading, ReadingGroup, tokens } from '@variegated-coffee/ui';
+import { describeBrewActions } from '../utils/brewActions';
 import {
   BoilerConfiguration,
   GroupConfiguration,
@@ -74,7 +75,7 @@ const ConfigurationCardComponent = ({ name, entityType, configuration, onConfigu
             {modeShortNames[config.brew_control_state.mode.type] || config.brew_control_state.mode.type}
           </Badge>
         </div>
-        <Reading label="Auto-tare" value={config.auto_tare_enabled ? 'On' : 'Off'} />
+        <Reading label="Brew actions" value={describeBrewActions(config.brew_actions)} />
       </ReadingGroup>
     );
   };

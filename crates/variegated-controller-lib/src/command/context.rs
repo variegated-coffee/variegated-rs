@@ -605,6 +605,22 @@ pub trait MachineCommandContext<'a>: 'a + crate::command::pump::PumpLoopContext 
                 let ScaleSelector::GroupScale(index) = selector;
                 self.scale_action(index, ScaleAction::Timer(command)).await
             }
+            MachineCommand::SetGroupBrewActions(index, actions) => {
+                // Saved immediately, like `SetBoilerControlTargetValues` and unlike
+                // `SetGroupBrewControlTarget`: what the machine does at the start of every
+                // shot is not a thing to forget on a power cycle, and two neighbouring
+                // settings rows disagreeing about permanence is the fault MENU-STRUCTURE.md
+                // records against the one that does.
+                let Some(slot) = self.configuration_mut().brew_actions_mut(index) else {
+                    log_warn!("SetGroupBrewActions: no group {} on this machine", index);
+                    return;
+                };
+                if *slot == actions {
+                    return;
+                }
+                *slot = actions;
+                self.save_persistent_configuration().await;
+            }
             MachineCommand::InferGroupPressureIntegral(index, target) => {
                 self.seed_pump_integral(index, PumpQuantity::Pressure, target as f32)
             }

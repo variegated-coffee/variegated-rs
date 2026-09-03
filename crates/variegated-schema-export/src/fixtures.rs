@@ -523,6 +523,7 @@ fn machine_commands() -> Vec<MachineCommand> {
             SetTimezone(_) => {}
             SetGroupBrewLimit(..) => {}
             ControlScaleTimer(..) => {}
+            SetGroupBrewActions(..) => {}
         }
     }
 

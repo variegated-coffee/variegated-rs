@@ -175,6 +175,18 @@ pub struct PeripheralDefinition {
     pub capabilities: heapless::Vec<SensorCapability, 8>,
     pub support_calibration: bool,
     pub via_comms_mcu: bool,
+    /// Whether this peripheral has a timer the firmware can drive.
+    ///
+    /// The same fact `ScaleCapabilities::timer` reports, published where a menu can reach it
+    /// -- that flag lives on the HAL object owned by the controller task, and no menu ever
+    /// sees a `Group`. This is exactly the argument [`Self::support_calibration`] exists for,
+    /// and the answer differs the same way: both Bluetooth protocols drive a timer, a load
+    /// cell wired to the machine has no scale for one to run on.
+    ///
+    /// **Appended.** `MachineDefinition` is built in code at boot and never stored, so this
+    /// costs no migration -- but it crosses the UART and the WebSocket, where postcard is
+    /// positional like everywhere else.
+    pub support_timer: bool,
 }
 
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

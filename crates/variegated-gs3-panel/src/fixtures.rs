@@ -543,6 +543,40 @@ pub fn overlay_dose() -> PanelView<'static> {
     view
 }
 
+/// Idle, with a dose capture refused because nothing is reporting a weight.
+///
+/// The strings are the firmware's own -- `menu::notice_panel_line` builds them -- and not a
+/// paraphrase, for the reason `routine_user_action` gives about its phrase: a fixture with a
+/// shorter line than the machine emits lets a real overrun through.
+pub fn overlay_refused_no_scale() -> PanelView<'static> {
+    let mut view = idle_ready();
+    view.overlay = Some(Overlay::Refused { line: "NO SCALE" });
+    view
+}
+
+/// The same refusal in its longer wording, which is the one that has to fit.
+pub fn overlay_refused_nothing_on_scale() -> PanelView<'static> {
+    let mut view = idle_ready();
+    view.overlay = Some(Overlay::Refused {
+        line: "NOTHING ON THE SCALE",
+    });
+    view
+}
+
+/// A refusal over a running shot.
+///
+/// Not suppressed during a brew, unlike the provisioning banner and the activity line: this is
+/// feedback for a gesture the operator just made, and button 6 is not gated on brewing. The
+/// fixture exists because the routine screen is the tallest state and therefore the one whose
+/// overlay floor is lowest.
+pub fn overlay_refused_over_a_shot() -> PanelView<'static> {
+    let mut view = routine();
+    view.overlay = Some(Overlay::Refused {
+        line: "NOTHING ON THE SCALE",
+    });
+    view
+}
+
 /// Idle with the steam valve open.
 pub fn overlay_activity() -> PanelView<'static> {
     let mut view = idle_ready();
@@ -572,7 +606,7 @@ pub fn overlay_identify() -> PanelView<'static> {
 pub fn all<'a>(
     trace: &'a ShotTrace,
     aborted: &'a ShotTrace,
-) -> [(&'static str, PanelView<'a>); 23] {
+) -> [(&'static str, PanelView<'a>); 26] {
     [
         ("6.1-off", off()),
         ("6.1-standby", standby()),
@@ -597,6 +631,12 @@ pub fn all<'a>(
         ("6.5-post-no-scale", post_no_scale(trace)),
         ("overlay-dose", overlay_dose()),
         ("overlay-activity", overlay_activity()),
+        ("overlay-refused-no-scale", overlay_refused_no_scale()),
+        (
+            "overlay-refused-nothing-on-scale",
+            overlay_refused_nothing_on_scale(),
+        ),
+        ("overlay-refused-over-a-shot", overlay_refused_over_a_shot()),
     ]
 }
 

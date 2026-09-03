@@ -38,6 +38,19 @@ pub trait ConfigurationAccess {
     /// heating element and one tuning, so it returns the same slot for either boiler index --
     /// see the note on its impl, which explains why that is load-bearing rather than lazy.
     fn pid_parameters_mut(&mut self, target: PidParameterTarget) -> Option<&mut PidParameters>;
+
+    /// What happens to a group's scale when a brew starts.
+    ///
+    /// **The two machines keep this in different places, which is the whole reason it is on
+    /// this trait.** The dual-boiler stores a whole `GroupConfiguration` and this lives in it;
+    /// the single-boiler machine stores no `GroupConfiguration` at all and keeps the field
+    /// directly on its persistent blob, building a `GroupConfiguration` only to publish one.
+    /// A handler reaching through `persistent.group` would compile for one machine and not
+    /// the other.
+    fn brew_actions_mut(
+        &mut self,
+        index: GroupIndex,
+    ) -> Option<&mut variegated_controller_types::BrewActions>;
 }
 
 /// What a target command wants done with the curve clock.

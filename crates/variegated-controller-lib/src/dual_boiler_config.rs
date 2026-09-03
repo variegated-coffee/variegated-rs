@@ -19,7 +19,7 @@ use variegated_controller_types::DualBoilerSingleGroupControllerBoilers::{BrewBo
 use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_types::{
     BoilerConfiguration, BoilerControlMode, BoilerControlState, BoilerControlTargetValues,
-    BoilerIndex, Configuration, DutyCycleType, FillConfiguration, GroupBrewControlMode,
+    BoilerIndex, BrewActions, Configuration, DutyCycleType, FillConfiguration, GroupBrewControlMode,
     GroupBrewControlState, GroupBrewControlTargetValues, GroupBrewLimitMode, GroupConfiguration,
     GroupIndex, MachineConfiguration, MachineMode, PidLimits, PidParameterTarget, PidParameters,
     PidTerm, SteamWandConfiguration, SteamWandControlState, TankConfiguration,
@@ -110,6 +110,18 @@ impl crate::command::ConfigurationAccess for DualBoilerSingleGroupConfiguration 
     ) -> Option<&mut GroupBrewControlState> {
         match index {
             0 => Some(&mut self.ephemeral.group_brew_control_state),
+            _ => None,
+        }
+    }
+
+    /// In the stored `GroupConfiguration`, where the byte `auto_tare_enabled` used to occupy
+    /// still is. The single-boiler machine keeps it somewhere else entirely.
+    fn brew_actions_mut(
+        &mut self,
+        index: GroupIndex,
+    ) -> Option<&mut variegated_controller_types::BrewActions> {
+        match index {
+            0 => Some(&mut self.persistent.group.brew_actions),
             _ => None,
         }
     }
@@ -414,7 +426,12 @@ impl Default for DualBoilerSingleGroupPersistentConfiguration {
                 pressure_pid_parameters: pump_pressure_params,
                 brew_control_state: GroupBrewControlState::default(), // Not used - see default_group_brew_control_state
                 max_brew_time_seconds: None,
-                auto_tare_enabled: false,
+                // `TARE`, where the `auto_tare_enabled` this replaces defaulted to `false`.
+                // Not a change of mind: the machine has always tared at brew start regardless
+                // of that flag, so taring *is* the behaviour a machine with nothing stored has
+                // always had, and the flag was simply never consulted. A machine that does
+                // have something stored inherits `NONE` instead -- see `BrewActions`.
+                brew_actions: BrewActions::TARE,
                 pump_configuration: None,
                 pressure_sensor_kalman_parameters: None,
                 flow_sensor_pulses_per_liter: None,

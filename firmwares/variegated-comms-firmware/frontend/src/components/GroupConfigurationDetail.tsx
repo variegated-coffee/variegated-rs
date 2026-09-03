@@ -8,6 +8,7 @@ import {
   optionalValue,
 } from './ConfigurationSection';
 import { useMachine } from '../contexts/MachineContext';
+import { describeBrewActions } from '../utils/brewActions';
 
 interface GroupConfigurationDetailProps {
   entityKey: number;
@@ -87,14 +88,15 @@ export const GroupConfigurationDetail = ({
       <EntityDetailHeader name={name} index={entityKey} />
 
       <ConfigurationSection title="Basic settings">
-        <ReadingGroup>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: tokens.space.sm }}>
-            <span style={{ fontSize: '0.9rem', color: tokens.color.inkMuted }}>Auto-tare scale</span>
-            <Badge role={groupConfig.auto_tare_enabled ? 'ok' : undefined}>
-              {groupConfig.auto_tare_enabled ? 'Enabled' : 'Disabled'}
-            </Badge>
-          </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm, marginBottom: tokens.space.sm }}>
+          <SettingRow
+            title="Brew actions"
+            description={describeBrewActions(groupConfig.brew_actions)}
+            onEdit={() => onNavigateToParameter('brew_actions')}
+          />
+        </div>
 
+        <ReadingGroup>
           <Reading
             label="Supply tank"
             value={

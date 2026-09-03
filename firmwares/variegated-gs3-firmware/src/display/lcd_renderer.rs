@@ -145,6 +145,18 @@ impl LcdDisplayState {
         // On the TFT this is an overlay drawn on top of the menu; here it is a takeover,
         // because 2x16 has no room to be both. Five seconds, then the menu is back where it
         // was -- the stack is untouched by this.
+        // A refused capture, in the same place and for the same five seconds as the
+        // confirmation below -- the two are the two outcomes of one gesture, and a user who
+        // has learned where one appears should find the other there too. Ahead of it because
+        // a refusal means nothing was stored, so there is no dose for the row below to show.
+        //
+        // Both rows are written to sixteen columns exactly, so `pad_or_truncate_to_16` has
+        // nothing to do and cannot eat a word from the right.
+        if let Some(notice) = self.shared_state.active_notice() {
+            let (top, bottom) = crate::menu::notice_lcd_rows(notice.refusal);
+            return (top.to_string(), bottom.to_string()).into();
+        }
+
         if self.shared_state.dose_popup_active() {
             if let Some(grams) = self.shared_state.dose_popup_weight() {
                 return ("  Dose captured ".to_string(), format!("     {:.1} g", grams)).into();

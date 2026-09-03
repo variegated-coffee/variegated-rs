@@ -315,6 +315,68 @@ pub struct KalmanParameters {
     pub posterior_estimate: f32,
 }
 
+/// What the machine does to a group's scale when a brew starts.
+///
+/// A set rather than a mode: taring and starting the scale's timer are independent, and a
+/// machine may reasonably do both, one, or neither.
+///
+/// # Why this is one byte, and what an upgraded machine inherits
+///
+/// It replaces `auto_tare_enabled: bool` **in the same position** in [`GroupConfiguration`],
+/// which is nested inside the GS3's stored configuration blob. That blob is postcard-encoded
+/// and carries no version field, so an ordinary field change makes every stored copy fail to
+/// deserialize -- and `SettingsStorage::load_settings` maps that to `Default`, silently
+/// resetting every setpoint, PID tuning, Kalman parameter and pump calibration on the machine.
+///
+/// postcard writes a `bool` as one byte and a newtype `u8` as one byte, so nothing moves and
+/// every stored blob still decodes. `duty_cycle`'s two types are the same construction.
+///
+/// The inheritance is deliberate and one-directional: `auto_tare_enabled` never had a setter
+/// -- no `MachineCommand`, and the ESPHome switch's write path logs and drops -- so every
+/// stored GS3 holds `false`, which is `0x00`, which is [`Self::NONE`]. **A GS3 that has been
+/// run before therefore comes up not taring**, and the `Settings > Scale` rows are how it is
+/// turned back on. A machine with nothing stored gets its firmware's default, which tares.
+/// That trade buys keeping everything else in the blob.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrewActions(u8);
+
+impl BrewActions {
+    /// Do nothing to the scale. What a stored `auto_tare_enabled: false` decodes as.
+    pub const NONE: Self = Self(0);
+    /// Zero the scale.
+    pub const TARE: Self = Self(1 << 0);
+    /// Return the scale's own timer to zero and start it running.
+    pub const RESET_AND_START_TIMER: Self = Self(1 << 1);
+
+    /// Whether every action in `other` is in this set.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The same set with `action` added or removed.
+    pub const fn with(self, action: Self, on: bool) -> Self {
+        Self(if on { self.0 | action.0 } else { self.0 & !action.0 })
+    }
+
+    /// Zero the scale at brew start.
+    pub const fn tare(self) -> bool {
+        self.contains(Self::TARE)
+    }
+
+    /// Reset and start the scale's timer at brew start.
+    pub const fn reset_and_start_timer(self) -> bool {
+        self.contains(Self::RESET_AND_START_TIMER)
+    }
+
+    /// Whether anything at all happens.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -325,7 +387,11 @@ pub struct GroupConfiguration {
     pub pressure_pid_parameters: PidParameters,
     pub brew_control_state: GroupBrewControlState,
     pub max_brew_time_seconds: Option<u32>,
-    pub auto_tare_enabled: bool,
+    /// What the machine does to this group's scale when a brew starts.
+    ///
+    /// **Occupies the byte `auto_tare_enabled: bool` used to.** See [`BrewActions`] for why
+    /// that matters and what an upgraded machine inherits.
+    pub brew_actions: BrewActions,
     pub pump_configuration: Option<PumpConfiguration>,
     pub pressure_sensor_kalman_parameters: Option<KalmanParameters>,
     pub flow_sensor_pulses_per_liter: Option<f32>,
@@ -404,4 +470,65 @@ pub struct TankConfiguration {
     /// Water level below this threshold is considered "empty" and will prevent
     /// starting new water-consuming operations if prevention is enabled.
     pub empty_threshold: Option<WaterLevelType>,
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod tests {
+    use super::*;
+
+    /// **The whole migration argument, asserted.**
+    ///
+    /// [`BrewActions`] took the byte `auto_tare_enabled: bool` used to occupy inside a blob
+    /// that carries no version field. If this stops being exactly one byte, every stored GS3
+    /// configuration fails to deserialize on the next boot and `load_settings` maps that to
+    /// `Default` -- every setpoint, PID tuning and calibration on the machine, gone, with a
+    /// single `log_warn!` to show for it. Nothing else in the tree would catch that.
+    #[test]
+    fn brew_actions_occupy_exactly_one_byte() {
+        let mut buffer = [0u8; 8];
+        for actions in [
+            BrewActions::NONE,
+            BrewActions::TARE,
+            BrewActions::RESET_AND_START_TIMER,
+            BrewActions::TARE.with(BrewActions::RESET_AND_START_TIMER, true),
+        ] {
+            let encoded = postcard::to_slice(&actions, &mut buffer).unwrap();
+            assert_eq!(encoded.len(), 1, "{actions:?} must encode as one byte");
+        }
+    }
+
+    /// A stored `bool` decodes as the set an upgraded machine inherits.
+    ///
+    /// `false` is the only value any GS3 can actually hold -- the flag never had a setter --
+    /// and it becomes "do nothing", which is why the upgrade stops the machine taring until
+    /// the operator says otherwise. `true` is asserted anyway, because it is what the Silvia
+    /// published and what a hand-written blob could contain.
+    #[test]
+    fn a_stored_bool_decodes_as_the_matching_set() {
+        let (none, _) = postcard::take_from_bytes::<BrewActions>(&[0x00]).unwrap();
+        assert_eq!(none, BrewActions::NONE);
+        assert!(!none.tare());
+
+        let (tare, _) = postcard::take_from_bytes::<BrewActions>(&[0x01]).unwrap();
+        assert_eq!(tare, BrewActions::TARE);
+        assert!(tare.tare());
+        assert!(!tare.reset_and_start_timer());
+    }
+
+    /// Each bit answers for itself, and neither answers for the empty set.
+    #[test]
+    fn each_action_is_independent() {
+        let both = BrewActions::NONE
+            .with(BrewActions::TARE, true)
+            .with(BrewActions::RESET_AND_START_TIMER, true);
+        assert!(both.tare() && both.reset_and_start_timer());
+
+        let timer_only = both.with(BrewActions::TARE, false);
+        assert!(!timer_only.tare() && timer_only.reset_and_start_timer());
+
+        assert!(BrewActions::NONE.is_empty());
+        assert!(!BrewActions::NONE.tare());
+        assert!(!BrewActions::NONE.reset_and_start_timer());
+        assert!(!BrewActions::TARE.is_empty());
+    }
 }

@@ -805,6 +805,18 @@ fn overlay(state: &GraphicalDisplayState, mode: DisplayMode) -> Option<Overlay<'
         }
     }
 
+    // A refused gesture, above the dose popup it replaces. The two are the two outcomes of one
+    // hold and cannot both be live: a refusal means nothing was stored, so no dose edge fired.
+    // Ranked first anyway, because if that ever stops being true the operator should see the
+    // reason rather than a stale confirmation.
+    //
+    // Not suppressed during a shot, for the dose popup's reason below.
+    if let Some(notice) = state.shared_state.active_notice() {
+        return Some(Overlay::Refused {
+            line: crate::menu::notice_panel_line(notice.refusal),
+        });
+    }
+
     // The dose popup is not suppressed during a shot, unlike the two below. Long-press 6 is
     // not gated on brewing, and withholding feedback for an action the user just took is
     // worse than briefly covering the shot numbers.

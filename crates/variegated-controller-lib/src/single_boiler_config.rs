@@ -64,6 +64,18 @@ pub struct SingleBoilerSingleGroupPersistentConfiguration {
     /// If another field is ever wanted here, add it in the same flash as something else that
     /// needs one: the migration surface is the cost, not the field.
     pub pump_configuration: Option<variegated_controller_types::PumpConfiguration>,
+    /// What the machine does to the scale when a brew starts.
+    ///
+    /// **Appended, and appending here resets this machine's stored configuration once more**,
+    /// for exactly the reasons the field above sets out — and on the terms its last paragraph
+    /// asks for: one machine runs this firmware, and re-entering its settings once costs less
+    /// than a legacy decode path.
+    ///
+    /// It cannot ride in `GroupConfiguration` the way it does on the GS3, which is where the
+    /// asymmetry comes from: this firmware does not *store* a `GroupConfiguration` at all. It
+    /// builds one for publication in `From<&SingleBoilerSingleGroupConfiguration>` below, so
+    /// there is no existing byte here to reuse.
+    pub brew_actions: variegated_controller_types::BrewActions,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -230,6 +242,10 @@ impl Default for SingleBoilerSingleGroupPersistentConfiguration {
             flow_sensor_pulses_per_liter: None,
             // Unconfigured, which `command::pump::apply_pump_limits` treats as unclamped.
             pump_configuration: None,
+            // What this machine has always done at brew start, now said out loud. Unlike the
+            // GS3 there is no legacy byte to inherit here -- the append resets this blob, so
+            // every machine starts from this default rather than from anything stored.
+            brew_actions: variegated_controller_types::BrewActions::TARE,
         }
     }
 }
@@ -260,6 +276,18 @@ impl crate::command::ConfigurationAccess for SingleBoilerSingleGroupConfiguratio
     ) -> Option<&mut GroupBrewControlState> {
         match index {
             0 => Some(&mut self.ephemeral.group_brew_control_state),
+            _ => None,
+        }
+    }
+
+    /// Directly on the persistent blob, not in a `GroupConfiguration` -- this machine does not
+    /// store one. See the field's own note for why that asymmetry with the dual-boiler exists.
+    fn brew_actions_mut(
+        &mut self,
+        index: GroupIndex,
+    ) -> Option<&mut variegated_controller_types::BrewActions> {
+        match index {
+            0 => Some(&mut self.persistent.brew_actions),
             _ => None,
         }
     }
@@ -343,7 +371,10 @@ impl From<SingleBoilerSingleGroupConfiguration> for Configuration {
             pressure_pid_parameters: config.persistent.pid_parameters.pump_pressure_params.clone(),
             brew_control_state: config.ephemeral.group_brew_control_state,
             max_brew_time_seconds: Some(300), // 5 minutes max brew time
-            auto_tare_enabled: true,
+            // Published from storage now rather than hard-coded `true`, for the reason
+            // `pump_configuration` below gives about itself: a value the machine acts on but
+            // never publishes is one the UI shows as unset however many times it is written.
+            brew_actions: config.persistent.brew_actions,
             // Published now rather than hard-coded `None`: the browser's pump settings page
             // reads this, and a value the machine stores but never publishes is one the UI
             // shows as unset however many times it is written.

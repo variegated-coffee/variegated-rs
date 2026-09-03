@@ -18,12 +18,13 @@
 
 use embassy_time::{Duration, Instant};
 use variegated_controller_lib::routine::{ParameterUnit, Routine, RoutineParameter};
+use variegated_controller_lib::command::shot::DoseRefusal;
 use variegated_controller_lib::scale_calibration::ScaleCalibration;
 use variegated_controller_types::bluetooth::BluetoothPeripheralList;
 use variegated_controller_types::panel::{PanelDataPoints, PanelOrigin};
 use variegated_controller_types::{
-    BoilerIndex, GroupBrewControlMode, ImprovState, MachineCommand, MachineMode, RoutineIndex,
-    Status, TemperatureType,
+    BoilerIndex, BrewActions, GroupBrewControlMode, ImprovState, MachineCommand, MachineMode,
+    RoutineIndex, Status, TemperatureType,
 };
 use variegated_machine_menu::{
     boiler_temperature_adjustable, format_value, parameter_adjustable, parameter_geometry,
@@ -232,6 +233,16 @@ pub enum MenuItemKind {
     OpenWifiInfo,
     /// Opens the Bluetooth submenu.
     OpenBluetooth,
+    /// Toggles whether a brew starts by zeroing the scale.
+    ///
+    /// A *setting*, unlike the three rows below it: it records what should happen at the start
+    /// of the next shot rather than doing anything now, which is why it is not gated on the
+    /// scale currently answering. Acts in place, like a Bluetooth row.
+    AutoTare,
+    /// Toggles whether a brew starts by resetting and starting the scale's own timer.
+    ///
+    /// Absent entirely on a machine whose scale has no timer -- see [`SCALE_ITEMS_NO_TIMER`].
+    AutoTimer,
     /// Tares the group scale.
     ScaleTare,
     /// Zero-calibrates the group scale. Only offered where the fitted scale supports it.
@@ -349,17 +360,47 @@ const SETTINGS_ITEMS: &[MenuItem] = &[
     MenuItem { label: "Screen Y", kind: MenuItemKind::PanelOriginY },
 ];
 
-/// Scale actions. **Tare first, and it is the only one every scale can do.**
+/// What happens to the scale at the start of a shot, then the things you do to it by hand.
 ///
-/// The two calibration rows are sliced off this table when the fitted scale cannot perform
-/// them -- see [`scale_items`]. They are last precisely so that this is a truncation rather
-/// than a filter: dropping a row from the middle would renumber the ones after it, and the
-/// button task and both renderers resolve a selection index against this list independently.
+/// **The settings come first and the actions after**, which is the order the panel's other
+/// lists already use: the row you change while tasting is above the row you press with a
+/// portafilter in your hand.
+///
+/// The two calibration rows are sliced off the end when the fitted scale cannot perform them
+/// -- see [`scale_items`]. They are last precisely so that this is a truncation rather than a
+/// filter: dropping a row from the middle would renumber the ones after it, and the button
+/// task and both renderers resolve a selection index against this list independently.
+///
+/// `Auto-timer` is the row that cannot be handled that way, because it sits above rows that
+/// survive it, so it gets [`SCALE_ITEMS_NO_TIMER`] rather than a filter. Two tables is the
+/// price of every menu list staying a `&'static` subslice.
 const SCALE_ITEMS: &[MenuItem] = &[
+    MenuItem { label: "Auto-tare", kind: MenuItemKind::AutoTare },
+    MenuItem { label: "Auto-timer", kind: MenuItemKind::AutoTimer },
     MenuItem { label: "Tare", kind: MenuItemKind::ScaleTare },
     MenuItem { label: "Zero cal", kind: MenuItemKind::ScaleZeroCalibrate },
     MenuItem { label: "Cal 100 g", kind: MenuItemKind::ScaleCalibrate100g },
 ];
+
+/// [`SCALE_ITEMS`] for a machine whose scale has no timer to drive -- a load cell wired to the
+/// drip tray, which has no display for one to run on.
+///
+/// Hidden rather than greyed, for the reason the calibration rows are: it is a permanent
+/// property of the fitted hardware, and a row that can never become available is a control
+/// that can only ever disappoint.
+///
+/// **Must stay in step with [`SCALE_ITEMS`] except for that one row**, and specifically must
+/// keep the same two calibration rows last -- `scale_items` truncates both tables by the same
+/// count.
+const SCALE_ITEMS_NO_TIMER: &[MenuItem] = &[
+    MenuItem { label: "Auto-tare", kind: MenuItemKind::AutoTare },
+    MenuItem { label: "Tare", kind: MenuItemKind::ScaleTare },
+    MenuItem { label: "Zero cal", kind: MenuItemKind::ScaleZeroCalibrate },
+    MenuItem { label: "Cal 100 g", kind: MenuItemKind::ScaleCalibrate100g },
+];
+
+/// How many rows at the end of both scale tables are the calibration pair.
+const SCALE_CALIBRATION_ROWS: usize = 2;
 
 /// Which optional data points the routine screen may draw. `ON` means shown.
 ///
@@ -391,6 +432,7 @@ const ALL_ITEM_TABLES: &[&[MenuItem]] = &[
     ROOT_ITEMS,
     SETTINGS_ITEMS,
     SCALE_ITEMS,
+    SCALE_ITEMS_NO_TIMER,
     WIFI_INFO_ITEMS,
     SCHEDULE_ITEM_ITEMS,
     DISPLAY_ITEMS,
@@ -430,10 +472,11 @@ const _: () = {
 /// disappoint. Contrast the scale merely being switched off, which *is* greyed -- that one
 /// has a fix, and the row is where it gets said.
 fn scale_items(data: &MenuData) -> &'static [MenuItem] {
+    let table = if data.scale_timer { SCALE_ITEMS } else { SCALE_ITEMS_NO_TIMER };
     if data.scale_calibration.is_offered() {
-        SCALE_ITEMS
+        table
     } else {
-        &SCALE_ITEMS[..1]
+        &table[..table.len() - SCALE_CALIBRATION_ROWS]
     }
 }
 
@@ -482,6 +525,12 @@ pub struct MenuData<'a> {
     /// implementation: two sides disagreeing about a list's length is a selection index
     /// pointing at different rows on each.
     pub scale_calibration: ScaleCalibration,
+    /// Whether a fitted scale has a timer, for the `Auto-timer` row.
+    ///
+    /// Supplied for [`Self::scale_calibration`]'s reason, and it decides a list length the
+    /// same way. A `bool` rather than that field's three states because the row is a setting
+    /// rather than an action -- see `scale_calibration::scale_timer_supported`.
+    pub scale_timer: bool,
     /// Whether any scale is answering, for the `Tare` row.
     ///
     /// A different question from [`Self::scale_calibration`]: every scale in this tree can
@@ -945,6 +994,9 @@ pub struct MenuConfig {
     /// would allow a state where one is known and the other is not. `GroupBrewControlState`
     /// is `Copy`, so carrying it whole costs nothing.
     pub brew: Option<variegated_controller_types::GroupBrewControlState>,
+    /// What the group does to its scale when a brew starts. `None` until the first
+    /// `Configuration`, which greys the two rows rather than showing an invented `OFF`.
+    pub brew_actions: Option<variegated_controller_types::BrewActions>,
 }
 
 impl MenuConfig {
@@ -970,6 +1022,12 @@ impl MenuConfig {
                 .group_configurations
                 .get(&GROUP)
                 .map(|g| g.brew_control_state),
+            // Persistent, unlike `brew` above: this one is stored and the controller saves it
+            // on every change, so what the rows show is what the next shot will do.
+            brew_actions: configuration
+                .group_configurations
+                .get(&GROUP)
+                .map(|g| g.brew_actions),
         }
     }
 }
@@ -1244,6 +1302,17 @@ pub fn value(row: &MenuRow, ctx: &MenuContext) -> Option<MenuValue> {
             // shipped default is one. `ON` means the routine screen may draw that quantity on
             // its own rank -- it is drawn regardless while the pump is targeting or capping
             // it, which is a state of the machine rather than a preference.
+            // `n/a` until the first `Configuration`, matching `BrewMode` two rows' worth
+            // above: this row says what the machine will do at the start of the next shot,
+            // and "off" is a claim rather than an absence.
+            MenuItemKind::AutoTare => Some(match ctx.config.brew_actions {
+                Some(actions) => on_off(actions.tare()),
+                None => MenuValue::Text(UNAVAILABLE),
+            }),
+            MenuItemKind::AutoTimer => Some(match ctx.config.brew_actions {
+                Some(actions) => on_off(actions.reset_and_start_timer()),
+                None => MenuValue::Text(UNAVAILABLE),
+            }),
             MenuItemKind::ShowWeight => Some(on_off(ctx.data_points.weight)),
             MenuItemKind::ShowPressure => Some(on_off(ctx.data_points.pressure)),
             MenuItemKind::ShowFlow => Some(on_off(ctx.data_points.flow)),
@@ -1584,6 +1653,24 @@ pub fn scale_present(
     )
 }
 
+/// Whether the fitted scale has a timer, for [`MenuData::scale_timer`].
+///
+/// Wraps `variegated_controller_lib::scale_calibration::scale_timer_supported` for the reason
+/// [`scale_calibration`] is wrapped: both list builders must ask it the same way, and neither
+/// should have to remember the `None`-definition case.
+///
+/// A `None` definition answers **false**, which is the opposite of what [`routine_runnable`]
+/// does with one and deliberately so. Answering "runnable" optimistically costs a refusal from
+/// the controller's own backstop; answering "has a timer" optimistically would put a row in a
+/// list, and the list's *length* is the thing three call sites resolve a selection index
+/// against. A row that appears once the definition lands is a cursor that moves under the
+/// user's finger. The definition arrives within a second or two of boot.
+pub fn scale_timer(
+    definition: Option<&variegated_controller_types::MachineDefinition>,
+) -> bool {
+    definition.is_some_and(variegated_controller_lib::scale_calibration::scale_timer_supported)
+}
+
 /// The unit the brew target row is currently editing, for [`MenuData::brew_target_unit`].
 pub fn brew_target_unit(config: &MenuConfig) -> Option<ParameterUnit> {
     brew_target(config).map(|(_, unit, _)| unit)
@@ -1595,6 +1682,27 @@ pub fn activate(row: &MenuRow, ctx: &MenuContext) -> MenuActivation {
             MenuItemKind::OpenSettings => MenuActivation::Enter(MenuId::Settings),
             MenuItemKind::OpenRoutines => MenuActivation::Enter(MenuId::Routines),
             MenuItemKind::OpenDisplay => MenuActivation::Enter(MenuId::Display),
+            // Refused until the current set is known, for `BrewMode`'s reason: a toggle needs
+            // a "this" before it can mean "not this", and guessing would write a set the
+            // operator never saw. The value column already reads `n/a`, so the refusal was
+            // announced before the press.
+            MenuItemKind::AutoTare => match ctx.config.brew_actions {
+                Some(actions) => MenuActivation::Command(MachineCommand::SetGroupBrewActions(
+                    GROUP,
+                    actions.with(BrewActions::TARE, !actions.tare()),
+                )),
+                None => MenuActivation::Refuse,
+            },
+            MenuItemKind::AutoTimer => match ctx.config.brew_actions {
+                Some(actions) => MenuActivation::Command(MachineCommand::SetGroupBrewActions(
+                    GROUP,
+                    actions.with(
+                        BrewActions::RESET_AND_START_TIMER,
+                        !actions.reset_and_start_timer(),
+                    ),
+                )),
+                None => MenuActivation::Refuse,
+            },
             // Act in place, like a Bluetooth row: there is nothing to confirm and nothing to
             // dial, and the value column beside the row is the feedback.
             MenuItemKind::ShowWeight => {
@@ -1987,6 +2095,59 @@ pub struct MenuSnapshot {
     /// every value, not just the one being edited. Positional and `Copy`, which is what lets
     /// this type stay a `Watch` payload.
     pub values: ParameterValues,
+    /// A refusal the operator should see, and when to stop showing it.
+    ///
+    /// **Not menu state**, and it is here anyway because this is the only thing the button
+    /// task publishes to both displays. A gesture that is refused produces no `Status` change
+    /// -- that is the whole point, nothing happened -- so the displays have no other way to
+    /// learn a button was pressed. A watch of its own is the documented alternative
+    /// (`main.rs`, beside `MENU_CONFIG_WATCH`), and the reason given there is a `heapless::Vec`
+    /// payload waking a render loop for nothing; this is four bytes that *should* wake it.
+    ///
+    /// The button task sets it and does not clear it. Each display compares the deadline
+    /// itself, exactly as `DisplayState::dose_popup_active` already does, so taking it down
+    /// costs no second publish.
+    pub notice: Option<Notice>,
+}
+
+/// Something the machine refused to do, for the panel to say so.
+///
+/// Carries [`DoseRefusal`] rather than a second enum of its own. The decision and the wording
+/// are genuinely different concerns -- one is arithmetic on a reading, tested in
+/// `variegated-controller-lib` where a test binary can run, and the other is two strings with a
+/// width budget -- but they are not two *vocabularies*, and a parallel enum here would be one
+/// more mapping to keep in step for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, defmt::Format)]
+pub struct Notice {
+    /// Why the machine refused.
+    pub refusal: DoseRefusal,
+    /// When the displays should stop drawing it.
+    pub until: Instant,
+}
+
+/// The line the graphical panel draws. Uppercase, like every word on that panel.
+///
+/// Here rather than on [`DoseRefusal`] because it is this panel's wording: the character LCD
+/// below needs different strings for the same refusal, and a shared crate should not be
+/// choosing between them.
+pub const fn notice_panel_line(refusal: DoseRefusal) -> &'static str {
+    match refusal {
+        DoseRefusal::NoReading => "NO SCALE",
+        DoseRefusal::NothingOnScale => "NOTHING ON THE SCALE",
+    }
+}
+
+/// The two rows the character LCD takes over with. Sixteen columns each, exactly.
+///
+/// Gated on the feature that builds the only renderer which draws it, rather than carrying an
+/// `allow(dead_code)`: the narrower gate is what keeps a genuine regression reportable in the
+/// builds that *do* compile it. The same reason `display::mod` gates the renderer itself.
+#[cfg(feature = "character-display")]
+pub const fn notice_lcd_rows(refusal: DoseRefusal) -> (&'static str, &'static str) {
+    match refusal {
+        DoseRefusal::NoReading => ("  Dose refused  ", "    No scale    "),
+        DoseRefusal::NothingOnScale => ("  Dose refused  ", "Nothing on scale"),
+    }
 }
 
 impl MenuSnapshot {
@@ -1997,6 +2158,7 @@ impl MenuSnapshot {
             wifi_pending: false,
             editor: None,
             values: ParameterValues::default(),
+            notice: None,
         }
     }
 }

@@ -82,6 +82,8 @@ export const BoilerTypeSchema = enumType('BoilerType', {
   VirtualSteamBoiler: unitVariant('VirtualSteamBoiler')
 });
 
+export const BrewActionsSchema = newtypeStruct('BrewActions', u8());
+
 export const ControlCurveSchema = struct({
   a: f32(),
   b: f32(),
@@ -530,7 +532,8 @@ export const PeripheralDefinitionSchema = struct({
   location: string(),
   capabilities: seq(SensorCapabilitySchema),
   support_calibration: bool(),
-  via_comms_mcu: bool()
+  via_comms_mcu: bool(),
+  support_timer: bool()
 });
 
 export const PeripheralInfoSchema = struct({
@@ -836,7 +839,7 @@ export const GroupConfigurationSchema = struct({
   pressure_pid_parameters: PidParametersSchema,
   brew_control_state: GroupBrewControlStateSchema,
   max_brew_time_seconds: option(u32()),
-  auto_tare_enabled: bool(),
+  brew_actions: BrewActionsSchema,
   pump_configuration: option(PumpConfigurationSchema),
   pressure_sensor_kalman_parameters: option(KalmanParametersSchema),
   flow_sensor_pulses_per_liter: option(f32()),
@@ -1007,7 +1010,8 @@ export const MachineCommandSchema = enumType('MachineCommand', {
   SetShotUploadSettings: newtypeVariant('SetShotUploadSettings', ShotUploadSettingsSchema),
   SetTimezone: newtypeVariant('SetTimezone', TimezoneSettingSchema),
   SetGroupBrewLimit: tupleVariant('SetGroupBrewLimit', u8(), GroupBrewLimitModeSchema, option(GroupBrewControlTargetValuesUpdateSchema)),
-  ControlScaleTimer: tupleVariant('ControlScaleTimer', ScaleSelectorSchema, ScaleTimerCommandSchema)
+  ControlScaleTimer: tupleVariant('ControlScaleTimer', ScaleSelectorSchema, ScaleTimerCommandSchema),
+  SetGroupBrewActions: tupleVariant('SetGroupBrewActions', u8(), BrewActionsSchema)
 });
 
 export const QueryOutcomeSchema = enumType('QueryOutcome', {
@@ -1066,6 +1070,7 @@ export type BoilerControlTargetValuesUpdate = InferType<typeof BoilerControlTarg
 export type BoilerDefinition = InferType<typeof BoilerDefinitionSchema>;
 export type BoilerStatus = InferType<typeof BoilerStatusSchema>;
 export type BoilerType = InferType<typeof BoilerTypeSchema>;
+export type BrewActions = InferType<typeof BrewActionsSchema>;
 export type BrewControlTarget = InferType<typeof BrewControlTargetSchema>;
 export type BrewLimitStatus = InferType<typeof BrewLimitStatusSchema>;
 export type BrewStatus = InferType<typeof BrewStatusSchema>;

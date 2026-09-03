@@ -590,9 +590,13 @@ fn update_group_configuration(
                            ((group_index as u32) << 16) |
                            (GROUP_AUTO_TARE_ENABLED_CONST as u32);
 
+        // One bit of the brew-action set, which is what this switch has always reported --
+        // `auto_tare_enabled` occupied the same byte and meant the same thing to a reader.
+        // Still read-only: `command_mapper` logs switch writes and acts on none of them, so
+        // this reports the machine rather than driving it.
         let _ = sender.try_send(StateChange::SwitchStateChange(SwitchState {
             key: auto_tare_key,
-            state: group_config.auto_tare_enabled,
+            state: group_config.brew_actions.tare(),
         }));
     }
 

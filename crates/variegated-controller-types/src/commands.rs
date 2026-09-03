@@ -314,6 +314,21 @@ pub enum MachineCommand {
     /// Write-only. Nothing here reads the timer back -- see [`crate::ScaleOp`] -- so there
     /// is no query counterpart and no state to keep in sync.
     ControlScaleTimer(ScaleSelector, ScaleTimerCommand),
+
+    /// Choose what the machine does to a group's scale when a brew starts.
+    ///
+    /// **Appended, not inserted**, for the reason [`Self::ControlScaleTimer`] gives above.
+    ///
+    /// The whole set in one command rather than a flag per action: the two are edited
+    /// together on both surfaces that offer them -- two menu rows and one editor pane -- and
+    /// a per-flag command would let a client that knew about one and not the other clear the
+    /// one it had never heard of.
+    ///
+    /// Persistent. The handler writes the stored configuration and saves it immediately, as
+    /// `SetBoilerControlTargetValues` does; a brew-start behaviour that reset on every power
+    /// cycle would be the same trap `SetGroupBrewControlTarget` is documented as falling
+    /// into.
+    SetGroupBrewActions(GroupIndex, crate::configuration::BrewActions),
 }
 
 impl MachineCommand {
@@ -389,6 +404,7 @@ impl MachineCommand {
             MachineCommand::SetTimezone(_) => "SetTimezone",
             MachineCommand::SetGroupBrewLimit(_, _, _) => "SetGroupBrewLimit",
             MachineCommand::ControlScaleTimer(_, _) => "ControlScaleTimer",
+            MachineCommand::SetGroupBrewActions(_, _) => "SetGroupBrewActions",
             MachineCommand::SetShotUploadConfig(_) => "SetShotUploadConfig",
             MachineCommand::SetShotUploadSettings(_) => "SetShotUploadSettings",
         }
@@ -465,6 +481,7 @@ impl defmt::Format for MachineCommand {
             MachineCommand::SetTimezone(tz) => defmt::write!(f, "SetTimezone({})", tz.as_str()),
             MachineCommand::SetGroupBrewLimit(idx, limit, values) => defmt::write!(f, "SetGroupBrewLimit({}, {:?}, {:?})", idx, limit, values),
             MachineCommand::ControlScaleTimer(scale, command) => defmt::write!(f, "ControlScaleTimer({:?}, {:?})", scale, command),
+            MachineCommand::SetGroupBrewActions(group, actions) => defmt::write!(f, "SetGroupBrewActions({}, {:?})", group, actions),
             MachineCommand::SetShotUploadConfig(c) => defmt::write!(f, "SetShotUploadConfig({})", c),
             // `{}` on the whole value again, not its fields: `ShotUploadSettings` derives
             // `Format`, but its `token` field's impl is hand-written and elides. Reaching

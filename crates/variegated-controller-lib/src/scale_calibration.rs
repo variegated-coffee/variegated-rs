@@ -114,6 +114,29 @@ pub fn scale_calibration(
     }
 }
 
+/// Whether any fitted scale has a timer this firmware can drive.
+///
+/// **A `bool` where [`scale_calibration`] is three-state, and the difference is the difference
+/// between an action and a setting.** `Zero cal` *performs* something and needs a scale that is
+/// answering right now, which is why it has an `Offline` case worth drawing greyed. The
+/// brew-action rows only record what should happen at the start of the next shot -- a question
+/// an operator can answer with the scale switched off, or before pairing one. So the only thing
+/// that can make `Auto-timer` meaningless is hardware with no timer at all, and that does not
+/// change while the machine is running.
+///
+/// There is no matching question for taring, deliberately: every scale in this tree tares, so
+/// an `Auto-tare` row is always worth offering.
+///
+/// Considers only [`PeripheralType::Scale`], for the reason [`scale_calibration`] gives.
+pub fn scale_timer_supported(definition: &MachineDefinition) -> bool {
+    definition
+        .peripherals
+        .iter()
+        .any(|(_, peripheral)| {
+            peripheral.peripheral_type == PeripheralType::Scale && peripheral.support_timer
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +168,20 @@ mod tests {
         peripheral_type: PeripheralType,
         support_calibration: bool,
     ) {
+        // The two flags are opposites on every scale in this tree -- a load cell calibrates
+        // and has no timer, a Bluetooth scale is the other way round -- so deriving one from
+        // the other keeps these fixtures matching real hardware without a fourth parameter on
+        // a helper that has one caller per case.
+        with_peripheral_support(definition, id, peripheral_type, support_calibration, !support_calibration)
+    }
+
+    fn with_peripheral_support(
+        definition: &mut MachineDefinition,
+        id: u16,
+        peripheral_type: PeripheralType,
+        support_calibration: bool,
+        support_timer: bool,
+    ) {
         let mut capabilities = heapless::Vec::new();
         let _ = capabilities.push(SensorCapability::Weight);
         let _ = definition.add_peripheral(
@@ -155,6 +192,7 @@ mod tests {
                 capabilities,
                 support_calibration,
                 via_comms_mcu: true,
+                support_timer,
             },
         );
     }
@@ -279,5 +317,57 @@ mod tests {
             ),
             ScaleCalibration::Available,
         );
+    }
+
+    /// A load cell calibrates and has no timer; a Bluetooth scale is the other way round.
+    /// The two questions must not answer each other.
+    #[test]
+    fn the_timer_and_calibration_answers_are_independent() {
+        let mut load_cell = empty_definition();
+        with_peripheral(&mut load_cell, GRAVITY, PeripheralType::Scale, true);
+        assert!(!scale_timer_supported(&load_cell), "a load cell has no timer");
+        assert_eq!(
+            scale_calibration(&load_cell, &live(&[(GRAVITY, true)])),
+            ScaleCalibration::Available,
+        );
+
+        let mut bluetooth = empty_definition();
+        with_peripheral(&mut bluetooth, BLUETOOTH_SCALE, PeripheralType::Scale, false);
+        assert!(scale_timer_supported(&bluetooth), "a Bluetooth scale drives a timer");
+        assert_eq!(
+            scale_calibration(&bluetooth, &live(&[(BLUETOOTH_SCALE, true)])),
+            ScaleCalibration::Unsupported,
+        );
+    }
+
+    /// Unlike calibration, this does not consult liveness at all: the row records a setting
+    /// for the next shot, so a scale that is merely switched off must not hide it.
+    #[test]
+    fn a_timer_is_offered_even_with_nothing_answering() {
+        let mut definition = empty_definition();
+        with_peripheral(&mut definition, BLUETOOTH_SCALE, PeripheralType::Scale, false);
+
+        assert!(scale_timer_supported(&definition));
+        // The same definition with the scale offline still offers it, where the calibration
+        // rows would grey.
+        assert_eq!(
+            scale_calibration(&definition, &live(&[(BLUETOOTH_SCALE, false)])),
+            ScaleCalibration::Unsupported,
+        );
+    }
+
+    /// A machine with no scale at all offers nothing.
+    #[test]
+    fn no_scale_means_no_timer() {
+        let definition = empty_definition();
+        assert!(!scale_timer_supported(&definition));
+    }
+
+    /// A probe that declared a timer is not a scale, and must not offer the row.
+    #[test]
+    fn only_a_scale_answers_for_the_timer() {
+        let mut definition = empty_definition();
+        with_peripheral_support(&mut definition, PROBE, PeripheralType::BrewSensor, false, true);
+        assert!(!scale_timer_supported(&definition));
     }
 }

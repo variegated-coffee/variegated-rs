@@ -1522,11 +1522,15 @@ impl<
             // Give initial PID boost for temperature drop compensation
             self.brew_boiler_pid.ki.accumulate += 50.0;
 
+            // Not a brew action: zero-tracking and smoothing are about how the scale behaves
+            // *during* the shot, so they are settings of the measurement rather than
+            // something the operator chose to have happen at the start of it.
             let _ = self.group.scale_set_configuration(ScaleConfiguration {
                 zero_tracking: Some(false),
                 smoothing: Some(true)
             }).await;
-            let _ = self.group.scale_tare().await;
+            let actions = self.configuration.persistent.group.brew_actions;
+            self.group.apply_brew_actions(actions).await;
         } else {
             log_info!("start_brewing() called but group_brewing already true - skipping baseline capture");
         }

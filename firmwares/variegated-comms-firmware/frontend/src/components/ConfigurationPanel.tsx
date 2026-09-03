@@ -24,6 +24,7 @@ import { PumpConfigurationEditor } from './PumpConfigurationEditor';
 import { ControlCurveEditor } from './ControlCurveEditor';
 import { BoilerControlEditor } from './BoilerControlEditor';
 import { GroupControlEditor } from './GroupControlEditor';
+import { BrewActionsEditor } from './BrewActionsEditor';
 import { getWebSocketService } from '../services/websocket';
 
 interface ConfigurationPanelProps {
@@ -149,7 +150,8 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           output_flow_rate_curve: 'Output Flow Rate Curve',
           duty_cycle_curve: 'Duty Cycle Curve',
           boiler_control: 'Boiler Control',
-          group_control: 'Group Control'
+          group_control: 'Group Control',
+          brew_actions: 'Brew Actions'
         };
         parts.push(categoryNames[navigation.parameterCategory] || navigation.parameterCategory);
       }
@@ -447,6 +449,9 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
       | PumpConfiguration
       | ControlCurve
       | KalmanParameters
+      // The brew-action set, as the bitfield the firmware stores. The only editor here whose
+      // whole value is a scalar, which is why it is the only `number` in this union.
+      | number
       | null;
 
     /**
@@ -514,6 +519,12 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
           }
         );
         sent('Brew control change');
+        return;
+      }
+
+      if (navigation.parameterCategory === 'brew_actions' && navigation.entityKey !== null) {
+        ws.setGroupBrewActions(navigation.entityKey, data as number);
+        sent('Brew actions change');
         return;
       }
 
@@ -684,6 +695,15 @@ const ConfigurationPanelComponent = ({ configuration }: ConfigurationPanelProps)
         if (!entityConfig) break;
 
         switch (navigation.parameterCategory) {
+          case 'brew_actions':
+            editor = (
+              <BrewActionsEditor
+                actions={entityConfig.brew_actions}
+                onSave={handleSaveWrapper}
+                onCancel={handleCancel}
+              />
+            );
+            break;
           case 'flow_rate_pid':
             editor = (
               <PidParametersEditor
