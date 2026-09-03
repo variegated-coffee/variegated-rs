@@ -42,7 +42,23 @@ use crate::ws_types::{EncodedPayload, QueryOutcome};
 /// Unlike `SHOT_LOG_FORMAT_VERSION` this is *not* on the wire. A stored shot outlives the
 /// firmware that wrote it and has to be self-describing; a live session does not, because both
 /// ends are reachable and a mismatch shows up immediately as a refused handshake.
-pub const UPLINK_SCHEMA_VERSION: u32 = 1;
+/// # v2
+///
+/// Two appended enum variants, both reachable from [`UplinkMessage`]:
+/// `BluetoothDriverKind::UlanziD100H` (discriminant 4, reached through
+/// `Configuration.bluetooth_peripherals` and `Status.bluetooth`) and
+/// `PeripheralType::InputDevice` (discriminant 5, reached through
+/// `MachineDefinition.peripherals` and `Status.peripheral_status`).
+///
+/// Both are strict appends, so nothing that v1 could encode decodes differently under v2.
+/// The break runs the other way: a machine on this firmware can emit discriminant 4 or 5,
+/// and a v1 reader has no variant at that index. That fails loudly rather than mis-decoding,
+/// which is why this is a version bump and not a silent one.
+///
+/// A drift audit against the frozen v1 file was run before this bump and found nothing else:
+/// of the 90 types the two schemas share, 88 were byte-identical, with no reordering, no
+/// renames, no width changes and nothing removed. So v2 carries these two and nothing more.
+pub const UPLINK_SCHEMA_VERSION: u32 = 2;
 
 /// Plaintext bytes per sealed frame within a record.
 ///
