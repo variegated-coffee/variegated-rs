@@ -12,7 +12,7 @@ use embassy_time::{Duration, Timer};
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
 use variegated_belka_portal_trouble_driver::{BelkaPortalDriver, HIDE_GRAPH, SHOW_GRAPH};
-use variegated_controller_types::{BrewSensorOp, ExternalPeripheralSensorReading};
+use variegated_controller_types::{BrewSensorOp, ExternalPeripheralSensorReading, InputCommand};
 use variegated_controller_types::debug::DebugEvent;
 use crate::debug::bus;
 use variegated_trouble_connection_manager::BleConnectionManager;
@@ -22,13 +22,14 @@ use crate::ble::scale_slot::{run_scale_slot, AcaiaNew, AcaiaOld, Bookoo};
 use crate::ble::scanner::ScanPrinter;
 use crate::ble::status;
 use crate::channels::{
-    BLE_RECONNECT_REQUEST, BLE_SCAN_REQUEST, BREW_SENSOR_COMMAND_CHANNEL, BT_ASSOCIATIONS,
-    SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
+    BLE_RECONNECT_REQUEST, BLE_SCAN_REQUEST, BOND_REPORT_CAPACITY, BREW_SENSOR_COMMAND_CHANNEL,
+    BT_ASSOCIATIONS, BT_BONDS, INPUT_COMMAND_CAPACITY, SCALE_COMMAND_CHANNEL,
+    SENSOR_READING_CAPACITY,
 };
 use variegated_trouble_connection_manager::ScanRequest;
 use variegated_controller_types::bluetooth::{
-    reconcile_bluetooth_slots, BluetoothDriverKind, BluetoothSlotAssignment,
-    BluetoothSlotAssignments, MAX_BLUETOOTH_PERIPHERALS,
+    reconcile_bluetooth_slots, BluetoothBond, BluetoothDriverKind, BluetoothSecurityLevel,
+    BluetoothSlotAssignment, BluetoothSlotAssignments, MAX_BLUETOOTH_PERIPHERALS,
 };
 use variegated_controller_types::PeripheralId;
 use variegated_log::log_warn;
@@ -56,6 +57,8 @@ static SLOT_ASSIGNMENTS: Watch<
 pub async fn ble_devices_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     scanner: &'static ScanPrinter,
+    // Needed only to install stored bonds; the connection manager owns everything else.
+    stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
 ) {
     let handle = manager.handle();
 
@@ -67,12 +70,64 @@ pub async fn ble_devices_task(
         join(
             manager.run(scanner),
             join(
-                reconcile_associations_loop(),
+                join(reconcile_associations_loop(), bond_install_loop(stack)),
                 join(reconnect_request_loop(handle.clone()), scan_request_loop(manager)),
             ),
         ),
     )
     .await;
+}
+
+/// Install the bonds the application processor holds into the Security Manager.
+///
+/// This processor has no flash, so every pairing key it knows arrives over the UART. They
+/// have to be in the stack *before* a bonded peer asks to encrypt the link, or the peer's
+/// request fails on a key this side does not have -- and a HID device with an unencrypted
+/// link reports nothing, so the symptom is a dial that connects and does nothing.
+///
+/// The sole receiver on [`BT_BONDS`]; every other reader uses `try_get`.
+async fn bond_install_loop(
+    stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
+) {
+    let mut bonds = BT_BONDS
+        .receiver()
+        .expect("BT_BONDS is sized for this receiver");
+
+    loop {
+        let list = bonds.changed().await;
+
+        // Installed rather than reconciled: the stack has no "forget everything" call, and
+        // a bond the application processor has dropped is one it will not send again after
+        // the next reset. Re-adding a bond that is already present replaces it, so a repeat
+        // of the same list is harmless.
+        let mut installed = 0usize;
+        for bond in list.0.iter() {
+            let information = BondInformation::new(
+                Identity {
+                    bd_addr: BdAddr::new(bond.address),
+                    irk: bond.identity_resolving_key.map(IdentityResolvingKey::new),
+                },
+                LongTermKey::new(bond.long_term_key),
+                match bond.security_level {
+                    BluetoothSecurityLevel::EncryptedAuthenticated => {
+                        SecurityLevel::EncryptedAuthenticated
+                    }
+                    BluetoothSecurityLevel::Encrypted => SecurityLevel::Encrypted,
+                    BluetoothSecurityLevel::NoEncryption => SecurityLevel::NoEncryption,
+                },
+                true,
+            );
+
+            if stack.add_bond_information(information).is_ok() {
+                installed += 1;
+            } else {
+                log_warn!("Could not install a bond: the security manager is full");
+            }
+        }
+
+        // A count, never the keys: these lines reach the TCP debug server.
+        log_info!("Installed {} Bluetooth bond(s)", installed);
+    }
 }
 
 /// Forward scan requests from the application processor to the connection manager.
@@ -169,6 +224,11 @@ pub async fn ble_slot_task(
     manager: &'static BleConnectionManager<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
     sensor_sender: Sender<'static, CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>,
+    // UI commands from an input device, and bonds formed by one. Both are `Sender`s taken
+    // once and copied into the driver arm, rather than subscribers acquired here: unlike
+    // `SCALE_COMMAND_CHANNEL`, these run outward, so there is no subscriber slot to leak.
+    input_sender: Sender<'static, CriticalSectionRawMutex, (PeripheralId, InputCommand), INPUT_COMMAND_CAPACITY>,
+    bond_sender: Sender<'static, CriticalSectionRawMutex, BluetoothBond, BOND_REPORT_CAPACITY>,
 ) {
     let handle = manager.handle();
     let mut assignments = SLOT_ASSIGNMENTS
@@ -320,6 +380,21 @@ pub async fn ble_slot_task(
                         slot,
                         sensor_sender,
                         &mut scale_commands,
+                    )
+                    .await
+                }
+                BluetoothDriverKind::UlanziD100H => {
+                    // Neither `sensor_sender` nor a command subscriber: this device reports
+                    // no readings and takes no operations. It sends UI commands, on a
+                    // channel of their own, and it is the only driver here that pairs.
+                    crate::ble::ulanzi_slot::ulanzi_input_loop(
+                        handle.clone(),
+                        stack,
+                        BdAddr::new(assignment.address),
+                        assignment.id,
+                        slot,
+                        input_sender,
+                        bond_sender,
                     )
                     .await
                 }

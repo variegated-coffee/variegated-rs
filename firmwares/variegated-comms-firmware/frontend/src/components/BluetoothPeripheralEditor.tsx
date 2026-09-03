@@ -16,7 +16,8 @@ const DRIVERS: { kind: BluetoothDriverKind['type']; label: string; hint: string 
   { kind: 'AcaiaNew', label: 'ACAIA (2021 and later)', hint: 'Pyxis, Lunar 2021, Pearl S, Cinco' },
   { kind: 'AcaiaOld', label: 'ACAIA (pre-2021)', hint: 'Lunar AL010, Pearl 2015' },
   { kind: 'Bookoo', label: 'BooKoo Themis', hint: 'Themis, Themis Mini and Themis Ultra' },
-  { kind: 'BelkaPortal', label: 'Belka Portal', hint: 'Water sensor: conductivity, temperature' }
+  { kind: 'BelkaPortal', label: 'Belka Portal', hint: 'Water sensor: conductivity, temperature' },
+  { kind: 'UlanziD100H', label: 'Ulanzi D100H', hint: 'Dial and seven keys, for driving the menus' }
 ];
 
 interface BluetoothPeripheralEditorProps {

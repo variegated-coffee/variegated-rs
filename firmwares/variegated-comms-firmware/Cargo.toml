@@ -31,7 +31,17 @@ variegated-schema-export = { path = "../../crates/variegated-schema-export" }
 # embassy-sync version reason -- and cargo would unify the feature in from there anyway.
 # It is named here because this is the binary that needs it, and a feature list that omits
 # it would read as "this firmware has no GATT server".
-trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
+#
+# `security` is the Security Manager -- SMP pairing and bonding. Nothing else here needs an
+# encrypted link: the scales and the Belka Portal expose their data on open GATT. A HID
+# device does not, because HID-over-GATT gates its report characteristics on encryption, so
+# a dial that is not bonded reports nothing at all.
+#
+# It is not free. It pulls in `p256`, `aes`, `cmac`, `rand_chacha` and `rand`, and P-256
+# ECDH is stack-hungry -- against a budget with 2,452 bytes of stack headroom and 6,688
+# bytes of uncommitted SRAM (`docs/comms-firmware-memory-budget.md`). Measure after
+# flashing; if it does not fit, this feature is the first thing to reconsider.
+trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "security", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
 # Improv Wi-Fi provisioning. `ble` brings in the GATT service and the run loop; without it
 # this crate is just the packet codec, which is how its host tests stay runnable.
 variegated-improv-trouble = { path = "../../crates/variegated-improv-trouble", features = ["ble"] }
@@ -39,6 +49,10 @@ variegated-comms-api-types = { path = "../../crates/variegated-comms-api-types" 
 variegated-trouble-connection-manager = { path = "../../crates/variegated-trouble-connection-manager" }
 variegated-belka-portal-trouble-driver = { path = "../../crates/variegated-belka-portal-trouble-driver" }
 variegated-scale-trouble-driver = { path = "../../crates/variegated-scale-trouble-driver" }
+# The dial's report decoding and rotation sampling. A codec crate rather than a
+# `-trouble-driver` one so that it can host tests; the BLE half of the dial lives in
+# `src/ble/ulanzi_slot.rs` here.
+variegated-ulanzi-codec = { path = "../../crates/variegated-ulanzi-codec", features = ["defmt"] }
 variegated-controller-types = { path = "../../crates/variegated-controller-types", default-features = false, features = ["serde", "defmt"] }
 # The *same* crate the application processor uses, not a second bus. Both
 # workspaces declare `embassy-sync = "0.8.0"` and `embassy-time = "0.5.1"`, so

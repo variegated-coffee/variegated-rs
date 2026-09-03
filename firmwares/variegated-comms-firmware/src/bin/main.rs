@@ -49,7 +49,7 @@ use variegated_comms_firmware::{
         ShotLogEventChannel, SHOT_LOG_EVENT_CHANNEL,
         CONFIGURATION_CHANNEL, MACHINE_COMMAND_CHANNEL, STATUS_CHANNEL, ROUTINE_CHANNEL,
         MachineCommandSender, STATE_CHANGE_CHANNEL, CLIENT_EVENT_CHANNEL, SENSOR_READING_CHANNEL,
-        DEBUG_COMMAND_CHANNEL,
+        DEBUG_COMMAND_CHANNEL, INPUT_COMMAND_CHANNEL, BOND_REPORT_CHANNEL,
     },
     config::{debug_uart_config, uart_config},
     debug,
@@ -415,6 +415,21 @@ async fn application_processor_task(
     // The scanner owns the queue and this task drains it. Passed as a `&'static` scanner
     // rather than a receiver so the borrow is obviously tied to the `mk_static!` object.
     scanner: &'static ScanPrinter,
+    input_command_receiver: embassy_sync::channel::Receiver<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        (
+            variegated_controller_types::PeripheralId,
+            variegated_controller_types::InputCommand,
+        ),
+        { variegated_comms_firmware::channels::INPUT_COMMAND_CAPACITY },
+    >,
+    bond_report_receiver: embassy_sync::channel::Receiver<
+        'static,
+        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+        variegated_controller_types::bluetooth::BluetoothBond,
+        { variegated_comms_firmware::channels::BOND_REPORT_CAPACITY },
+    >,
 ) {
     let status_publisher = status_channel.publisher().unwrap();
     let config_publisher = config_channel.publisher().unwrap();
@@ -440,6 +455,8 @@ async fn application_processor_task(
             sensor_reading_receiver,
             debug_command_receiver,
             scanner.results(),
+            input_command_receiver,
+            bond_report_receiver,
         ),
     )
     .await;
@@ -631,6 +648,8 @@ async fn main(spawner: Spawner) -> ! {
         SHOT_LOG_EVENT_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
     let command_channel = MACHINE_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
     let sensor_reading_channel = SENSOR_READING_CHANNEL.init(embassy_sync::channel::Channel::new());
+    let input_command_channel = INPUT_COMMAND_CHANNEL.init(embassy_sync::channel::Channel::new());
+    let bond_report_channel = BOND_REPORT_CHANNEL.init(embassy_sync::channel::Channel::new());
 
     // Initialize the debug command channel. Filled by the USB-Serial-JTAG reader
     // always, and by the TCP reader when `config::TCP_COMMANDS_ENABLED`; drained by
@@ -727,7 +746,7 @@ async fn main(spawner: Spawner) -> ! {
     // now returns `()`) onto the `#[task]` function itself. A failed spawn used to
     // be discarded silently; `spawn_or_report!` turns it into a `SpawnFailed` event
     // instead. See the macro's doc comment for why an event and not `unwrap`.
-    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, shot_log_event_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver(), printer));
+    spawn_or_report!(spawner, "application_processor", application_processor_task(rx, tx, status_channel, config_channel, routine_channel, shot_log_event_channel, command_channel, sensor_reading_channel, debug_command_channel.receiver(), printer, input_command_channel.receiver(), bond_report_channel.receiver()));
     spawn_or_report!(spawner, "status_listener", status_listener_task(status_channel));
     log_info!("Application processor tasks spawned");
 
@@ -881,14 +900,14 @@ async fn main(spawner: Spawner) -> ! {
 
     // Spawn BLE tasks
     spawn_or_report!(spawner, "ble_runner", ble_runner_task(runner, printer));
-    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager, printer));
+    spawn_or_report!(spawner, "ble_devices", ble_devices_task(connection_manager, printer, stack));
     // One worker per slot, spawned unconditionally and idle until the application
     // processor says what to connect to. There is no peripheral list at this point --
     // this firmware stores none -- so spawning per peripheral is not an option even in
     // principle; a task cannot be created later from a context that has no `Spawner`,
     // and cannot be destroyed at all.
     for slot in 0..MAX_BLUETOOTH_PERIPHERALS {
-        spawn_or_report!(spawner, "ble_slot", ble_slot_task(slot, connection_manager, stack, sensor_reading_sender));
+        spawn_or_report!(spawner, "ble_slot", ble_slot_task(slot, connection_manager, stack, sensor_reading_sender, input_command_channel.sender(), bond_report_channel.sender()));
     }
     // Idle until the application processor opens a window, which it will not do until
     // someone has held a button on the machine. It reports what it learns on

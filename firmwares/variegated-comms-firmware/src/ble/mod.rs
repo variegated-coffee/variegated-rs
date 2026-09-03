@@ -4,6 +4,7 @@ pub mod devices;
 pub mod scale_slot;
 pub mod scanner;
 pub mod status;
+pub mod ulanzi_slot;
 
 pub use devices::{ble_devices_task, ble_slot_task};
 pub use scanner::ScanPrinter;

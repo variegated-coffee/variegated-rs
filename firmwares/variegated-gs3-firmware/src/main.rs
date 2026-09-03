@@ -196,6 +196,18 @@ pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
 #[cfg(feature = "bluetooth-group-1-scale")]
 pub const BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID: u16 = 0xB5C0;
 
+/// A Bluetooth input device -- a dial or keypad that drives this machine's UI.
+///
+/// **This must equal `BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID` in the comms firmware's
+/// `config.rs`**, for the reason given above.
+///
+/// Not behind a feature, unlike every peripheral above it. Those name hardware that is
+/// either fitted to this machine or is not, and the build says which. An input device is an
+/// accessory: whether one exists is expressed by whether the user has associated one, and
+/// the role has to be offered in the association UI before they can. Gating it would mean a
+/// rebuild stands between a user and a dial they just bought.
+pub const BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID: u16 = 0xBA1D;
+
 // The group has one scale, and the two implementations cannot share it.
 //
 // It is not just that `Group` has a single `scale_controller` and a single
@@ -3274,6 +3286,26 @@ async fn main_task(
             support_timer: false,
         };
         let _ = machine_definition.add_peripheral(BELKA_PERIPHERAL_ID, scale_def);
+    }
+
+    // The Bluetooth input device -- a dial that drives the menus.
+    //
+    // Unconditional, unlike the peripherals above: see the note on
+    // `BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID`.
+    {
+        let input_def = PeripheralDefinition {
+            peripheral_type: PeripheralType::InputDevice,
+            location: heapless::String::try_from("Bench").unwrap(),
+            // Empty, and not for want of looking: every `SensorCapability` names something
+            // measured, and this device measures nothing. It is the one peripheral here
+            // that sends no readings at all -- it sends UI commands, on a path of their
+            // own -- so there is no capability that would be true.
+            capabilities: heapless::Vec::new(),
+            support_calibration: false,
+            via_comms_mcu: true,
+            support_timer: false,
+        };
+        let _ = machine_definition.add_peripheral(BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID, input_def);
     }
 
     // Add function routine descriptions (for the 4 routine buttons)

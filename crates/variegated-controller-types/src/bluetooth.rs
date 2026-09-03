@@ -165,9 +165,10 @@ pub type BluetoothPeripheralList =
 
 /// How strong a bonded link is.
 ///
-/// A mirror of the LE security mode 1 levels, and only those: modes 2 and 3 describe data
-/// signing and broadcast codes, neither of which a connection bond can carry, so mirroring
-/// them would be inventing states this type can never hold.
+/// A mirror of the three states the Bluetooth stack's connection API actually reports.
+/// Deliberately *not* the LE security mode/level matrix: the stack has a type for that too,
+/// but a bond is formed and reported in terms of these three, and mirroring the richer one
+/// would invent distinctions nothing on this path can fill in.
 ///
 /// **Append, never insert** -- this is stored in flash.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -175,16 +176,16 @@ pub type BluetoothPeripheralList =
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BluetoothSecurityLevel {
-    /// No authentication and no encryption.
+    /// No encryption and no authentication. Every connection starts here.
     #[default]
-    Level1,
-    /// Unauthenticated pairing with encryption -- what Just Works produces, and therefore
-    /// what a keypad-less, display-less dial can reach.
-    Level2,
-    /// Authenticated pairing with encryption.
-    Level3,
-    /// Authenticated LE Secure Connections with a 128-bit key.
-    Level4,
+    NoEncryption,
+    /// Encrypted but not authenticated -- no protection against a man in the middle.
+    ///
+    /// What Just Works pairing produces, and therefore what a device with no keypad and no
+    /// display can reach. It is the expected level for a dial.
+    Encrypted,
+    /// Encrypted and authenticated.
+    EncryptedAuthenticated,
 }
 
 /// The keys from one completed pairing.
@@ -235,6 +236,7 @@ pub type BluetoothBondList = heapless::Vec<BluetoothBond, MAX_BLUETOOTH_PERIPHER
 /// `Default`, which would silently drop every pairing a user already has. A second key
 /// costs nothing by comparison.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "schema", derive(variegated_postcard_schema::PostcardSchema))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BluetoothBonds(pub BluetoothBondList);
@@ -590,7 +592,7 @@ mod tests {
             address_random: true,
             long_term_key: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
             identity_resolving_key: None,
-            security_level: BluetoothSecurityLevel::Level2,
+            security_level: BluetoothSecurityLevel::Encrypted,
         });
 
         let mut buf = [0u8; 2048];
@@ -671,7 +673,7 @@ mod tests {
             address_random: true,
             long_term_key: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
             identity_resolving_key: Some(0xdead_beef_dead_beef_dead_beef_dead_beef),
-            security_level: BluetoothSecurityLevel::Level2,
+            security_level: BluetoothSecurityLevel::Encrypted,
         };
 
         let mut buf = [0u8; 128];
@@ -697,7 +699,7 @@ mod tests {
                     address_random: true,
                     long_term_key: u128::MAX,
                     identity_resolving_key: Some(u128::MAX),
-                    security_level: BluetoothSecurityLevel::Level4,
+                    security_level: BluetoothSecurityLevel::EncryptedAuthenticated,
                 })
                 .is_ok(), "slot {slot} did not fit the list");
         }

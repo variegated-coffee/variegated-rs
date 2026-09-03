@@ -790,7 +790,7 @@ mod tests {
             address_random: true,
             long_term_key: u128::MAX,
             identity_resolving_key: Some(1),
-            security_level: BluetoothSecurityLevel::Level2,
+            security_level: BluetoothSecurityLevel::Encrypted,
         };
         let msg = CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(bond);
 

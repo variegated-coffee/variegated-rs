@@ -75,6 +75,13 @@ pub const BELKA_PERIPHERAL_ID: u16 = 0xB1CA;
 pub const BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID: u16 = 0xB5C0;
 pub const BLUETOOTH_GROUP_2_SCALE_PERIPHERAL_ID: u16 = 0xB5C1;
 pub const BLUETOOTH_DOSE_SCALE_1_PERIPHERAL_ID: u16 = 0xB5D0;
+/// A Bluetooth input device -- a dial or keypad that drives the machine's UI.
+///
+/// Outside the `0xB5C_` / `0xB5D_` scale block on purpose: it is not a scale and not a
+/// sensor of any kind, and it reports no readings at all. Both espresso firmwares carry a
+/// matching `BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID`, and the numbers must agree; a mismatch
+/// is silent and shows up as a dial that pairs, connects, and then moves nothing.
+pub const BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID: u16 = 0xBA1D;
 
 /// Endpoints a scale reports on, within `ExternalPeripheralSensorReading`.
 ///

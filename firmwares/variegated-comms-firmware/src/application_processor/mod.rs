@@ -12,8 +12,9 @@ use postcard::accumulator::{CobsAccumulator, FeedResult};
 use portable_atomic::{AtomicBool, Ordering};
 use variegated_controller_types::{
     ApplicationProcessorToCommsProcessorMessage, CommsProcessorToApplicationProcessorMessage,
-    ExternalPeripheralSensorReading, MachineCommand, ScaleOp,
+    ExternalPeripheralSensorReading, InputCommand, MachineCommand, PeripheralId, ScaleOp,
 };
+use variegated_controller_types::bluetooth::BluetoothBond;
 use variegated_controller_types::debug::DebugEvent;
 use variegated_controller_types::debug_command::DebugCommand;
 use variegated_debug::relay::relayable;
@@ -25,6 +26,7 @@ use crate::channels::{
     MACHINE_COMMAND_CAPACITY, COMMS_STATUS_SIGNAL, DEBUG_COMMAND_CAPACITY, MACHINE_DEFINITION,
     BREW_SENSOR_COMMAND_CHANNEL, ROUTINE_CACHE, SCALE_COMMAND_CHANNEL, SENSOR_READING_CAPACITY,
     BLE_SCAN_REQUEST, BT_ASSOCIATIONS, BT_PERIPHERALS_RECEIVED,
+    BOND_REPORT_CAPACITY, BT_BONDS, BT_BONDS_RECEIVED, INPUT_COMMAND_CAPACITY,
     ImprovReport, IMPROV_REPORT_CHANNEL,
     SHOT_UPLOAD_CONFIG, SHOT_UPLOAD_CONFIG_RECEIVED,
     WIFI_CREDENTIALS, WIFI_CREDENTIALS_RECEIVED, WIFI_PROVISIONING_WINDOW,
@@ -82,6 +84,10 @@ pub async fn start(
     // static here, because the scanner is the only thing that writes it and this task is
     // the only thing that reads it.
     scan_result_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, ScanReport, SCAN_RESULT_CAPACITY>,
+    // UI commands from an input device, and bonds formed by one. Both come from a BLE slot
+    // task; see the arm they share with sensor readings for why they sit where they do.
+    input_command_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, (PeripheralId, InputCommand), INPUT_COMMAND_CAPACITY>,
+    bond_report_receiver: ChannelReceiver<'static, CriticalSectionRawMutex, BluetoothBond, BOND_REPORT_CAPACITY>,
 ) {
     log_info!("Starting UART transceiver");
 
@@ -515,6 +521,19 @@ pub async fn start(
                                 log_info!("Received Bluetooth scan request for {} ms", duration_ms);
                                 BLE_SCAN_REQUEST.signal(duration_ms);
                             }
+                            ApplicationProcessorToCommsProcessorMessage::BluetoothBonds(bonds) => {
+                                // A count, never the keys: this line reaches the TCP debug
+                                // server, and a long-term key printed there is a long-term
+                                // key given away.
+                                log_info!("Received {} Bluetooth bond(s)", bonds.0.len());
+                                // `send`, which never awaits and never fails -- this task
+                                // must not block on back-pressure; see the `ScaleCommand`
+                                // arm above.
+                                BT_BONDS.sender().send(bonds);
+                                // Set on receipt, not on the list being non-empty. An empty
+                                // list is a complete answer.
+                                BT_BONDS_RECEIVED.store(true, Ordering::Relaxed);
+                            }
                         }
 
                         window = remaining;
@@ -576,6 +595,14 @@ pub async fn start(
             .expect("Failed to write RequestShotUploadConfig");
         log_warn!("Sent initial RequestShotUploadConfig command on startup");
 
+        // Send initial RequestBluetoothBonds command on startup
+        let request_bonds_message = CommsProcessorToApplicationProcessorMessage::RequestBluetoothBonds;
+        let serialized_message = postcard::to_allocvec_cobs(&request_bonds_message)
+            .expect("Failed to serialize RequestBluetoothBonds");
+        write_frame(&mut tx, &serialized_message).await
+            .expect("Failed to write RequestBluetoothBonds");
+        log_warn!("Sent initial RequestBluetoothBonds command on startup");
+
         // Track last request times for periodic operations
         let mut last_routine_request = Instant::now();
         let mut last_config_retry = Instant::now();
@@ -628,7 +655,17 @@ pub async fn start(
                 // real time. It polls first because it is rare -- at most a couple per
                 // window -- so it cannot starve the commands beside it.
                 select(IMPROV_REPORT_CHANNEL.receive(), command_receiver.receive()),
-                sensor_reading_receiver.receive(),
+                // Input commands and bond reports share the sensor-reading arm, because all
+                // three are traffic from a Bluetooth peripheral. They poll *before* the
+                // readings, which is the point of the ordering: readings arrive
+                // continuously while a scale is on, and a keypress that queued behind a
+                // second of them is a button the machine appears to have ignored. The
+                // reverse cannot happen -- input is a few messages per second at most, so
+                // it has nothing to starve a reading with.
+                select(
+                    select(input_command_receiver.receive(), bond_report_receiver.receive()),
+                    sensor_reading_receiver.receive(),
+                ),
                 select(
                     Timer::after(timeout),
                     select(
@@ -764,7 +801,38 @@ pub async fn start(
                         log_info!("Scheduled delayed request for 500ms from now");
                     }
                 }
-                Either4::Third(sensor_reading) => {
+                Either4::Third(Either::First(Either::First((peripheral_id, command)))) => {
+                    let message =
+                        CommsProcessorToApplicationProcessorMessage::InputEvent(peripheral_id, command);
+
+                    // Matched rather than `.expect`ed, unlike the readings below it: this
+                    // originated on a radio, and nothing arriving from one may panic the
+                    // processor. A dropped keypress is a button the user presses again.
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
+                                log_error!("Failed to write input command");
+                            }
+                        }
+                        Err(_) => log_error!("Failed to serialize input command"),
+                    }
+                }
+                Either4::Third(Either::First(Either::Second(bond))) => {
+                    // A count of one, and nothing about the key itself: this reaches the
+                    // TCP debug server.
+                    log_info!("Forwarding a Bluetooth bond to the application processor");
+
+                    let message = CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(bond);
+                    match postcard::to_allocvec_cobs(&message) {
+                        Ok(serialized_message) => {
+                            if write_frame(&mut tx, &serialized_message).await.is_err() {
+                                log_error!("Failed to write bond report");
+                            }
+                        }
+                        Err(_) => log_error!("Failed to serialize bond report"),
+                    }
+                }
+                Either4::Third(Either::Second(sensor_reading)) => {
                     // Log before moving the value
                     /*log_info!("Sending ExternalPeripheralSensorReading from peripheral 0x{:04X}, endpoint {}, value {}",
                         sensor_reading.id, sensor_reading.endpoint, sensor_reading.value);*/
@@ -1060,6 +1128,26 @@ pub async fn start(
                             write_frame(&mut tx, &serialized_message).await
                                 .expect("Failed to write RequestBluetoothPeripherals");
                             log_warn!("Sent periodic RequestBluetoothPeripherals command (still waiting for response)");
+                        }
+
+                        // Only send RequestBluetoothBonds if we have not been answered yet.
+                        //
+                        // The flag is set on *receipt*, never on the list being non-empty.
+                        // A machine whose only paired device is an unbonded scale answers
+                        // with an empty list, and that is a complete answer.
+                        //
+                        // Note the application processor defers this one until it has
+                        // published a Configuration, because it prunes the bond list
+                        // against the associations before sending it and an unknown
+                        // association list would prune everything. So a few unanswered
+                        // rounds here at boot are expected rather than a fault.
+                        if !BT_BONDS_RECEIVED.load(Ordering::Relaxed) {
+                            let request_bonds_message = CommsProcessorToApplicationProcessorMessage::RequestBluetoothBonds;
+                            let serialized_message = postcard::to_allocvec_cobs(&request_bonds_message)
+                                .expect("Failed to serialize RequestBluetoothBonds");
+                            write_frame(&mut tx, &serialized_message).await
+                                .expect("Failed to write RequestBluetoothBonds");
+                            log_warn!("Sent periodic RequestBluetoothBonds command (still waiting for response)");
                         }
 
                         // Only send RequestWifiCredentials if we have not been answered yet.

@@ -83,6 +83,19 @@ use crate::rotary::{UIStatus};
 
 pub const GRAVITY_PERIPHERAL_ID: u16 = 0x5C1E;
 
+/// A Bluetooth input device -- a dial or keypad that drives this machine's UI.
+///
+/// **This must equal `BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID` in the comms firmware's
+/// `config.rs`.** The two firmwares are separate binaries on separate chips, so the compiler
+/// cannot check it; a mismatch is silent, and shows up as a dial that pairs, connects, and
+/// then moves nothing.
+///
+/// Not behind a feature, unlike the scale above. That names hardware either fitted to this
+/// machine or not, and the build says which. An input device is an accessory: whether one
+/// exists is expressed by whether the user has associated one, and the role has to be
+/// offered in the association UI before they can.
+pub const BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID: u16 = 0xBA1D;
+
 // `NoopDispatcher` is `variegated_controller_lib::external_sensor_dispatcher`'s, beside the
 // trait it implements.
 use variegated_controller_lib::external_sensor_dispatcher::NoopDispatcher;
@@ -1103,6 +1116,24 @@ async fn main_task(spawner: Spawner) -> ! {
             support_timer: false,
         };
         let _ = machine_definition.add_peripheral(GRAVITY_PERIPHERAL_ID, scale_def);
+    }
+
+    // The Bluetooth input device -- a dial that drives the menus.
+    //
+    // Unconditional, unlike the scale above: see the note on
+    // `BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID`.
+    {
+        let input_def = PeripheralDefinition {
+            peripheral_type: PeripheralType::InputDevice,
+            location: heapless::String::try_from("Bench").unwrap(),
+            // Empty because every `SensorCapability` names something measured, and this
+            // device measures nothing -- it sends UI commands, on a path of their own.
+            capabilities: heapless::Vec::new(),
+            support_calibration: false,
+            via_comms_mcu: true,
+            support_timer: false,
+        };
+        let _ = machine_definition.add_peripheral(BLUETOOTH_INPUT_DEVICE_PERIPHERAL_ID, input_def);
     }
 
     info!("Machine definition created: {:?}", machine_definition);

@@ -195,6 +195,16 @@ fn driver_for_service(uuid: &Uuid) -> Option<BluetoothDriverKind> {
         Some(BluetoothDriverKind::Bookoo)
     } else if *uuid == BELKA_SERVICE_UUID {
         Some(BluetoothDriverKind::BelkaPortal)
+    } else if *uuid == crate::ble::ulanzi_slot::HID_SERVICE_UUID {
+        // The only generic suggestion on this list: every UUID above names one vendor's
+        // product, while this one names a whole class of device. A keyboard or a mouse
+        // advertising HID would be suggested the dial's driver too.
+        //
+        // That is worth it because a HID device that is *not* suggested a driver cannot be
+        // associated at all, and the cost of a wrong suggestion is low: the user picks the
+        // driver, this only pre-fills it, and the dial's decoder rejects frames that are
+        // not its own rather than acting on them.
+        Some(BluetoothDriverKind::UlanziD100H)
     } else {
         None
     }

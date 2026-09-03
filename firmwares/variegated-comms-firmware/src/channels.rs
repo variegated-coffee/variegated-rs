@@ -8,8 +8,10 @@ use embassy_sync::mutex::Mutex;
 use embassy_sync::watch::Watch;
 use portable_atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use static_cell::StaticCell;
-use variegated_controller_types::bluetooth::{BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS};
-use variegated_controller_types::{BrewSensorOp, CommsStatus, Configuration, ExternalPeripheralSensorReading, MachineCommand, MachineDefinition, PeripheralId, RoutineDeleteOutcome, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
+use variegated_controller_types::bluetooth::{
+    BluetoothBond, BluetoothBonds, BluetoothPeripheralList, MAX_BLUETOOTH_PERIPHERALS,
+};
+use variegated_controller_types::{BrewSensorOp, CommsStatus, Configuration, ExternalPeripheralSensorReading, InputCommand, MachineCommand, MachineDefinition, PeripheralId, RoutineDeleteOutcome, RoutineIndex, RoutineSummaryList, RoutineWriteOutcome, ScaleOp, Status};
 use variegated_controller_types::shot_log::{
     ShotAnnotations, ShotLogEvent, ShotLogId, ShotLogList, ShotLogListEntry, ShotLogListRequest,
     ShotLogStorageError,
@@ -357,6 +359,39 @@ pub const BT_ASSOCIATION_RECEIVERS: usize = 1;
 /// would make such a machine re-ask every ten seconds forever.
 pub static BT_PERIPHERALS_RECEIVED: AtomicBool = AtomicBool::new(false);
 
+/// The Bluetooth bonds the application processor last sent.
+///
+/// This processor has no flash, so the pairing keys it needs to reconnect to an already
+/// bonded device come across the UART at every boot. A `Watch` rather than a channel for
+/// [`BT_ASSOCIATIONS`]'s reasons: it is a current value, not a stream, and `try_get` lets a
+/// slot task read it without burning a receiver slot.
+pub static BT_BONDS: Watch<CriticalSectionRawMutex, BluetoothBonds, BT_BOND_RECEIVERS> =
+    Watch::new();
+
+/// Receiver slots on [`BT_BONDS`]. None: every reader uses `try_get`, which needs no slot.
+///
+/// A `Watch` requires at least one slot to be declared even when none is taken, and this
+/// being 1 rather than 0 is that requirement rather than a reader nobody can find.
+pub const BT_BOND_RECEIVERS: usize = 1;
+
+/// Whether the application processor has ever answered `RequestBluetoothBonds`.
+///
+/// Set on **receipt**, never on the list being non-empty -- the same trap
+/// [`BT_PERIPHERALS_RECEIVED`] documents. A machine whose only paired device is an unbonded
+/// scale answers with an empty list, and that is a complete answer.
+pub static BT_BONDS_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// Bonds formed here, on their way to the application processor's flash.
+///
+/// A channel rather than a `Watch` because every one of these matters: a `Watch` keeps only
+/// the latest, and two devices paired in quick succession would leave the first unstored
+/// and needing to pair again. Depth 2 covers that case without pretending pairing is
+/// something that happens in bursts.
+pub const BOND_REPORT_CAPACITY: usize = 2;
+pub static BOND_REPORT_CHANNEL: StaticCell<
+    Channel<CriticalSectionRawMutex, BluetoothBond, BOND_REPORT_CAPACITY>,
+> = StaticCell::new();
+
 /// The Wi-Fi credentials the application processor last sent, or `None` if it says none
 /// are configured.
 ///
@@ -496,6 +531,18 @@ pub static CLIENT_EVENT_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, Cli
 // External Peripheral Sensor Reading Channel - sensor readings from BLE devices to send to application processor
 pub const SENSOR_READING_CAPACITY: usize = 16;
 pub static SENSOR_READING_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, ExternalPeripheralSensorReading, SENSOR_READING_CAPACITY>> = StaticCell::new();
+
+// UI commands from an input device, on their way to the application processor.
+//
+// A channel of its own rather than a second use of `SENSOR_READING_CHANNEL`, because the
+// two have opposite disposal rules. A dropped sensor reading is replaced by the next one a
+// few hundred milliseconds later and nothing is lost; a dropped keypress is a button the
+// user pressed and the machine ignored.
+//
+// Depth 4 because the sampler has already collapsed a turn into one message before anything
+// reaches here, so this carries deliberate gestures rather than a report stream.
+pub const INPUT_COMMAND_CAPACITY: usize = 4;
+pub static INPUT_COMMAND_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, (PeripheralId, InputCommand), INPUT_COMMAND_CAPACITY>> = StaticCell::new();
 
 // Per-peripheral connection state is not here: it lives in `ble::status`, as a slot table
 // rather than one named static per peripheral. Named statics cannot survive a peripheral

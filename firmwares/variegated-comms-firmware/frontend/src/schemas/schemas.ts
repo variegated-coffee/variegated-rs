@@ -57,7 +57,8 @@ export const BluetoothDriverKindSchema = enumType('BluetoothDriverKind', {
   BelkaPortal: unitVariant('BelkaPortal'),
   AcaiaOld: unitVariant('AcaiaOld'),
   Bookoo: unitVariant('Bookoo'),
-  AcaiaNew: unitVariant('AcaiaNew')
+  AcaiaNew: unitVariant('AcaiaNew'),
+  UlanziD100H: unitVariant('UlanziD100H')
 });
 
 export const BoilerControlModeSchema = enumType('BoilerControlMode', {
@@ -220,7 +221,8 @@ export const PeripheralTypeSchema = enumType('PeripheralType', {
   PressureSensor: unitVariant('PressureSensor'),
   FlowMeter: unitVariant('FlowMeter'),
   LevelSensor: unitVariant('LevelSensor'),
-  BrewSensor: unitVariant('BrewSensor')
+  BrewSensor: unitVariant('BrewSensor'),
+  InputDevice: unitVariant('InputDevice')
 });
 
 export const PidOutSchema = struct({
