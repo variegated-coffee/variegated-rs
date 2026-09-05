@@ -199,23 +199,6 @@ async fn bond_install_loop(
                 ..information
             };
 
-            // The address *kind* and whether an IRK came with it, because those two decide
-            // what the controller does with this entry and neither is visible otherwise.
-            //
-            // A resolving-list entry is matched on (kind, address). The dial's address ends
-            // in 0xCA -- BdAddr is little-endian, so that is the most significant byte, and
-            // `11` in its top bits means static random. An entry stored as PUBLIC would
-            // therefore never match the advertiser, and the symptom is exactly this one: it
-            // connected fine before any bond existed and stopped once one was installed.
-            //
-            // Never the keys themselves; this reaches the TCP debug server.
-            log_info!(
-                "Bond for {:?}: random={}, irk={}",
-                bond.address,
-                bond.address_random,
-                bond.identity_resolving_key.is_some()
-            );
-
             if stack.add_bond_information(information).is_ok() {
                 installed += 1;
             } else {

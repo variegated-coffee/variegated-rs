@@ -127,7 +127,9 @@ pub async fn ulanzi_input_loop(
             continue;
         };
 
-        if REQUIRE_ENCRYPTION && !ensure_encrypted(&connection, &bond_sender).await {
+        if REQUIRE_ENCRYPTION
+            && !ensure_encrypted(&connection, stack, address, &bond_sender).await
+        {
             // Not retried in a tight loop: a device refusing to pair will refuse again, and
             // this slot has a radio to share.
             Timer::after(Duration::from_secs(5)).await;
@@ -174,6 +176,9 @@ pub async fn ulanzi_input_loop(
 /// Returns whether the link is encrypted and therefore worth reading reports from.
 async fn ensure_encrypted(
     connection: &Connection<'_, SlotPool>,
+    // Both only to tell a bonded reconnect from a bondless pairing; see the `None` arm.
+    stack: &'static SlotStack,
+    address: BdAddr,
     bond_sender: &Sender<
         'static,
         CriticalSectionRawMutex,
@@ -231,9 +236,27 @@ async fn ensure_encrypted(
                 log_warn!("Dropped a bond report: channel full");
             }
         }
-        // Pairing succeeded without producing a bond, which means one side was not
-        // bondable. The link works now and will need pairing again after a reboot.
-        None => log_warn!("Paired without a bond; this will not survive a reboot"),
+        // `None` means *no new bond was created*, which is two different situations.
+        //
+        // The ordinary one is a bonded reconnect: the link was re-encrypted with the key we
+        // restored, so nothing new was needed. trouble reports that as `PairingComplete`
+        // with no bond, and reading it as a failure produced a "this will not survive a
+        // reboot" warning on precisely the reboots it had survived.
+        //
+        // The real failure is the same event with no bond *on record* for this peer, which
+        // means one side was not bondable and the next reboot really will re-pair.
+        None => {
+            let already_bonded = stack.with_bond_information(|bonds| {
+                bonds
+                    .iter()
+                    .any(|existing| existing.identity.addr.addr == address)
+            });
+            if already_bonded {
+                log_info!("Re-encrypted with the stored bond");
+            } else {
+                log_warn!("Paired without a bond; this will not survive a reboot");
+            }
+        }
     }
 
     is_encrypted(connection)
@@ -391,19 +414,13 @@ async fn run_session(
                 let now = Instant::now().as_millis();
                 let bytes: &[u8] = notification.as_ref();
 
-                match decode_consumer_report(bytes) {
-                    Some(input) => {
-                        // **Temporary, and paired with the line below.** Together they say
-                        // whether a report reached the consumer collection at all, which is
-                        // the question this whole subscription change exists to answer. Both
-                        // come out once the dial is known to work -- a HID device notifies at
-                        // whatever rate the hand moves, and neither belongs in a normal log.
-                        log_info!("Ulanzi slot {}: {:?} from {:?}", slot, input, bytes);
-                        sampler.push(input, now)
-                    }
-                    // A report from one of the other collections -- the keyboard's eight-byte
-                    // frames arrive here -- or a usage this device does not send.
-                    None => log_info!("Ulanzi slot {}: ignored report {:?}", slot, bytes),
+                // Not logged, either branch. A HID device notifies at whatever rate the hand
+                // moves, so a line per report buries everything else in the log -- and the
+                // question these lines existed to answer (which collection the reports come
+                // from, and whether the decoder recognises them) has been answered on
+                // hardware.
+                if let Some(input) = decode_consumer_report(bytes) {
+                    sampler.push(input, now);
                 }
             }
             Either3::Second(_) => {
