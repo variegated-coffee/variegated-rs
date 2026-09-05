@@ -155,7 +155,7 @@ pub async fn ulanzi_input_loop(
         };
 
         super::status::set_slot_connected(slot, true);
-        log_info!("Ulanzi slot {}: connected and encrypted", slot);
+        log_info!("Ulanzi slot {}: GATT client up", slot);
 
         // The client's own task has to run for any GATT operation to make progress, so it
         // is raced against the session rather than spawned.
