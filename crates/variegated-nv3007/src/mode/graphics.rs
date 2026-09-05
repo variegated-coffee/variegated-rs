@@ -15,6 +15,26 @@ use embedded_hal::digital::OutputPin;
 #[cfg(feature = "delta-updates")]
 use crate::region_tracker::DoubleBuffer;
 
+/// What one [`GraphicsMode::flush`] actually sent.
+///
+/// Returned rather than logged because this crate has no opinion about where a measurement
+/// should go: the firmware publishes these as indicators beside its own flush timing, which
+/// is what makes a slow frame attributable. A flush time without the traffic that caused it
+/// cannot distinguish a slow bus from a frame that repainted the world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushStats {
+    /// Whether the whole framebuffer went out as one contiguous transfer.
+    ///
+    /// The interesting bit when a flush time jumps: the full and delta paths differ by
+    /// roughly an order of magnitude, so this says which of the two was taken rather than
+    /// leaving it to be inferred from the duration.
+    pub full: bool,
+    /// Rectangles the diff produced. Zero on the full path.
+    pub regions: u16,
+    /// Bytes handed to the display interface.
+    pub bytes: u32,
+}
+
 /// Graphics mode handler with external buffer support
 ///
 /// Memory layout: Row-major (pixels stored left-to-right, top-to-bottom)
@@ -204,41 +224,59 @@ where
     /// - Without delta-updates: always full screen flush
     /// - With delta-updates: smart region-based flush if double-buffer is configured
     #[cfg(feature = "delta-updates")]
-    pub async fn flush(&mut self) -> Result<(), DisplayError> {
-        // Detect changes and decide on update strategy
-        let (do_full, regions) = if let (Some(ref tracker), Some(ref prev)) =
-            (&self.double_buffer_tracker, &self.previous_buffer) {
-            let regions = instrumented_section!("Determine Regions", { tracker.detect_changes(self.buffer, prev) });
-            let do_full = instrumented_section!("Determine full", { tracker.should_full_update(&regions) });
-            (do_full, Some(regions))
-        } else {
-            (true, None)
+    pub async fn flush(&mut self) -> Result<FlushStats, DisplayError> {
+        // Decide what to send. Without a previous buffer there is nothing to diff against
+        // and the whole framebuffer goes.
+        let (do_full, regions) = match (&self.double_buffer_tracker, &self.previous_buffer) {
+            (Some(tracker), Some(prev)) => {
+                let regions = tracker.detect_changes(self.buffer, prev);
+                let do_full = tracker.should_full_update(&regions);
+                (do_full, Some(regions))
+            }
+            _ => (true, None),
         };
 
-        // Perform the update
+        let region_count = regions.as_ref().map(|r| r.len()).unwrap_or(0) as u16;
+        let bytes = match (&self.double_buffer_tracker, &regions) {
+            (Some(tracker), Some(regions)) => tracker.bytes_for(regions, do_full),
+            _ => self.buffer_size() as u32,
+        };
+
         if do_full {
-            instrumented_section!("Full Flush", {
-                self.flush_full().await?;
-            });
-        } else if let Some(regions) = regions {
-            instrumented_section!("Region flush", {
-                self.flush_regions(&regions).await?;
-            });
+            self.flush_full().await?;
+        } else if let Some(ref regions) = regions {
+            self.flush_regions(regions).await?;
         }
 
-        // Swap buffers after successful update
-        if let (Some(ref tracker), Some(ref mut prev)) =
-            (&self.double_buffer_tracker, &mut self.previous_buffer) {
-            tracker.swap_buffers(self.buffer, prev);
+        // Bring the previous buffer up to date with what actually went out -- and *only*
+        // that. Everything else in it already matches the panel by definition, so copying
+        // the whole framebuffer here was 143,808 bytes of traffic per frame, including on
+        // frames where nothing had changed at all. On the GS3 that crosses the QMI, because
+        // both buffers are in PSRAM.
+        if let (Some(tracker), Some(prev)) =
+            (&self.double_buffer_tracker, &mut self.previous_buffer)
+        {
+            let empty: [crate::region_tracker::Region; 0] = [];
+            let regions = regions.as_deref().unwrap_or(&empty);
+            tracker.sync_previous(self.buffer, prev, regions, do_full);
         }
 
-        Ok(())
+        Ok(FlushStats {
+            full: do_full,
+            regions: region_count,
+            bytes,
+        })
     }
 
     /// Write data to display (always full flush without delta-updates)
     #[cfg(not(feature = "delta-updates"))]
-    pub async fn flush(&mut self) -> Result<(), DisplayError> {
-        self.flush_full().await
+    pub async fn flush(&mut self) -> Result<FlushStats, DisplayError> {
+        self.flush_full().await?;
+        Ok(FlushStats {
+            full: true,
+            regions: 0,
+            bytes: self.buffer_size() as u32,
+        })
     }
 
     /// Force full screen update (single contiguous transfer)
@@ -466,7 +504,6 @@ use embedded_graphics_core::{
     prelude::*,
     Pixel,
 };
-use variegated_instrumentation::instrumented_section;
 
 #[cfg(feature = "graphics")]
 impl<'a, DV, DI> DrawTarget for GraphicsMode<'a, DV, DI>

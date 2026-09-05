@@ -87,19 +87,29 @@ run "variegated-debug-codec" -p variegated-debug-codec "$@"
 # the driver's dialect does not use, and BooKoo's own document had four wrong timer
 # checksums until 2026-07-30 which most third-party libraries still ship.
 run "variegated-scale-codec" -p variegated-scale-codec "$@"
-# The Ulanzi D100H dial: Consumer Control report decoding, and the sampler that turns its
-# rotation into step counts.
+# The Ulanzi D100H dial: Consumer Control report decoding, and the mapping from a report to
+# a UI command.
 #
 # A crate of its own for the same reason as the one above -- `variegated-ulanzi-trouble-driver`
 # cannot host a test binary.
 #
-# The sampler is why this suite exists. The dial is **stepless**, so its report rate is set
-# by hand speed rather than by detents, and every interesting case is a timing case: a burst
-# collapsing into one count, two bursts either side of a window boundary staying two, a
-# reversal flushing rather than cancelling, and a remainder surviving into the next window.
-# None of those are reachable by turning a real wheel and watching, because the failure in
-# each is an off-by-one in a number nobody sees.
+# The decoding is why this suite exists. The usages are two bytes captured from the device
+# rather than taken from a document -- upstream's notes describe a USB frame with a report-id
+# byte that GATT does not send -- and reading one a byte off decodes as silence rather than
+# as an error, so nothing on the machine would say the dial had stopped working.
 run "variegated-ulanzi-codec" -p variegated-ulanzi-codec "$@"
+# The NV3007's frame differencing: which rectangles of the framebuffer changed, whether they
+# are worth sending as a delta, and keeping the previous buffer in step with what was sent.
+#
+# A crate of its own because `variegated-nv3007` sets `[lib] test = false` and carries
+# `embassy-rp` as a dev-dependency, so it cannot host a test binary -- its own
+# `#[cfg(test)] mod tests` had therefore never run.
+#
+# Worth testing because every failure here is invisible or misattributed. A rectangle that
+# misses a changed pixel leaves stale content on the panel with nothing to log; a partial
+# buffer sync that copies too little makes the *next* frame wrong instead of this one; and
+# fragmenting the diff shows up only as a display that feels slow.
+run "variegated-display-regions" -p variegated-display-regions "$@"
 # The menu navigation model, shared by both firmwares. No `--no-default-features` needed:
 # this crate's `defmt` is opt-in precisely so that a plain `cargo test` links.
 run "variegated-menu" -p variegated-menu "$@"

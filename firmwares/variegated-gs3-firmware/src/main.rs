@@ -664,7 +664,26 @@ define_indicators! {
         /// contiguous write of all 143,808 bytes once enough of the screen has changed.
         /// The two paths differ by roughly an order of magnitude, so a jump here usually
         /// means the frame crossed that threshold, not that the bus got slower.
+        ///
+        /// Read it beside [`IndicatorId::DisplayFlushBytes`], which says which of those
+        /// two actually happened. On its own this number cannot tell a slow bus from a
+        /// frame that repainted the world.
         DisplayFlushTimeMs = 5,
+        /// Bytes sent to the panel by the last flush.
+        ///
+        /// 143,808 means the full path; anything less is the delta path, and the ratio to
+        /// that figure is how much of the screen the frame actually touched. Divide by
+        /// 1,250 for the milliseconds those bytes cost on the wire at the display's
+        /// 10 MHz, and the remainder of [`IndicatorId::DisplayFlushTimeMs`] is the
+        /// differencing and buffer-sync work either side of the transfer.
+        DisplayFlushBytes = 6,
+        /// Rectangles the last flush's diff produced. Zero on the full path.
+        ///
+        /// Diagnostic for the differencing itself rather than for the panel: a frame whose
+        /// changes are one shape should be one or two rectangles, and a count climbing
+        /// towards `MAX_REGIONS` means the diff is fragmenting -- which costs a transfer
+        /// per row for every partial-width rectangle among them.
+        DisplayFlushRegions = 7,
     }
 }
 

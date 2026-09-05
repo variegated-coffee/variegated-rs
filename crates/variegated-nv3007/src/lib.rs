@@ -59,8 +59,13 @@ pub enum Error<CommE, PinE> {
 
 pub mod builder;
 pub mod command;
+/// Frame differencing, re-exported from `variegated-display-regions`.
+///
+/// It lives in a crate of its own because this one cannot host a test binary -- see that
+/// crate's own documentation. Re-exported under the name it had as a module here so callers
+/// and `crate::region_tracker::Region` paths are unaffected by where it moved.
 #[cfg(feature = "delta-updates")]
-pub mod region_tracker;
+pub use variegated_display_regions as region_tracker;
 pub mod display;
 pub mod displayrotation;
 pub mod displays;

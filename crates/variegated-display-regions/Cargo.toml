@@ -1,0 +1,14 @@
+[package]
+name = "variegated-display-regions"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+heapless = { workspace = true }
+
+[features]
+default = []
+# Nothing here needs `std`; the feature exists so the host gate can name this crate
+# uniformly with the other pure-logic crates.
+std = []

@@ -5537,6 +5537,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "variegated-display-regions"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.9.3",
+]
+
+[[package]]
 name = "variegated-embassy-dual-c595-shift-register"
 version = "0.1.0"
 dependencies = [
@@ -5819,7 +5826,7 @@ dependencies = [
  "embedded-hal-async 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "heapless 0.9.3",
  "panic-probe",
- "variegated-instrumentation",
+ "variegated-display-regions",
 ]
 
 [[package]]

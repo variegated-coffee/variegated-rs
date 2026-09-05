@@ -526,18 +526,31 @@ pub async fn graphical_display_task(
                 .handle(crate::IndicatorId::DisplayRenderTimeMs)
                 .set(render_start.elapsed().as_millis());
 
+            // Flush to display with delta updates: the diff against the previous buffer
+            // decides whether changed regions or the whole framebuffer goes out.
             let flush_start = Instant::now();
-            instrumented_section!("Display flush", {
-                // Flush to display with delta updates
-                // With double buffering, only changed regions are sent (typically 50-100 transactions)
-                // Falls back to full update if >70% changed (~3 transactions)
-                if let Err(_) = display.flush().await {
+            let stats = match display.flush().await {
+                Ok(stats) => Some(stats),
+                Err(_) => {
                     defmt::error!("Failed to flush TFT display");
+                    None
                 }
-            });
+            };
             crate::INDICATORS
                 .handle(crate::IndicatorId::DisplayFlushTimeMs)
                 .set(flush_start.elapsed().as_millis());
+
+            // Published beside the duration so the two can be read together. A flush time
+            // on its own is not attributable -- these say whether the frame took the full
+            // path and how much of the panel it actually moved.
+            if let Some(stats) = stats {
+                crate::INDICATORS
+                    .handle(crate::IndicatorId::DisplayFlushBytes)
+                    .set(stats.bytes as u64);
+                crate::INDICATORS
+                    .handle(crate::IndicatorId::DisplayFlushRegions)
+                    .set(stats.regions as u64);
+            }
         }
     });
 }

@@ -27,7 +27,14 @@ embassy-sync.workspace = true
 heapless.workspace = true
 defmt = { workspace = true, optional = true }
 embedded-graphics-core = { workspace = true, optional = true }
-variegated-instrumentation = { version = "0.1.0", path = "../variegated-instrumentation" }
+# No variegated-instrumentation. `instrumented_section!` takes a measurement and drops it
+# -- it has no output path at all -- so the timings it appeared to collect here never
+# reached anything. `flush` returns `FlushStats` instead, and the caller decides where that
+# goes.
+# Frame differencing. A crate of its own so it can be tested: this one sets
+# `[lib] test = false` and carries `embassy-rp` as a dev-dependency, so it cannot host a
+# test binary -- `cargo test` here dies compiling `embassy-rp` for the host.
+variegated-display-regions = { version = "0.1.0", path = "../variegated-display-regions" }
 
 [dev-dependencies]
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "defmt"] }
