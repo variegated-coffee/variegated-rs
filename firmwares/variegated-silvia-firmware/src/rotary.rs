@@ -7,12 +7,12 @@ use embassy_sync::channel::Sender;
 use embassy_time::Timer;
 use embedded_hal::digital::InputPin;
 use embedded_hal_async::digital::Wait;
-use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, DutyCycleType, GroupBrewControlMode, GroupBrewControlTargetValuesUpdate, InputCommand, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
+use variegated_controller_types::{BoilerControlMode, BoilerControlTargetValuesUpdate, Configuration, InputCommand, MachineCommand, MachineMode, PidParameters, PidParameterTarget, RoutineIndex, Status};
 use crate::{RoutineRepository, StatusSubscriber, ConfigurationSubscriber};
 use crate::list_menu::{ListMenuType, ListMenuItem, MenuItemId, PidConfigType, PidTermType, PidComponentType};
 use variegated_machine_menu::{
     boiler_temperature_adjustable, parameter_bounds, parameter_geometry, parameter_row,
-    ParameterListChrome, ParameterRow, ParameterValues,
+    FreeBrewMeasurements, FreeBrewState, ParameterListChrome, ParameterRow, ParameterValues,
 };
 use variegated_menu::{Adjustable, ListGeometry, ListNav};
 use alloc::string::ToString;
@@ -25,14 +25,6 @@ use variegated_controller_lib::single_boiler_state::{
 };
 use alloc::string::String;
 
-#[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
-pub(crate) enum ControlMode {
-    #[default]
-    PumpDutyCycle,
-    PumpFlowRate,
-    PumpPressure,
-}
-
 #[derive(Debug, Format, Copy, Clone, PartialEq)]
 pub(crate) enum ConfigEditType {
     BoilerTemperature,
@@ -40,32 +32,6 @@ pub(crate) enum ConfigEditType {
     /// machine is in steam mode.
     SteamTemperature,
     PidParameter(PidConfigType, PidTermType, PidComponentType),
-}
-
-impl ControlMode {
-    pub fn next(&self) -> ControlMode {
-        match self {
-            ControlMode::PumpDutyCycle => ControlMode::PumpFlowRate,
-            ControlMode::PumpFlowRate => ControlMode::PumpPressure,
-            ControlMode::PumpPressure => ControlMode::PumpDutyCycle,
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            ControlMode::PumpDutyCycle => "Duty Cycle",
-            ControlMode::PumpFlowRate => "Flow Rate", 
-            ControlMode::PumpPressure => "Pressure",
-        }
-    }
-
-    pub fn unit(&self) -> &'static str {
-        match self {
-            ControlMode::PumpDutyCycle => "%",
-            ControlMode::PumpFlowRate => "ml/s",
-            ControlMode::PumpPressure => "bar",
-        }
-    }
 }
 
 #[derive(Debug, Format, Default, Copy, Clone, PartialEq)]
@@ -135,7 +101,10 @@ pub(crate) enum UIState {
     /// may yet want their own state; nothing transitions into them today.
     #[allow(dead_code)]
     Steaming,
-    ManualBrew(ControlMode),
+    /// A free brew, with the pump driven by hand. The mode and its targets live on
+    /// [`UIStatus::free_brew`] rather than in this variant: they outlive the screen, so that
+    /// leaving and re-entering returns to the numbers you left rather than to defaults.
+    ManualBrew,
     #[allow(dead_code)]
     DispensingWater,
     RoutineExecution,
@@ -186,136 +155,6 @@ pub(crate) enum UIState {
 impl Default for UIState {
     fn default() -> Self {
         UIState::Idle(IdleSubState::NoMenuItemSelected)
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub(crate) struct ManualBrewParameters {
-    /// A percentage. This screen is an operator control, so it stays on the operator's
-    /// scale; the conversion to the pump's 0-255 scale happens in the controller.
-    pub duty_cycle: DutyCycleType,
-    pub flow_rate: f32,    // ml/s
-    pub pressure: f32,     // bar
-}
-
-impl ManualBrewParameters {
-    pub fn new() -> Self {
-        Self {
-            duty_cycle: DutyCycleType::OFF,
-            flow_rate: 5.0,
-            pressure: 9.0,
-        }
-    }
-
-    pub fn get_value(&self, mode: ControlMode) -> f32 {
-        match mode {
-            ControlMode::PumpDutyCycle => self.duty_cycle.value() as f32,
-            ControlMode::PumpFlowRate => self.flow_rate,
-            ControlMode::PumpPressure => self.pressure,
-        }
-    }
-
-    /// The bounds and step for each mode, stated exactly once.
-    ///
-    /// They used to be per-mode literals inside `adjust_value` *and* again as rounding clamps
-    /// inside `sync_from_process_values`, which is two places for one fact.
-    fn limits(mode: ControlMode) -> (f32, f32, f32) {
-        match mode {
-            //             min    max     step
-            ControlMode::PumpDutyCycle => (0.0, 100.0, 5.0),
-            ControlMode::PumpFlowRate => (0.0, 50.0, 0.5),
-            ControlMode::PumpPressure => (0.0, 15.0, 0.5),
-        }
-    }
-
-    fn adjustable(&self, mode: ControlMode) -> Adjustable {
-        let (min, max, step) = Self::limits(mode);
-        Adjustable::new(self.get_value(mode), min, max, step)
-    }
-
-    pub fn adjust_value(&mut self, mode: ControlMode, increment: bool) {
-        let mut a = self.adjustable(mode);
-        if increment { a.increase() } else { a.decrease() }
-
-        match mode {
-            // `Adjustable` already clamps to 0..=100; `from_f32` clamps again and rounds
-            // rather than truncating, which is the rule every duty cycle narrows by.
-            ControlMode::PumpDutyCycle => self.duty_cycle = DutyCycleType::from_f32(a.value()),
-            ControlMode::PumpFlowRate => self.flow_rate = a.value(),
-            ControlMode::PumpPressure => self.pressure = a.value(),
-        }
-    }
-
-    pub fn to_group_brew_control_command(&self, mode: ControlMode) -> (GroupBrewControlMode, Option<GroupBrewControlTargetValuesUpdate>) {
-        match mode {
-            ControlMode::PumpDutyCycle => {
-                if self.duty_cycle == DutyCycleType::OFF {
-                    (GroupBrewControlMode::Off, None)
-                } else {
-                    (GroupBrewControlMode::FixedDutyCycle, Some(GroupBrewControlTargetValuesUpdate {
-                        duty_cycle: Some(self.duty_cycle),
-                        ..Default::default()
-                    }))
-                }
-            }
-            ControlMode::PumpFlowRate => {
-                if self.flow_rate <= 0.0 {
-                    (GroupBrewControlMode::Off, None)
-                } else {
-                    (GroupBrewControlMode::GroupFlowRate, Some(GroupBrewControlTargetValuesUpdate {
-                        flow_rate: Some(self.flow_rate),
-                        ..Default::default()
-                    }))
-                }
-            }
-            ControlMode::PumpPressure => {
-                if self.pressure <= 0.0 {
-                    (GroupBrewControlMode::Off, None)
-                } else {
-                    (GroupBrewControlMode::Pressure, Some(GroupBrewControlTargetValuesUpdate {
-                        pressure: Some(self.pressure),
-                        ..Default::default()
-                    }))
-                }
-            }
-        }
-    }
-
-    pub fn sync_from_process_values(&mut self, group_status: &variegated_controller_types::GroupStatus) {
-        // Update duty cycle from current pump output, as a percentage -- `pump_output` is on
-        // the pump's 0-255 scale and this screen is not.
-        //
-        // The arithmetic is in `u16` because it used to have to be: `current_duty` came from
-        // an unclamped `as u8` cast, so a duty of 254 or 255 overflowed the `+ 2` -- a debug
-        // panic, and a wrap to 0 in release. `DutyCycle::value()` is bounded at 100 now, so
-        // that cannot recur; the wider type is kept because `+ 2` on a `u8` at exactly 100 is
-        // still closer to the edge than this needs to be.
-        let current_duty = group_status.pump_output.duty_cycle().value();
-        let (_, duty_max, _) = Self::limits(ControlMode::PumpDutyCycle);
-        let snapped = (((current_duty as u16 + 2) / 5) * 5).min(duty_max as u16);
-        self.duty_cycle = DutyCycleType::new(snapped as u8);
-
-        // Update flow rate from the current process value. It must be the *input* flow rate:
-        // `ControlMode::PumpFlowRate` maps to `GroupBrewControlMode::GroupFlowRate`, whose PID
-        // reads `get_input_flow_rate`. Preferring the output flow rate -- which this did --
-        // handed the PID a setpoint measured on the other side of the puck, so the transfer
-        // started with a real error however well the integral was seeded. If there is no
-        // input reading, leave the previous target alone rather than substitute the one the
-        // loop cannot see, exactly as the pressure branch below does.
-        if let Some(flow) = group_status.input_flow_rate {
-            // Bounds and step from the same table `adjust_value` uses, so the rounding grid a
-            // synced value lands on is the grid the knob then steps along.
-            let (min, max, step) = Self::limits(ControlMode::PumpFlowRate);
-            let clamped_flow = flow.max(min).min(max);
-            self.flow_rate = ((clamped_flow + step / 2.0) / step) as u32 as f32 * step;
-        }
-
-        // Update pressure from current process value
-        if let Some(pressure) = group_status.pressure {
-            let (min, max, step) = Self::limits(ControlMode::PumpPressure);
-            let clamped_pressure = pressure.max(min).min(max);
-            self.pressure = ((clamped_pressure + step / 2.0) / step) as u32 as f32 * step;
-        }
     }
 }
 
@@ -389,7 +228,9 @@ impl RoutineParameterEditState {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct UIStatus {
     pub(crate) state: UIState,
-    pub(crate) manual_brew_parameters: ManualBrewParameters,
+    /// The free brew's control mode and its targets. Shared with the GS3's panel and
+    /// host-tested there -- see [`variegated_machine_menu::FreeBrewState`].
+    pub(crate) free_brew: FreeBrewState,
 }
 
 // Menu item activation handler
@@ -440,7 +281,7 @@ pub async fn handle_menu_item_activation(
         MenuItemId::SettingsInformation => Some(UIState::SettingsInformation),
         MenuItemId::SettingsDebugInfo => Some(UIState::SettingsDebugInfo),
         MenuItemId::SettingsScaleSettings => Some(UIState::ScaleSettings(ScaleSettingsSubState::default())),
-        MenuItemId::SettingsManualBrew => Some(UIState::ManualBrew(ControlMode::default())),
+        MenuItemId::SettingsManualBrew => Some(UIState::ManualBrew),
         MenuItemId::SettingsWifiProvisioning => {
             // Handled at the call site, which has the command sender this function does not:
             // entering the screen has to *open* the window, not merely display it. Same shape
@@ -540,8 +381,7 @@ where
         configuration_receiver: ConfigurationSubscriber,
         input_receiver: embassy_sync::channel::Receiver<'a, NoopRawMutex, InputCommand, 4>,
     ) -> Self {
-        let mut status = UIStatus::default();
-        status.manual_brew_parameters = ManualBrewParameters::new();
+        let status = UIStatus::default();
 
         Self {
             rotary,
@@ -661,17 +501,17 @@ where
                             Direction::CounterClockwise => substate.rotate_counterclockwise(),
                         };
                     }
-                    UIState::ManualBrew(control_mode) => {
-                        // Adjust the parameter value for the current control mode
+                    UIState::ManualBrew => {
+                        // Adjust the target for the current control mode
                         let increment = match direction {
                             Direction::CounterClockwise => true,  // CounterClockwise increments
                             Direction::Clockwise => false,        // Clockwise decrements
                         };
-                        
-                        self.status.manual_brew_parameters.adjust_value(*control_mode, increment);
-                        
+
+                        self.status.free_brew.adjust(increment);
+
                         // Send command to update the group brew control target
-                        let (mode, values) = self.status.manual_brew_parameters.to_group_brew_control_command(*control_mode);
+                        let (mode, values) = self.status.free_brew.to_command();
                         self.command_sender.send(
                             MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), mode, values)
                         ).await;
@@ -1025,18 +865,21 @@ where
                             }
                         }
                     }
-                    UIState::ManualBrew(control_mode) => {
-                        // Sync parameters from current process values before switching modes
+                    UIState::ManualBrew => {
+                        // Sync the targets to the measurements before switching, so the
+                        // incoming PID starts with ~0 error. Half of bumpless transfer; the
+                        // other half seeds the integral in the controller. See
+                        // `variegated_controller_lib::pump_transfer`.
                         if let Some(group_status) = self.current_status.get_group_status(SingleGroup.as_index()) {
-                            self.status.manual_brew_parameters.sync_from_process_values(group_status);
+                            self.status
+                                .free_brew
+                                .sync_from(&FreeBrewMeasurements::from_group_status(group_status));
                         }
-                        
-                        // Cycle to the next control mode
-                        let new_mode = control_mode.next();
-                        self.status.state = UIState::ManualBrew(new_mode);
-                        
+
+                        self.status.free_brew.advance_mode();
+
                         // Send command to update the group brew control target with new mode
-                        let (mode, values) = self.status.manual_brew_parameters.to_group_brew_control_command(new_mode);
+                        let (mode, values) = self.status.free_brew.to_command();
                         self.command_sender.send(
                             MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), mode, values)
                         ).await;
@@ -1242,13 +1085,14 @@ where
                     // Handle automatic UI switching for Manual Brew entry
                     if !self.previous_brewing_state && current_brewing && 
                        !routine_running &&
-                       !matches!(self.status.state, UIState::ManualBrew(_) | UIState::RoutineExecution) {
+                       !matches!(self.status.state, UIState::ManualBrew | UIState::RoutineExecution) {
                         warn!("Switching to Manual Brew mode due to brewing start");
                         // Brewing just started, no routine running, switch to Manual Brew
-                        self.status.state = UIState::ManualBrew(ControlMode::default());
-                        
+                        self.status.state = UIState::ManualBrew;
+                        self.status.free_brew = FreeBrewState::default();
+
                         // Set group control target to safe default (duty cycle 0 = Off)
-                        let (mode, values) = self.status.manual_brew_parameters.to_group_brew_control_command(ControlMode::default());
+                        let (mode, values) = self.status.free_brew.to_command();
                         self.command_sender.send(
                             MachineCommand::SetGroupBrewControlTarget(SingleGroup.as_index(), mode, values)
                         ).await;
@@ -1258,7 +1102,7 @@ where
                     
                     // Handle automatic UI switching for Manual Brew exit
                     else if self.previous_brewing_state && !current_brewing &&
-                            matches!(self.status.state, UIState::ManualBrew(_)) &&
+                            matches!(self.status.state, UIState::ManualBrew) &&
                             !routine_running {
                         warn!("Switching from Manual Brew mode due to brewing stop");
 

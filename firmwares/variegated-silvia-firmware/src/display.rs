@@ -28,11 +28,11 @@ use variegated_controller_types::SingleGroupControllerGroups::SingleGroup;
 use variegated_controller_lib::single_boiler_state;
 use variegated_controller_lib::routine::{RoutineExitCondition, StateCondition, ParameterValue, ParameterUnit, RoutineRepository as RoutineRepositoryTrait};
 use crate::rotary::RoutineParameterEditState;
-use variegated_machine_menu::{format_value, ParameterRow, UnitStyle};
+use variegated_machine_menu::{format_value, unit_suffix, ParameterRow, UnitStyle};
 use variegated_instrumentation::async_task_loop;
 
 use crate::{DisplayPeripherals, RoutineRepository, StatusSubscriber, GRAVITY_PERIPHERAL_ID};
-use crate::rotary::{ControlMode, IdleSubState, ScaleSettingsSubState, UIState, UIStatus, ConfigEditType};
+use crate::rotary::{IdleSubState, ScaleSettingsSubState, UIState, UIStatus, ConfigEditType};
 use crate::list_menu::{ListMenuItem, ListMenuType};
 use variegated_menu::{ListGeometry, ListNav};
 
@@ -218,8 +218,8 @@ impl DisplayController {
             UIState::RoutineExecution => {
                 self.render_routine_execution().await;
             }
-            UIState::ManualBrew(control_mode) => {
-                self.render_manual_brew(control_mode).await;
+            UIState::ManualBrew => {
+                self.render_manual_brew().await;
             }
             UIState::RoutineParameters(routine_index, edit_state) => {
                 self.render_routine_parameters(routine_index, &edit_state).await;
@@ -871,7 +871,7 @@ impl DisplayController {
         self.text_style_medium_small.set_text_color(Some(BinaryColor::On));
     }
 
-    async fn render_manual_brew(&mut self, control_mode: ControlMode) {
+    async fn render_manual_brew(&mut self) {
         // Title
         Text::with_text_style("Manual Brew", Point::new(64, 0), self.text_style_medium_small, 
             TextStyleBuilder::new()
@@ -890,12 +890,15 @@ impl DisplayController {
             .draw(&mut self.display)
             .unwrap();
 
-        // Current control mode and parameter value (large text)
-        let current_value = self.ui_status.manual_brew_parameters.get_value(control_mode);
-        let value_text = match control_mode {
-            ControlMode::PumpDutyCycle => format!("{:.0}{}", current_value, control_mode.unit()),
-            ControlMode::PumpFlowRate => format!("{:.1}{}", current_value, control_mode.unit()),
-            ControlMode::PumpPressure => format!("{:.1}{}", current_value, control_mode.unit()),
+        // Current control mode and target (large text)
+        let free_brew = self.ui_status.free_brew;
+        let current_value = free_brew.value();
+        let suffix = unit_suffix(Some(free_brew.unit()), UnitStyle::Ascii);
+        // A duty cycle is a whole percent; the other two are dialled in tenths.
+        let value_text = if free_brew.unit() == ParameterUnit::Percent {
+            format!("{:.0}{}", current_value, suffix)
+        } else {
+            format!("{:.1}{}", current_value, suffix)
         };
 
         Text::with_text_style(&value_text, Point::new(64, 12), self.text_style_large,
@@ -907,7 +910,7 @@ impl DisplayController {
             .unwrap();
 
         // Control mode name below the value
-        Text::with_text_style(control_mode.display_name(), Point::new(64, 32), self.text_style_medium,
+        Text::with_text_style(free_brew.label(), Point::new(64, 32), self.text_style_medium,
             TextStyleBuilder::new()
                 .alignment(Alignment::Center)
                 .baseline(Baseline::Top)

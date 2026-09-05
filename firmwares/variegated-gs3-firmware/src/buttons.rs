@@ -21,16 +21,23 @@
 //! | Screen | 1 | 2 | 3 | 4 | 5 | 6 | `{5,3}` |
 //! |---|---|---|---|---|---|---|---|
 //! | **Idle** | Routine 0 | Routine 1 | Routine 2 | Routine 3 | Brew | Water | Power |
-//! | **Brewing** | `-` | `+` | Select | Return **= stop** | **stop** | -- | -- |
+//! | **Brewing** | `-` **target** | `+` **target** | Select **= next mode** | Return **= stop** | **stop** | -- | -- |
 //! | **Routine running** | `-` | `+` | Select | Return **= cancel** | -- | -- | -- |
 //! | **Standby / Off** | `-` | `+` | Select | Return | -- | -- | Power |
 //! | **Menu open** | `-` | `+` | Select | Return | -- | -- | -- |
 //!
 //! The dashes outside the idle row are that vocabulary having **nothing to act on**, not a
-//! hole in the capture. `-`, `+` and Select reach a screen with no rows and no value, so they
-//! do nothing; Return is the one the brewing and routine screens give a meaning. That is why
-//! the dial's Return also stops a brew and cancels a routine, without a line of code that
-//! knows a dial exists.
+//! hole in the capture. On the routine and resting screens `-`, `+` and Select reach a screen
+//! with no rows and no value, so they do nothing; Return is the one those screens give a
+//! meaning. That is why the dial's Return also stops a brew and cancels a routine, without a
+//! line of code that knows a dial exists.
+//!
+//! **The brewing screen is a free brew's control surface**, and reads the whole vocabulary:
+//! `-` and `+` dial the pump target, Select advances the control mode — duty cycle, pressure,
+//! input flow, and round — with bumpless transfer. The model is
+//! [`variegated_machine_menu::FreeBrewState`], shared with the Silvia's encoder; the panel's
+//! mode chip and `COMMAND` figure are already fed from `brew_control_target`, so the readout
+//! follows without any display work here.
 //!
 //! Button 5 stopping a brew is the one **hardware-only** meaning outside the idle screen: the
 //! button that started it stops it. The dial does not need it -- Return does the same thing.
@@ -147,8 +154,8 @@ use variegated_controller_types::panel::{PanelDataPoints, PanelOrigin};
 // The panel origin's store is reached through the trait, like every other settings store.
 use variegated_controller_lib::settings::SettingsStorage;
 use variegated_machine_menu::{
-    apply_schedule_change, parameter_adjustable, routine_rows, schedule_rows, ParameterValues,
-    RoutineRows, ScheduleChange,
+    apply_schedule_change, parameter_adjustable, routine_rows, schedule_rows, FreeBrewMeasurements,
+    FreeBrewState, ParameterValues, RoutineRows, ScheduleChange,
 };
 
 /// Button indices for routine control (buttons 0-3)
@@ -365,6 +372,16 @@ pub struct ButtonEventHandler {
     steam_valve_state: SteamValveState,
     /// Current routine execution state (from status subscription)
     routine_executing: bool,
+    /// Which pump control mode a free brew is being driven in, and the target dialled into
+    /// each. **Held here rather than read out of `Status` per press**, and deliberately:
+    /// `Status` lands at ~10 Hz, so two presses inside one period would both read the same
+    /// pre-update value and the second would be swallowed.
+    ///
+    /// Re-seeded from the controller at the start of each brew, so it cannot drift across
+    /// shots -- see [`Self::update_status`].
+    free_brew: FreeBrewState,
+    /// What the group is measuring, for the setpoint sync half of bumpless transfer.
+    free_brew_measurements: FreeBrewMeasurements,
     /// Current machine mode (from status subscription)
     machine_mode: MachineMode,
     /// The projection of `Status` the menu reads, refreshed by `update_status`.
@@ -507,6 +524,8 @@ impl ButtonEventHandler {
             #[cfg(feature = "pwm-steam-valve")]
             steam_valve_state: SteamValveState::Off,
             routine_executing: false,
+            free_brew: FreeBrewState::default(),
+            free_brew_measurements: FreeBrewMeasurements::default(),
             machine_mode: MachineMode::Off,
             menu_context: MenuContext::default(),
             menu: GsMenu::closed(),
@@ -731,8 +750,28 @@ impl ButtonEventHandler {
 
     /// Update status from the status receiver
     pub fn update_status(&mut self, status: &Status) {
+        let group_status =
+            status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index());
+
+        // What the free-brew controls read and write. The measurements are refreshed every
+        // status; the *state* is re-seeded only on the edge into brewing, because it is what
+        // the user is actively dialling and a ten-times-a-second overwrite would fight every
+        // press. Edge-triggered for the same reason `apply_pending_dose` below is.
+        if let Some(group) = group_status {
+            self.free_brew_measurements = FreeBrewMeasurements::from_group_status(group);
+
+            let was_brewing = self.brewing_active;
+            if group.is_brewing && !was_brewing {
+                // Open on what the controller is actually set to rather than on a local copy
+                // left over from the last shot -- the web, a routine or a reboot may all have
+                // moved it since.
+                self.free_brew = FreeBrewState::from_control_state(&group.control_state);
+                defmt::info!("Free brew: opening in {:?}", self.free_brew.mode());
+            }
+        }
+
         // Update brewing state from status
-        self.brewing_active = status.get_group_status(SingleGroupControllerGroups::SingleGroup.as_index())
+        self.brewing_active = group_status
             .map(|group| group.is_brewing)
             .unwrap_or(false);
 
@@ -981,6 +1020,13 @@ impl ButtonEventHandler {
                 self.open_menu();
                 vec![]
             }
+            // The brewing screen drives the pump by hand: `-` and `+` dial the current mode's
+            // target, Select advances the mode. The panel's chip and `COMMAND` figure are
+            // already fed from `brew_control_target`, so these need no display work -- the
+            // readout follows the command round through the controller.
+            (DisplayMode::Brewing, InputCommand::Decrement(_)) => self.adjust_free_brew(false),
+            (DisplayMode::Brewing, InputCommand::Increment(_)) => self.adjust_free_brew(true),
+            (DisplayMode::Brewing, InputCommand::Activate) => self.advance_free_brew_mode(),
             // The brewing screen's reading of Return. Button 5 says the same thing in
             // hardware; see `resolve`.
             (DisplayMode::Brewing, InputCommand::Return) => {
@@ -998,6 +1044,49 @@ impl ButtonEventHandler {
             }
             _ => vec![],
         }
+    }
+
+    /// Step the free brew's current target, and send it.
+    ///
+    /// The command carries only the mode's own quantity, so this cannot disturb a target the
+    /// operator set from somewhere else.
+    fn adjust_free_brew(&mut self, increment: bool) -> Vec<MachineCommand> {
+        self.free_brew.adjust(increment);
+        defmt::info!(
+            "Free brew: {:?} target {}",
+            self.free_brew.mode(),
+            self.free_brew.value()
+        );
+        self.free_brew_command()
+    }
+
+    /// Advance the free brew's control mode, bumplessly.
+    ///
+    /// **The sync comes first, and that ordering is the point.** Snapping every target to the
+    /// measurement its loop reads means the incoming PID starts with ~0 error, so its
+    /// proportional term contributes nothing to the handover -- which is what leaves the
+    /// controller's seeded integral holding the output steady. Advancing first would sync the
+    /// new mode against a measurement taken under the old one.
+    ///
+    /// The other half is the controller's, in `pump_transfer`; neither is any use alone.
+    fn advance_free_brew_mode(&mut self) -> Vec<MachineCommand> {
+        self.free_brew.sync_from(&self.free_brew_measurements);
+        self.free_brew.advance_mode();
+        defmt::info!(
+            "Free brew: mode {:?}, target {}",
+            self.free_brew.mode(),
+            self.free_brew.value()
+        );
+        self.free_brew_command()
+    }
+
+    fn free_brew_command(&self) -> Vec<MachineCommand> {
+        let (mode, values) = self.free_brew.to_command();
+        vec![MachineCommand::SetGroupBrewControlTarget(
+            SingleGroupControllerGroups::SingleGroup.as_index(),
+            mode,
+            values,
+        )]
     }
 
     /// Handle a button event and return the appropriate machine command
