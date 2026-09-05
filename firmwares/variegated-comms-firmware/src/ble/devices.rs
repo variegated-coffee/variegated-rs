@@ -131,6 +131,21 @@ async fn bond_install_loop(
                 true,
             );
 
+            // **Set after `new`, which hardcodes the Secure Connections values** -- zero
+            // diversifier, zero random number, 16-byte key. For a legacy bond those are all
+            // wrong, and a bond restored with them is offered to the peer under a name it
+            // cannot look up: the device answers "PIN or Key Missing" and the link falls
+            // back to a fresh pairing on every single reconnect.
+            //
+            // Harmless for a Secure Connections bond, whose stored values are exactly what
+            // `new` would have written anyway.
+            let information = BondInformation {
+                ediv: bond.encrypted_diversifier,
+                rand: bond.random_number,
+                encryption_key_len: bond.encryption_key_len,
+                ..information
+            };
+
             if stack.add_bond_information(information).is_ok() {
                 installed += 1;
             } else {

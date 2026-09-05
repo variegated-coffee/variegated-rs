@@ -264,6 +264,14 @@ fn to_stored_bond(bond: &BondInformation, security_level: SecurityLevel) -> Blue
         // `NonZeroU128` in 0.7 -- an all-zero IRK is how a peer says it distributed none,
         // and the type now says so.
         identity_resolving_key: bond.identity.irk.map(|irk| irk.0.get()),
+        // **Legacy pairing cannot restore a bond without these.** Secure Connections
+        // derives the session key from the LTK alone and leaves them zero; legacy pairing
+        // has the peripheral look its key up by `(ediv, rand)`, so a bond stored without
+        // them offers the right key under the wrong name and is refused with "PIN or Key
+        // Missing". That is precisely what a reconnect did before they were carried.
+        encrypted_diversifier: bond.ediv,
+        random_number: bond.rand,
+        encryption_key_len: bond.encryption_key_len,
         security_level: match security_level {
             SecurityLevel::EncryptedAuthenticated => {
                 BluetoothSecurityLevel::EncryptedAuthenticated
@@ -384,11 +392,18 @@ async fn run_session(
                 let bytes: &[u8] = notification.as_ref();
 
                 match decode_consumer_report(bytes) {
-                    Some(input) => sampler.push(input, now),
+                    Some(input) => {
+                        // **Temporary, and paired with the line below.** Together they say
+                        // whether a report reached the consumer collection at all, which is
+                        // the question this whole subscription change exists to answer. Both
+                        // come out once the dial is known to work -- a HID device notifies at
+                        // whatever rate the hand moves, and neither belongs in a normal log.
+                        log_info!("Ulanzi slot {}: {:?} from {:?}", slot, input, bytes);
+                        sampler.push(input, now)
+                    }
                     // A report from one of the other collections -- the keyboard's eight-byte
-                    // frames arrive here constantly -- or a usage this device does not send.
-                    // Not logged: a HID device notifies at whatever rate the hand moves.
-                    None => {}
+                    // frames arrive here -- or a usage this device does not send.
+                    None => log_info!("Ulanzi slot {}: ignored report {:?}", slot, bytes),
                 }
             }
             Either3::Second(_) => {

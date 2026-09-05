@@ -221,6 +221,23 @@ pub struct BluetoothBond {
     pub identity_resolving_key: Option<u128>,
     /// The level the bond was formed at.
     pub security_level: BluetoothSecurityLevel,
+    /// Encrypted Diversifier. Zero for Secure Connections, non-zero for LE Legacy.
+    ///
+    /// **Legacy pairing cannot re-establish encryption without this and [`Self::rand`].**
+    /// Secure Connections derives the session key from the LTK alone, so a bond needs only
+    /// the key; legacy pairing has the peripheral look its LTK *up* by `(ediv, rand)`, and a
+    /// central that offers the right key with the wrong diversifier is told
+    /// "PIN or Key Missing" -- which is what a bond restored without these produced.
+    pub encrypted_diversifier: u16,
+    /// Random Number. All zeros for Secure Connections, non-zero for LE Legacy.
+    ///
+    /// See [`Self::encrypted_diversifier`].
+    pub random_number: [u8; 8],
+    /// Negotiated encryption key length in bytes. 16 for Secure Connections.
+    ///
+    /// Legacy pairing may agree a shorter key, and restoring the bond with the wrong length
+    /// fails the same way a wrong diversifier does.
+    pub encryption_key_len: u8,
 }
 
 pub type BluetoothBondList = heapless::Vec<BluetoothBond, MAX_BLUETOOTH_PERIPHERALS>;
@@ -593,6 +610,9 @@ mod tests {
             long_term_key: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
             identity_resolving_key: None,
             security_level: BluetoothSecurityLevel::Encrypted,
+            encrypted_diversifier: 0x1234,
+            random_number: [9, 8, 7, 6, 5, 4, 3, 2],
+            encryption_key_len: 16,
         });
 
         let mut buf = [0u8; 2048];
@@ -660,6 +680,38 @@ mod tests {
         assert_eq!(bonds.0[0].long_term_key, 2);
     }
 
+    /// A legacy bond keeps the diversifier and random number that identify its key.
+    ///
+    /// Written after a bond restored without them was refused with "PIN or Key Missing" on
+    /// every reconnect, sending the dial through a fresh pairing each time. Secure
+    /// Connections needs only the LTK, so the omission was invisible until a device that
+    /// pairs the legacy way turned up -- which is exactly the device this all exists for.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_legacy_bond_round_trips_its_diversifier_and_random_number() {
+        let bond = BluetoothBond {
+            address: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            address_random: true,
+            long_term_key: u128::MAX,
+            identity_resolving_key: None,
+            security_level: BluetoothSecurityLevel::Encrypted,
+            encrypted_diversifier: 0xBEEF,
+            random_number: [1, 2, 3, 4, 5, 6, 7, 8],
+            encryption_key_len: 7,
+        };
+
+        let mut buf = [0u8; 128];
+        let encoded = postcard::to_slice(&bond, &mut buf).expect("serialize");
+        let decoded: BluetoothBond = postcard::from_bytes(encoded).expect("deserialize");
+
+        assert_eq!(decoded, bond);
+        // Named individually, because `assert_eq` on the whole struct would pass just as
+        // happily if all three were dropped from the type again.
+        assert_eq!(decoded.encrypted_diversifier, 0xBEEF);
+        assert_eq!(decoded.random_number, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(decoded.encryption_key_len, 7);
+    }
+
     /// A bond survives the trip to flash and back.
     ///
     /// The keys are the whole point: a bond that round-trips with a corrupted LTK is worse
@@ -674,6 +726,9 @@ mod tests {
             long_term_key: 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
             identity_resolving_key: Some(0xdead_beef_dead_beef_dead_beef_dead_beef),
             security_level: BluetoothSecurityLevel::Encrypted,
+            encrypted_diversifier: 0,
+            random_number: [0; 8],
+            encryption_key_len: 16,
         };
 
         let mut buf = [0u8; 128];
@@ -700,6 +755,9 @@ mod tests {
                     long_term_key: u128::MAX,
                     identity_resolving_key: Some(u128::MAX),
                     security_level: BluetoothSecurityLevel::EncryptedAuthenticated,
+                    encrypted_diversifier: u16::MAX,
+                    random_number: [0xff; 8],
+                    encryption_key_len: 16,
                 })
                 .is_ok(), "slot {slot} did not fit the list");
         }

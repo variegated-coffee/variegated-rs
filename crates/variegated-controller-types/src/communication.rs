@@ -791,6 +791,11 @@ mod tests {
             long_term_key: u128::MAX,
             identity_resolving_key: Some(1),
             security_level: BluetoothSecurityLevel::Encrypted,
+            // Non-zero, because a legacy bond's are, and this message exists to carry a
+            // legacy bond across the link intact.
+            encrypted_diversifier: 0xABCD,
+            random_number: [8, 7, 6, 5, 4, 3, 2, 1],
+            encryption_key_len: 16,
         };
         let msg = CommsProcessorToApplicationProcessorMessage::BluetoothBondStored(bond);
 
