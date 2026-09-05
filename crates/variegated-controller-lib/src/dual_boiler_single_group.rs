@@ -15,6 +15,7 @@ use heapless::index_map::FnvIndexMap;
 use movavg::MovAvg;
 use variegated_control_algorithm::pid::{PidCtrl, PidIn, PidOut};
 use crate::pump_limit::{self, LimitEngagement};
+use crate::pump_transfer::{PumpPidEngagement, PumpPidTransfer};
 use variegated_hal::{Boiler, Group, WaterTap, Tank, PeripheralRegistry};
 #[cfg(feature = "pwm-steam-valve")]
 use variegated_hal::SteamWand;
@@ -93,6 +94,9 @@ pub struct DualBoilerSingleGroupController<
     brew_boiler_pid: PidCtrl<f32>,
     steam_boiler_pid: PidCtrl<f32>,
     pump_pid: PidCtrl<f32>,
+    /// Whether `pump_pid` currently owns the pump, and what the pump is running at — see
+    /// [`crate::pump_transfer`].
+    pump_pid_engagement: PumpPidEngagement,
     /// The limit loop, when one is armed. A second controller against the same actuator,
     /// selected against `pump_pid` by taking the lower output — see [`crate::pump_limit`].
     limit_pid: PidCtrl<f32>,
@@ -100,6 +104,15 @@ pub struct DualBoilerSingleGroupController<
     /// What the last `update_pump` decided about the limit, for the status publisher — which
     /// runs on its own cadence and cannot recompute it. See [`GroupStatus::brew_limit`].
     last_brew_limit: Option<BrewLimitStatus>,
+    /// The **resolved** brew target the last `update_group_pump` acted on, for the status
+    /// publisher — same reason as `last_brew_limit`, and the same cadence problem.
+    ///
+    /// This used to be recomputed at publication time as `pump_pid.setpoint`, which is only
+    /// written in the closed-loop arms. In `FixedDutyCycle` — this machine's *default*
+    /// free-brew mode — that published whatever a previous PID mode had left behind, or
+    /// `0.0` since boot, under a `FixedDutyCycle` label. Only `update_group_pump` knows both
+    /// the mode and its resolved value, curve evaluation included.
+    last_brew_target: Option<variegated_controller_types::BrewControlTarget>,
     last_brew_boiler_output: f32,
     last_steam_boiler_output: f32,
 
@@ -460,8 +473,10 @@ impl<
             // Same clamps as the main loop: it drives the same actuator on the same scale,
             // and is only ever holding a different quantity.
             limit_pid: super::hexadecimal_limited_pid(),
+            pump_pid_engagement: PumpPidEngagement::new(),
             limit_engagement: LimitEngagement::new(),
             last_brew_limit: None,
+            last_brew_target: None,
             last_brew_boiler_output: 0.0,
             last_steam_boiler_output: 0.0,
             configuration_store: settings_store,
@@ -1142,32 +1157,54 @@ impl<
             _ => 0.0,
         };
 
-        let pump_pid_out = self.pump_pid.step(PidIn::new(pump_pv, delta_t));
+        // The PID steps only while it owns the output, and inherits the duty cycle already
+        // being commanded on the way in. Stepping it unconditionally -- which is what this
+        // did -- wound the integral up against the hardcoded `0.0` process value of the arm
+        // above every time the pump was under open-loop control, and left it at zero for a
+        // PID taking over a running pump. See `crate::pump_transfer`.
+        let pump_pid_out = match self.pump_pid_engagement.transfer_for(control_state.mode) {
+            PumpPidTransfer::Hold => None,
+            PumpPidTransfer::Engage { seed_from_duty } => {
+                // Setpoint and gains are already set for this mode by the match above, and
+                // both matter: the seed is `target_output - kp * error`.
+                self.pump_pid.infer_and_set_integral(seed_from_duty.value() as f32, pump_pv);
+                Some(self.pump_pid.step(PidIn::new(pump_pv, delta_t)))
+            }
+            PumpPidTransfer::Continue => Some(self.pump_pid.step(PidIn::new(pump_pv, delta_t))),
+        };
 
-        // What the mode alone asks for, before any limit. Everything below the controller is
-        // on the pump's 0-255 scale; the operator's percentages are converted here, once, on
-        // the way in. `None` is `Off`: the pump is not driven, and a limit cannot change that.
-        let (brewing, main_output) = match control_state.mode {
-            GroupBrewControlMode::Off => (false, None),
-            GroupBrewControlMode::FullOn => {
-                (true, Some(HexadecimalDutyCycleType::FULL.value() as f32))
-            },
-            GroupBrewControlMode::FixedDutyCycle => {
-                let duty_cycle: HexadecimalDutyCycleType = control_state.values.duty_cycle.into();
-                (true, Some(duty_cycle.value() as f32))
-            }
-            GroupBrewControlMode::FixedDutyCycleCurve => {
-                // The curve is authored in percent and evaluates to an `f32`, so going
-                // through `DutyCycle` costs no resolution -- the narrowing to a byte happens
-                // once, on the far side of the conversion.
-                let target_percent = DutyCycleType::from_f32(
-                    control_state.values.duty_cycle_curve.evaluate(elapsed_seconds),
-                );
-                let duty_cycle: HexadecimalDutyCycleType = target_percent.into();
-                (true, Some(duty_cycle.value() as f32))
-            }
+        // What the mode alone asks for, before any limit. `pump_pid_out` is `Some` exactly
+        // when the mode is closed-loop, so it -- rather than a second list of modes that
+        // could drift from `is_closed_loop` -- picks the branch.
+        //
+        // Everything below the controller is on the pump's 0-255 scale; the operator's
+        // percentages are converted here, once, on the way in. `None` is `Off`: the pump is
+        // not driven, and a limit cannot change that.
+        let (brewing, main_output) = if let Some(pump_pid_out) = pump_pid_out {
             // The PID computes natively in 0-255, so this narrows but does not rescale.
-            _ => (true, Some(pump_pid_out.out)),
+            (true, Some(pump_pid_out.out))
+        } else {
+            match control_state.mode {
+                GroupBrewControlMode::FullOn => {
+                    (true, Some(HexadecimalDutyCycleType::FULL.value() as f32))
+                },
+                GroupBrewControlMode::FixedDutyCycle => {
+                    let duty_cycle: HexadecimalDutyCycleType = control_state.values.duty_cycle.into();
+                    (true, Some(duty_cycle.value() as f32))
+                }
+                GroupBrewControlMode::FixedDutyCycleCurve => {
+                    // The curve is authored in percent and evaluates to an `f32`, so going
+                    // through `DutyCycle` costs no resolution -- the narrowing to a byte happens
+                    // once, on the far side of the conversion.
+                    let target_percent = DutyCycleType::from_f32(
+                        control_state.values.duty_cycle_curve.evaluate(elapsed_seconds),
+                    );
+                    let duty_cycle: HexadecimalDutyCycleType = target_percent.into();
+                    (true, Some(duty_cycle.value() as f32))
+                }
+                // `Off`, and anything else `is_closed_loop` declines.
+                _ => (false, None),
+            }
         };
 
         // The limit loop, and the selector. See `crate::pump_limit`.
@@ -1187,27 +1224,55 @@ impl<
             });
 
         // External reset feedback: whichever loop did not get the output is held at the one
-        // that did, or it winds up and takes over with a step.
-        //
-        // Note this controller steps `pump_pid` in *every* mode, including the open-loop
-        // ones -- it has never had the engagement discipline `crate::pump_transfer` added to
-        // the single-boiler controller, so its main loop still winds up against a hardcoded
-        // process value when the pump is under open-loop control. That is a pre-existing
-        // divergence and is not addressed here; tracking it when the limit wins is correct
-        // regardless.
+        // that did, or it winds up and takes over with a step. An open-loop main mode has no
+        // integral to hold, so only the limit is tracked there.
         if let Some(limit_out) = limit_pid_out {
             if selection.binding {
-                self.pump_pid.track_to(selection.output, &pump_pid_out, delta_t);
+                if let Some(main_out) = pump_pid_out {
+                    self.pump_pid.track_to(selection.output, &main_out, delta_t);
+                }
             } else {
                 self.limit_pid.track_to(selection.output, &limit_out, delta_t);
             }
         }
+
+        // The **resolved** target, remembered for the status publisher. Taken from the PID
+        // only where the PID has one: under a curve `pump_pid.setpoint` is where the ramp has
+        // actually got to, which `control_state.values` cannot say, while in the open-loop
+        // modes the PID's setpoint is a leftover from whenever it last ran and the target is
+        // the duty being commanded. Gated the same way the dispatch above is, so a machine
+        // that is not brewing reports no target rather than a stale one.
+        self.last_brew_target = if self.group_brewing && control_state.mode != GroupBrewControlMode::Off {
+            let value = match control_state.mode {
+                GroupBrewControlMode::FullOn => DutyCycleType::FULL.value() as f32,
+                GroupBrewControlMode::FixedDutyCycle => {
+                    control_state.values.duty_cycle.value() as f32
+                }
+                // Reported in percent, the scale it was authored on, matching the plain
+                // `FixedDutyCycle` arm above rather than the pump's 0-255.
+                GroupBrewControlMode::FixedDutyCycleCurve => {
+                    control_state.values.duty_cycle_curve.evaluate(elapsed_seconds)
+                }
+                _ => self.pump_pid.setpoint,
+            };
+            Some(variegated_controller_types::BrewControlTarget {
+                mode: control_state.mode,
+                value,
+            })
+        } else {
+            None
+        };
 
         let duty_cycle = self.apply_pump_configuration_limits(
             HexadecimalDutyCycleType::from_f32(selection.output),
             !brewing,
         );
         self.group.set_brewing_state(brewing, duty_cycle).await;
+
+        // What the next `Engage` inherits, which is why it is recorded in every mode -- and
+        // the *limited* duty rather than the commanded one, because inheriting a value the
+        // pump never actually ran at is what bumpless transfer exists to avoid.
+        self.pump_pid_engagement.record_commanded_duty(duty_cycle);
 
         // `out` is republished as the *limited* duty so the status reports what the pump was
         // actually given rather than what the controller asked for.
@@ -1217,13 +1282,12 @@ impl<
             // The limit loop is driving, so report its terms rather than the main loop's.
             let limit_out = limit_pid_out.expect("binding implies a limit output");
             PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..limit_out })
+        } else if let Some(pump_pid_out) = pump_pid_out {
+            PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..pump_pid_out })
         } else {
-            match control_state.mode {
-                GroupBrewControlMode::FullOn
-                | GroupBrewControlMode::FixedDutyCycle
-                | GroupBrewControlMode::FixedDutyCycleCurve => PumpOutput::FixedDutyCycle(duty_cycle),
-                _ => PumpOutput::PidOutput(PidOut { out: duty_cycle.value() as f32, ..pump_pid_out }),
-            }
+            // The open-loop modes, which is exactly where the PID did not run. Listing them
+            // again here is what the `Option` replaces.
+            PumpOutput::FixedDutyCycle(duty_cycle)
         }
     }
 
@@ -1361,25 +1425,16 @@ impl<
             control_state: self.configuration.ephemeral.group_brew_control_state,
             previous_brew: self.previous_brew.map(|info| info.into()),
             pump_rpm: self.group.get_pump_rpm(),
-            // The **resolved** setpoint, taken from the PID rather than from
-            // `control_state.values` above. Under a curve those two disagree completely:
-            // the stored value is whatever was last written by a non-curve command -- a
-            // shot spent entirely in `PressureCurve` leaves it at whatever preinfusion set,
-            // for the whole shot -- while this is where the ramp has actually got to.
+            // The **resolved** setpoint, not `control_state.values` above. Under a curve
+            // those two disagree completely: the stored value is whatever was last written
+            // by a non-curve command -- a shot spent entirely in `PressureCurve` leaves it
+            // at whatever preinfusion set, for the whole shot -- while this is where the
+            // ramp has actually got to.
             //
-            // Gated the same way `update_group_pump` gates its own dispatch, so a machine
-            // that is not brewing reports no target rather than a stale one.
-            brew_control_target: {
-                let mode = self.configuration.ephemeral.group_brew_control_state.mode;
-                if self.group_brewing && mode != GroupBrewControlMode::Off {
-                    Some(variegated_controller_types::BrewControlTarget {
-                        mode,
-                        value: self.pump_pid.setpoint,
-                    })
-                } else {
-                    None
-                }
-            },
+            // Set by `update_group_pump`, which is the only place that knows the mode *and*
+            // its resolved value. Recomputing it here as `pump_pid.setpoint` was wrong in
+            // every open-loop mode; see the field.
+            brew_control_target: self.last_brew_target,
             // Set by `update_pump`, which is the only place that knows whether the limit won.
             brew_limit: self.last_brew_limit,
         };
@@ -1960,15 +2015,16 @@ impl<
         }
     }
 
-    /// The `FixedDutyCycle` **target**, not what the pump is actually running at -- see the
-    /// trait's note, and `crate::pump_transfer::last_commanded_duty`. Pre-existing and left
-    /// alone: changing it is a change to this machine's pump behaviour, not a refactor.
+    /// What the pump is actually running at, already on its own 0-255 scale.
     ///
-    /// The conversion matters. The stored value is a percentage and the PID's integral is in
-    /// the pump's 0-255 units, so seeding it directly would start the pump at 1/2.55 of the
-    /// intended output.
+    /// This used to read the `FixedDutyCycle` **target** out of the ephemeral configuration,
+    /// which is right only when the transfer comes from duty-cycle mode and is stale in every
+    /// other case -- including closed-loop to closed-loop, where it holds whatever was last
+    /// dialled into the duty-cycle screen. See
+    /// [`PumpPidEngagement::last_commanded_duty`], which records the *limited* duty the pump
+    /// was actually given.
     fn seeding_duty_cycle(&self) -> HexadecimalDutyCycleType {
-        self.configuration.ephemeral.group_brew_control_state.values.duty_cycle.into()
+        self.pump_pid_engagement.last_commanded_duty()
     }
 
     fn limit_pid(&mut self) -> &mut PidCtrl<f32> {

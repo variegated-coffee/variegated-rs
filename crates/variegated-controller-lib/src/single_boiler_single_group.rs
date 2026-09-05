@@ -82,6 +82,11 @@ pub struct SingleBoilerSingleGroupController<
     /// What the last `update_pump` decided about the limit, for the status publisher — which
     /// runs on its own cadence and cannot recompute it. See [`GroupStatus::brew_limit`].
     last_brew_limit: Option<BrewLimitStatus>,
+    /// The **resolved** brew target the last `update_pump` acted on, for the status publisher
+    /// — same reason as `last_brew_limit`. See the dual-boiler controller's copy for why this
+    /// is remembered rather than recomputed as `pump_pid.setpoint`, which is only ever written
+    /// in the closed-loop arms.
+    last_brew_target: Option<variegated_controller_types::BrewControlTarget>,
     configuration_store: SettingsStoreT,
     /// The machine's configuration, persistent and ephemeral halves together.
     ///
@@ -329,6 +334,7 @@ impl<
             limit_pid: super::hexadecimal_limited_pid(),
             limit_engagement: LimitEngagement::new(),
             last_brew_limit: None,
+            last_brew_target: None,
             configuration_store: settings_store,
             configuration: SingleBoilerSingleGroupConfiguration::default(),
             machine_config,
@@ -860,6 +866,33 @@ impl<
             binding: selection.binding,
         });
 
+        // The **resolved** target, remembered for the status publisher. Taken from the PID
+        // only where the PID has one: under a curve `pump_pid.setpoint` is where the ramp has
+        // actually got to, which `values` cannot say, while in the open-loop modes the PID's
+        // setpoint is a leftover from whenever it last ran and the target is the duty being
+        // commanded. `mode` is already forced to `Off` by the caller when not brewing.
+        self.last_brew_target = if actual_pump_control_state.mode != GroupBrewControlMode::Off {
+            let value = match actual_pump_control_state.mode {
+                GroupBrewControlMode::FullOn => DutyCycleType::FULL.value() as f32,
+                GroupBrewControlMode::FixedDutyCycle => {
+                    actual_pump_control_state.values.duty_cycle.value() as f32
+                }
+                // Reported in percent, the scale it was authored on, matching the plain
+                // `FixedDutyCycle` arm above rather than the pump's 0-255.
+                GroupBrewControlMode::FixedDutyCycleCurve => actual_pump_control_state
+                    .values
+                    .duty_cycle_curve
+                    .evaluate(elapsed_seconds),
+                _ => self.pump_pid.setpoint,
+            };
+            Some(variegated_controller_types::BrewControlTarget {
+                mode: actual_pump_control_state.mode,
+                value,
+            })
+        } else {
+            None
+        };
+
         // External reset feedback. Whichever loop did *not* get the output is forced to the
         // one that did, or it integrates against an error it is not driving, winds up, and
         // takes over with a step the next time it wins. An open-loop main mode has no
@@ -1113,22 +1146,11 @@ impl<
             // single-boiler firmware passes a tacho receiver. Routed through the getter
             // rather than hardcoded so wiring one is a firmware-only change.
             pump_rpm: self.group.get_pump_rpm(),
-            // The resolved setpoint -- see the dual-boiler controller's copy for why this
-            // is taken from the PID rather than from `control_state.values` above.
-            brew_control_target: {
-                let mode = self.configuration.ephemeral.group_brew_control_state.mode;
-                // Same condition as `is_brewing` above -- this controller tracks brewing as a
-                // state rather than as a flag.
-                let brewing = self.state == SingleBoilerSingleGroupControllerState::Brewing;
-                if brewing && mode != GroupBrewControlMode::Off {
-                    Some(variegated_controller_types::BrewControlTarget {
-                        mode,
-                        value: self.pump_pid.setpoint,
-                    })
-                } else {
-                    None
-                }
-            },
+            // The resolved setpoint -- see the dual-boiler controller's copy for why this is
+            // remembered by `update_pump` rather than recomputed here as `pump_pid.setpoint`.
+            // The brewing gate comes with it: the caller forces `mode` to `Off` when this
+            // controller is not in its `Brewing` state, so a non-`None` target implies one.
+            brew_control_target: self.last_brew_target,
             // Set by `update_pump`, which is the only place that knows whether the limit won.
             brew_limit: self.last_brew_limit,
         };
