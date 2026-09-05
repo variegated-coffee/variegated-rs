@@ -879,8 +879,32 @@ async fn main(spawner: Spawner) -> ! {
     }
     log_info!("BLE: Generated random address");
 
+    // Seed the Security Manager's RNG.
+    //
+    // **Not optional.** With the `security` feature on, `Stack::build()` panics outright if
+    // this has not been done -- "the security manager random number generator has not been
+    // seeded from a cryptographically secure random number generator" -- and a panic here is
+    // a silent watchdog reboot, because it happens before TIMG1 is ever fed.
+    //
+    // **`Trng`, not the `Rng` above.** The plain one is not a CSPRNG with the radio idle, and
+    // it does not implement `CryptoRng`, so this would not compile with it. What it seeds is
+    // the pairing key material: a predictable seed does not weaken a bond, it removes it.
+    // The address above may use `Rng` because an address is public by construction -- it is
+    // broadcast to anyone listening -- and only has to be unique, not unguessable.
+    //
+    // `try_new` fails only when the radio's entropy source is off, and `BleConnector::new`
+    // above has already brought the radio up -- it `unwrap`s for the same reason. It is
+    // refcounted rather than exclusive, so this does not take the TRNG away from the shot
+    // uploader or the uplink, both of which hold one of their own.
+    //
+    // Dropped as soon as the seed is copied: 32 bytes are read once, here.
+    let mut trng = esp_hal::rng::Trng::try_new()
+        .expect("the TRNG needs the radio, which BleConnector::new brought up above");
+
     // Create BLE stack
-    let stack = trouble_host::new(controller, ble_resources).set_random_address(address);
+    let stack = trouble_host::new(controller, ble_resources)
+        .set_random_address(address)
+        .set_random_generator_seed(&mut trng);
     let stack = mk_static!(
         Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
         stack
