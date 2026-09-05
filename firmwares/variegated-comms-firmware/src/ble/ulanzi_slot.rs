@@ -58,6 +58,25 @@ pub const HID_SERVICE_UUID: Uuid = Uuid::new_short(0x1812);
 /// The HID Report characteristic. Several of these exist on one device, one per collection.
 const HID_REPORT_UUID: Uuid = Uuid::new_short(0x2A4D);
 
+/// Whether to pair before reading reports.
+///
+/// **Currently `false`, and that is an experiment rather than a decision.**
+///
+/// The D100H answers a Pairing Request with the Secure Connections bit clear -- it does LE
+/// *Legacy* pairing only -- and trouble-host 0.6.0 implements Secure Connections
+/// exclusively, rejecting the response with `UnspecifiedReason` before any key material is
+/// exchanged. There is no setting that fixes that: legacy pairing arrived in 0.7.0 behind a
+/// `legacy-pairing` feature, and 0.7 needs bt-hci 0.9, which no released esp-radio has.
+///
+/// So the question this answers is whether the dial actually *enforces* encryption on its
+/// report characteristics. HID-over-GATT says it must, and most devices do -- but this is a
+/// cheap generic chipset, and if it does not, then none of pairing, bonding or the `security`
+/// feature is needed for this device at all.
+///
+/// If reports arrive with this `false`, that is the answer and the pairing path comes out.
+/// If they do not, upgrading the stack is the only route and this goes back to `true`.
+const REQUIRE_ENCRYPTION: bool = false;
+
 /// How long to wait for pairing to finish before giving up and reconnecting.
 ///
 /// A failsafe, not a operational deadline: Just Works pairing over a live link completes in
@@ -110,12 +129,21 @@ pub async fn ulanzi_input_loop(
             continue;
         };
 
-        if !ensure_encrypted(&connection, &bond_sender).await {
+        if REQUIRE_ENCRYPTION && !ensure_encrypted(&connection, &bond_sender).await {
             // Not retried in a tight loop: a device refusing to pair will refuse again, and
             // this slot has a radio to share.
             Timer::after(Duration::from_secs(5)).await;
             continue;
         }
+
+        // Stated either way, because it is the thing under test: with `REQUIRE_ENCRYPTION`
+        // off this is expected to be false, and what matters is whether reports arrive
+        // anyway.
+        log_info!(
+            "Ulanzi slot {}: link encrypted = {}",
+            slot,
+            is_encrypted(&connection)
+        );
 
         let client = match GattClient::<_, SlotPool, 10>::new(stack, &connection).await {
             Ok(client) => client,
@@ -279,10 +307,30 @@ async fn run_session(
             }
         };
 
-    let Ok(mut reports) = client.subscribe(&report, false).await else {
-        log_warn!("Ulanzi slot {}: could not subscribe to reports", slot);
-        return;
+    // How many characteristics the HID service has, which is the other open question about
+    // this device: the report we subscribe to below is the *first* of possibly several, and
+    // 0.6.0's client cannot tell them apart. The count does not identify them, but it says
+    // whether there is more than one to be wrong about.
+    match client.characteristics::<16>(&service).await {
+        Ok(all) => log_info!("Ulanzi slot {}: HID service has {} characteristics", slot, all.len()),
+        Err(_) => log_warn!("Ulanzi slot {}: could not enumerate HID characteristics", slot),
+    }
+
+    let mut reports = match client.subscribe(&report, false).await {
+        Ok(reports) => reports,
+        Err(_) => {
+            // The expected failure if the device does enforce encryption on its reports: a
+            // CCCD write on an unencrypted link is refused with Insufficient Encryption.
+            // Distinguished from "no notifications ever arrive", which would mean the
+            // subscription took and the first Report is simply not the collection we want.
+            log_warn!(
+                "Ulanzi slot {}: could not subscribe to reports (encryption required?)",
+                slot
+            );
+            return;
+        }
     };
+    log_info!("Ulanzi slot {}: subscribed to the first Report", slot);
 
     let mut sampler = DialSampler::new();
 
@@ -292,11 +340,23 @@ async fn run_session(
         match select(reports.next(), Timer::after(SAMPLER_TICK)).await {
             Either::First(notification) => {
                 let now = Instant::now().as_millis();
-                match decode_consumer_report(notification.as_ref()) {
+                let bytes: &[u8] = notification.as_ref();
+
+                // Logged raw, and only while this is an experiment. It is what says which
+                // HID collection the first Report characteristic belongs to: a consumer
+                // frame is `02 XX 00`, where a keyboard report is eight bytes and a mouse
+                // report three or four with a different shape. That distinction is the whole
+                // of the "we cannot choose the Report characteristic" question, and one
+                // turn of the dial answers it.
+                //
+                // **Remove this once the collection is known.** A HID device notifies at
+                // whatever rate the hand moves, and this is one line per report.
+                log_info!("Ulanzi slot {}: report {:?}", slot, bytes);
+
+                match decode_consumer_report(bytes) {
                     Some(input) => sampler.push(input, now),
                     // Either a report from a collection this is not interested in, or a
-                    // usage the device does not send. Neither is worth a log line at the
-                    // rate a HID device produces them.
+                    // usage the device does not send.
                     None => {}
                 }
             }
