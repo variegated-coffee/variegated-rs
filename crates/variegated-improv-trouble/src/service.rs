@@ -146,7 +146,10 @@ where
         let adv_len = AdStructure::encode_slice(
             &[
                 AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                AdStructure::ServiceUuids128(&[IMPROV_SERVICE_UUID_LE]),
+                // `Complete`, not `Incomplete`: trouble 0.7 split the old `ServiceUuids128`
+                // into the two the spec has always distinguished, and this really is the
+                // whole list -- the Improv service is the only one advertised here.
+                AdStructure::CompleteServiceUuids128(&[IMPROV_SERVICE_UUID_LE]),
                 AdStructure::ServiceData16 {
                     uuid: IMPROV_SERVICE_DATA_UUID_LE,
                     data: &service_data(state, CAPABILITIES),
@@ -238,7 +241,9 @@ async fn serve<H: ImprovHandler>(
                         "improv: write to handle {=u16} ({=usize} B) -- not the RPC \
                          characteristic ({=u16}), likely a CCCD",
                         event.handle(),
-                        event.data().len(),
+                        // trouble 0.7 made the payload a borrow taken under a closure rather
+                        // than a slice handed out; the length is all this line wanted.
+                        event.with_data(|len, _| len),
                         service.rpc_command.handle
                     );
                     let handle = event.handle();
@@ -275,13 +280,20 @@ async fn serve<H: ImprovHandler>(
                 // packet fails the codec's length check and is reported as `InvalidRpc`,
                 // which is at least visible; it is the first thing to suspect if provisioning
                 // works from a laptop and not from a phone.
+                // One `with_data`, not four: trouble 0.7 hands the payload to a closure
+                // rather than returning a slice, and the copy and the length check both
+                // have to happen inside it. `written` is the length the client actually
+                // sent, kept for the truncation warning below.
                 let mut packet = [0u8; MAX_COMMAND_LEN];
-                let len = event.data().len().min(MAX_COMMAND_LEN);
-                packet[..len].copy_from_slice(&event.data()[..len]);
-                if event.data().len() > MAX_COMMAND_LEN {
+                let (len, written) = event.with_data(|written, data| {
+                    let len = written.min(MAX_COMMAND_LEN);
+                    packet[..len].copy_from_slice(&data[..len]);
+                    (len, written)
+                });
+                if written > MAX_COMMAND_LEN {
                     warn_!(
                         "improv: RPC write of {=usize} B truncated to {=usize}",
-                        event.data().len(),
+                        written,
                         MAX_COMMAND_LEN
                     );
                 }
@@ -510,7 +522,12 @@ async fn respond(
     // client has not subscribed. The second case is indistinguishable from success here, so
     // a result logged as sent and never seen by the client means "not subscribed", and the
     // CCCD writes logged in `serve` are how to confirm that.
-    match service.rpc_result.notify(connection, &value).await {
+    // `store: true` throughout this file, which is not a choice so much as keeping what
+    // trouble 0.6 did: its `notify` always called `server.set` before sending, so the
+    // attribute always reflected the last value announced. 0.7 made that a parameter. It
+    // matters here because a client may *read* these characteristics as well as subscribe --
+    // `current_state` in particular is read on connect, before any CCCD is written.
+    match service.rpc_result.notify(connection, &value, true).await {
         Ok(()) => info!("improv: sent a {} result, {=usize} B", command, len),
         Err(error) => warn_!("improv: could not send a {} result: {}", command, error),
     }
@@ -527,7 +544,7 @@ async fn set_state<H: ImprovHandler>(
     *current = next;
     handler.state_changed(next);
     info!("improv: state -> {}", next);
-    if let Err(error) = service.current_state.notify(connection, &(next as u8)).await {
+    if let Err(error) = service.current_state.notify(connection, &(next as u8), true).await {
         warn_!("improv: could not notify state {}: {}", next, error);
     }
 }
@@ -540,7 +557,7 @@ async fn set_error(
     if error != ErrorState::None {
         warn_!("improv: reporting error {}", error);
     }
-    if let Err(e) = service.error_state.notify(connection, &(error as u8)).await {
+    if let Err(e) = service.error_state.notify(connection, &(error as u8), true).await {
         warn_!("improv: could not notify error {}: {}", error, e);
     }
 }

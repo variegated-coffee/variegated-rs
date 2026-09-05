@@ -60,22 +60,20 @@ const HID_REPORT_UUID: Uuid = Uuid::new_short(0x2A4D);
 
 /// Whether to pair before reading reports.
 ///
-/// **Currently `false`, and that is an experiment rather than a decision.**
+/// `true`, and settled by experiment rather than by assumption. Run against the dial with
+/// this `false`, the CCCD write was refused every time: the D100H does enforce encryption on
+/// its report characteristics, exactly as HID-over-GATT requires. There is no unpaired route
+/// to it.
 ///
-/// The D100H answers a Pairing Request with the Secure Connections bit clear -- it does LE
-/// *Legacy* pairing only -- and trouble-host 0.6.0 implements Secure Connections
-/// exclusively, rejecting the response with `UnspecifiedReason` before any key material is
-/// exchanged. There is no setting that fixes that: legacy pairing arrived in 0.7.0 behind a
-/// `legacy-pairing` feature, and 0.7 needs bt-hci 0.9, which no released esp-radio has.
+/// It also does LE *Legacy* pairing -- it answers a Pairing Request with the Secure
+/// Connections bit clear -- which is why this needs trouble-host 0.7's `legacy-pairing`
+/// feature. On 0.6.0, which implements Secure Connections only, pairing failed with
+/// `UnspecifiedReason` before any key material was exchanged.
 ///
-/// So the question this answers is whether the dial actually *enforces* encryption on its
-/// report characteristics. HID-over-GATT says it must, and most devices do -- but this is a
-/// cheap generic chipset, and if it does not, then none of pairing, bonding or the `security`
-/// feature is needed for this device at all.
-///
-/// If reports arrive with this `false`, that is the answer and the pairing path comes out.
-/// If they do not, upgrading the stack is the only route and this goes back to `true`.
-const REQUIRE_ENCRYPTION: bool = false;
+/// Kept as a constant rather than deleted because it is the one switch that separates "the
+/// dial will not pair" from "the dial pairs but sends nothing", and those have very
+/// different causes.
+const REQUIRE_ENCRYPTION: bool = true;
 
 /// How long to wait for pairing to finish before giving up and reconnecting.
 ///
@@ -256,14 +254,16 @@ fn is_encrypted(connection: &Connection<'_, SlotPool>) -> bool {
 /// Convert the stack's bond into the one the application processor stores.
 fn to_stored_bond(bond: &BondInformation, security_level: SecurityLevel) -> BluetoothBond {
     BluetoothBond {
-        address: bond.identity.bd_addr.into_inner(),
-        // Not carried by `Identity`, which records the address the peer distributed rather
-        // than how it was advertised. `true` is the safe answer: identity addresses handed
-        // out during pairing are random-static far more often than public, and the
-        // connection manager offers both kinds in its accept list regardless.
-        address_random: true,
+        address: bond.identity.addr.addr.into_inner(),
+        // Recorded rather than assumed. trouble 0.6's `Identity` held a bare `BdAddr` and
+        // this had to hardcode `true` on the grounds that a distributed identity address is
+        // usually random-static; 0.7 carries the whole `Address`, so the peer's own answer
+        // is available and is what gets stored.
+        address_random: bond.identity.addr.kind == AddrKind::RANDOM,
         long_term_key: bond.ltk.0,
-        identity_resolving_key: bond.identity.irk.map(|irk| irk.0),
+        // `NonZeroU128` in 0.7 -- an all-zero IRK is how a peer says it distributed none,
+        // and the type now says so.
+        identity_resolving_key: bond.identity.irk.map(|irk| irk.0.get()),
         security_level: match security_level {
             SecurityLevel::EncryptedAuthenticated => {
                 BluetoothSecurityLevel::EncryptedAuthenticated

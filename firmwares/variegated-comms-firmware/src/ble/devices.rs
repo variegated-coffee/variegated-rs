@@ -104,8 +104,21 @@ async fn bond_install_loop(
         for bond in list.0.iter() {
             let information = BondInformation::new(
                 Identity {
-                    bd_addr: BdAddr::new(bond.address),
-                    irk: bond.identity_resolving_key.map(IdentityResolvingKey::new),
+                    // trouble 0.7's `Identity` carries a whole `Address`, kind included,
+                    // where 0.6 had a bare `BdAddr` and left the kind to be guessed. The
+                    // stored flag can now be honoured rather than assumed.
+                    addr: if bond.address_random {
+                        Address::random(bond.address)
+                    } else {
+                        Address { kind: AddrKind::PUBLIC, addr: BdAddr::new(bond.address) }
+                    },
+                    // `IdentityResolvingKey::new` returns `Option`, because an all-zero IRK
+                    // is not one -- it is how a peer says it distributed none. `and_then`
+                    // rather than `map` so that a stored zero collapses to `None` here
+                    // instead of becoming `Some(None)`.
+                    irk: bond
+                        .identity_resolving_key
+                        .and_then(IdentityResolvingKey::new),
                 },
                 LongTermKey::new(bond.long_term_key),
                 match bond.security_level {

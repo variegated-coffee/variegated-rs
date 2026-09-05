@@ -396,7 +396,15 @@ impl<'a, C: Controller, P: PacketPool> BleConnectionManager<'a, C, P> {
                     connect_params: Default::default(),
                     scan_config: ScanConfig {
                         active: false,
-                        filter_accept_list: &[(AddrKind::PUBLIC, address), (AddrKind::RANDOM, address)],
+                        // trouble 0.7 takes `Address` here rather than the
+                        // `(AddrKind, &BdAddr)` pairs 0.6 wanted. Both kinds are still
+                        // offered for the same reason as before: an association may predate
+                        // the `address_random` flag, so which kind a device advertises with
+                        // is not always known.
+                        filter_accept_list: &[
+                            Address { kind: AddrKind::PUBLIC, addr: *address },
+                            Address { kind: AddrKind::RANDOM, addr: *address },
+                        ],
                         interval: SCAN_INTERVAL,
                         window: SCAN_WINDOW,
                         ..Default::default()

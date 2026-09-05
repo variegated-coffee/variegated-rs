@@ -25,23 +25,24 @@ defmt = { workspace = true, optional = true }
 
 # All optional, all `ble`. The note at the top of this file is the reason.
 trouble-host = { workspace = true, optional = true, features = ["gatt", "derive", "peripheral", "default-packet-pool"] }
-# **NOT `workspace = true`, and this is load bearing.**
+# `workspace = true` as of trouble-host 0.7, and the history is worth keeping because the
+# constraint could come back.
 #
-# The workspace pins embassy-sync 0.8, because that is what esp-hal and esp-radio need.
-# trouble-host 0.6.0 depends on 0.7. Three versions already coexist in this workspace --
-# see the note on `trouble-host` in the workspace manifest, which says to keep channels
-# from crossing the boundary.
+# This was pinned to 0.7 while trouble-host 0.6.0 depended on embassy-sync 0.7 and the
+# workspace was on 0.8 for esp-hal and esp-radio. `#[gatt_service]` and `#[gatt_server]`
+# expand to code containing literal `embassy_sync::blocking_mutex::raw::RawMutex` paths,
+# resolved in whichever crate invokes the macro, and `AttributeTable`'s bound is
+# trouble-host's `RawMutex`. With the wrong version in scope the generated bound is a
+# *different trait of the same name*, and the error says so twice.
 #
-# `#[gatt_service]` and `#[gatt_server]` make that boundary sharper than a channel would.
-# Both expand to code containing literal `embassy_sync::blocking_mutex::raw::RawMutex`
-# paths, resolved in whichever crate invokes the macro. `AttributeTable`'s bound is
-# trouble-host's `RawMutex`, i.e. 0.7's. So the invoking crate's `embassy_sync` has to be
-# 0.7, and with 0.8 in scope the generated bound is a *different trait of the same name*
-# and the error says so twice.
+# trouble-host 0.7 depends on embassy-sync ^0.8, so the invoking crate and trouble now agree
+# on 0.8 and the pin is not merely unnecessary but wrong -- it would reintroduce exactly the
+# mismatch it was added to avoid. **If trouble's embassy-sync requirement ever diverges from
+# the workspace's again, this goes back to a literal version.**
 #
-# That is why both macros are invoked here rather than in the firmware, whose
-# `embassy_sync` is and must remain 0.8.
-embassy-sync = { version = "0.7", optional = true }
+# Both macros are still invoked here rather than in the firmware, which remains the right
+# place for them regardless of which version is in play.
+embassy-sync = { workspace = true, optional = true }
 embassy-time = { workspace = true, optional = true }
 # Named by path in the macro output: each characteristic wider than 8 bytes gets a
 # `static_cell::StaticCell` for its value storage.

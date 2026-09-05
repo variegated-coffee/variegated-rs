@@ -41,7 +41,13 @@ variegated-schema-export = { path = "../../crates/variegated-schema-export" }
 # ECDH is stack-hungry -- against a budget with 2,452 bytes of stack headroom and 6,688
 # bytes of uncommitted SRAM (`docs/comms-firmware-memory-budget.md`). Measure after
 # flashing; if it does not fit, this feature is the first thing to reconsider.
-trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "security", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
+#
+# `legacy-pairing` sits beside `security` because the dial needs both. The D100H answers a
+# Pairing Request with the Secure Connections bit clear -- it does LE Legacy pairing -- and
+# enforces encryption on its HID reports, so without this it cannot be read at all. This
+# feature does not exist in 0.6.0, which is the whole reason for the version move and for the
+# `esp-radio` patch that makes it possible.
+trouble-host = { workspace = true, features = ["gatt", "derive", "default-packet-pool", "default-packet-pool-mtu-255", "default-packet-pool-size-16", "peripheral", "central", "scan", "security", "legacy-pairing", "defmt", "gatt-client-notification-queue-size-8", "l2cap-rx-queue-size-8"] }
 # Improv Wi-Fi provisioning. `ble` brings in the GATT service and the run loop; without it
 # this crate is just the packet codec, which is how its host tests stay runnable.
 variegated-improv-trouble = { path = "../../crates/variegated-improv-trouble", features = ["ble"] }

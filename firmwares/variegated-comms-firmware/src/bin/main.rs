@@ -834,8 +834,22 @@ async fn main(spawner: Spawner) -> ! {
     //
     // If any of those three claims stops being true, this line is the thing that
     // fails, and it fails at connect/advertise time rather than at compile time.
+    // trouble 0.7 takes the controller and pool as *type* parameters here, and adds a fourth
+    // const: `BONDS`, the number of pairing keys the security manager keeps in `.bss`.
+    //
+    // **4, not the default 10.** A bond is only useful for a device that can be associated,
+    // and there are `MAX_BLUETOOTH_PERIPHERALS` of those. Six unusable slots is not a large
+    // number of bytes, but this firmware has 6,688 of uncommitted SRAM and no reason to spend
+    // any of them on bonds no association can reach.
     let ble_resources = mk_static!(
-        HostResources<DefaultPacketPool, 6, 2, 1>,
+        HostResources<
+            ExternalController<BleConnector<'static>, 20>,
+            DefaultPacketPool,
+            6,
+            2,
+            1,
+            { variegated_controller_types::bluetooth::MAX_BLUETOOTH_PERIPHERALS },
+        >,
         HostResources::new()
     );
 
@@ -879,39 +893,26 @@ async fn main(spawner: Spawner) -> ! {
     }
     log_info!("BLE: Generated random address");
 
-    // Seed the Security Manager's RNG.
-    //
-    // **Not optional.** With the `security` feature on, `Stack::build()` panics outright if
-    // this has not been done -- "the security manager random number generator has not been
-    // seeded from a cryptographically secure random number generator" -- and a panic here is
-    // a silent watchdog reboot, because it happens before TIMG1 is ever fed.
-    //
-    // **`Trng`, not the `Rng` above.** The plain one is not a CSPRNG with the radio idle, and
-    // it does not implement `CryptoRng`, so this would not compile with it. What it seeds is
-    // the pairing key material: a predictable seed does not weaken a bond, it removes it.
-    // The address above may use `Rng` because an address is public by construction -- it is
-    // broadcast to anyone listening -- and only has to be unique, not unguessable.
-    //
-    // `try_new` fails only when the radio's entropy source is off, and `BleConnector::new`
-    // above has already brought the radio up -- it `unwrap`s for the same reason. It is
-    // refcounted rather than exclusive, so this does not take the TRNG away from the shot
-    // uploader or the uplink, both of which hold one of their own.
-    //
-    // Dropped as soon as the seed is copied: 32 bytes are read once, here.
-    let mut trng = esp_hal::rng::Trng::try_new()
-        .expect("the TRNG needs the radio, which BleConnector::new brought up above");
-
     // Create BLE stack
-    let stack = trouble_host::new(controller, ble_resources)
-        .set_random_address(address)
-        .set_random_generator_seed(&mut trng);
+    //
+    // **No RNG seeding here, unlike under trouble 0.6.** With `security` on, 0.6 panicked in
+    // `build()` unless it had been handed a `CryptoRng` -- and that panic happens before
+    // TIMG1 is first fed, so it presented as a silent watchdog reboot rather than as a
+    // message. 0.7 seeds the security manager itself, out of the controller's own `LE Rand`
+    // command, during runner initialisation. That is better than what this code did: the
+    // entropy comes from the radio's hardware RNG rather than from a `Trng` handle main had
+    // to acquire and hold at exactly the right moment.
+    let stack = trouble_host::new(controller, ble_resources).set_random_address(address);
     let stack = mk_static!(
         Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
-        stack
+        stack.build()
     );
 
-    // Build BLE host
-    let Host { central, peripheral, runner, .. } = stack.build();
+    // Central, peripheral and runner are accessors on the built `Stack` in 0.7, where 0.6
+    // destructured a `Host` returned from `build()`.
+    let central = stack.central();
+    let peripheral = stack.peripheral();
+    let runner = stack.runner();
 
     // Create connection manager
     let connection_manager = mk_static!(

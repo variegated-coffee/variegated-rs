@@ -314,20 +314,25 @@ toml = "0.8.19"
 # ESP32-C6 comms side. Only `variegated-comms-firmware` and the BLE crates use these.
 # ---------------------------------------------------------------------------------
 
-# BLE. trouble-host is held at 0.6.0, NOT 0.7.0: esp-radio 0.18 depends on bt-hci 0.8,
-# while trouble-host 0.7 requires bt-hci ^0.9. Only esp-hal `main` (unreleased) is on
-# bt-hci 0.9. 0.6.0 is a strict superset of the git revision this used to pin (53e34022,
-# 2025-11-14, between v0.5.0 and v0.5.1), so the multi-peripheral fix that motivated the
-# pin is included.
+# BLE. trouble-host 0.7.0, for **LE Legacy pairing**, which arrived there behind the
+# `legacy-pairing` feature and does not exist in 0.6.0 at all.
 #
-# Note trouble-host 0.6.0 asks for embassy-sync ^0.7 while esp-hal/esp-radio need ^0.8,
-# so two embassy-sync versions coexist in the lockfile. That is harmless -- the
-# esp-radio <-> trouble interface is bt-hci's `Controller` trait, not an embassy-sync
-# type. Just don't pass a channel across that boundary. `variegated-improv-trouble`
-# pins its own `embassy-sync = "0.7"` for this reason and must not be "tidied" to
-# `workspace = true`.
-trouble-host = "0.6.0"
-bt-hci = "0.8"
+# That is not a preference. The Ulanzi D100H answers a Pairing Request with the Secure
+# Connections bit clear and enforces encryption on its HID report characteristics, so on
+# 0.6.0 -- which implements Secure Connections only -- the dial cannot be read by any route.
+# 0.7 also fixes the GATT client's `characteristics()`, which in 0.6.0 discarded the UUID and
+# the CCCD handle and so could not tell one of a device's several Report characteristics from
+# another.
+#
+# **This is why `esp-radio` is patched below.** 0.7 requires bt-hci ^0.9, and no released
+# esp-radio asks for it: 0.18.0 and 1.0.0-beta.0 both pin ^0.8.0. See the patch section.
+#
+# The old note about two embassy-sync versions coexisting no longer applies: 0.6.0 wanted
+# ^0.7 against esp-hal's ^0.8, and 0.7.0 wants ^0.8, so the lockfile now has one.
+# `variegated-improv-trouble` pinned its own `embassy-sync = "0.7"` for that reason and can
+# now follow the workspace.
+trouble-host = "0.7.0"
+bt-hci = "0.9"
 
 embassy-net = "0.9.1"
 
@@ -487,3 +492,17 @@ overflow-checks  = false
 [patch.crates-io]
 sdio = { path = "../sdio" }
 exfat-slim = { path = "../exfat-slim" }
+# esp-radio 0.18.0 as published, with its `bt-hci` dependency moved from 0.8 to 0.9 and
+# nothing else changed. `trouble-host` 0.7 -- the first release with LE Legacy pairing, which
+# the Ulanzi dial requires -- needs bt-hci ^0.9, and no released esp-radio asks for it.
+#
+# The alternative was pinning esp-radio to the esp-hal `main` branch, which would drag
+# esp-hal itself plus esp-alloc, esp-config, esp-sync, esp-phy and esp-rom-sys onto one
+# unreleased revision. This way esp-hal stays on released 1.1.2 and exactly one crate is
+# forked, from a tag, by one version string.
+#
+# It works because only `src/ble/controller/mod.rs` names bt-hci there, and every item it
+# imports lives in bt-hci's `lib.rs` and `transport.rs`, which are byte-identical between
+# 0.8.1 and 0.9.0. See `../esp-radio-fork/FORK.md`, and delete both when an esp-radio release
+# asks for bt-hci 0.9 or later.
+esp-radio = { path = "../esp-radio-fork" }

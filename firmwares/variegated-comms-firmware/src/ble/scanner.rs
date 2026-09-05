@@ -246,7 +246,14 @@ fn decode_advertisement(data: &[u8]) -> Advertisement {
             }
             // Advertised as raw little-endian bytes, so they are rebuilt into a `Uuid`
             // and compared against the drivers' own constants.
-            Ok(AdStructure::ServiceUuids16(uuids)) => {
+            // Both list forms, and that is not belt-and-braces. trouble 0.7 split the old
+            // `ServiceUuids16`/`ServiceUuids128` into the `Complete` and `Incomplete`
+            // variants the spec has always had, and matching only one of each would silently
+            // stop recognising devices: a peripheral with more services than fit its
+            // advertisement sends an *incomplete* list, which is exactly the case where the
+            // one UUID we care about may still be present.
+            Ok(AdStructure::CompleteServiceUuids16(uuids))
+            | Ok(AdStructure::IncompleteServiceUuids16(uuids)) => {
                 for uuid in uuids {
                     if let Some(found) =
                         driver_for_service(&Uuid::new_short(u16::from_le_bytes(*uuid)))
@@ -255,7 +262,8 @@ fn decode_advertisement(data: &[u8]) -> Advertisement {
                     }
                 }
             }
-            Ok(AdStructure::ServiceUuids128(uuids)) => {
+            Ok(AdStructure::CompleteServiceUuids128(uuids))
+            | Ok(AdStructure::IncompleteServiceUuids128(uuids)) => {
                 for uuid in uuids {
                     if let Some(found) = driver_for_service(&Uuid::new_long(*uuid)) {
                         driver = Some(found);
