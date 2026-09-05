@@ -8,26 +8,52 @@
 //! two-button set. Pin 7 is the on-board button, acted on only under `pwm-steam-valve`,
 //! where it cycles the steam valve. See `ACTIVE_BUTTON_MASK`.
 //!
-//! # Normal mode
+//! # One vocabulary, read per screen
 //!
-//! | Input | Action |
-//! |---|---|
-//! | Tap 1-4 | Run routine 0-3; cancel the running one |
-//! | Tap 5 | Toggle brew |
-//! | Tap 6 | Toggle water dispensing |
-//! | Tap 5 + 3 | Toggle machine power: `On -> Off`, anything else (incl. `PowerSaveStandby`) `-> On` |
-//! | Hold 5, 1.5 s | Enter menu mode |
-//! | Hold 6, 3 s | `TagDoseFromScale(GroupScale(SingleGroup))` |
+//! The panel speaks [`InputCommand`] -- `-`, `+`, Select, Return, Menu -- and **every screen
+//! reads that one vocabulary against whatever it is showing**. A Bluetooth dial sends the
+//! same five commands down the same path, so the two are one UI rather than two that drift.
 //!
-//! `{5,3}` is the *only* power control on the panel. The old "any button while Off turns it
-//! On" rule is gone -- it made every button a power button, which is exactly what makes a
-//! deliberate chord worth having.
+//! The **idle screen is the exception**: there the six buttons carry machine-specific
+//! meanings of their own, and those are *hardware-only*. A dial cannot start a shot by being
+//! turned, which is the whole reason this split exists.
+//!
+//! | Screen | 1 | 2 | 3 | 4 | 5 | 6 | `{5,3}` |
+//! |---|---|---|---|---|---|---|---|
+//! | **Idle** | Routine 0 | Routine 1 | Routine 2 | Routine 3 | Brew | Water | Power |
+//! | **Brewing** | `-` | `+` | Select | Return **= stop** | **stop** | -- | -- |
+//! | **Routine running** | `-` | `+` | Select | Return **= cancel** | -- | -- | -- |
+//! | **Standby / Off** | `-` | `+` | Select | Return | -- | -- | Power |
+//! | **Menu open** | `-` | `+` | Select | Return | -- | -- | -- |
+//!
+//! The dashes outside the idle row are that vocabulary having **nothing to act on**, not a
+//! hole in the capture. `-`, `+` and Select reach a screen with no rows and no value, so they
+//! do nothing; Return is the one the brewing and routine screens give a meaning. That is why
+//! the dial's Return also stops a brew and cancels a routine, without a line of code that
+//! knows a dial exists.
+//!
+//! Button 5 stopping a brew is the one **hardware-only** meaning outside the idle screen: the
+//! button that started it stops it. The dial does not need it -- Return does the same thing.
+//!
+//! | Hold | Screen | Action |
+//! |---|---|---|
+//! | 5, 1.5 s | any, menu closed | Enter menu mode (refused while busy) |
+//! | 6, 3 s | **idle only** | `TagDoseFromScale(GroupScale(SingleGroup))` |
+//! | 3, 1.5 s | menu open | Run the selected routine |
+//!
+//! `{5,3}` is the *only* power control on the panel, and it is unchanged: `On -> Off`,
+//! anything else (incl. `PowerSaveStandby`) `-> On`. It is inert while brewing or running a
+//! routine -- stop the machine first. Standby itself is reachable only from the Settings
+//! menu; there is deliberately no chord for it.
+//!
+//! The old "any button while Off turns it On" rule is gone -- it made every button a power
+//! button, which is exactly what makes a deliberate chord worth having.
 //!
 //! **Dispatch is on exact button sets**, so a chord is never a superset match: `{5,3}` powers
 //! the machine and does not also start a brew, and `{5,6}` does nothing at all rather than
 //! doing two things.
 //!
-//! Both long holds are measured **from finger-down**, not from the hold event. The recognizer
+//! Long holds are measured **from finger-down**, not from the hold event. The recognizer
 //! emits `PressAndHoldStart` at `SETTLING_DELAY_MS + PRESS_AND_HOLD_THRESHOLD_MS` (550 ms)
 //! after the button goes down, so that offset is subtracted in `check_long_hold` and the
 //! thresholds there are the numbers a user actually experiences.
@@ -49,18 +75,23 @@
 //! | Tap 3 | Activate | Confirm |
 //! | Tap 4 | Pop; popping the root leaves menu mode | Cancel |
 //! | Hold 3, 1.5 s | **Run the selected routine**, skipping its parameter screen | — |
-//! | Hold 6, 3 s | `TagDoseFromScale` -- the same meaning it has outside the menu | (same) |
 //!
 //! A list is not a third direction to learn: `-` moves towards the top of it because the top
 //! is the previous item, which is the same thing `-` means to a number. Each screen's hint row
 //! names what its own buttons do, so nobody has to derive it.
 //!
-//! **The two holds are meanings the menu has, not holes in its capture.** Tapping a routine
+//! **Button 3's hold is a meaning the menu has, not a hole in its capture.** Tapping a routine
 //! deliberately never runs it -- it always opens the parameter screen, so that what a press
 //! does is predictable before it is made. A hold is a separate, deliberate gesture, so it can
 //! carry the shortcut without weakening that rule; see [`crate::menu::activate_hold`], which
 //! also owns the two conditions under which it refuses. Button 5's hold is dropped here --
 //! re-opening an open menu is meaningless -- and every other hold and chord stays inert.
+//!
+//! **Button 6's dose capture is not available here**, and is not available anywhere but the
+//! idle screen. It used to fire on every screen, menus included, on the reasoning that
+//! capturing a dose is what a user is doing while standing at a parameter screen. That put a
+//! three-second hold that silently overwrites a dose behind every screen in the machine; it
+//! now belongs to the one screen whose buttons are about the shot in front of you.
 //!
 //! Entry is refused while brewing, dispensing or running a routine, but is **not** gated on
 //! machine mode -- provisioning a machine should not require heating it. The menu's content
@@ -103,6 +134,7 @@ use variegated_buttons::{
     ButtonEvent, ButtonEventRecognizer, ButtonSet, PRESS_AND_HOLD_THRESHOLD_MS, SETTLING_DELAY_MS,
 };
 use crate::StatusSubscriber;
+use crate::display_state::DisplayMode;
 use crate::menu::{
     self, EditorState, GsMenu, MenuActivation, MenuContext, MenuData, MenuFetch, MenuId,
     MenuItemKind, MenuKind, MenuRow, MenuSender, MenuSnapshot, WifiRequest,
@@ -172,6 +204,102 @@ const ACTIVE_BUTTON_MASK: u8 = 0b1011_1111;
 /// Read a sample from Port A, dropping the pins this build does not act on.
 fn button_set_from_port_a(sample: u8) -> ButtonSet {
     ButtonSet::from_active_low(sample, ACTIVE_BUTTON_MASK)
+}
+
+/// What a panel button set means on a given screen.
+///
+/// Everything but [`Self::Logical`] is a **hardware-only** meaning: it belongs to the panel
+/// and cannot be reached by a Bluetooth input device, which is what stops a dial from starting
+/// a shot. `Logical` is the shared vocabulary, and reaches exactly the same code an input
+/// device's command does.
+enum PanelMeaning {
+    /// Run function routine `n`. Never a cancel -- see [`ButtonEventHandler::routine_command`].
+    Routine(u8),
+    ToggleBrew,
+    ToggleWater,
+    TogglePower,
+    Logical(InputCommand),
+    /// Nothing on this screen.
+    Inert,
+}
+
+/// The four panel buttons that carry the shared vocabulary.
+///
+/// **Buttons 1 and 2 are marked `-` and `+` on the panel**, and that is the whole mapping:
+/// 1 is *less* or *previous*, 2 is *more* or *next*. 3 selects and 4 goes back.
+///
+/// `Increment`/`Decrement` carry 1: a button is one step. The count exists for a dial, which
+/// batches a turn into a single message.
+fn logical_for(buttons: ButtonSet) -> Option<InputCommand> {
+    match buttons {
+        SET_ROUTINE_0 => Some(InputCommand::Decrement(1)),
+        SET_ROUTINE_1 => Some(InputCommand::Increment(1)),
+        SET_ROUTINE_2 => Some(InputCommand::Activate),
+        SET_ROUTINE_3 => Some(InputCommand::Return),
+        _ => None,
+    }
+}
+
+fn logical_or_inert(buttons: ButtonSet) -> PanelMeaning {
+    match logical_for(buttons) {
+        Some(command) => PanelMeaning::Logical(command),
+        None => PanelMeaning::Inert,
+    }
+}
+
+/// The panel's meaning table, with the menu already handled by the caller.
+///
+/// This is the module doc's matrix in one place. The idle screen is the only one that gives
+/// its buttons machine-specific meanings; every other screen maps buttons 1-4 into the shared
+/// vocabulary and lets [`ButtonEventHandler::apply_logical`] decide what that screen makes of
+/// it -- which for most of them is nothing, because `-`, `+` and Select applied to a machine
+/// screen have no rows and no value to act on.
+///
+/// Dispatch is on **exact** sets, so a chord is never a superset match.
+fn resolve(screen: DisplayMode, buttons: ButtonSet) -> PanelMeaning {
+    // The chord first. It is an exact set, but the two buttons it is made of mean different
+    // things on the screens where it works, and putting it in each arm would be three copies
+    // of one rule.
+    if buttons == SET_POWER {
+        return match screen {
+            DisplayMode::Idle
+            | DisplayMode::PostBrew
+            | DisplayMode::PowerSaveStandby
+            | DisplayMode::Off => PanelMeaning::TogglePower,
+            // Stop the shot first. Cutting power out from under a running brew or routine
+            // leaves the group under pressure with nothing driving the sequence that would
+            // have released it.
+            DisplayMode::Brewing | DisplayMode::RoutineExecution => PanelMeaning::Inert,
+        };
+    }
+
+    match screen {
+        // `PostBrew` is here because `ButtonEventHandler::screen` never returns it -- the
+        // three-second summary is a display concern and the buttons are already the next
+        // shot's. Named anyway so this match stays exhaustive and stays right if that changes.
+        DisplayMode::Idle | DisplayMode::PostBrew => match buttons {
+            SET_ROUTINE_0 => PanelMeaning::Routine(ROUTINE_BUTTON_0 as u8),
+            SET_ROUTINE_1 => PanelMeaning::Routine(ROUTINE_BUTTON_1 as u8),
+            SET_ROUTINE_2 => PanelMeaning::Routine(ROUTINE_BUTTON_2 as u8),
+            SET_ROUTINE_3 => PanelMeaning::Routine(ROUTINE_BUTTON_3 as u8),
+            SET_BREW => PanelMeaning::ToggleBrew,
+            SET_WATER_TAP => PanelMeaning::ToggleWater,
+            _ => PanelMeaning::Inert,
+        },
+        // Button 5 is the one hardware-only meaning outside the idle screen: the button that
+        // started the shot stops it. Button 4 stops it too, but as `Return` -- so a dial's
+        // Return key does, and this arm needs no line about dials.
+        DisplayMode::Brewing => match buttons {
+            SET_BREW => PanelMeaning::ToggleBrew,
+            _ => logical_or_inert(buttons),
+        },
+        // A routine drives the brew itself, so button 5 is not its stop -- `Return` is, and
+        // `CancelRoutine` is what it sends. Standby and Off have no machine meanings at all:
+        // the chord above wakes them, and holding 5 opens the menu.
+        DisplayMode::RoutineExecution | DisplayMode::PowerSaveStandby | DisplayMode::Off => {
+            logical_or_inert(buttons)
+        }
+    }
 }
 
 // ============================================================================
@@ -700,6 +828,38 @@ impl ButtonEventHandler {
         self.brewing_active || self.water_dispensing_active || self.routine_executing
     }
 
+    /// Which screen the panel is reading its vocabulary against.
+    ///
+    /// The same question `display_state::get_display_mode` answers, from the projection this
+    /// handler already keeps -- `machine_mode`, `routine_executing` and `brewing_active`, all
+    /// refreshed in [`Self::update_status`] -- and in the same order, so the two cannot
+    /// disagree about which of two simultaneous conditions wins.
+    ///
+    /// **Deliberately never returns [`DisplayMode::PostBrew`].** That three-second summary
+    /// window is a display concern; for input it reads as `Idle`, because the shot is over and
+    /// the buttons that start the next one should already work. This handler holds no
+    /// `previous_brew` timestamp and needs none, which is the other reason not to call the
+    /// display's version: it is a method on a struct this task does not have, answering a
+    /// question with one more state in it.
+    ///
+    /// Water dispensing is `Idle` too, and that is not an oversight -- the tap has no screen
+    /// of its own, only an `ActivityOverlay`, and its own button is what stops it.
+    fn screen(&self) -> DisplayMode {
+        match self.machine_mode {
+            MachineMode::Off => DisplayMode::Off,
+            MachineMode::PowerSaveStandby => DisplayMode::PowerSaveStandby,
+            MachineMode::On => {
+                if self.routine_executing {
+                    DisplayMode::RoutineExecution
+                } else if self.brewing_active {
+                    DisplayMode::Brewing
+                } else {
+                    DisplayMode::Idle
+                }
+            }
+        }
+    }
+
     fn clear_hold_deadlines(&mut self) {
         self.button_3_hold_start = None;
         self.button_5_hold_start = None;
@@ -740,7 +900,17 @@ impl ButtonEventHandler {
     /// check is deliberately here rather than at either call site: it is checked when the
     /// menu is actually opened, because 1.5 s is long enough for a schedule to have started
     /// a routine since the gesture began.
+    ///
+    /// An open menu is left exactly as it is. The panel cannot reach this with a menu open --
+    /// button 5's deadline is dropped there -- but a dial's `Menu` key can, and it has no hold
+    /// to distinguish "open" from "go home" with. Without this guard that key would reset the
+    /// stack to the root from any depth, which is a destructive answer to a press whose
+    /// agreed meaning is "nothing".
     pub fn open_menu(&mut self) {
+        if self.menu.is_open() {
+            return;
+        }
+
         if self.machine_is_busy() {
             defmt::info!("Menu: refused, the machine is busy");
         } else {
@@ -751,34 +921,23 @@ impl ButtonEventHandler {
 
     /// Handle a UI command from an input device the comms processor owns.
     ///
-    /// Synthesizes the panel event that means the same thing and feeds it to
-    /// [`Self::handle_event`], rather than acting on the menu directly. That is what makes
-    /// a dial mean on each screen exactly what the panel means on it -- including on the
-    /// idle screen, where `-` and `+` run routines 0 and 1, because that is what those
-    /// buttons do there. Reimplementing the dispatch here would be a second UI that drifts
-    /// from the first.
+    /// Goes straight to [`Self::apply_logical`], which is the *same* function the panel's own
+    /// buttons reach once they have been mapped into this vocabulary. The panel maps into
+    /// [`InputCommand`]; nothing maps out of it. That direction is the whole design: a dial
+    /// and a button that mean the same thing are the same call, so the two cannot drift, and
+    /// a screen that gives `Return` a meaning gives it to both at once.
     ///
-    /// Nothing in here asks whether the menu is open, and nothing should: the panel's
-    /// vocabulary is the same on every screen, and which screen is showing is
-    /// `handle_event`'s business.
-    pub fn handle_input_command(
-        &mut self,
-        command: InputCommand,
-        now: Instant,
-    ) -> Vec<MachineCommand> {
-        let (buttons, repeats) = match command {
-            // Buttons 1 and 2 are marked `-` and `+` on the panel, which is the whole
-            // mapping: less/previous and more/next.
-            InputCommand::Decrement(steps) => (SET_ROUTINE_0, steps),
-            InputCommand::Increment(steps) => (SET_ROUTINE_1, steps),
-            InputCommand::Activate => (SET_ROUTINE_2, 1),
-            InputCommand::Return => (SET_ROUTINE_3, 1),
-            InputCommand::Menu => {
-                // Not a press: the menu opens on a *hold*, which is why this command exists
-                // at all. Synthesizing a press of button 5 would toggle the brew instead.
-                self.open_menu();
-                return Vec::new();
-            }
+    /// It used to be the other way round -- each command was turned into a synthetic press of
+    /// panel buttons 1-4 and fed to `handle_event`. On the idle screen those buttons run
+    /// function routines 0-3, so **turning the dial started a shot**, and its Return key ran
+    /// routine 3. The machine-specific meanings the idle screen gives its buttons are
+    /// hardware-only, and inverting the mapping is what makes them unreachable from here.
+    ///
+    /// Nothing in here asks which screen is showing, and nothing should: that is
+    /// `apply_logical`'s business, and it is the one place that knows.
+    pub fn handle_input_command(&mut self, command: InputCommand) -> Vec<MachineCommand> {
+        let repeats = match command {
+            InputCommand::Increment(steps) | InputCommand::Decrement(steps) => steps,
             InputCommand::Custom(index) => {
                 // Reserved, and carried this far so that giving it a meaning later is not a
                 // wire-format change. Logged so a key that does nothing is still visibly
@@ -786,69 +945,67 @@ impl ButtonEventHandler {
                 defmt::info!("Input: custom {} is not bound to anything", index);
                 return Vec::new();
             }
+            _ => 1,
         };
 
-        // One event per step. The far side batches a turn into a count precisely so this
-        // link carries one message instead of many -- but the menu moves one row per press,
-        // so the count has to be spent here.
+        // One application per step. The far side batches a turn into a count precisely so this
+        // link carries one message instead of many -- but the menu moves one row per step, so
+        // the count has to be spent here.
         let mut commands = Vec::new();
         for _ in 0..repeats {
-            commands.extend(self.handle_event(ButtonEvent::Press(buttons), now));
+            commands.extend(self.apply_logical(command));
         }
         commands
     }
 
-    /// Handle a button event and return the appropriate machine command
-    pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Vec<MachineCommand> {
-        // The menu captures the six panel buttons. Routed here rather than inside `handle_press`
-        // so that hold events cannot leak past it: with the menu open, a hold of button 5 must
-        // not re-open it.
-        //
-        // **Two holds mean something here, and both are meanings the menu has rather than
-        // holes in the capture.**
-        //
-        // Button 6 is "capture a dose", on every screen. That is exactly what a user is doing
-        // while standing at a routine's parameter screen, and requiring them to back out of
-        // the menu to do it -- then come back in, by which point the screen has re-seeded --
-        // is a worse gesture than the one that already exists.
-        //
-        // Button 3 is "run the selected routine", and only on a row that is one. It is the
-        // same button that selects, which is the point: hold what you would have pressed, and
-        // skip the parameter screen. See `menu::activate_hold` for why the shortcut is a hold
-        // rather than a second row, and for the two gates it still applies.
-        //
-        // Every *other* hold and chord stays inert here, which is what `handle_menu_press`
-        // and `check_long_hold` still enforce.
+    /// Apply one command of the shared vocabulary against the screen that is showing.
+    ///
+    /// **The one place that knows about screens.** Reached by a Bluetooth dial through
+    /// [`Self::handle_input_command`] and by the panel through [`Self::handle_press`], which
+    /// maps its buttons into this vocabulary everywhere except the idle screen.
+    ///
+    /// A command that a screen has no meaning for does nothing. That is not a gap: `-`, `+`
+    /// and Select applied to a machine screen with no rows and no value have nothing to act
+    /// on, and inventing something for them to do is how a panel gets a button that means one
+    /// thing in one place and something unrelated in another.
+    fn apply_logical(&mut self, command: InputCommand) -> Vec<MachineCommand> {
+        // The menu is a full-screen takeover and reads the whole vocabulary itself.
         if self.menu.is_open() {
-            return match event {
-                ButtonEvent::Press(buttons) => self.handle_menu_press(buttons),
-                ButtonEvent::PressAndHoldStart(buttons) if buttons == SET_WATER_TAP => {
-                    self.button_6_hold_start = Some(now);
-                    vec![]
-                }
-                ButtonEvent::PressAndHoldStart(buttons) if buttons == SET_ROUTINE_2 => {
-                    self.button_3_hold_start = Some(now);
-                    vec![]
-                }
-                // A hold that began before the menu opened ends up here. Both deadlines have to
-                // be cleared, or a hold that straddled the transition fires out of
-                // `check_long_hold`.
-                _ => {
-                    self.clear_hold_deadlines();
-                    vec![]
-                }
-            };
+            return self.handle_menu_command(command);
         }
 
+        match (self.screen(), command) {
+            // Refused when the machine is busy, which covers the two screens below -- so a
+            // dial cannot reach a menu the panel would not have opened.
+            (_, InputCommand::Menu) => {
+                self.open_menu();
+                vec![]
+            }
+            // The brewing screen's reading of Return. Button 5 says the same thing in
+            // hardware; see `resolve`.
+            (DisplayMode::Brewing, InputCommand::Return) => {
+                defmt::info!("Return on the brewing screen - stopping the brew");
+                vec![MachineCommand::StopBrewing(
+                    SingleGroupControllerGroups::SingleGroup.as_index(),
+                )]
+            }
+            // The routine screen's reading of it. This is now the *only* way to cancel from
+            // the panel: buttons 1-4 used to send `CancelRoutine` whenever one was running,
+            // and they no longer reach this screen at all. See `routine_command`.
+            (DisplayMode::RoutineExecution, InputCommand::Return) => {
+                defmt::info!("Return on the routine screen - cancelling the routine");
+                vec![MachineCommand::CancelRoutine]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Handle a button event and return the appropriate machine command
+    pub fn handle_event(&mut self, event: ButtonEvent, now: Instant) -> Vec<MachineCommand> {
         match event {
             ButtonEvent::Press(buttons) => self.handle_press(buttons),
             ButtonEvent::PressAndHoldStart(buttons) => {
-                // Exact sets, so holding {5,6} arms neither.
-                if buttons == SET_BREW {
-                    self.button_5_hold_start = Some(now);
-                } else if buttons == SET_WATER_TAP {
-                    self.button_6_hold_start = Some(now);
-                }
+                self.arm_hold(buttons, now);
                 vec![]
             }
             // The held set changed, so it is no longer a hold of exactly one of them. Cancelled
@@ -864,81 +1021,120 @@ impl ButtonEventHandler {
         }
     }
 
-    fn handle_menu_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
+    /// Start the clock on a hold, if this set has a hold meaning where we are.
+    ///
+    /// Three holds exist and each belongs to a different place:
+    ///
+    /// * **Button 3, menu only.** "Run the selected routine", and only on a row that is one.
+    ///   It is the same button that selects, which is the point: hold what you would have
+    ///   pressed, and skip the parameter screen. See `menu::activate_hold` for why the
+    ///   shortcut is a hold rather than a second row, and for the two gates it still applies.
+    /// * **Button 5, menu closed.** Opens the menu. Dropped with the menu open because
+    ///   re-opening an open menu is meaningless.
+    /// * **Button 6, idle screen only.** Captures the dose. Narrowed from "every screen": a
+    ///   three-second hold that silently replaces a dose does not belong behind a menu, or on
+    ///   a machine that is mid-shot.
+    ///
+    /// Exact sets, so holding {5,6} arms neither. The screen is checked again when the
+    /// deadline fires -- see [`Self::check_long_hold`] -- because seconds are long enough for
+    /// the machine to have moved underneath the finger.
+    fn arm_hold(&mut self, buttons: ButtonSet, now: Instant) {
+        // A hold beginning means no other one is in flight -- the recognizer emits `Stop`
+        // before the next `Start`, and a set that grows mid-gesture is a `Change`. Clearing
+        // first keeps that an invariant of this function rather than of its callers.
+        self.clear_hold_deadlines();
+
+        if self.menu.is_open() {
+            if buttons == SET_ROUTINE_2 {
+                self.button_3_hold_start = Some(now);
+            }
+            return;
+        }
+
+        if buttons == SET_BREW {
+            self.button_5_hold_start = Some(now);
+        } else if buttons == SET_WATER_TAP && self.screen() == DisplayMode::Idle {
+            self.button_6_hold_start = Some(now);
+        }
+    }
+
+    /// The menu's reading of the shared vocabulary.
+    ///
+    /// Reached from [`Self::apply_logical`], which both the panel and a dial go through; the
+    /// two are indistinguishable by the time they arrive, which is the point. `Menu` is not
+    /// one of the commands a menu reads -- [`Self::open_menu`] leaves an open one alone -- and
+    /// the panel's buttons 5 and 6 map to nothing here.
+    fn handle_menu_command(&mut self, command: InputCommand) -> Vec<MachineCommand> {
         let Some(frame) = self.menu.top() else { return vec![] };
 
-        // An editor frame has no rows, and buttons 1 and 2 move the value instead of the
-        // selection. 1 and 2 still mean "previous / next", whether what they step through is a
+        // An editor frame has no rows, and `-` and `+` move the value instead of the
+        // selection. They still mean "previous / next", whether what they step through is a
         // list, a number or a pair of clock fields.
         match frame.id.kind() {
-            MenuKind::NumberEditor => return self.handle_editor_press(buttons),
-            MenuKind::TimeEditor => return self.handle_time_editor_press(buttons),
+            MenuKind::NumberEditor => return self.handle_editor_command(command),
+            MenuKind::TimeEditor => return self.handle_time_editor_command(command),
             MenuKind::List => {}
         }
 
         // `geometry` borrows the fetched data; take the value out before touching `self` again.
         let geo = menu::geometry(frame.id, &self.menu_data());
 
-        match buttons {
-            SET_ROUTINE_0 => {
+        match command {
+            InputCommand::Decrement(_) => {
                 if let Some(frame) = self.menu.top_mut() {
                     frame.nav.up(geo);
                 }
                 vec![]
             }
-            SET_ROUTINE_1 => {
+            InputCommand::Increment(_) => {
                 if let Some(frame) = self.menu.top_mut() {
                     frame.nav.down(geo);
                 }
                 vec![]
             }
-            SET_ROUTINE_2 => self.activate_selected(),
-            SET_ROUTINE_3 => {
+            InputCommand::Activate => self.activate_selected(),
+            InputCommand::Return => {
                 self.pop_menu();
                 vec![]
             }
-            // The on-board button is not one of the six panel buttons. The menu can be opened
-            // mid-steam, and losing valve control behind a menu is not acceptable.
-            #[cfg(feature = "pwm-steam-valve")]
-            SET_STEAM_VALVE => self.cycle_steam_valve(),
-            // Buttons 5 and 6, and every chord, are inert here.
             _ => vec![],
         }
     }
 
-    /// Buttons on an editor frame: 1 decreases, 2 increases, 3 confirms, 4 cancels.
+    /// An editor frame: `-` decreases, `+` increases, Select confirms, Return cancels.
     ///
-    /// 1 and 2 are doing exactly what they do in a list -- the panel marks them `-` and `+`,
-    /// and *less* applied to a number is a smaller number the same way *previous* applied to a
-    /// list is the row above. Nothing is inverted between the two screens; see the module docs.
+    /// `-` and `+` are doing exactly what they do in a list -- the panel marks buttons 1 and 2
+    /// with them, and *less* applied to a number is a smaller number the same way *previous*
+    /// applied to a list is the row above. Nothing is inverted between the two screens; see
+    /// the module docs.
     ///
-    /// 3 and 4 do change, from Select/Back to Confirm/Cancel, because leaving an editor
-    /// without committing is a real choice here rather than the only one.
-    fn handle_editor_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
+    /// Select and Return do change, from Select/Back to Confirm/Cancel, because leaving an
+    /// editor without committing is a real choice here rather than the only one.
+    fn handle_editor_command(&mut self, command: InputCommand) -> Vec<MachineCommand> {
         let Some(frame) = self.menu.top() else { return vec![] };
         let id = frame.id;
 
-        match buttons {
-            SET_ROUTINE_0 => {
+        match command {
+            InputCommand::Decrement(_) => {
                 if let Some(EditorState::Number(editor)) = self.editor.as_mut() {
                     editor.decrease();
                 }
                 vec![]
             }
-            SET_ROUTINE_1 => {
+            InputCommand::Increment(_) => {
                 if let Some(EditorState::Number(editor)) = self.editor.as_mut() {
                     editor.increase();
                 }
                 vec![]
             }
-            SET_ROUTINE_2 => {
+            InputCommand::Activate => {
                 let Some(value) = self.editor.and_then(EditorState::number).map(|e| e.value())
                 else {
                     return vec![];
                 };
                 // A parameter's value never leaves this task until the routine runs; only the
                 // brew setpoint produces a command, and the controller persists that itself.
-                let command = menu::confirm_editor(id, value, &self.menu_config);
+                let machine_command = menu::confirm_editor(id, value, &self.menu_config);
                 if let MenuId::EditParameter { position, .. } = id {
                     self.values.set(position as usize, value);
                 }
@@ -959,58 +1155,57 @@ impl ButtonEventHandler {
                 }
                 defmt::info!("Menu: confirmed editor at {}", value);
                 self.pop_menu();
-                command.into_iter().collect()
+                machine_command.into_iter().collect()
             }
-            SET_ROUTINE_3 => {
+            InputCommand::Return => {
                 self.pop_menu();
                 vec![]
             }
-            #[cfg(feature = "pwm-steam-valve")]
-            SET_STEAM_VALVE => self.cycle_steam_valve(),
             _ => vec![],
         }
     }
 
-    /// Buttons on the time editor: 1 less, 2 more, 3 switches field, **4 commits**.
+    /// The time editor: `-` less, `+` more, Select switches field, **Return commits**.
     ///
-    /// 1 and 2 mean what they mean everywhere else on this panel -- `-` and `+` applied to
-    /// whichever half of `HH:MM` is selected.
+    /// `-` and `+` mean what they mean everywhere else -- applied to whichever half of
+    /// `HH:MM` is selected.
     ///
     /// **There is no cancel, and that is the deliberate difference from every other editor
-    /// here.** A time has two fields and this panel has four buttons, so button 3 is spent on
-    /// switching between them -- which leaves 4 as the only button that can leave the screen.
-    /// A 4 that discarded the edit would make the screen a dead end with no way to keep a
-    /// change, so it commits. The hint row reads `4 Done` rather than `4 Back` for exactly
-    /// that reason: this is the one screen in the menu where 4 does not mean "back".
+    /// here.** A time has two fields and this vocabulary has four commands to spend on them,
+    /// so Select is spent on switching between them -- which leaves Return as the only one
+    /// that can leave the screen. A Return that discarded the edit would make the screen a
+    /// dead end with no way to keep a change, so it commits. The hint row reads `4 Done`
+    /// rather than `4 Back` for exactly that reason: this is the one screen in the menu where
+    /// Return does not mean "back".
     ///
     /// The command itself is not built here. `UpdateScheduleItem` replaces the stored item
     /// wholesale, so it needs the schedule's `on_days`, `on_date`, `once` and `commands` --
     /// which only the store has, and reading it means awaiting a lock this synchronous path
     /// must not take. The change is recorded and the task loop resolves it.
-    fn handle_time_editor_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
+    fn handle_time_editor_command(&mut self, command: InputCommand) -> Vec<MachineCommand> {
         let Some(frame) = self.menu.top() else { return vec![] };
         let MenuId::EditScheduleTime(index) = frame.id else { return vec![] };
 
-        match buttons {
-            SET_ROUTINE_0 => {
+        match command {
+            InputCommand::Decrement(_) => {
                 if let Some(EditorState::Time(time)) = self.editor.as_mut() {
                     time.decrease();
                 }
                 vec![]
             }
-            SET_ROUTINE_1 => {
+            InputCommand::Increment(_) => {
                 if let Some(EditorState::Time(time)) = self.editor.as_mut() {
                     time.increase();
                 }
                 vec![]
             }
-            SET_ROUTINE_2 => {
+            InputCommand::Activate => {
                 if let Some(EditorState::Time(time)) = self.editor.as_mut() {
                     time.next_field();
                 }
                 vec![]
             }
-            SET_ROUTINE_3 => {
+            InputCommand::Return => {
                 if let Some(time) = self.editor.and_then(EditorState::time) {
                     defmt::info!(
                         "Menu: committing schedule {} at {}:{}",
@@ -1026,8 +1221,6 @@ impl ButtonEventHandler {
                 self.pop_menu();
                 vec![]
             }
-            #[cfg(feature = "pwm-steam-valve")]
-            SET_STEAM_VALVE => self.cycle_steam_valve(),
             _ => vec![],
         }
     }
@@ -1201,17 +1394,26 @@ impl ButtonEventHandler {
 
     /// Handle a button press event
     fn handle_press(&mut self, buttons: ButtonSet) -> Vec<MachineCommand> {
-        // The "any button while Off turns it On" rule is gone: it made every button on the panel
-        // a power button, which is exactly what makes `{5,3}` worth having. The controller
-        // already refuses `RunRoutine`, `StartBrewing` and `StartPumpingToWaterTap` while not in
-        // `On` (dual_boiler_single_group.rs:1787, 1811, 1832), so a press on a cold machine costs
-        // a log line and nothing else, and a mode gate here would be the same rule in two places.
-        match buttons {
-            SET_ROUTINE_0 => self.routine_command(ROUTINE_BUTTON_0),
-            SET_ROUTINE_1 => self.routine_command(ROUTINE_BUTTON_1),
-            SET_ROUTINE_2 => self.routine_command(ROUTINE_BUTTON_2),
-            SET_ROUTINE_3 => self.routine_command(ROUTINE_BUTTON_3),
-            SET_BREW => {
+        // The on-board button is not one of the six panel buttons and is not part of the
+        // vocabulary. It works on every screen, menus included: the menu can be opened
+        // mid-steam, and losing valve control behind a menu is not acceptable.
+        #[cfg(feature = "pwm-steam-valve")]
+        if buttons == SET_STEAM_VALVE {
+            return self.cycle_steam_valve();
+        }
+
+        // The menu reads the whole vocabulary and gives nothing else a meaning, so it needs no
+        // screen: map and hand it straight over.
+        if self.menu.is_open() {
+            return match logical_for(buttons) {
+                Some(command) => self.apply_logical(command),
+                None => vec![],
+            };
+        }
+
+        match resolve(self.screen(), buttons) {
+            PanelMeaning::Routine(index) => self.routine_command(index as usize),
+            PanelMeaning::ToggleBrew => {
                 let group_index = SingleGroupControllerGroups::SingleGroup.as_index();
                 vec![if self.brewing_active {
                     MachineCommand::StopBrewing(group_index)
@@ -1219,20 +1421,21 @@ impl ButtonEventHandler {
                     MachineCommand::StartBrewing(group_index)
                 }]
             }
-            SET_WATER_TAP => vec![if self.water_dispensing_active {
+            PanelMeaning::ToggleWater => vec![if self.water_dispensing_active {
                 MachineCommand::StopPumpingToWaterTap(0)
             } else {
                 MachineCommand::StartPumpingToWaterTap(0)
             }],
-            SET_POWER => vec![MachineCommand::SetMachineMode(match self.machine_mode {
-                // Anything that is not On becomes On -- `PowerSaveStandby` included, so the one
-                // chord is the one way back from either resting state.
-                MachineMode::On => MachineMode::Off,
-                _ => MachineMode::On,
-            })],
-            #[cfg(feature = "pwm-steam-valve")]
-            SET_STEAM_VALVE => self.cycle_steam_valve(),
-            _ => vec![],
+            PanelMeaning::TogglePower => {
+                vec![MachineCommand::SetMachineMode(match self.machine_mode {
+                    // Anything that is not On becomes On -- `PowerSaveStandby` included, so the
+                    // one chord is the one way back from either resting state.
+                    MachineMode::On => MachineMode::Off,
+                    _ => MachineMode::On,
+                })]
+            }
+            PanelMeaning::Logical(command) => self.apply_logical(command),
+            PanelMeaning::Inert => vec![],
         }
     }
 
@@ -1254,12 +1457,18 @@ impl ButtonEventHandler {
     /// Closing it properly means caching the four routines' prerequisites on this handler,
     /// refreshed off `ROUTINES_CHANGED` at the existing lock point rather than per press.
     /// Until then the refusal is real but invisible here.
+    ///
+    /// **These buttons no longer cancel.** They used to send `CancelRoutine` whenever a
+    /// routine was running, but they are only reachable from the idle screen now, and the
+    /// idle screen is by definition the one where none is -- `screen()` returns
+    /// `RoutineExecution` off the same `routine_executing` flag the old branch tested, so it
+    /// could not be true here. Cancelling is `Return`'s meaning on the routine screen, which
+    /// is button 4 and also a dial's Return key. See [`Self::apply_logical`].
     fn routine_command(&self, button_idx: usize) -> Vec<MachineCommand> {
-        vec![if self.routine_executing {
-            MachineCommand::CancelRoutine
-        } else {
-            MachineCommand::RunRoutine(RoutineIndex::Function(button_idx as u32), None)
-        }]
+        vec![MachineCommand::RunRoutine(
+            RoutineIndex::Function(button_idx as u32),
+            None,
+        )]
     }
 
     #[cfg(feature = "pwm-steam-valve")]
@@ -1279,12 +1488,13 @@ impl ButtonEventHandler {
         }
     }
 
-    /// Fire the two long holds.
+    /// Fire the long holds.
     ///
-    /// Button 5 held opens the menu; button 6 held tags the group scale's reading as the dose
-    /// for the next shot.
+    /// Button 5 held opens the menu; button 6 held, **on the idle screen only**, tags the
+    /// group scale's reading as the dose for the next shot; button 3 held, **in the menu
+    /// only**, runs the selected routine.
     ///
-    /// **Both are measured from finger-down, not from the hold event.** The deadlines are armed
+    /// **All are measured from finger-down, not from the hold event.** The deadlines are armed
     /// at `PressAndHoldStart`, which the recognizer emits `SETTLING_DELAY_MS +
     /// PRESS_AND_HOLD_THRESHOLD_MS` after the button went down, so that offset is subtracted
     /// here and the constants below are the numbers a user experiences. The hold this replaces
@@ -1311,17 +1521,27 @@ impl ButtonEventHandler {
         /// it a press at 550 ms, so the two are nowhere near each other.
         const RUN_ROUTINE_HOLD_MS: u64 = 1500;
 
+        // Each hold belongs to a place, and a hold that began in one and outlived it must not
+        // fire in another. `arm_hold` gates them on the way in; these are the same gates
+        // re-checked on the way out, because seconds are long enough for the menu to have
+        // closed or a schedule to have started a routine since the finger went down.
+        //
         // With the menu open the six panel buttons belong to the menu -- holds included,
-        // except the two the menu gives its own meaning: button 6 captures a dose anywhere,
-        // and button 3 runs the selected routine. See `handle_event` for why those are
-        // meanings the menu has rather than holes in the capture. Button 5's deadline is
-        // still dropped here: re-opening an open menu is meaningless.
+        // except the one the menu gives its own meaning: button 3 runs the selected routine.
+        // See `arm_hold` for why that is a meaning the menu has rather than a hole in the
+        // capture. Button 5's deadline is dropped: re-opening an open menu is meaningless.
         if self.menu.is_open() {
             self.button_5_hold_start = None;
         } else {
-            // And the converse: button 3's meaning is the menu's alone. A hold that began
-            // inside the menu and outlived it must not fire against a closed one.
+            // And the converse: button 3's meaning is the menu's alone.
             self.button_3_hold_start = None;
+        }
+
+        // Button 6's dose capture belongs to the idle screen. Dropped rather than deferred:
+        // a brew starting under a three-second hold means the gesture was aimed at a machine
+        // that no longer exists, and a dose silently replaced is not correctable from here.
+        if self.menu.is_open() || self.screen() != DisplayMode::Idle {
+            self.button_6_hold_start = None;
         }
 
         if let Some(started) = self.button_3_hold_start {
@@ -1644,7 +1864,7 @@ pub async fn button_controller_task(
         // stopped.
         while let Ok(command) = crate::INPUT_COMMAND_CHANNEL.try_receive() {
             defmt::debug!("Input command: {:?}", command);
-            for machine_command in handler.handle_input_command(command, Instant::now()) {
+            for machine_command in handler.handle_input_command(command) {
                 if command_sender.try_send(machine_command).is_err() {
                     defmt::warn!("Failed to send command - channel full");
                 }

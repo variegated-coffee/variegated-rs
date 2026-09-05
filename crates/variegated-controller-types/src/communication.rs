@@ -296,16 +296,23 @@ pub enum CommsProcessorToApplicationProcessorMessage {
 
 /// What an input device asks the machine's UI to do.
 ///
-/// Semantic rather than physical. Each control firmware maps these onto whatever its own
-/// input hardware would have produced -- the GS3 onto the panel button that means the same
-/// thing, the Silvia onto an encoder detent -- so one dial means on each machine what that
-/// machine's own controls mean, and neither firmware grows a second UI.
+/// Semantic rather than physical, and **the vocabulary each firmware's own controls speak**
+/// rather than a translation layer in front of them. The GS3 maps its panel buttons into
+/// these and dispatches the result; the Silvia turns them into the encoder events its PIO
+/// would have produced. So a dial and a button that mean the same thing are the same call,
+/// and neither firmware grows a second UI that drifts from the first.
 ///
 /// This is deliberately the panel's vocabulary and not the menu's. `-`, `+`, Select and
-/// Return are what the buttons *mean*; every screen reads that one vocabulary against
-/// whatever it is showing, and the idle screen -- which reads them as "run routine 0-3" --
-/// is one screen's reading of it rather than a mode. So nothing here has to know whether a
-/// menu is open, and no injection site branches on it.
+/// Return are what the controls *mean*; every screen reads that one vocabulary against
+/// whatever it is showing, and gives it whatever meaning it has there -- on the GS3 `Return`
+/// backs out of a menu, stops a brew and cancels a routine, because that is what backing out
+/// amounts to on each of those screens. Nothing here has to know whether a menu is open, and
+/// no injection site branches on it.
+///
+/// **A screen may also give its hardware buttons meanings that are not in this vocabulary,
+/// and those are unreachable from here.** The GS3's idle screen reads its six buttons as "run
+/// routine 0-3", "brew" and "water"; none of that is expressible as an `InputCommand`, which
+/// is exactly why turning a dial on that screen cannot start a shot.
 ///
 /// **Append-only**, for the reason given on
 /// [`CommsProcessorToApplicationProcessorMessage::DebugCommand`].
@@ -331,9 +338,15 @@ pub enum InputCommand {
     /// Open the menu -- what holding the GS3's button 5 does.
     ///
     /// A command of its own because the menu opens on a *hold*, and a device that sends
-    /// discrete commands has no hold to send. Without it a dial could only ever reach the
-    /// idle screen's reading of the vocabulary. Ignored on the Silvia, where the encoder
-    /// press already enters the menu from idle and [`Self::Activate`] therefore covers it.
+    /// discrete commands has no hold to send. Without it a dial would have no way off the
+    /// GS3's idle screen at all: the rest of this vocabulary means nothing there, because
+    /// that screen's buttons are spent on routines, brew and water. Ignored on the Silvia,
+    /// where the encoder press already enters the menu from idle and [`Self::Activate`]
+    /// therefore covers it.
+    ///
+    /// Opening a menu that is already open does nothing -- there is no hold here to
+    /// distinguish "open" from "go back to the root" with, and silently collapsing the stack
+    /// is a destructive answer to a press that means neither.
     Menu,
     /// Reserved. Carried and logged, bound to nothing.
     ///
