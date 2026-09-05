@@ -17,45 +17,43 @@
 //!
 //! This is pure index arithmetic over two byte slices, so it lives where it can be run.
 //!
-//! # What the shape of the output costs
+//! # Why the output is row bands and not rectangles
 //!
 //! The driver sends a full-width region as **one** contiguous transfer, and a partial-width
-//! region **row by row**, one transfer per row. At the GS3's 10 MHz that per-transfer
-//! overhead is small next to the bytes -- a 100x100 partial region is ~17 ms row-by-row
-//! against ~68 ms if it were widened to the panel's 428 columns -- so this code minimises
-//! *bytes*, not rectangles. Do not widen regions to reach the contiguous path; on a slower
-//! bus that arithmetic reverses, and it is written out here so the next person can redo it
-//! rather than guess.
+//! region **row by row** -- one `send_data` per row, each with its own bus lock and DMA
+//! setup. That asymmetry decides the whole design.
+//!
+//! This started as arbitrary rectangles, which is the obvious thing and is wrong here. On a
+//! real menu frame the diff came back as about fifty rectangles: text fragments a row into
+//! runs, and runs on neighbouring rows do not line up. Fifty partial-width rectangles of
+//! ~18 rows each is ~900 transfers, which is worse than simply resending the screen -- so
+//! the driver correctly fell back to a full repaint every single frame, and the delta path
+//! never ran at all.
+//!
+//! Bands sidestep it. Horizontal detail is exactly the part the hardware refuses to make
+//! cheap, so this does not track it: a row either changed or it did not, and contiguous
+//! changed rows become one full-width band sent as one transfer. A two-row menu selection
+//! move is then 36 rows -- 30,816 bytes against the framebuffer's 143,808.
+//!
+//! The cost is sending untouched pixels either side of a narrow change. That is the right
+//! trade for text and gauges, where a row that changes usually changes across its width;
+//! it would be the wrong one for a display whose updates are tall and narrow, and on a much
+//! faster bus the per-transfer overhead stops dominating and rectangles become worth their
+//! complexity again. The arithmetic is written out here so the next person can redo it
+//! rather than guess at it.
 
 // The tests build framebuffers of a real panel's size, which wants an allocator. The crate
 // itself stays `no_std`.
 #[cfg(test)]
 extern crate std;
 
-/// The most rectangles a single frame may be described by.
+/// The most bands a single frame may be described by.
 ///
-/// Reaching it is not a cliff. [`DoubleBuffer::detect_changes`] degrades by widening an
-/// existing rectangle rather than giving up and redrawing the screen, which is what the
-/// implementation this replaced did -- and it did it constantly, because it emitted one
-/// rectangle per changed row *before* merging, so any change touching more than 128 rows of
-/// a 168-row panel became a full-screen repaint.
+/// A band needs at least one unchanged row to separate it from the next, so a panel of
+/// `H` rows cannot produce more than `H / 2` bands however busy it is -- 84 for the GS3's
+/// 168. This is sized past that on purpose: the bound is structural, and a cap that cannot
+/// be reached needs no degradation path to get wrong.
 pub const MAX_REGIONS: usize = 128;
-
-/// The most separate changed spans one row may contribute before they are coalesced.
-///
-/// A row with more spans than this has its changes covered by a single span from the first
-/// change to the last. That over-sends the gaps, which is cheaper than tracking detail no
-/// realistic screen produces: this is text and gauges, not noise.
-const MAX_RUNS_PER_ROW: usize = 32;
-
-/// How close two spans must be, vertically, to be treated as one rectangle.
-///
-/// Rows are visited in order, so a rectangle is extended only from the row immediately
-/// above. The tolerance is horizontal: a span may extend a rectangle whose columns it
-/// overlaps, or misses by no more than this. Text descends and ascends by a pixel or two
-/// between rows, and splitting a glyph into a rectangle per row is what makes a region list
-/// explode.
-const X_JOIN_TOLERANCE: u16 = 8;
 
 /// A rectangular region in pixel coordinates, inclusive on both bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,16 +97,9 @@ impl Region {
         }
     }
 
-    /// Whether a span on the row below could extend this region without widening it much.
-    fn accepts_span(&self, span_x0: u16, span_x1: u16) -> bool {
-        let gap = if self.x1 < span_x0 {
-            span_x0 - self.x1
-        } else if span_x1 < self.x0 {
-            self.x0 - span_x1
-        } else {
-            0
-        };
-        gap <= X_JOIN_TOLERANCE
+    /// Rows this region spans.
+    pub const fn row_count(&self) -> u16 {
+        self.y1 - self.y0 + 1
     }
 }
 
@@ -130,11 +121,16 @@ impl DoubleBuffer {
         Self { width, height }
     }
 
-    /// The rectangles that differ between `current` and `previous`.
+    /// The full-width row bands that differ between `current` and `previous`.
     ///
-    /// Empty when the two are identical. Rectangles are built by scanning each row for
-    /// changed spans and extending the previous row's rectangles into this one, so a band of
-    /// rows that changed together comes back as one rectangle rather than one per row.
+    /// Empty when the two are identical. Each band is a maximal run of consecutive rows in
+    /// which at least one pixel differs, and every band spans the full width -- see the
+    /// module docs for why horizontal detail is deliberately not tracked.
+    ///
+    /// One slice comparison per row, and nothing else. Comparing two 856-byte rows is a
+    /// `memcmp` the compiler turns into word-at-a-time work; the rectangle-based version
+    /// this replaced walked every pixel of the panel individually and then ran up to ten
+    /// O(n²) merge passes over the result.
     pub fn detect_changes(
         &self,
         current: &[u8],
@@ -142,13 +138,10 @@ impl DoubleBuffer {
     ) -> heapless::Vec<Region, MAX_REGIONS> {
         let mut regions: heapless::Vec<Region, MAX_REGIONS> = heapless::Vec::new();
         let row_stride = (self.width as usize) * 2;
+        let last_column = self.width - 1;
 
-        // Indices into `regions` for the rectangles left open by the previous row, and the
-        // ones this row leaves open. A rectangle not extended by a row is simply never
-        // touched again -- there is no close step, because rows are visited in order.
-        let mut open_prev: heapless::Vec<usize, MAX_RUNS_PER_ROW> = heapless::Vec::new();
-        let mut open_cur: heapless::Vec<usize, MAX_RUNS_PER_ROW> = heapless::Vec::new();
-        let mut spans: heapless::Vec<(u16, u16), MAX_RUNS_PER_ROW> = heapless::Vec::new();
+        // The band being extended, if the previous row changed.
+        let mut open: Option<Region> = None;
 
         for y in 0..self.height {
             let row_offset = (y as usize) * row_stride;
@@ -157,131 +150,30 @@ impl DoubleBuffer {
                 break;
             }
 
-            self.row_spans(
-                &current[row_offset..row_end],
-                &previous[row_offset..row_end],
-                &mut spans,
-            );
+            let changed = current[row_offset..row_end] != previous[row_offset..row_end];
 
-            open_cur.clear();
-            if spans.is_empty() {
-                // Nothing changed on this row, so no rectangle above it can reach any
-                // further down and all of them are closed.
-                open_prev.clear();
-                continue;
-            }
-
-            for &(sx0, sx1) in spans.iter() {
-                // The first still-unclaimed rectangle from the row above whose columns this
-                // span can join. Claimed by removal, so two spans on this row cannot both
-                // extend one rectangle and swallow the gap between them.
-                let matched = open_prev
-                    .iter()
-                    .position(|&ri| regions[ri].accepts_span(sx0, sx1));
-
-                match matched {
-                    Some(pos) => {
-                        let ri = open_prev.swap_remove(pos);
-                        let region = &mut regions[ri];
-                        region.y1 = y;
-                        region.x0 = region.x0.min(sx0);
-                        region.x1 = region.x1.max(sx1);
-                        let _ = open_cur.push(ri);
-                    }
-                    None => {
-                        let fresh = Region::new(sx0, y, sx1, y);
-                        match regions.push(fresh) {
-                            Ok(()) => {
-                                let _ = open_cur.push(regions.len() - 1);
-                            }
-                            Err(_) => {
-                                // Out of rectangles. Widen the nearest one rather than
-                                // abandoning the delta -- an over-sent gap costs bytes,
-                                // where a full-screen repaint costs the whole frame.
-                                if let Some(nearest) = self.nearest_region(&regions, &fresh) {
-                                    regions[nearest] = regions[nearest].merge(&fresh);
-                                    let _ = open_cur.push(nearest);
-                                }
-                            }
-                        }
-                    }
+            match (&mut open, changed) {
+                // Extend the band through this row.
+                (Some(band), true) => band.y1 = y,
+                // The band ended on the row above.
+                (Some(_), false) => {
+                    // Cannot fail in practice -- a band needs a gap row after it, so a panel
+                    // of `height` rows yields at most `height / 2` bands and `MAX_REGIONS`
+                    // is sized past that. Dropped rather than asserted if it ever does: a
+                    // lost band is a stale strip on the panel, where a panic is a dead
+                    // machine.
+                    let _ = regions.push(open.take().expect("matched Some"));
                 }
+                (None, true) => open = Some(Region::new(0, y, last_column, y)),
+                (None, false) => {}
             }
+        }
 
-            core::mem::swap(&mut open_prev, &mut open_cur);
+        if let Some(band) = open.take() {
+            let _ = regions.push(band);
         }
 
         regions
-    }
-
-    /// Changed spans on one row, as inclusive `(x0, x1)` column pairs.
-    ///
-    /// Compares four pixels at a time and only looks at individual pixels inside a group
-    /// that differs. The implementation this replaced claimed to do this in a comment and
-    /// did not: it compared two bytes per pixel with a bounds check inside the inner loop,
-    /// over every pixel of the panel, on both buffers, every frame.
-    fn row_spans(
-        &self,
-        current_row: &[u8],
-        previous_row: &[u8],
-        spans: &mut heapless::Vec<(u16, u16), MAX_RUNS_PER_ROW>,
-    ) {
-        spans.clear();
-
-        // Whole-row equality first. Most rows of most frames are untouched, and this settles
-        // them in one comparison.
-        if current_row == previous_row {
-            return;
-        }
-
-        const GROUP: u16 = 4;
-        let mut run_start: Option<u16> = None;
-        let mut x: u16 = 0;
-
-        while x < self.width {
-            let group = GROUP.min(self.width - x);
-            let offset = (x as usize) * 2;
-            let len = (group as usize) * 2;
-
-            if current_row[offset..offset + len] == previous_row[offset..offset + len] {
-                if let Some(start) = run_start.take() {
-                    push_span(spans, start, x - 1);
-                }
-            } else {
-                for i in 0..group {
-                    let pixel = offset + (i as usize) * 2;
-                    let changed = current_row[pixel] != previous_row[pixel]
-                        || current_row[pixel + 1] != previous_row[pixel + 1];
-                    let column = x + i;
-                    match (run_start, changed) {
-                        (None, true) => run_start = Some(column),
-                        (Some(start), false) => {
-                            push_span(spans, start, column - 1);
-                            run_start = None;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            x += group;
-        }
-
-        if let Some(start) = run_start {
-            push_span(spans, start, self.width - 1);
-        }
-    }
-
-    /// The index of the region whose bounding box grows least by absorbing `candidate`.
-    fn nearest_region(&self, regions: &[Region], candidate: &Region) -> Option<usize> {
-        let mut best: Option<(usize, usize)> = None;
-        for (index, region) in regions.iter().enumerate() {
-            let cost = region.merge(candidate).pixel_count() - region.pixel_count();
-            if best.map(|(_, b)| cost < b).unwrap_or(true) {
-                best = Some((index, cost));
-            }
-        }
-        best.map(|(index, _)| index)
     }
 
     /// Whether sending `regions` is worse than simply sending the whole framebuffer.
@@ -293,14 +185,16 @@ impl DoubleBuffer {
             return false;
         }
 
-        let total_changed: usize = regions.iter().map(|r| r.pixel_count()).sum();
-        let total_pixels = (self.width as usize) * (self.height as usize);
-
-        // 70% by pixels. Deliberately not a rectangle count any more: the old rule also
-        // forced a full update above 80 rectangles, which punished a frame for being
-        // *detailed* rather than for being large, and a partial-width rectangle costs one
-        // transfer per row regardless of how many rectangles share the frame.
-        total_changed * 10 > total_pixels * 7
+        // By rows, because rows are what gets sent. Every band is full-width and costs one
+        // transfer, so the only thing separating the delta path from the full path is how
+        // many rows go out -- a frame is not more expensive for being detailed, and the
+        // count of bands does not enter into it.
+        //
+        // 70% is where the saving stops being worth the extra transfers and the gap rows'
+        // address-window commands. Below it the delta always wins; a fraction of the panel
+        // costs that fraction of the wire.
+        let changed_rows: usize = regions.iter().map(|r| r.row_count() as usize).sum();
+        changed_rows * 10 > (self.height as usize) * 7
     }
 
     /// Bring `previous` up to date with what was actually sent.
@@ -350,15 +244,6 @@ impl DoubleBuffer {
     }
 }
 
-/// Record a span, coalescing into the last one if the row has produced too many.
-fn push_span(spans: &mut heapless::Vec<(u16, u16), MAX_RUNS_PER_ROW>, x0: u16, x1: u16) {
-    if spans.push((x0, x1)).is_err() {
-        if let Some(last) = spans.last_mut() {
-            last.1 = x1;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,26 +282,24 @@ mod tests {
         assert!(tracker().detect_changes(&current, &previous).is_empty());
     }
 
-    /// One changed pixel is one rectangle of one pixel.
+    /// One changed pixel is one band, one row tall and the full width.
+    ///
+    /// The width is the deliberate part: the driver sends a full-width band as a single
+    /// contiguous transfer, and the columns either side of the changed pixel are cheaper to
+    /// resend than to address separately.
     #[test]
-    fn a_single_pixel_is_a_single_region() {
+    fn a_single_pixel_is_one_full_width_row() {
         let previous = blank();
         let mut current = previous.clone();
         set_pixel(&mut current, 100, 50, 0xF800);
 
         let regions = tracker().detect_changes(&current, &previous);
-        assert_eq!(regions.as_slice(), &[Region::new(100, 50, 100, 50)]);
+        assert_eq!(regions.as_slice(), &[Region::new(0, 50, W - 1, 50)]);
     }
 
-    /// **The regression this rewrite exists for.**
-    ///
-    /// A band of full-width rows changing together -- a menu scrolling -- must come back as
-    /// one rectangle. The previous implementation pushed one rectangle per changed row
-    /// before merging, overflowed its 128-rectangle cap on row 128 of a 168-row panel, and
-    /// returned a single full-screen rectangle, so every scroll frame repainted all 143,808
-    /// bytes.
+    /// Consecutive changed rows are one band, however many there are.
     #[test]
-    fn a_tall_band_of_rows_is_one_region_not_one_per_row() {
+    fn consecutive_changed_rows_are_one_band() {
         let previous = blank();
         let mut current = previous.clone();
         fill_rows(&mut current, 20, 150, 0x07E0);
@@ -425,54 +308,115 @@ mod tests {
         assert_eq!(regions.as_slice(), &[Region::new(0, 20, W - 1, 150)]);
     }
 
-    /// A change taller than the rectangle cap, but narrow, stays a delta.
+    /// **The frame this rewrite exists for: a menu selection moving by one row.**
     ///
-    /// **The regression this rewrite exists for, in its sharpest form.** 131 rows is more
-    /// than `MAX_REGIONS`, and the previous implementation emitted one rectangle per changed
-    /// row before merging -- so it overflowed on row 128 and returned a single full-screen
-    /// rectangle, turning a 9%-of-the-panel edit into a 143,808-byte repaint. Row count must
-    /// have no bearing on the decision; only area may.
+    /// The GS3 menu draws four 18px rows from y=21, the selected one on a filled bar. Moving
+    /// the selection repaints two of those rows and nothing else. Text fragments each row
+    /// into runs that do not line up between rows, which is what made the rectangle-based
+    /// diff return ~50 partial-width rectangles -- roughly 900 row transfers, worse than
+    /// resending the screen, so the driver fell back to a full repaint every frame.
+    ///
+    /// As bands it is two transfers of 18 rows each.
     #[test]
-    fn a_tall_narrow_change_is_not_promoted_to_a_full_repaint() {
-        let previous = blank();
-        let mut current = previous.clone();
-        for y in 10..=140 {
-            for x in 0..=50 {
-                set_pixel(&mut current, x, y, 0x001F);
+    fn a_menu_selection_move_is_two_small_bands() {
+        const ROW_H: u16 = 18;
+        const FIRST_ROW_Y: u16 = 21;
+
+        // Text scattered across a row, the way glyphs land: short runs, unaligned between
+        // rows, with untouched columns between them.
+        let paint_texty_row = |buf: &mut [u8], top: u16, seed: u16| {
+            for y in top..top + ROW_H {
+                for run in 0..12u16 {
+                    let x0 = 6 + run * 34 + (y % 3) + seed;
+                    for x in x0..(x0 + 9).min(W - 1) {
+                        set_pixel(buf, x, y, 0xFFFF);
+                    }
+                }
             }
+        };
+
+        let mut previous = blank();
+        let mut current = blank();
+        // Four rows of text, identical in both frames...
+        for row in 0..4u16 {
+            let top = FIRST_ROW_Y + row * ROW_H;
+            paint_texty_row(&mut previous, top, 0);
+            paint_texty_row(&mut current, top, 0);
         }
+        // ...except that the selection bar moves from row 0 to row 1.
+        fill_rows(&mut previous, FIRST_ROW_Y, FIRST_ROW_Y + ROW_H - 1, 0x0001);
+        fill_rows(&mut current, FIRST_ROW_Y + ROW_H, FIRST_ROW_Y + 2 * ROW_H - 1, 0x0001);
 
         let t = tracker();
         let regions = t.detect_changes(&current, &previous);
 
-        assert_eq!(regions.as_slice(), &[Region::new(0, 10, 50, 140)]);
+        assert_eq!(
+            regions.as_slice(),
+            &[Region::new(0, FIRST_ROW_Y, W - 1, FIRST_ROW_Y + 2 * ROW_H - 1)],
+            "the two repainted rows are adjacent, so they coalesce into one band"
+        );
         assert!(
             !t.should_full_update(&regions),
-            "131 rows of 51 columns is 9% of the panel and must stay a delta, got {regions:?}"
+            "36 of 168 rows must stay a delta"
+        );
+        assert_eq!(t.bytes_for(&regions, false), 36 * 428 * 2);
+    }
+
+    /// Bands separated by untouched rows stay separate.
+    #[test]
+    fn bands_separated_by_unchanged_rows_do_not_merge() {
+        let previous = blank();
+        let mut current = previous.clone();
+        fill_rows(&mut current, 10, 20, 0xFFFF);
+        fill_rows(&mut current, 40, 50, 0xFFFF);
+
+        let regions = tracker().detect_changes(&current, &previous);
+        assert_eq!(
+            regions.as_slice(),
+            &[Region::new(0, 10, W - 1, 20), Region::new(0, 40, W - 1, 50)]
         );
     }
 
-    /// Two separated shapes stay two rectangles rather than one box spanning the gap.
+    /// Changes on the same rows but far apart horizontally cost one band, not two.
+    ///
+    /// The property that makes this design work on a fragmented frame: horizontal detail
+    /// does not multiply the transfer count.
     #[test]
-    fn distant_changes_do_not_merge_into_one_box() {
+    fn horizontally_scattered_changes_stay_one_band_per_row_run() {
         let previous = blank();
         let mut current = previous.clone();
         for y in 10..=20 {
             for x in 0..=30 {
                 set_pixel(&mut current, x, y, 0xFFFF);
             }
-        }
-        for y in 10..=20 {
             for x in 300..=330 {
                 set_pixel(&mut current, x, y, 0xFFFF);
             }
         }
 
         let regions = tracker().detect_changes(&current, &previous);
-        assert_eq!(
-            regions.as_slice(),
-            &[Region::new(0, 10, 30, 20), Region::new(300, 10, 330, 20)]
-        );
+        assert_eq!(regions.as_slice(), &[Region::new(0, 10, W - 1, 20)]);
+    }
+
+    /// The band count cannot exceed what the panel's height structurally allows.
+    ///
+    /// Every band needs an unchanged row after it, so alternating rows is the worst case:
+    /// 84 bands on a 168-row panel, inside `MAX_REGIONS`. This is why the detector has no
+    /// overflow path -- the old rectangle-based one did, and getting it wrong was what made
+    /// a tall change silently become a full repaint.
+    #[test]
+    fn alternating_rows_produce_the_structural_maximum_of_bands() {
+        let previous = blank();
+        let mut current = previous.clone();
+        let mut y = 0;
+        while y < H {
+            fill_rows(&mut current, y, y, 0xFFFF);
+            y += 2;
+        }
+
+        let regions = tracker().detect_changes(&current, &previous);
+        assert_eq!(regions.len(), (H as usize).div_ceil(2));
+        assert!(regions.len() <= MAX_REGIONS);
     }
 
     /// Every changed pixel ends up inside some rectangle.
@@ -609,17 +553,19 @@ mod tests {
         assert!(!Region::new(0, 5, W - 2, 9).is_full_width(W));
     }
 
-    /// A change in the last column and last row is still found.
+    /// A change in the very last pixel of the panel is still found.
     ///
-    /// The row scan walks four pixels at a time and 428 is not a multiple of four, so the
-    /// final group is short -- an off-by-one here loses the right-hand edge of the panel.
+    /// The bottom-right corner is where two off-by-ones show up: a row loop that stops one
+    /// row short never looks at row 167, and a row slice one pixel short never sees column
+    /// 427. Both would lose an edge of the panel silently -- the display simply keeps
+    /// showing something stale there, with nothing to log.
     #[test]
-    fn the_final_partial_group_is_scanned() {
+    fn the_last_pixel_of_the_panel_is_scanned() {
         let previous = blank();
         let mut current = previous.clone();
         set_pixel(&mut current, W - 1, H - 1, 0x8888);
 
         let regions = tracker().detect_changes(&current, &previous);
-        assert_eq!(regions.as_slice(), &[Region::new(W - 1, H - 1, W - 1, H - 1)]);
+        assert_eq!(regions.as_slice(), &[Region::new(0, H - 1, W - 1, H - 1)]);
     }
 }
