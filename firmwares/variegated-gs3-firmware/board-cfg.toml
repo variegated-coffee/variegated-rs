@@ -21,8 +21,8 @@ tx_pin = "embassy_rp::peripherals::PIN_8"
 rx_pin = "embassy_rp::peripherals::PIN_9"
 cts_pin = "embassy_rp::peripherals::PIN_10"
 rts_pin = "embassy_rp::peripherals::PIN_11"
-dma_tx = "embassy_rp::peripherals::DMA_CH4"
-dma_rx = "embassy_rp::peripherals::DMA_CH5"
+# No dma_tx/dma_rx: this link is a `BufferedUart`, which is interrupt-driven.
+# DMA_CH4 and DMA_CH5 were its channels and are unallocated.
 
 [potentiometer_peripherals]
 adc = "embassy_rp::peripherals::ADC"

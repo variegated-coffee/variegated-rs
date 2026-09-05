@@ -96,14 +96,20 @@ static FRAMES_DROPPED: AtomicU32 = AtomicU32::new(0);
 /// `tx_sender.send(..).await` and forwards `MachineCommand`s while it is at it.
 ///
 /// That was worse than latency on `single-boiler` while that board ran the link at 115200
-/// with no RTS/CTS: `embassy_rp::uart::UartRx<Async>::read` arms DMA per call, so a parked
-/// reader left only the 32-byte hardware FIFO -- about 2.8 ms before bytes were lost, COBS
-/// desynchronised and the link reported a decode error.
+/// with no RTS/CTS. The reader then used embassy-rp's DMA `UartRx<Async>::read`, which arms
+/// DMA per call, so a parked reader left only the 32-byte hardware FIFO -- about 2.8 ms
+/// before bytes were lost, COBS desynchronised and the link reported a decode error.
 ///
-/// Both boards now run 576 kbaud with hardware flow control, so a parked reader de-asserts
-/// RTS and the far end stops rather than overrunning. The reservation stays: flow control
-/// converts the failure from lost bytes into stalled telemetry, which is better but still
-/// not something a debug feature may inflict on the machine's own traffic.
+/// Two things have since removed that particular edge. Both boards run 576 kbaud with
+/// hardware flow control, so a parked reader de-asserts RTS and the far end stops rather
+/// than overrunning; and the link now uses a `BufferedUart`, whose ISR drains the FIFO into
+/// a ring buffer whether or not the reader task is being polled, so being parked no longer
+/// means being deaf.
+///
+/// The reservation stays regardless. Both of those convert the failure from lost bytes into
+/// stalled telemetry, which is better but still not something a debug feature may inflict on
+/// the machine's own traffic -- and the ring is finite, so a reader parked long enough still
+/// reaches back-pressure, just several milliseconds later than it used to.
 ///
 /// Two slots, because the reader needs one for the response it is sending and one for
 /// the next one to have somewhere to go. Refusing here is a drop like any other and is

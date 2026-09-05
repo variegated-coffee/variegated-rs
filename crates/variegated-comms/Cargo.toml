@@ -8,7 +8,10 @@ rust-version.workspace = true
 # Embassy async framework
 embassy-executor = { workspace = true, features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-futures.workspace = true
-embassy-rp = { workspace = true, features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb"] }
+# No embassy-rp. This crate runs on the application processor but names nothing from its
+# HAL: the link's endpoints arrive as `embedded_io_async::Read`/`Write`, so the firmware
+# that owns the peripheral is the only thing that has to know it is a UART. Do not add it
+# back to reach for a peripheral type -- take a trait and let the caller supply it.
 embassy-sync = { workspace = true, features = ["defmt"] }
 embassy-time = { workspace = true, features = ["defmt"] }
 variegated-timekeeping = { path = "../variegated-timekeeping", features = [] }
@@ -36,6 +39,10 @@ heapless.workspace = true
 # Core libraries
 embedded-alloc.workspace = true
 defmt.workspace = true
+# The link's two endpoints are taken as `Read`/`Write` rather than as embassy-rp's
+# concrete `UartRx`/`UartTx`, so this crate names no UART type of its own -- see the
+# note on `esp_transceiver_main`'s `RX`/`TX` parameters.
+embedded-io-async.workspace = true
 
 # Local dependencies
 variegated-controller-lib = { path = "../variegated-controller-lib" }

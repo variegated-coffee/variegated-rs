@@ -32,7 +32,7 @@ use variegated_hal::gpio::gpio_binary_heating_element::{GpioBinaryHeatingElement
 use variegated_hal::noop::NoopOutputPin;
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_rp::pwm::InputMode;
-use embassy_rp::uart::Uart;
+use embassy_rp::uart::BufferedUart;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
@@ -118,24 +118,28 @@ use variegated_controller_lib::shot_log_storage::{
 };
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
-    EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
+    // Buffered, not DMA. The ESP link carries a byte stream whose frames are delimited by
+    // COBS sentinels, not by length, and a DMA read has to be told a length up front -- so
+    // it delivered nothing until a fixed block was full, which held complete keypresses
+    // hostage to unrelated traffic. `BufferedUart`'s ISR drains the FIFO into a ring and
+    // hands the reader whatever has arrived. See `variegated_comms`'s reader loop.
+    EspIrq => uart::BufferedInterruptHandler<Esp32PeripheralsUart>;
     RotaryEncoderPioIrq => pio::InterruptHandler<RotaryEncoderPeripheralsPio>;
     QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
     // embassy-rp 0.10 made async DMA interrupt-driven, so every DMA channel
-    // passed to `Spi::new`/`Uart::new` needs a handler. All RP2350 channels
-    // share DMA_IRQ_0, and they must be bound in this struct because only one
-    // struct may bind a given interrupt and `Uart::new_with_rtscts` wants a
-    // single type covering both the UART and its DMA interrupts.
+    // passed to `Spi::new` needs a handler. All RP2350 channels share DMA_IRQ_0,
+    // and they must be bound in this struct because only one struct may bind a
+    // given interrupt and each constructor wants a single type covering every
+    // interrupt it uses.
     //
     // Channels track the `dma_tx`/`dma_rx` entries in board-cfg.toml:
-    //   CH0/CH1 internal_spi_bus, CH2/CH3 display, CH4/CH5 esp32 uart,
-    //   CH6/CH7 sd_card (PIO data path).
+    //   CH0/CH1 internal_spi_bus, CH2/CH3 display, CH6/CH7 sd_card (PIO data
+    //   path). CH4/CH5 were the esp32 uart's and are now free: that link is a
+    //   `BufferedUart`, which is interrupt-driven and takes no DMA channel.
     DmaIrq => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH3>,
-              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>,
-              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH7>;
     UsbIrq => usb::InterruptHandler<embassy_rp::peripherals::USB>;
@@ -144,6 +148,22 @@ variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
     // somewhere a `cfg` can be threaded cleanly.
     SdCardPioIrq => pio::InterruptHandler<SdCardPeripheralsPio>;
 });
+
+/// Ring capacity for each direction of the ESP link's `BufferedUart`.
+///
+/// The RX figure is the one with a justification. It is the slack the reader has to spend
+/// elsewhere before the far end has to be flow-controlled: at 576 kbaud 8N1 the link carries
+/// 57.6 kB/s, so 1024 bytes is about 17.8 ms, against the 0.55 ms the 32-byte hardware FIFO
+/// gave when this link read through DMA. The reader spends that slack inside one very large
+/// `match` on every decoded message, which is exactly when bytes used to be at risk.
+///
+/// TX shares the figure for symmetry rather than from a measurement. A ring smaller than the
+/// largest frame is still correct -- `write_all` simply blocks until the ISR has drained
+/// enough -- and outbound frames reach roughly 4 kB at the shot-log listing's budget, so no
+/// plausible ring holds one whole. 1024 is margin, not a threshold.
+const ESP_UART_BUF_LEN: usize = 1024;
+static ESP_UART_TX_BUF: StaticCell<[u8; ESP_UART_BUF_LEN]> = StaticCell::new();
+static ESP_UART_RX_BUF: StaticCell<[u8; ESP_UART_BUF_LEN]> = StaticCell::new();
 
 // Embassy task wrapper for ESP transceiver (single-boiler)
 #[embassy_executor::task]
@@ -171,16 +191,17 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     config.baudrate = baudrate;
 
     // Argument order is tx, rx, **rts, cts** -- the pair is easy to transpose, and doing so
-    // deadlocks the link rather than failing to build.
-    let uart = Uart::new_with_rtscts(
+    // deadlocks the link rather than failing to build. The two buffers that follow are
+    // **tx then rx**, which is the opposite order to the DMA channels this used to take.
+    let uart = BufferedUart::new_with_rtscts(
         esp_p.uart,
         esp_p.tx_pin,
         esp_p.rx_pin,
         esp_p.rts_pin,
         esp_p.cts_pin,
         Irqs,
-        esp_p.dma_rx,
-        esp_p.dma_tx,
+        ESP_UART_TX_BUF.init([0; ESP_UART_BUF_LEN]),
+        ESP_UART_RX_BUF.init([0; ESP_UART_BUF_LEN]),
         config
     );
 
@@ -201,7 +222,7 @@ async fn esp_transceiver_task(esp_p: Esp32Peripherals, status_receiver: StatusSu
     // not "all nine arms are alive".
     watch(
         MONITOR.claim(CheckinId::EspTransceiver),
-        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver), Some(input_command_sender), Some(bond_store)),
+        esp_transceiver_main::<_, _, NoopDispatcher, _, NoopRawMutex, _, _, _, _, _>(uart_tx, uart_rx, baudrate, status_receiver, configuration_receiver, routine_repository, command_sender, machine_definition, None, debug_command_sender, None, None, Some(bluetooth_scan_receiver), shot_log_query_sender, shot_log_reply_receiver, shot_log_event_receiver, Some(wifi_credentials_receiver), Some(wifi_provisioning_receiver), Some(shot_upload_config_receiver), Some(input_command_sender), Some(bond_store)),
     ).await;
 }
 
@@ -315,8 +336,6 @@ struct Esp32Peripherals {
     rx_pin: Peri<'static, ()>,
     cts_pin: Peri<'static, ()>,
     rts_pin: Peri<'static, ()>,
-    dma_tx: Peri<'static, ()>,
-    dma_rx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("qwiic_i2c_bus_peripherals")]

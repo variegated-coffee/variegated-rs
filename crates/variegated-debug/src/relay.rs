@@ -497,34 +497,53 @@ mod tests {
             "the worst case on this link is expected to sit exactly on MAX_FRAME"
         );
 
-        // The size the link actually uses, fed in the 8-byte reads
-        // `esp_transceiver_main` performs -- the chunking matters, because
+        // Fed in chunks, because the chunking is part of what this covers:
         // `CobsAccumulator` decides `OverFull` per feed against what it has already
         // buffered, not against the message as a whole.
-        let mut accumulator: CobsAccumulator<4096> = CobsAccumulator::new();
-        let mut decoded = false;
-        for chunk in on_the_wire.chunks(8) {
-            let mut window = chunk;
-            while !window.is_empty() {
-                window = match accumulator.feed::<Inbound>(window) {
-                    FeedResult::Consumed => break,
-                    FeedResult::OverFull(_) => panic!(
-                        "4096 bytes must hold the largest command the codec accepts ({} B)",
-                        on_the_wire.len()
-                    ),
-                    FeedResult::DeserError(_) => {
-                        panic!("the message the comms processor sent must decode")
-                    }
-                    FeedResult::Success { data, remaining } => {
-                        // `DebugCommand` has no `Debug` and no `PartialEq` by design,
-                        // so this checks the shape rather than comparing values.
-                        assert!(matches!(data, Inbound::DebugCommand(DebugCommand::Machine(_))));
-                        decoded = true;
-                        remaining
-                    }
-                };
+        //
+        // A range of sizes rather than one. This used to pin `chunks(8)`, naming the
+        // fixed 8-byte reads `esp_transceiver_main` performed through embassy-rp's DMA
+        // `read`. It reads through a `BufferedUart` now and takes whatever has arrived,
+        // which is a single byte on an idle link and up to its whole buffer on a busy
+        // one -- so a range is the honest fixture for a reader whose chunk size is
+        // decided by traffic rather than by the code. 1 and 7 are the pathological small
+        // reads (7 being a keypress frame, the size that motivated the change), 64 is
+        // the reader's buffer, and one chunk of everything is the degenerate case.
+        for chunk_len in [1usize, 7, 8, 64, on_the_wire.len()] {
+            let mut accumulator: CobsAccumulator<4096> = CobsAccumulator::new();
+            let mut decoded = false;
+            for chunk in on_the_wire.chunks(chunk_len) {
+                let mut window = chunk;
+                while !window.is_empty() {
+                    window = match accumulator.feed::<Inbound>(window) {
+                        FeedResult::Consumed => break,
+                        FeedResult::OverFull(_) => panic!(
+                            "4096 bytes must hold the largest command the codec accepts \
+                             ({} B, fed {chunk_len} at a time)",
+                            on_the_wire.len()
+                        ),
+                        FeedResult::DeserError(_) => panic!(
+                            "the message the comms processor sent must decode \
+                             (fed {chunk_len} bytes at a time)"
+                        ),
+                        FeedResult::Success { data, remaining } => {
+                            // `DebugCommand` has no `Debug` and no `PartialEq` by design,
+                            // so this checks the shape rather than comparing values.
+                            assert!(matches!(
+                                data,
+                                Inbound::DebugCommand(DebugCommand::Machine(_))
+                            ));
+                            decoded = true;
+                            remaining
+                        }
+                    };
+                }
             }
+            assert!(
+                decoded,
+                "the command must arrive whole at the application processor, \
+                 fed {chunk_len} bytes at a time"
+            );
         }
-        assert!(decoded, "the command must arrive whole at the application processor");
     }
 }

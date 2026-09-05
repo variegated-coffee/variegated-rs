@@ -28,7 +28,7 @@ use variegated_ads124s08::{WaitStrategy, ADS124S08};
 use variegated_hal::{Boiler, Group, WaterTap, PeripheralRegistry, WithTask, Tank, SensorReading};
 use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_futures::select::{select, select4, Either, Either4};
-use embassy_rp::uart::Uart;
+use embassy_rp::uart::BufferedUart;
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Watch};
@@ -150,31 +150,35 @@ use variegated_debug::usb_cdc::{self, DebugUsbResources};
 static HEAP: Heap = Heap::empty();
 
 variegated_board_cfg::aliased_bind_interrupts!(struct Irqs {
-    EspIrq => uart::InterruptHandler<Esp32PeripheralsUart>;
+    // Buffered, not DMA. The ESP link carries a byte stream whose frames are delimited by
+    // COBS sentinels, not by length, and a DMA read has to be told a length up front -- so
+    // it delivered nothing until a fixed block was full, which held complete keypresses
+    // hostage to unrelated traffic. `BufferedUart`'s ISR drains the FIFO into a ring and
+    // hands the reader whatever has arrived. See `variegated_comms`'s reader loop.
+    EspIrq => uart::BufferedInterruptHandler<Esp32PeripheralsUart>;
     AdcIrq => adc::InterruptHandler;
     InternalI2cIrq => i2c::InterruptHandler<InternalI2cBusPeripheralsI2C>;
     QwiicI2cIrq => i2c::InterruptHandler<QwiicI2cBusPeripheralsI2C>;
     FlowMeterPioIrq => pio::InterruptHandler<PulseCounterPioPeripheralsPio>;
     // embassy-rp 0.10 made async DMA interrupt-driven: `dma::Channel::new`,
-    // used internally by `Spi::new`/`Uart::new`, now requires a binding for the
+    // used internally by `Spi::new`, now requires a binding for the
     // channel's interrupt. Every DMA channel handed to an embassy constructor
     // therefore needs a handler here, and all 16 RP2350 channels share
     // DMA_IRQ_0 -- hence one interrupt with several handlers.
     //
     // They must live in this struct rather than a separate one: only one struct
-    // may bind a given interrupt (the macro emits its ISR symbol), and
-    // `Uart::new_with_rtscts` wants a single type that binds both the UART
-    // interrupt and its two DMA interrupts.
+    // may bind a given interrupt (the macro emits its ISR symbol), and each
+    // constructor wants a single type that binds every interrupt it uses.
     //
     // Channels must match the `dma_tx`/`dma_rx` entries in board-cfg.toml:
-    //   CH0/CH1 internal_spi_bus, CH4/CH5 esp32 uart, CH6/CH7 eyespi_display.
+    //   CH0/CH1 internal_spi_bus, CH6/CH7 eyespi_display.
+    // CH4/CH5 were the esp32 uart's and are now free: that link is a
+    // `BufferedUart`, which is interrupt-driven and takes no DMA channel.
     // CH8 (flow_meter) and CH9 (gear_pump tacho) are intentionally absent: the
     // PIO pulse counter drives those through the raw PAC and never enables
     // their interrupt or awaits a Transfer, so they need no waker.
     DmaIrq => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
-              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH4>,
-              dma::InterruptHandler<embassy_rp::peripherals::DMA_CH5>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>,
               dma::InterruptHandler<embassy_rp::peripherals::DMA_CH7>;
     UsbIrq => usb::InterruptHandler<embassy_rp::peripherals::USB>;
@@ -231,6 +235,22 @@ pub const GROUP_SCALE_PERIPHERAL_ID: u16 = BLUETOOTH_GROUP_1_SCALE_PERIPHERAL_ID
 #[cfg(all(feature = "gravity", not(feature = "bluetooth-group-1-scale")))]
 pub const GROUP_SCALE_PERIPHERAL_ID: u16 = GRAVITY_PERIPHERAL_ID;
 
+/// Ring capacity for each direction of the ESP link's `BufferedUart`.
+///
+/// The RX figure is the one with a justification. It is the slack the reader has to spend
+/// elsewhere before the far end has to be flow-controlled: at 576 kbaud 8N1 the link carries
+/// 57.6 kB/s, so 1024 bytes is about 17.8 ms, against the 0.55 ms the 32-byte hardware FIFO
+/// gave when this link read through DMA. The reader spends that slack inside one very large
+/// `match` on every decoded message, which is exactly when bytes used to be at risk.
+///
+/// TX shares the figure for symmetry rather than from a measurement. A ring smaller than the
+/// largest frame is still correct -- `write_all` simply blocks until the ISR has drained
+/// enough -- and outbound frames reach roughly 4 kB at the shot-log listing's budget, so no
+/// plausible ring holds one whole. 1024 is margin, not a threshold.
+const ESP_UART_BUF_LEN: usize = 1024;
+static ESP_UART_TX_BUF: StaticCell<[u8; ESP_UART_BUF_LEN]> = StaticCell::new();
+static ESP_UART_RX_BUF: StaticCell<[u8; ESP_UART_BUF_LEN]> = StaticCell::new();
+
 // Embassy task wrapper for ESP transceiver (dual-boiler)
 //
 // One variant, not one per feature. A `belka` / `not(belka)` pair differing only in
@@ -263,15 +283,18 @@ async fn esp_transceiver_task(
     let mut config = uart::Config::default();
     config.baudrate = baudrate;
 
-    let uart = Uart::new_with_rtscts(
+    // Argument order is tx, rx, **rts, cts**, and the two buffers that follow are **tx then
+    // rx** -- the opposite order to the DMA channels this used to take. Transposing either
+    // pair compiles.
+    let uart = BufferedUart::new_with_rtscts(
         esp_p.uart,
         esp_p.tx_pin,
         esp_p.rx_pin,
         esp_p.rts_pin,
         esp_p.cts_pin,
         Irqs,
-        esp_p.dma_rx,
-        esp_p.dma_tx,
+        ESP_UART_TX_BUF.init([0; ESP_UART_BUF_LEN]),
+        ESP_UART_RX_BUF.init([0; ESP_UART_BUF_LEN]),
         config
     );
     let (uart_tx, uart_rx) = uart.split();
@@ -400,8 +423,6 @@ struct Esp32Peripherals {
     rx_pin: Peri<'static, ()>,
     cts_pin: Peri<'static, ()>,
     rts_pin: Peri<'static, ()>,
-    dma_tx: Peri<'static, ()>,
-    dma_rx: Peri<'static, ()>,
 }
 
 #[variegated_board_cfg::board_cfg("sd_card_peripherals")]

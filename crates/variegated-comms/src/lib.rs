@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use crc::{Crc, CRC_32_ISCSI};
 use defmt::{error, info};
 use embassy_futures::join::{join, join4, join5};
-use embassy_rp::uart::{UartRx, UartTx};
+// `Error` is imported for its `kind()` method on the reader's associated error type; see
+// the read arm in the reader loop.
+use embedded_io_async::{Error as _, Read, Write};
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::blocking_mutex::Mutex;
 use postcard::to_allocvec_cobs;
@@ -431,9 +433,16 @@ fn forward_shot_log_query<M: embassy_sync::blocking_mutex::raw::RawMutex, SM: em
 /// caller's to choose: `variegated_debug::usb_cdc::CommandSink` fixes it to
 /// `CriticalSectionRawMutex`, and injected commands from both transports have to
 /// converge on that one channel.
-pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, SM: embassy_sync::blocking_mutex::raw::RawMutex, BS: SettingsStorage<BluetoothBonds>, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
-    mut uart_tx: UartTx<'static, embassy_rp::uart::Async>,
-    mut uart_rx: UartRx<'static, embassy_rp::uart::Async>,
+///
+/// `RX` and `TX` are `embedded_io_async` traits rather than embassy-rp's `UartRx`/`UartTx`,
+/// which is what lets the callers hand over a `BufferedUart`. **The RX side must return
+/// what is available rather than filling a fixed buffer** -- see the reader loop's own note.
+/// Named parameters rather than `impl Trait` in argument position, because
+/// `variegated-silvia-firmware` calls this with an explicit turbofish and Rust refuses
+/// those on a function that uses argument-position `impl Trait`.
+pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex, R: RoutineRepository, D: ExternalSensorDispatcher, DM: embassy_sync::blocking_mutex::raw::RawMutex, SM: embassy_sync::blocking_mutex::raw::RawMutex, BS: SettingsStorage<BluetoothBonds>, RX: Read, TX: Write, const STATUS_SUBS: usize, const CONFIG_SUBS: usize>(
+    mut uart_tx: TX,
+    mut uart_rx: RX,
     // The baud rate `uart_tx`/`uart_rx` were configured with -- see the note on
     // `link_baud` in this function's docs.
     link_baud: u32,
@@ -636,7 +645,19 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             // after a message that decoded -- says the same thing without the flood.
             let mut link_healthy = true;
 
-            let mut buf = [0u8; 8];
+            // Sized for a burst, not for a message. `RX::read` returns what is *available*
+            // -- one byte on an idle link, a whole burst on a busy one -- so this is a
+            // ceiling on how much one wake may carry, not a quantum that has to be filled.
+            //
+            // That distinction is the entire point of the buffered reader. This used to be
+            // `[0u8; 8]` fed to embassy-rp's DMA `read`, which fills its buffer exactly or
+            // fails, and an `InputEvent` is 7 bytes on the wire for a keypress: a complete,
+            // decodable frame sat here waiting for 1-7 bytes of *unrelated* traffic to
+            // finish the block. With nothing else on the radio the next thing to arrive was
+            // the comms processor's 1 Hz `CommsStatus`, so a button press could take up to
+            // a second to be seen, and how long it actually took depended on whether a
+            // Bluetooth scale happened to be streaming.
+            let mut buf = [0u8; 64];
 
             // The raw bytes of the frame the accumulator is currently assembling, so a
             // failure can show what actually arrived rather than only that something did.
@@ -653,13 +674,12 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             let mut raw_len: usize = 0;
 
             loop {
-                // The result used to be bound and dropped. `read` either fills `buf`
-                // completely or fails -- its signature is `Result<(), Error>`, not a byte
-                // count -- so on failure what is sitting in the buffer is whatever the
-                // aborted transfer left there, and the old code fed exactly that to a COBS
-                // accumulator that may be mid-frame. A UART error therefore corrupted the
-                // *next* message as well as losing its own, and did it silently: overrun,
-                // framing, parity and break all arrived with no log line and no counter.
+                // A failed read tells us nothing about how much of `buf` it touched, so
+                // nothing from it may reach the accumulator: feeding a partial buffer to
+                // an accumulator that is mid-frame corrupts the *next* message as well as
+                // losing this one. Hence `continue` rather than feeding what is there --
+                // the same reason this arm has always existed, restated for a `read` that
+                // reports a count instead of filling.
                 //
                 // Reported on the same edge latch as the decode errors below, and with the
                 // same event. `OverFull` already shares that latch on the grounds that both
@@ -668,16 +688,37 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
                 // causes, so per-occurrence reporting would turn the 16-slot ring over on
                 // its own. A distinct `DebugEvent` variant would say it better, but that is
                 // a wire-format change and this is a warnings pass.
-                if let Err(e) = uart_rx.read(&mut buf).await {
-                    if link_healthy {
-                        link_healthy = false;
-                        error!("UART read error on the ESP32 link: {:?}", e);
-                        bus::emit_event(DebugEvent::LinkDecodeError);
+                //
+                // The error is reported by `ErrorKind` rather than by its own type: `RX` is
+                // now a trait parameter, so the concrete error is whatever the caller's
+                // transport uses and this crate cannot bound it on `defmt::Format` without
+                // constraining every future caller. `kind()` is the trait's own lossy
+                // summary and is all this edge-latched line ever needed.
+                let read = match uart_rx.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(e) => {
+                        if link_healthy {
+                            link_healthy = false;
+                            error!(
+                                "UART read error on the ESP32 link: {:?}",
+                                defmt::Debug2Format(&e.kind())
+                            );
+                            bus::emit_event(DebugEvent::LinkDecodeError);
+                        }
+                        continue;
                     }
+                };
+
+                // `Ok(0)` is end-of-stream in the `embedded_io_async::Read` contract. A
+                // UART has no end, so this should not happen -- but falling through with an
+                // empty window would skip the `'cobs` loop and spin this task against the
+                // executor as fast as it can be polled, which is a livelock rather than a
+                // missed message. Treated as "nothing arrived" instead.
+                if read == 0 {
                     continue;
                 }
 
-                let mut window = &buf[..];
+                let mut window = &buf[..read];
 
                 'cobs: while !window.is_empty() {
                     // Shadow exactly what `feed` is about to take. It consumes up to and
@@ -1390,7 +1431,13 @@ pub async fn esp_transceiver_main<M: embassy_sync::blocking_mutex::raw::RawMutex
             // UART TX task - handles all outgoing data
             loop {
                 let data = tx_receiver.receive().await;
-                let _ = uart_tx.write(data.as_slice()).await;
+                // `write_all`, not `write`. `Write::write` is permitted to take only part
+                // of the slice, and a buffered writer takes exactly what fits in its ring
+                // -- so `write` here would silently truncate every frame larger than the
+                // free space, which for a shot-log listing at `SHOT_LOG_LIST_BUDGET` is
+                // most of it. embassy-rp's DMA `UartTx::write` happened to write the whole
+                // slice, which is why the distinction did not matter before.
+                let _ = uart_tx.write_all(data.as_slice()).await;
             }
         },
         async {
