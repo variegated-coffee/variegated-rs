@@ -9,7 +9,6 @@ rust-version.workspace = true
 # set turns on defmt, whose `links = "defmt"` build script a host test binary cannot
 # satisfy, and the failure reads "Too many sections!" without mentioning defmt.
 variegated-controller-types = { path = "../variegated-controller-types", default-features = false }
-heapless = { workspace = true }
 # Optional on purpose. `variegated-ulanzi-trouble-driver` will take defmt unconditionally,
 # which is one of the reasons that crate cannot host a test binary; repeating it here would
 # defeat the point of splitting the codec out. See `variegated-scale-codec`.

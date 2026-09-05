@@ -38,13 +38,13 @@
 use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Timer};
 use trouble_host::prelude::*;
 use variegated_controller_types::bluetooth::{
     BluetoothBond, BluetoothSecurityLevel, MAX_BLUETOOTH_PERIPHERALS,
 };
 use variegated_controller_types::{InputCommand, PeripheralId};
-use variegated_ulanzi_codec::{decode_consumer_report, DialSampler};
+use variegated_ulanzi_codec::{command_for, decode_consumer_report};
 
 use variegated_log::{log_info, log_warn};
 
@@ -83,12 +83,13 @@ const REQUIRE_ENCRYPTION: bool = true;
 /// this slot forever, and the slot is one of only four.
 const PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How often the sampler is given a chance to close its window.
+/// How often the loop wakes with no report to read.
 ///
-/// The end of a turn is a *silence*, so nothing but the clock can tell the sampler that a
-/// burst is over. 10 ms is well inside the sampler's own window and imperceptible against a
-/// gesture.
-const SAMPLER_TICK: Duration = Duration::from_millis(10);
+/// A liveness poll, and nothing more: it is what notices a connection that has gone away
+/// while the dial sits idle. It once also gave the rotation sampler a chance to close its
+/// window, which is why it is as short as it is -- nothing depends on that now, so this
+/// could be lengthened if the wakeups ever matter.
+const LIVENESS_TICK: Duration = Duration::from_millis(10);
 
 /// Drive one Ulanzi dial for as long as it stays assigned to this slot.
 ///
@@ -388,13 +389,12 @@ async fn run_session(
         }
     };
 
-    let mut sampler = DialSampler::new();
-
     loop {
         // Three things to wait on: a report, the clock, and the connection's own events.
         //
-        // The tick is not optional -- a burst ends in silence, and only the clock can tell
-        // the sampler that the turn is over -- and it doubles as the liveness poll.
+        // The tick is only the liveness poll. It used to be load-bearing for input as well,
+        // back when a rotation sampler ended a turn on a silence; nothing waits on a clock
+        // to be heard now.
         //
         // The connection events are not optional either, which was not obvious: trouble
         // *requires* a `RequestConnectionParams` to be accepted or rejected, and logs
@@ -405,13 +405,12 @@ async fn run_session(
         // the difference between responsive and laggy.
         match select3(
             reports.next(),
-            Timer::after(SAMPLER_TICK),
+            Timer::after(LIVENESS_TICK),
             connection.next(),
         )
         .await
         {
             Either3::First(notification) => {
-                let now = Instant::now().as_millis();
                 let bytes: &[u8] = notification.as_ref();
 
                 // Not logged, either branch. A HID device notifies at whatever rate the hand
@@ -419,8 +418,17 @@ async fn run_session(
                 // question these lines existed to answer (which collection the reports come
                 // from, and whether the decoder recognises them) has been answered on
                 // hardware.
-                if let Some(input) = decode_consumer_report(bytes) {
-                    sampler.push(input, now);
+                //
+                // Decoded and sent in the same breath. There is no sampler between the two
+                // any more: a report is a command, and holding it back for company only
+                // ever added latency to a gesture.
+                if let Some(command) = decode_consumer_report(bytes).and_then(command_for) {
+                    // `try_send`, because blocking here would stall the GATT client this
+                    // session is racing against. A dropped step is one the user turns again;
+                    // a stalled client is a dial that stops working until it reconnects.
+                    if input_sender.try_send((peripheral_id, command)).is_err() {
+                        log_warn!("Dropped an input command: channel full");
+                    }
                 }
             }
             Either3::Second(_) => {
@@ -440,19 +448,6 @@ async fn run_session(
                 ConnectionEvent::Disconnected { .. } => return,
                 _ => {}
             },
-        }
-
-        // Drained to empty rather than one per iteration: a fast turn arrives as several
-        // steps at once, and leaving any queued would show up as the menu still moving
-        // after the dial has stopped.
-        let now = Instant::now().as_millis();
-        while let Some(command) = sampler.poll(now) {
-            // `try_send`, because blocking here would stall the GATT client this session is
-            // racing against. A dropped step is one the user turns again; a stalled client
-            // is a dial that stops working until it reconnects.
-            if input_sender.try_send((peripheral_id, command)).is_err() {
-                log_warn!("Dropped an input command: channel full");
-            }
         }
     }
 }
