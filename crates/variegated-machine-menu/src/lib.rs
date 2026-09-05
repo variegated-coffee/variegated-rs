@@ -31,6 +31,7 @@ extern crate alloc;
 
 mod brew;
 mod format;
+mod free_brew;
 mod listing;
 mod parameters;
 mod rows;
@@ -41,6 +42,9 @@ pub use brew::{
     brew_mode_label, brew_target, duty_cycle_from_editor, next_brew_mode, OFFERED_BREW_MODES,
 };
 pub use format::{format_value, unit_suffix, UnitStyle, VALUE_TEXT_LEN};
+pub use free_brew::{
+    free_brew_bounds, next_free_brew_mode, FreeBrewMeasurements, FreeBrewState, FREE_BREW_MODES,
+};
 pub use listing::{RoutineRow, RoutineRows, MAX_MENU_ROUTINES, ROUTINE_NAME_LEN, routine_rows};
 pub use parameters::{
     parameter_adjustable, parameter_bounds, parameter_geometry, parameter_row,
