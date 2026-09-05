@@ -853,45 +853,23 @@ async fn main(spawner: Spawner) -> ! {
         HostResources::new()
     );
 
-    // Generate random BLE address
-    let rng = Rng::new();
-    let mut address_bytes = [
-        rng.random() as u8,
-        (rng.random() >> 8) as u8,
-        (rng.random() >> 16) as u8,
-        (rng.random() >> 24) as u8,
-        rng.random() as u8,
-        (rng.random() >> 8) as u8,
-    ];
-
-    // Six random bytes are not a valid BLE random address. Core spec Vol 6, Part B
-    // §1.3.2 defines the top two bits of the most significant byte as the address
-    // sub-type: `11` static, `00` non-resolvable private, `01` resolvable private -- and
-    // `10` is not a valid type at all. A resolvable private address additionally has to
-    // carry a hash of an IRK, which a random draw will not be.
+    // **No address is set here, deliberately.** The controller's own is used instead.
     //
-    // `Address::random` does no fix-up; it just tags the bytes `AddrKind::RANDOM`. So an
-    // unmasked draw lands on an invalid sub-type a quarter of the time and on a malformed
-    // resolvable one another quarter, and `LE Set Random Address` rejects those with
-    // **Invalid HCI Command Parameters** -- which is the error the BLE runner has been
-    // dying with.
+    // This used to draw six random bytes and force the top two to `11` to make a valid
+    // static random address. That was correct while nothing bonded: an address only had to
+    // be valid and unique, and "stable for the power cycle" was enough.
     //
-    // Forcing `11` makes it a static random address: valid, stable for the power cycle,
-    // and the right sub-type for a device that has no bonding identity to protect. The
-    // remaining 46 bits must be neither all-zero nor all-one, which six random bytes
-    // satisfy with overwhelming probability -- and the all-zero draw would be caught by
-    // the `ReadBdAddr` check downstream rather than silently advertised.
-    address_bytes[5] |= 0b1100_0000;
-
-    let address = Address::random(address_bytes);
-    // Mirror the *same* array the controller is about to advertise, rather than
-    // generating a second one for reporting: a second draw would put an address on
-    // screen that no scanner will ever see.
-    {
-        use variegated_comms_firmware::channels::{store_address48, BT_ADDRESS};
-        store_address48(&BT_ADDRESS, address_bytes);
-    }
-    log_info!("BLE: Generated random address");
+    // Bonding changed what the address *is*. A bond is a relationship between two
+    // identities, and the peer stores ours as half of it. Regenerating on every boot meant
+    // coming back as a different device, so every bond the dial held referred to a central
+    // that no longer existed -- it paired happily and then never reconnected, which is
+    // exactly the symptom that led here.
+    //
+    // With no address set, trouble reads the controller's public address with `ReadBdAddr`
+    // and hands it to the security manager as our identity. That address comes from the
+    // chip's efuse: unique per board and stable for its life, which is what a bond needs.
+    // `ble_devices_task` publishes it to `BT_ADDRESS` once the runner has read it, since it
+    // is not knowable here.
 
     // Create BLE stack
     //
@@ -902,7 +880,7 @@ async fn main(spawner: Spawner) -> ! {
     // command, during runner initialisation. That is better than what this code did: the
     // entropy comes from the radio's hardware RNG rather than from a `Trng` handle main had
     // to acquire and hold at exactly the right moment.
-    let stack = trouble_host::new(controller, ble_resources).set_random_address(address);
+    let stack = trouble_host::new(controller, ble_resources);
     let stack = mk_static!(
         Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
         stack.build()

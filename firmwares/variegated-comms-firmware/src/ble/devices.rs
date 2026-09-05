@@ -8,7 +8,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_sync::pubsub::Subscriber;
 use embassy_sync::watch::Watch;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use esp_radio::ble::controller::BleConnector;
 use trouble_host::prelude::*;
 use variegated_belka_portal_trouble_driver::{BelkaPortalDriver, HIDE_GRAPH, SHOW_GRAPH};
@@ -89,6 +89,33 @@ pub async fn ble_devices_task(
 async fn bond_install_loop(
     stack: &'static Stack<'static, ExternalController<BleConnector<'static>, 20>, DefaultPacketPool>,
 ) {
+    // Publish this board's own BLE address, once the runner has read it from the controller.
+    //
+    // Not knowable in `main`: nothing sets an address there any more, so it arrives when
+    // `ReadBdAddr` runs during runner initialisation and the security manager is told what
+    // our identity is. Polled rather than signalled because trouble offers no event for it,
+    // and the wait is over in milliseconds.
+    //
+    // Bounded so a controller that never reports one cannot leave this loop spinning for the
+    // life of the firmware. A failsafe, not a deadline: the address is available almost
+    // immediately, and ten seconds is far past anything a working controller needs.
+    let address_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(address) = stack.get_local_address() {
+            crate::channels::store_address48(
+                &crate::channels::BT_ADDRESS,
+                address.addr.into_inner(),
+            );
+            log_info!("BLE: local address published");
+            break;
+        }
+        if Instant::now() > address_deadline {
+            log_warn!("BLE: the controller never reported a local address");
+            break;
+        }
+        Timer::after(Duration::from_millis(50)).await;
+    }
+
     let mut bonds = BT_BONDS
         .receiver()
         .expect("BT_BONDS is sized for this receiver");
@@ -100,14 +127,40 @@ async fn bond_install_loop(
         // a bond the application processor has dropped is one it will not send again after
         // the next reset. Re-adding a bond that is already present replaces it, so a repeat
         // of the same list is harmless.
+        // What the *advertising reports* said about each associated device's address kind.
+        //
+        // Ground truth, and better than the bond's own flag: an association's
+        // `address_random` was recorded from a live advertising report -- how the device
+        // actually puts itself on the air -- where the bond's is derived from the identity
+        // the peer distributed during pairing. A resolving-list entry is matched on
+        // `(kind, address)`, so getting the kind wrong means it never matches and the device
+        // becomes unreachable the moment a bond exists for it.
+        let associations = BT_ASSOCIATIONS.try_get();
+
         let mut installed = 0usize;
         for bond in list.0.iter() {
+            let advertised_random = associations
+                .as_ref()
+                .and_then(|list| list.iter().find(|a| a.address == bond.address))
+                .map(|a| a.address_random);
+
+            // Logged before any correction, so the stored value is still visible. Never the
+            // keys themselves; this reaches the TCP debug server.
+            log_info!(
+                "Bond for {:?}: stored random={}, advertised random={:?}, irk={}",
+                bond.address,
+                bond.address_random,
+                advertised_random,
+                bond.identity_resolving_key.is_some()
+            );
+
+            let address_random = advertised_random.unwrap_or(bond.address_random);
+
             let information = BondInformation::new(
                 Identity {
                     // trouble 0.7's `Identity` carries a whole `Address`, kind included,
-                    // where 0.6 had a bare `BdAddr` and left the kind to be guessed. The
-                    // stored flag can now be honoured rather than assumed.
-                    addr: if bond.address_random {
+                    // where 0.6 had a bare `BdAddr` and left the kind to be guessed.
+                    addr: if address_random {
                         Address::random(bond.address)
                     } else {
                         Address { kind: AddrKind::PUBLIC, addr: BdAddr::new(bond.address) }
@@ -145,6 +198,23 @@ async fn bond_install_loop(
                 encryption_key_len: bond.encryption_key_len,
                 ..information
             };
+
+            // The address *kind* and whether an IRK came with it, because those two decide
+            // what the controller does with this entry and neither is visible otherwise.
+            //
+            // A resolving-list entry is matched on (kind, address). The dial's address ends
+            // in 0xCA -- BdAddr is little-endian, so that is the most significant byte, and
+            // `11` in its top bits means static random. An entry stored as PUBLIC would
+            // therefore never match the advertiser, and the symptom is exactly this one: it
+            // connected fine before any bond existed and stopped once one was installed.
+            //
+            // Never the keys themselves; this reaches the TCP debug server.
+            log_info!(
+                "Bond for {:?}: random={}, irk={}",
+                bond.address,
+                bond.address_random,
+                bond.identity_resolving_key.is_some()
+            );
 
             if stack.add_bond_information(information).is_ok() {
                 installed += 1;
