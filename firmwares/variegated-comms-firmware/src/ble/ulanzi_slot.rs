@@ -35,7 +35,7 @@
 //! nothing -- not a dial that does something random. The fix would then be a local patch to
 //! trouble-host exposing either the UUID or a constructible `ServiceHandle`.
 
-use embassy_futures::select::{select, Either};
+use embassy_futures::select::{select, select3, Either, Either3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Sender;
 use embassy_time::{Duration, Instant, Timer};
@@ -159,7 +159,7 @@ pub async fn ulanzi_input_loop(
         // is raced against the session rather than spawned.
         select(
             client.task(),
-            run_session(&client, &connection, peripheral_id, slot, input_sender),
+            run_session(&client, &connection, stack, peripheral_id, slot, input_sender),
         )
         .await;
 
@@ -278,6 +278,9 @@ fn to_stored_bond(bond: &BondInformation, security_level: SecurityLevel) -> Blue
 async fn run_session(
     client: &GattClient<'_, super::SlotController, SlotPool, 10>,
     connection: &Connection<'_, SlotPool>,
+    // Needed only to answer a connection-parameter request, which has to go back through the
+    // host rather than through the connection alone.
+    stack: &'static SlotStack,
     peripheral_id: PeripheralId,
     slot: usize,
     input_sender: Sender<
@@ -296,75 +299,115 @@ async fn run_session(
         return;
     };
 
-    // The first Report characteristic, and the only one reachable -- see this module's
-    // header for why, and for why guessing wrong is survivable.
-    let report: Characteristic<Uuid> =
-        match client.characteristic_by_uuid(&service, &HID_REPORT_UUID).await {
-            Ok(characteristic) => characteristic,
-            Err(_) => {
-                log_warn!("Ulanzi slot {}: no Report characteristic", slot);
-                return;
-            }
-        };
-
-    // How many characteristics the HID service has, which is the other open question about
-    // this device: the report we subscribe to below is the *first* of possibly several, and
-    // 0.6.0's client cannot tell them apart. The count does not identify them, but it says
-    // whether there is more than one to be wrong about.
-    match client.characteristics::<16>(&service).await {
-        Ok(all) => log_info!("Ulanzi slot {}: HID service has {} characteristics", slot, all.len()),
-        Err(_) => log_warn!("Ulanzi slot {}: could not enumerate HID characteristics", slot),
-    }
-
-    let mut reports = match client.subscribe(&report, false).await {
-        Ok(reports) => reports,
+    // **Every Report characteristic, not the first one.**
+    //
+    // The device exposes five HID collections and this service has fourteen characteristics.
+    // Subscribing to the first Report got the *keyboard* collection -- eight-byte boot
+    // reports, all zeros -- and the dial's rotation is on the consumer one. Under
+    // trouble 0.6 that could not be fixed: `characteristics()` discarded the UUID and the
+    // CCCD handle, so there was no way to find the others. 0.7 returns both.
+    let all = match client.characteristics::<16>(&service).await {
+        Ok(all) => all,
         Err(_) => {
-            // The expected failure if the device does enforce encryption on its reports: a
-            // CCCD write on an unencrypted link is refused with Insufficient Encryption.
-            // Distinguished from "no notifications ever arrive", which would mean the
-            // subscription took and the first Report is simply not the collection we want.
-            log_warn!(
-                "Ulanzi slot {}: could not subscribe to reports (encryption required?)",
-                slot
-            );
+            log_warn!("Ulanzi slot {}: could not enumerate HID characteristics", slot);
             return;
         }
     };
-    log_info!("Ulanzi slot {}: subscribed to the first Report", slot);
+
+    // Enable notifications on each Report, then drop each listener immediately.
+    //
+    // `subscribe` does two things -- writes the CCCD on the device, and takes one of the
+    // client's notification subscriber slots -- and there is only one such slot by default.
+    // Dropping the listener releases the slot while leaving the CCCD written, because the
+    // CCCD lives on the *device*. So this loop enables every Report and ends holding
+    // nothing, and the single catch-all listener below picks up all of them.
+    let mut subscribed = 0usize;
+    for characteristic in all.iter().filter(|c| c.uuid == HID_REPORT_UUID) {
+        match client.subscribe(characteristic, false).await {
+            Ok(listener) => {
+                drop(listener);
+                subscribed += 1;
+            }
+            // Not fatal on its own: a device may expose an output or feature Report that
+            // cannot be notified at all, and the one we want may still be further along.
+            Err(_) => log_warn!(
+                "Ulanzi slot {}: could not enable Report at handle {}",
+                slot,
+                characteristic.handle
+            ),
+        }
+    }
+
+    if subscribed == 0 {
+        log_warn!("Ulanzi slot {}: no Report characteristic could be enabled", slot);
+        return;
+    }
+    log_info!("Ulanzi slot {}: enabled {} Report characteristics", slot, subscribed);
+
+    // One catch-all listener rather than one per Report, which is what keeps this inside the
+    // single subscriber slot -- and it is also simpler: the collection a notification came
+    // from does not have to be tracked, because `decode_consumer_report` recognises the
+    // consumer frames and rejects everything else. A keyboard report is eight bytes and
+    // fails that check on length alone.
+    let mut reports = match client.listen_all() {
+        Ok(reports) => reports,
+        Err(_) => {
+            log_warn!("Ulanzi slot {}: could not listen for reports", slot);
+            return;
+        }
+    };
 
     let mut sampler = DialSampler::new();
 
     loop {
-        // The tick is not optional: a burst ends in silence, and only the clock can tell the
-        // sampler that the turn is over. It doubles as the liveness poll.
-        match select(reports.next(), Timer::after(SAMPLER_TICK)).await {
-            Either::First(notification) => {
+        // Three things to wait on: a report, the clock, and the connection's own events.
+        //
+        // The tick is not optional -- a burst ends in silence, and only the clock can tell
+        // the sampler that the turn is over -- and it doubles as the liveness poll.
+        //
+        // The connection events are not optional either, which was not obvious: trouble
+        // *requires* a `RequestConnectionParams` to be accepted or rejected, and logs
+        // `ConnParamRequest dropped without being accepted/rejected` if the event is
+        // discarded. Nothing here polled `connection.next()` after pairing, so the dial's
+        // requests went unanswered every couple of seconds. Answering them also lets the
+        // device have the connection interval it asked for, which on a hand-operated dial is
+        // the difference between responsive and laggy.
+        match select3(
+            reports.next(),
+            Timer::after(SAMPLER_TICK),
+            connection.next(),
+        )
+        .await
+        {
+            Either3::First(notification) => {
                 let now = Instant::now().as_millis();
                 let bytes: &[u8] = notification.as_ref();
 
-                // Logged raw, and only while this is an experiment. It is what says which
-                // HID collection the first Report characteristic belongs to: a consumer
-                // frame is `02 XX 00`, where a keyboard report is eight bytes and a mouse
-                // report three or four with a different shape. That distinction is the whole
-                // of the "we cannot choose the Report characteristic" question, and one
-                // turn of the dial answers it.
-                //
-                // **Remove this once the collection is known.** A HID device notifies at
-                // whatever rate the hand moves, and this is one line per report.
-                log_info!("Ulanzi slot {}: report {:?}", slot, bytes);
-
                 match decode_consumer_report(bytes) {
                     Some(input) => sampler.push(input, now),
-                    // Either a report from a collection this is not interested in, or a
-                    // usage the device does not send.
+                    // A report from one of the other collections -- the keyboard's eight-byte
+                    // frames arrive here constantly -- or a usage this device does not send.
+                    // Not logged: a HID device notifies at whatever rate the hand moves.
                     None => {}
                 }
             }
-            Either::Second(_) => {
+            Either3::Second(_) => {
                 if !connection.is_connected() {
                     return;
                 }
             }
+            Either3::Third(event) => match event {
+                // Accepted with the peer's own parameters, which is what `None` means here.
+                // The dial asked; it knows better than this firmware does what interval suits
+                // its battery and its haptics.
+                ConnectionEvent::RequestConnectionParams(request) => {
+                    if request.accept(None, stack).await.is_err() {
+                        log_warn!("Ulanzi slot {}: could not accept connection params", slot);
+                    }
+                }
+                ConnectionEvent::Disconnected { .. } => return,
+                _ => {}
+            },
         }
 
         // Drained to empty rather than one per iteration: a fast turn arrives as several
