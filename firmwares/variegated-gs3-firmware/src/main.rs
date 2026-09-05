@@ -630,11 +630,29 @@ define_indicators! {
         BrewPressureReadingTimeMs = 1,
         SteamTemperatureReadingTimeMs = 2,
         SteamPressureReadingTimeMs = 3,
+        /// Time to draw one frame into the PSRAM framebuffer, in milliseconds.
+        ///
+        /// Split from the flush because the two answer different questions and move for
+        /// different reasons: this one tracks what the panel is being asked to draw, and
+        /// grows when a screen gains widgets or a font gets more expensive.
+        DisplayRenderTimeMs = 4,
+        /// Time to push that frame to the panel over SPI, in milliseconds.
+        ///
+        /// Expect this to be bimodal rather than noisy: `flush()` diffs against the
+        /// previous buffer and sends only changed regions, but falls back to one
+        /// contiguous write of all 143,808 bytes once enough of the screen has changed.
+        /// The two paths differ by roughly an order of magnitude, so a jump here usually
+        /// means the frame crossed that threshold, not that the bus got slower.
+        DisplayFlushTimeMs = 5,
     }
 }
 
-static COUNTERS: PerformanceCounters<4> = PerformanceCounters::new();
-static INDICATORS: PerformanceIndicators<4> = PerformanceIndicators::new();
+// Sized from `COUNT` rather than a literal. The literal is the trap in this mechanism:
+// adding a variant without widening the array does not fail to compile, it panics at boot
+// -- either in `Sampler::new`, which asserts the name count matches, or in `handle()`'s
+// bounds check.
+static COUNTERS: PerformanceCounters<{ CounterId::COUNT }> = PerformanceCounters::new();
+static INDICATORS: PerformanceIndicators<{ IndicatorId::COUNT }> = PerformanceIndicators::new();
 
 // Check-in slots, and this board is why the mechanism exists: seven of these are arms of
 // the `join_all` at the end of `main_task`, sharing one task's poll frame, and one of them

@@ -408,11 +408,24 @@ define_indicators! {
     enum IndicatorId {
         BoilerTemperatureReadingTimeMs = 0,
         BoilerPressureReadingTimeMs = 1,
+        /// Time to draw one frame into the OLED's buffer, in milliseconds.
+        DisplayRenderTimeMs = 2,
+        /// Time to push that frame to the OLED over SPI, in milliseconds.
+        ///
+        /// Unlike the GS3's panel there is no delta path here -- `oled_async` writes the
+        /// whole 1 KB buffer every frame -- so this should be near-constant, and a change
+        /// in it means something about the bus changed rather than something about the
+        /// screen.
+        DisplayFlushTimeMs = 3,
     }
 }
 
-static COUNTERS: PerformanceCounters<2> = PerformanceCounters::new();
-static INDICATORS: PerformanceIndicators<2> = PerformanceIndicators::new();
+// Sized from `COUNT` rather than a literal. The literal is the trap in this mechanism:
+// adding a variant without widening the array does not fail to compile, it panics at boot
+// -- either in `Sampler::new`, which asserts the name count matches, or in `handle()`'s
+// bounds check.
+static COUNTERS: PerformanceCounters<{ CounterId::COUNT }> = PerformanceCounters::new();
+static INDICATORS: PerformanceIndicators<{ IndicatorId::COUNT }> = PerformanceIndicators::new();
 
 // Check-in slots. Ten of these are arms of the `join_all` in `main_task`, which is the
 // reason the whole mechanism exists: they share one task's poll frame, so the executor

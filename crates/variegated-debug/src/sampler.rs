@@ -13,7 +13,17 @@ use variegated_controller_types::debug::{DebugPayload, MetricKind, MAX_SAMPLES, 
 use variegated_instrumentation::{PerformanceCounters, PerformanceIndicators};
 
 /// Sampling period for counters and indicators.
-pub const DEFAULT_SAMPLE_INTERVAL_MS: u32 = 500;
+///
+/// This is a *boot default*, not a limit: a host that wants finer resolution raises the
+/// rate at runtime with `AppDebugOp::SetSampleIntervalMs`, which is clamped only to
+/// 50..60000. So the cost of a slower default falls on nobody who is actually watching.
+///
+/// It was 500 ms until the two display frame-time indicators were added. Sample frames
+/// are the only part of steady-state debug traffic that scales with the metric count, and
+/// on a 115 200-baud link the total had ~3 B/s of headroom left -- see
+/// `relay::tests::steady_state_relay_traffic_fits_the_budget`, which derives its own
+/// arithmetic from this constant and is what will fail if it moves back.
+pub const DEFAULT_SAMPLE_INTERVAL_MS: u32 = 1_000;
 /// How often the full schema is re-emitted for late-attaching clients.
 pub const SCHEMA_INTERVAL_MS: u32 = 5_000;
 

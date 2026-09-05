@@ -508,12 +508,25 @@ pub async fn graphical_display_task(
             next_redraw =
                 Instant::now() + Duration::from_millis(display_state.redraw_period_ms() as u64);
 
+            // Both spans are published as indicators, in milliseconds, as the last frame's
+            // cost rather than a running maximum -- the same shape as the ADC read timings
+            // in `variegated-hal`. A frame under a millisecond therefore reads 0, which is
+            // the honest answer at this resolution.
+            //
+            // Timed from outside `instrumented_section!` rather than through it: that macro
+            // takes the same measurement and discards it, and wiring it up to reach a
+            // metric is a change to every one of its call sites, not just these two.
+            let render_start = Instant::now();
             instrumented_section!("Display update", {
                 if let Err(_) = display_state.render(&mut *display) {
                     defmt::error!("Failed to render to TFT display");
                 }
             });
+            crate::INDICATORS
+                .handle(crate::IndicatorId::DisplayRenderTimeMs)
+                .set(render_start.elapsed().as_millis());
 
+            let flush_start = Instant::now();
             instrumented_section!("Display flush", {
                 // Flush to display with delta updates
                 // With double buffering, only changed regions are sent (typically 50-100 transactions)
@@ -522,6 +535,9 @@ pub async fn graphical_display_task(
                     defmt::error!("Failed to flush TFT display");
                 }
             });
+            crate::INDICATORS
+                .handle(crate::IndicatorId::DisplayFlushTimeMs)
+                .set(flush_start.elapsed().as_millis());
         }
     });
 }

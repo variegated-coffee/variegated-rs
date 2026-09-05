@@ -107,7 +107,7 @@ mod tests {
             DebugPayload::FirmwareInfo {
                 firmware: name("variegated-gs3-firmware"),
                 counters: 4,
-                indicators: 4,
+                indicators: 6,
                 checkins: MAX_CHECKINS as u8,
             },
             DebugPayload::CheckinReport(checkins),
@@ -174,7 +174,7 @@ mod tests {
     /// against the budget.
     ///
     /// Steady state for `variegated-gs3-firmware` is, per second: two sample frames per
-    /// `DEFAULT_SAMPLE_INTERVAL_MS` (500 ms, so four), one `StateSnapshot`, and one
+    /// `DEFAULT_SAMPLE_INTERVAL_MS` (1000 ms, so two), one `StateSnapshot`, and one
     /// fifth of a schema burst (`SCHEMA_INTERVAL_MS` is 5 s, and the burst is
     /// `FirmwareInfo` plus one `MetricName` per metric). Text frames are excluded:
     /// the log bridge's own token bucket already bounds them, and in steady state on
@@ -194,15 +194,23 @@ mod tests {
         // Capacity named rather than spelled: these are `DebugPayload`'s own sample
         // vectors, so a literal here would have to be kept in step with `MAX_SAMPLES`
         // by hand, and a bump to it would break this suite rather than these vectors.
-        let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
-        // Four counters and four indicators in the GS3 firmware, at values large enough
-        // that postcard's varints are not artificially short.
-        for _ in 0..4 {
-            let _ = samples.push(u32::MAX as u64);
+        //
+        // Four counters and six indicators in the GS3 firmware -- the two counts differ
+        // since the display's render and flush times were added as indicators only -- at
+        // values large enough that postcard's varints are not artificially short.
+        const GS3_COUNTERS: u8 = 4;
+        const GS3_INDICATORS: u8 = 6;
+
+        fn samples_of(n: u8) -> Vec<u64, MAX_SAMPLES> {
+            let mut samples: Vec<u64, MAX_SAMPLES> = Vec::new();
+            for _ in 0..n {
+                let _ = samples.push(u32::MAX as u64);
+            }
+            samples
         }
 
-        let counters = wrapped_len(DebugPayload::CounterSamples(samples.clone()));
-        let indicators = wrapped_len(DebugPayload::IndicatorSamples(samples));
+        let counters = wrapped_len(DebugPayload::CounterSamples(samples_of(GS3_COUNTERS)));
+        let indicators = wrapped_len(DebugPayload::IndicatorSamples(samples_of(GS3_INDICATORS)));
         let snapshot = wrapped_len(DebugPayload::StateSnapshot(DebugStateSnapshot {
             heap_used: u32::MAX,
             heap_free: u32::MAX,
@@ -225,17 +233,22 @@ mod tests {
 
         let mut schema = wrapped_len(DebugPayload::FirmwareInfo {
             firmware: name("variegated-gs3-firmware"),
-            counters: 4,
-            indicators: 4,
+            counters: GS3_COUNTERS,
+            indicators: GS3_INDICATORS,
             checkins: MAX_CHECKINS as u8,
         });
-        for kind in [MetricKind::Counter, MetricKind::Indicator] {
-            for id in 0..4u8 {
+        let mut metric_frames = 1usize;
+        for (kind, count) in [
+            (MetricKind::Counter, GS3_COUNTERS),
+            (MetricKind::Indicator, GS3_INDICATORS),
+        ] {
+            for id in 0..count {
                 schema += wrapped_len(DebugPayload::MetricName {
                     kind,
                     id,
                     label: name("ControllerLoopDuration"),
                 });
+                metric_frames += 1;
             }
         }
         // The check-in schema rides the same burst, one frame per slot, and there are far
@@ -261,10 +274,17 @@ mod tests {
         }
         let checkin_report = wrapped_len(DebugPayload::CheckinReport(checkins));
 
-        // Per second: 2 sample frames every 500 ms, 1 snapshot, 1 check-in report,
-        // 1/5 of a schema burst.
-        let per_second =
-            2 * (counters + indicators) + snapshot + checkin_report + schema / 5;
+        // Per second: one counter frame and one indicator frame per sample interval,
+        // 1 snapshot, 1 check-in report, 1/5 of a schema burst.
+        //
+        // Derived from the constant rather than spelled, so that retuning the sampler's
+        // default cadence moves this budget with it. That is not hypothetical: halving
+        // the rate is what paid for the two display indicators above.
+        let samples_per_second = 1000 / crate::sampler::DEFAULT_SAMPLE_INTERVAL_MS as usize;
+        let per_second = samples_per_second * (counters + indicators)
+            + snapshot
+            + checkin_report
+            + schema / 5;
         std::println!(
             "relay steady state: counters={counters} indicators={indicators} \
              snapshot={snapshot} checkins={checkin_report} schema_burst={schema} \
@@ -278,14 +298,23 @@ mod tests {
         // The same traffic against the pessimistic link. It is the binding case and the one
         // nobody would think to check.
         //
-        // **This is now tight: ~573 of 576 B/s.** The check-in report is a full table once
-        // a second and is the largest single item here after the schema burst; adding it
-        // consumed almost all of what was left. No board runs 115 200 today -- both links
-        // are 576 kbaud, where this is 20% -- so nothing is broken, but the next payload
-        // added to steady state will not fit at this rate. When that happens the knob is
-        // `checkin::REPORT_INTERVAL_MS`: halving the report's cadence buys back 64 B/s and
-        // costs a host one second of resolution on a table whose fastest slot is already
-        // sampled far more often than it changes.
+        // **~539 of 576 B/s.** It was 573 -- three bytes of headroom -- until the GS3's two
+        // display frame-time indicators were added, which took it to 605 and over the line.
+        // What paid for them was `sampler::DEFAULT_SAMPLE_INTERVAL_MS`, 500 ms -> 1000 ms:
+        // sample frames are the only item here that scales with the metric count, so
+        // halving their rate both funded the addition and stopped the next one from being
+        // charged for it. That is the general shape of the knob -- a boot default, which a
+        // host that actually wants the resolution raises at runtime with
+        // `AppDebugOp::SetSampleIntervalMs`.
+        //
+        // The remaining knob, if this ever tightens again, is `checkin::REPORT_INTERVAL_MS`:
+        // the check-in report is a full table once a second and the largest single item here
+        // after the schema burst, so halving its cadence buys back 64 B/s and costs a host
+        // one second of resolution on a table whose fastest slot is already sampled far more
+        // often than it changes.
+        //
+        // No board runs 115 200 today -- both links are 576 kbaud, where this is under 20%.
+        // This assert exists because that is a fact about the fleet, not about the protocol.
         let slow_budget = bytes_per_sec_for_baud(SLOW_BAUD) as usize;
         std::println!("  against the 115200-baud link: {per_second} B/s of {slow_budget} B/s");
         assert!(
@@ -305,7 +334,7 @@ mod tests {
             ("indicators", indicators),
             ("snapshot", snapshot),
             ("checkin report", checkin_report),
-            ("largest schema frame", schema / (9 + MAX_CHECKINS)),
+            ("largest schema frame", schema / (metric_frames + MAX_CHECKINS)),
             ("maximum-length text", text),
         ] {
             assert!(

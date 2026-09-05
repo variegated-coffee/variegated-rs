@@ -142,10 +142,30 @@ impl DisplayController {
     pub async fn render_loop(&mut self) -> ! {
         // Use a short delay to allow for an additional await-point
         async_task_loop!("Display update loop", Some(Duration::from_micros(1)), {
+            // Drawing and flushing are timed separately and published as indicators, in
+            // milliseconds, as the last frame's cost. A frame under a millisecond reads 0,
+            // which is the honest answer at this resolution.
+            //
+            // The flush lives here rather than at the end of `render_frame` so that there
+            // is exactly one of it to measure: `render_frame` has an early return for the
+            // Improv identify flash, and used to flush on both paths.
+            let render_start = Instant::now();
             self.render_frame().await;
+            crate::INDICATORS
+                .handle(crate::IndicatorId::DisplayRenderTimeMs)
+                .set(render_start.elapsed().as_millis());
+
+            let flush_start = Instant::now();
+            self.display.flush().await.expect("Failed to flush display");
+            crate::INDICATORS
+                .handle(crate::IndicatorId::DisplayFlushTimeMs)
+                .set(flush_start.elapsed().as_millis());
         });
     }
 
+    /// Draws one frame. Does **not** flush -- `render_loop` does that, so that the two
+    /// halves can be timed separately and so the identify-flash path below does not need
+    /// a flush of its own.
     pub async fn render_frame(&mut self) {
         self.update_status();
         self.display.clear();
@@ -168,7 +188,6 @@ impl DisplayController {
                         .draw(&mut self.display)
                         .unwrap();
                 }
-                self.display.flush().await.expect("Failed to flush display");
                 return;
             }
         }
@@ -215,8 +234,6 @@ impl DisplayController {
                 self.render_old().await;
             }
         }
-
-        self.display.flush().await.expect("Failed to flush display");
     }
 
     async fn render_list_menu(
