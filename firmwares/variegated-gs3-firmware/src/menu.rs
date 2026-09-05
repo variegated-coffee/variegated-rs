@@ -2030,10 +2030,10 @@ pub fn confirm_editor(menu: MenuId, value: f32, config: &MenuConfig) -> Option<M
         MenuId::EditParameter { .. } => None,
         // **Committed by the button task, not here.** The panel's trim is one machine's
         // physical alignment: it has a settings key of its own, no `MachineCommand`, and no
-        // reason to reach the controller at all. `handle_editor_press` writes it and
+        // reason to reach the controller at all. `handle_editor_command` writes it and
         // republishes, the way it already writes a routine parameter into `values`.
         MenuId::EditPanelOriginX | MenuId::EditPanelOriginY => None,
-        // **Committed by `handle_time_editor_press`, not here.** This function's input is an
+        // **Committed by `handle_time_editor_command`, not here.** This function's input is an
         // `f32` and a time is two `u8`s, so it could not be reached without a wider parameter
         // anyway -- and widening it would still not be enough. `MenuData::schedules` holds
         // *rows*, not `ScheduleItem`s, and `UpdateScheduleItem` replaces the item wholesale:
