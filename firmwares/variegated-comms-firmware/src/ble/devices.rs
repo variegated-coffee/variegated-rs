@@ -154,7 +154,20 @@ async fn bond_install_loop(
         }
 
         // A count, never the keys: these lines reach the TCP debug server.
-        log_info!("Installed {} Bluetooth bond(s)", installed);
+        //
+        // `privacy` is here because it decides whether any of this can work. A peer that
+        // distributed an IRK may advertise with a *resolvable private address*, which only
+        // the controller's resolving list can match -- and `add_bond_information` does not
+        // write that list directly. It queues an update that trouble applies "the next time
+        // advertising, scanning, and connecting are all idle", and this firmware asks the
+        // connection manager to maintain a connection continuously, so that window may never
+        // come. If bonds are installed, privacy is on, and the device still never connects,
+        // that interaction is the first thing to suspect.
+        log_info!(
+            "Installed {} Bluetooth bond(s), privacy {}",
+            installed,
+            stack.is_privacy_enabled()
+        );
     }
 }
 
