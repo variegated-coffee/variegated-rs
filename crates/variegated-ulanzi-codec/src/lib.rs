@@ -17,9 +17,17 @@
 //! # The device
 //!
 //! A BLE HID dial with seven keys. The useful input arrives on its **Consumer Control**
-//! collection (usage page `0x0c`) as three bytes, `[0x02, usage_low, usage_high]`, with the
+//! collection (usage page `0x0c`) as **two bytes** -- `[usage_low, usage_high]` -- with the
 //! dial mapped to volume up/down and the three top keys to media transport. The four side
 //! keys sit on the *Keyboard* collection instead and are not decoded here.
+//!
+//! Upstream's notes give that frame as `[0x02, usage_low, usage_high]`. The `0x02` is a
+//! report id belonging to the USB HID stack they were captured through; over GATT the report
+//! id is implicit in which characteristic notified. The two-byte form here was captured from
+//! the device itself.
+//!
+//! Observed, in full: `E9` clockwise, `EA` counter-clockwise, `E2` dial press, `B6`/`CD`/`B5`
+//! for the three top keys, and `00` for the release that follows each.
 //!
 //! The dial is **stepless** -- it has no detents. A turn produces reports at whatever rate
 //! the hand is moving rather than one per click, which is the whole reason [`DialSampler`]
@@ -61,12 +69,16 @@ pub enum DialInput {
     Clockwise,
     /// Dial turned counter-clockwise. Sent as Volume Down.
     CounterClockwise,
-    /// Dial pressed. Sent as Mute.
+    /// Dial pressed. Sent as Mute (`0xE2`).
     ///
-    /// **Not to be relied on.** Upstream's two documents disagree about whether this
-    /// survives the wireless link, one of them saying it registers only over USB. The
-    /// device has no wired data mode, so a press that only works on USB works never --
-    /// which is why every meaning it carries is also reachable from a key that does work.
+    /// **It does work over BLE**, observed on hardware. Upstream's two documents disagree on
+    /// this -- `hardware.md` says the press transmits, `offline-protocol.md` says it
+    /// registers only over USB -- and the first is right. The press was arriving on the
+    /// wireless link like any other usage.
+    ///
+    /// [`InputCommand::Activate`] is still reachable from the play/pause key as well. That
+    /// was hedging against this being USB-only and is now simply a second way to confirm,
+    /// which is worth keeping on a device whose dial is also a button.
     Press,
     /// Top-left key. Sent as Previous Track.
     MediaPrevious,
@@ -83,10 +95,20 @@ pub enum DialInput {
 /// `None` covers both a malformed frame and a usage this device does not send. There is
 /// nothing useful to distinguish: either way there is no input to act on.
 pub fn decode_consumer_report(report: &[u8]) -> Option<DialInput> {
-    // Either `[0x02, lo, hi]` or a report-id byte and then the same. Nothing longer is
-    // accepted -- a marker found further in would be a coincidence inside someone else's
-    // frame rather than this device's.
+    // **Two bytes is the form this device actually sends**, captured from the dial over
+    // GATT: `[usage_low, usage_high]` and nothing else. Upstream's notes give the frame as
+    // `[0x02, usage_low, usage_high]`, but that `0x02` is a *report id*, prepended by the USB
+    // HID stack those notes were sniffed through. Over GATT the report id is implicit in
+    // which characteristic notified, so it never appears on the wire.
+    //
+    // The marker forms are kept because they cost one arm each and the notes are not wrong
+    // about the transports they describe -- but the bare pair is the one that matches
+    // hardware, and requiring a marker meant every real report was discarded.
+    //
+    // Length is what keeps this from swallowing the other collections: the keyboard's boot
+    // report is eight bytes and the vendor heartbeats are one and sixty-four.
     let (usage_low, usage_high) = match report {
+        [low, high] => (*low, *high),
         [CONSUMER_FRAME_MARKER, low, high] => (*low, *high),
         [_, CONSUMER_FRAME_MARKER, low, high] => (*low, *high),
         _ => return None,
@@ -307,6 +329,48 @@ mod tests {
             decode_consumer_report(&[0x02, 0x00, 0x00]),
             Some(DialInput::Release)
         );
+    }
+
+    /// The two-byte form the device actually sends over GATT.
+    ///
+    /// **These are real bytes, captured from the dial**, not a guess from a document.
+    /// Upstream's notes give the frame as `[0x02, usage_low, usage_high]`, but that leading
+    /// `0x02` is a *report id* prepended by the USB HID stack it was sniffed through. Over
+    /// GATT the report id is implicit in which characteristic notified, so what arrives is
+    /// the usage alone -- and requiring the marker meant every one of these was discarded.
+    #[test]
+    fn the_two_byte_gatt_form_decodes() {
+        assert_eq!(decode_consumer_report(&[0xE9, 0x00]), Some(DialInput::Clockwise));
+        assert_eq!(
+            decode_consumer_report(&[0xEA, 0x00]),
+            Some(DialInput::CounterClockwise)
+        );
+        assert_eq!(decode_consumer_report(&[0xE2, 0x00]), Some(DialInput::Press));
+        assert_eq!(
+            decode_consumer_report(&[0xB6, 0x00]),
+            Some(DialInput::MediaPrevious)
+        );
+        assert_eq!(
+            decode_consumer_report(&[0xCD, 0x00]),
+            Some(DialInput::MediaPlayPause)
+        );
+        assert_eq!(decode_consumer_report(&[0xB5, 0x00]), Some(DialInput::MediaNext));
+        assert_eq!(decode_consumer_report(&[0x00, 0x00]), Some(DialInput::Release));
+    }
+
+    /// The other collections' reports still decode to nothing.
+    ///
+    /// Accepting a bare two-byte frame must not widen the decoder into accepting the
+    /// keyboard's eight-byte reports or the vendor heartbeats, all of which arrive on the
+    /// same catch-all listener now that every Report characteristic is subscribed.
+    #[test]
+    fn other_collections_are_still_rejected() {
+        // The keyboard's boot report, no key held.
+        assert_eq!(decode_consumer_report(&[0, 0, 0, 0, 0, 0, 0, 0]), None);
+        // A vendor heartbeat: one byte.
+        assert_eq!(decode_consumer_report(&[100]), None);
+        // The other vendor characteristic's 64-byte frame, abbreviated.
+        assert_eq!(decode_consumer_report(&[224, 16, 199, 56, 215, 160]), None);
     }
 
     /// The frame is found whether or not a report-id byte precedes it.
