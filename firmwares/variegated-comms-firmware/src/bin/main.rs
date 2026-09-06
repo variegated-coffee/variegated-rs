@@ -852,6 +852,11 @@ async fn main(spawner: Spawner) -> ! {
     // controller table smaller than the host's is invisible until the link count reaches
     // it, which is exactly how this was found.
     //
+    // Briefly taken to 4 while hunting heap and put back: the two extra slots are the Improv
+    // window and the reconnect margin, both of which are wanted, and neither the controller's
+    // per-link cost nor the saving was ever measured. The Wi-Fi buffer pool below is where the
+    // memory actually is.
+    //
     // The cost is heap, not `.stack`: the controller's per-connection state is allocated
     // by the blob through `esp_alloc::HEAP`. That heap is genuinely tight here -- see the
     // Wi-Fi buffer note below, where the default dynamic buffer caps once exhausted it
@@ -1063,19 +1068,32 @@ async fn main(spawner: Spawner) -> ! {
     // the default pair can reach far more than this firmware has to give. The machine then
     // died on `memory allocation of 800 bytes failed`.
     //
-    // 24/16. The RX cap must stay at or above `rx_queue_size`, which is the invariant the
-    // previous note was protecting: the queue holds `PacketBuffer` handles and each pins a
-    // dynamic buffer, so a cap below the queue depth is a queue that can never fill. Hence
-    // `rx_queue_size` 32 -> 24 alongside it, still far above the default 5 that latched the
-    // stack (see the paragraph above), and TX 16 to match `tx_queue_size` exactly.
+    // The RX cap must stay at or above `rx_queue_size`, which is the invariant the previous
+    // note was protecting: the queue holds `PacketBuffer` handles and each pins a dynamic
+    // buffer, so a cap below the queue depth is a queue that can never fill. So the queue and
+    // the cap move together on each side, and TX matches `tx_queue_size` exactly.
     //
-    // If throughput regresses, raise these *and* the matching queue -- never one alone.
+    // **12/8, halved from 24/16, and this is the largest single lever on this firmware's
+    // heap.** The paragraph above measured the pool taking ~43 kB during a reconnect and
+    // never giving it back; at ~1.6 kB a buffer, 24+16 caps it at about 64 kB and 12+8 caps
+    // it at about 32. A machine reading 600-2000 bytes free with two Bluetooth peripherals
+    // connected cannot afford a pool that large, and the pool is a *cap* rather than a
+    // reservation -- lowering it costs throughput under load, not memory when idle.
+    //
+    // `esp-radio` validates `rx_ba_win < dynamic_rx_buf_num` and
+    // `rx_ba_win < 2 * static_rx_buf_num`. `rx_ba_win` defaults to 6, so 12 clears the first
+    // comfortably and `static_rx_buf_num` stays at 6 for the second -- it is the documented
+    // floor while AMPDU RX is on and is not what this change is about.
+    //
+    // If throughput regresses, raise these *and* the matching queue -- never one alone. The
+    // workload is a 50 kB gzipped page, ESPHome telemetry and shot uploads, so a slower
+    // upload is the symptom to expect, not a broken one.
     let radio_config = esp_radio::wifi::ControllerConfig::default()
-        .with_rx_queue_size(24)
-        .with_tx_queue_size(16)
+        .with_rx_queue_size(12)
+        .with_tx_queue_size(8)
         .with_static_rx_buf_num(6)
-        .with_dynamic_rx_buf_num(24)
-        .with_dynamic_tx_buf_num(16);
+        .with_dynamic_rx_buf_num(12)
+        .with_dynamic_tx_buf_num(8);
     let (controller, interfaces) =
         esp_radio::wifi::new(peripherals.WIFI, radio_config).unwrap();
 
