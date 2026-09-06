@@ -18,12 +18,40 @@ use variegated_log::{log_error, log_info};
 use edge_http::io::server::{
     Connection as ServerConnection, DEFAULT_BUF_SIZE, Handler, Server,
 };
-use edge_http::DEFAULT_MAX_HEADERS_COUNT;
 
 /// The HTTP server, with its handler-task count pinned to the size of the socket pool
 /// in `main.rs`. See the note at its construction in `http_server_task`; these two
 /// numbers are one decision and have to move together.
-type HttpServer = Server<2, DEFAULT_BUF_SIZE, DEFAULT_MAX_HEADERS_COUNT>;
+/// The HTTP server, at **one** handler slot.
+///
+/// The count must equal `TcpBuffers`'s socket count in `bin/main.rs`: each handler task waits
+/// in `accept()` simultaneously and holds a socket while it does, because smoltcp has no
+/// accept queue. Leaving this above the pool size once stopped port 80 listening entirely.
+///
+/// Two became one for heap. This task's future is the third-largest static in the firmware,
+/// and it is dominated by per-slot state -- one buffer of `DEFAULT_BUF_SIZE` plus a header
+/// table -- so the slot count is very nearly a multiplier on it. What it costs is page-load
+/// concurrency: the SPA is `index.html` plus one bundle, and the browser now fetches them one
+/// after the other rather than together. Status, configuration and routines all travel over
+/// the WebSocket, which has a socket of its own, so nothing at runtime is serialised by this.
+///
+type HttpServer = Server<1, DEFAULT_BUF_SIZE, MAX_HEADERS_COUNT>;
+
+/// Header slots per request, against edge-http's default of 64.
+///
+/// `Headers<'b, N>` is `[httparse::Header; N]` and a `Header` is two fat pointers, so each
+/// slot is 16 bytes and the table appears more than once in the connection state.
+///
+/// **32 is chosen against what a browser actually sends**, which is on the order of ten to
+/// sixteen: `Host`, `User-Agent`, `Accept`, `Accept-Encoding`, `Accept-Language`,
+/// `Connection`, `Referer`, a few `Sec-Fetch-*` and `Sec-CH-UA-*`, and `Cookie`. Doubling the
+/// realistic count leaves room for a proxy or an extension to add its own without leaving 48
+/// slots permanently resident for a machine on a home network.
+///
+/// The failure mode if a client does exceed it is a refused request rather than anything
+/// silent -- httparse reports too many headers and the parse fails -- so if some client ever
+/// trips this, the fix is to raise this number and it will be obvious which one to raise.
+const MAX_HEADERS_COUNT: usize = 32;
 
 /// How long to wait for the application processor to answer a shot-log request.
 ///

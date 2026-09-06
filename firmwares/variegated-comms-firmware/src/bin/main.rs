@@ -677,7 +677,15 @@ async fn main(spawner: Spawner) -> ! {
     // four times. Which is the argument for setting this line from `.stack` rather than from
     // arithmetic: build, read the section, and return whatever moved.
     //
-    // 37544 - 10848 = 26696.
+    // 37544 - 10848 = 26696, then **-18960 when the HTTP server went from two handler slots
+    // to one and its header table from 64 to 32**. That is the opposite direction from
+    // everything above it: not a buffer moved out of the heap, but a static deleted outright,
+    // so the whole of it is heap the firmware did not have. `http_server_task`'s future is
+    // very nearly linear in the slot count -- one `DEFAULT_BUF_SIZE` buffer and one header
+    // table apiece -- which is why halving the slots was worth more than every buffer
+    // right-sizing put together.
+    //
+    // 26696 - 18960 = 7736.
     //
     // **This leaves 64 kB reclaimed + 38840 here = 103376 of heap, against 122880 before any
     // of it.** The capacity removed is smaller than the demand removed -- the BLE driver
@@ -692,7 +700,7 @@ async fn main(spawner: Spawner) -> ! {
     // `max_connections: 6`, `r_esp_ble_msys_init`'s 10752, and the per-association driver
     // boxes in `ble/devices.rs`, which are held for peripherals that are merely *enabled*.
     // Right-sizing these buffers is worth ~10 kB and is not by itself the answer.
-    esp_alloc::heap_allocator!(size: 64 * 1024 - 26696);
+    esp_alloc::heap_allocator!(size: 64 * 1024 - 7736);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());
@@ -1201,7 +1209,12 @@ async fn main(spawner: Spawner) -> ! {
     // bundle, and status, configuration and routines all travel over the WebSocket now,
     // which has its own socket rather than one of these. Two 4 kB connections is both
     // faster and 4 kB *cheaper* than the four 5 kB ones it replaces.
-    let tcp_buffers = mk_static!(TcpBuffers<2, 4096, 4096>, TcpBuffers::new());
+    //
+    // **1, matching `HttpServer`'s handler count in `http.rs`, which went 2 -> 1 for heap.**
+    // The invariant above is unchanged and is what makes these one number; the paragraph
+    // above about "4 -> 2 connections is what pays for it" now reads 2 -> 1 for the same
+    // reason and the same 8 kB per pair of buffers.
+    let tcp_buffers = mk_static!(TcpBuffers<1, 4096, 4096>, TcpBuffers::new());
     let tcp_stack = mk_static!(Tcp<'static>, Tcp::new(net_stack, tcp_buffers));
 
     // Get command sender for HTTP server
