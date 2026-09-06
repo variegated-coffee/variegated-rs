@@ -238,6 +238,17 @@ async fn handle_websocket_connection(
     // guess. This was 2048 bytes to hold 10.
     let mut frame_buf = [0u8; WS_INLINE_FRAME_LEN];
     let mut header_buf = [0u8; 16];
+    // Where every server-originated payload is encoded.
+    //
+    // One buffer for both users, and that is sound rather than lucky: the update-send loop
+    // runs inside the `join` below and exits on `frame_done`, while
+    // `handle_client_request_tx` runs *after* the join returns. They are sequential, so the
+    // buffer is never wanted by two writers at once. The frame *receiver*, which is the half
+    // that genuinely runs concurrently with the send loop, does not encode anything.
+    //
+    // A local of this function rather than a `mk_static!`: it costs the same bytes -- this
+    // task's future is a `.bss` `POOL` either way -- and needs no argument about second takes.
+    let mut encode_buf = [0u8; MAX_WS_FRAME_LEN];
 
     // Split socket into read and write halves for concurrent access
     let (mut socket_rx, mut socket_tx) = socket.split();
@@ -324,7 +335,8 @@ async fn handle_websocket_connection(
                         continue;
                     };
 
-                    let encoded: Option<Result<Vec<u8>, &'static str>> = match selected {
+                    // A length into `encode_buf` rather than a `Vec`. See `encode_ws_message`.
+                    let encoded: Option<Result<usize, &'static str>> = match selected {
                         Either::First(()) => {
                             log_debug!("Update handler: frame_done received, exiting");
                             break;
@@ -334,7 +346,10 @@ async fn handle_websocket_connection(
                             let now = Instant::now();
                             if now.duration_since(last_status_send) >= Duration::from_millis(200) {
                                 last_status_send = now;
-                                Some(encode_ws_message(&WsMessage::StatusUpdate(status)))
+                                Some(encode_ws_message(
+                                    &mut encode_buf,
+                                    &WsMessage::StatusUpdate(status),
+                                ))
                             } else {
                                 None
                             }
@@ -342,17 +357,26 @@ async fn handle_websocket_connection(
                         Either::Second(Either::Second(Either::First(config))) => {
                             // Send configuration update to client
                             log_info!("Sending ConfigurationUpdate to client");
-                            Some(encode_ws_message(&WsMessage::ConfigurationUpdate(config)))
+                            Some(encode_ws_message(
+                                &mut encode_buf,
+                                &WsMessage::ConfigurationUpdate(config),
+                            ))
                         }
                         Either::Second(Either::Second(Either::Second(Either::First(summaries)))) => {
                             log_info!("Sending RoutinesUpdate to client");
-                            Some(encode_ws_message(&WsMessage::RoutinesUpdate(
-                                RoutineSummaryStorage::from_list(&summaries),
-                            )))
+                            Some(encode_ws_message(
+                                &mut encode_buf,
+                                &WsMessage::RoutinesUpdate(RoutineSummaryStorage::from_list(
+                                    &summaries,
+                                )),
+                            ))
                         }
                         Either::Second(Either::Second(Either::Second(Either::Second(event)))) => {
                             log_info!("Sending ShotLogEvent to client");
-                            Some(encode_ws_message(&WsMessage::ShotLogEvent(event)))
+                            Some(encode_ws_message(
+                                &mut encode_buf,
+                                &WsMessage::ShotLogEvent(event),
+                            ))
                         }
                     };
 
@@ -362,12 +386,12 @@ async fn handle_websocket_connection(
                     // the frame receiver in the other half of the `join` is what notices
                     // a dead socket and ends the connection -- but they are worth saying.
                     match encoded {
-                        Some(Ok(bytes)) => {
+                        Some(Ok(len)) => {
                             if let Err(e) = send_frame_tx(
                                 &mut socket_tx,
                                 &mut header_buf,
                                 FrameType::Binary(false),
-                                &bytes,
+                                &encode_buf[..len],
                             ).await {
                                 log_warn!("Failed to send update frame: {}", e);
                             }
@@ -413,6 +437,7 @@ async fn handle_websocket_connection(
                                 request,
                                 &mut socket_tx,
                                 &mut header_buf,
+                                &mut encode_buf,
                                 &command_sender,
                                 checkin,
                             ).await?;
@@ -619,7 +644,7 @@ async fn send_frame_tx(
 ///
 /// Callers must not hold the message past this call. Taking `&WsMessage` rather than
 /// consuming it is deliberate: the natural call is
-/// `encode_ws_message(&WsMessage::Foo(..))`, where the argument is a temporary that
+/// `encode_ws_message(encode_buf, &WsMessage::Foo(..))`, where the argument is a temporary that
 /// dies at the end of the statement.
 ///
 /// # The outbound bound, and exactly what it does not do
@@ -628,27 +653,36 @@ async fn send_frame_tx(
 /// passes through. The only `send_frame_tx` calls that bypass it are the `Ping` echo --
 /// already bounded by [`MAX_CLIENT_FRAME_LEN`] -- and the empty `Close`.
 ///
-/// **The check is post-hoc, and must not be read as protection against the allocation.** By
-/// the time the length is known, `to_allocvec` has already allocated it, and geometric growth
-/// means transiently up to about twice the final size. Bounding the allocation would mean
-/// `try_reserve`-ing `MAX_WS_FRAME_LEN` and encoding with `to_slice` -- an 8 kB allocation on
-/// every frame of a 5 Hz status push, which is far worse than what it would prevent.
+/// **The check is no longer post-hoc, and there is no allocation to protect against.** It used
+/// to be both: `to_allocvec` had already allocated by the time the length was known, with
+/// geometric growth reaching transiently about twice the final size, and the note here
+/// rejected `to_slice` because bounding it would have meant `try_reserve`-ing
+/// `MAX_WS_FRAME_LEN` -- an 8 kB allocation on every frame of a 5 Hz status push, worse than
+/// what it prevented.
 ///
-/// What this does buy: an oversized frame never reaches the wire, and a line appears in the
-/// log naming the size. Before it there was no bound of any kind on this side.
-fn encode_ws_message(msg: &WsMessage<'_>) -> Result<Vec<u8>, &'static str> {
-    let bytes = postcard::to_allocvec(msg).map_err(|_| "Failed to serialize message")?;
+/// That objection was to a *heap* buffer, and it was right. The caller now supplies a stack
+/// one, so `to_slice` allocates nothing, and the encode of an oversized message fails instead
+/// of succeeding and being thrown away. This was the largest and most frequent remaining
+/// allocation in the firmware, on a heap where a 4 kB request has already panicked mid-upload
+/// (see `upload::Buffers`).
+///
+/// The ceiling check below is kept even though `to_slice` now enforces the buffer's length,
+/// because the two are not the same statement: the buffer could be resized, and this is the
+/// protocol's bound rather than the buffer's.
+fn encode_ws_message(buf: &mut [u8], msg: &WsMessage<'_>) -> Result<usize, &'static str> {
+    let bytes = postcard::to_slice(msg, buf).map_err(|_| "Failed to serialize message")?;
+    let len = bytes.len();
 
-    if bytes.len() > MAX_WS_FRAME_LEN {
+    if len > MAX_WS_FRAME_LEN {
         log_warn!(
             "Refusing to send a {} byte message: over the {} byte ceiling",
-            bytes.len(),
+            len,
             MAX_WS_FRAME_LEN
         );
         return Err("Message too large to send");
     }
 
-    Ok(bytes)
+    Ok(len)
 }
 
 /// What a client actually asked for.
@@ -724,6 +758,7 @@ async fn handle_client_request_tx(
     request: ClientRequest,
     writer: &mut TcpWriter<'_>,
     header_buf: &mut [u8],
+    encode_buf: &mut [u8],
     command_sender: &Sender<'static, CriticalSectionRawMutex, MachineCommand, MACHINE_COMMAND_CAPACITY>,
     checkin: &variegated_checkin::CheckinHandle,
 ) -> Result<(), &'static str> {
@@ -742,13 +777,13 @@ async fn handle_client_request_tx(
                         // answer, so the result is a reconnect storm rather than a message
                         // saying what is wrong. The fallback ack is a few dozen bytes and
                         // cannot itself trip the bound.
-                        match encode_ws_message(&WsMessage::MachineDefinition(
+                        match encode_ws_message(encode_buf, &WsMessage::MachineDefinition(
                             machine_def.clone(),
                         )) {
                             Ok(bytes) => bytes,
                             Err(e) => {
                                 log_error!("Cannot send the machine definition: {}", e);
-                                encode_ws_message(&WsMessage::CommandAck {
+                                encode_ws_message(encode_buf, &WsMessage::CommandAck {
                                     id: 0,
                                     success: false,
                                     error: Some("Machine definition too large to send"),
@@ -758,7 +793,7 @@ async fn handle_client_request_tx(
                     }
                     None => {
                         log_warn!("Machine definition not available, sending error");
-                        encode_ws_message(&WsMessage::CommandAck {
+                        encode_ws_message(encode_buf, &WsMessage::CommandAck {
                             id: 0,
                             success: false,
                             error: Some("Machine definition not available yet"),
@@ -766,7 +801,8 @@ async fn handle_client_request_tx(
                     }
                 }
             };
-            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encode_buf[..encoded])
+                .await?;
             log_info!("Sent MachineDefinition response");
         }
         ClientRequest::Routines => {
@@ -775,13 +811,13 @@ async fn handle_client_request_tx(
                 let guard = ROUTINE_CACHE.lock().await;
                 match guard.as_ref() {
                     // Fails soft for the reason given on the arm above.
-                    Some(summaries) => match encode_ws_message(&WsMessage::RoutinesUpdate(
+                    Some(summaries) => match encode_ws_message(encode_buf, &WsMessage::RoutinesUpdate(
                         RoutineSummaryStorage::from_list(summaries),
                     )) {
                         Ok(bytes) => bytes,
                         Err(e) => {
                             log_error!("Cannot send the routine list: {}", e);
-                            encode_ws_message(&WsMessage::CommandAck {
+                            encode_ws_message(encode_buf, &WsMessage::CommandAck {
                                 id: 0,
                                 success: false,
                                 error: Some("Routine list too large to send"),
@@ -790,7 +826,7 @@ async fn handle_client_request_tx(
                     },
                     None => {
                         log_warn!("Routines not available, sending error");
-                        encode_ws_message(&WsMessage::CommandAck {
+                        encode_ws_message(encode_buf, &WsMessage::CommandAck {
                             id: 0,
                             success: false,
                             error: Some("Routines not available yet"),
@@ -798,7 +834,8 @@ async fn handle_client_request_tx(
                     }
                 }
             };
-            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encode_buf[..encoded])
+                .await?;
             log_info!("Sent RoutinesUpdate response");
         }
         // The one request this server does not answer itself.
@@ -833,12 +870,13 @@ async fn handle_client_request_tx(
             }
 
             if let Some(id) = id {
-                let encoded = encode_ws_message(&WsMessage::CommandAck {
+                let encoded = encode_ws_message(encode_buf, &WsMessage::CommandAck {
                     id,
                     success: queued,
                     error: (!queued).then_some("Command channel full"),
                 })?;
-                send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+                send_frame_tx(writer, header_buf, FrameType::Binary(false), &encode_buf[..encoded])
+                .await?;
             }
         }
         // The one arm that blocks. `serve_query` awaits the application processor for up to
@@ -859,8 +897,9 @@ async fn handle_client_request_tx(
             // Encoded and sent in separate statements, like every other reply here: a
             // `QueryOk::RoutineDefinition` owns a couple of kilobytes and must not be alive
             // across the write.
-            let encoded = encode_ws_message(&WsMessage::QueryReply { id, outcome })?;
-            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encoded).await?;
+            let encoded = encode_ws_message(encode_buf, &WsMessage::QueryReply { id, outcome })?;
+            send_frame_tx(writer, header_buf, FrameType::Binary(false), &encode_buf[..encoded])
+                .await?;
         }
     }
     Ok(())

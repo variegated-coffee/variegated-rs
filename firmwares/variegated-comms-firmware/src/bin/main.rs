@@ -656,8 +656,26 @@ async fn main(spawner: Spawner) -> ! {
     // that panicked with `memory allocation of 4096 bytes failed` mid-upload, while the 1536
     // beside it succeeded -- fragmentation, not exhaustion. See `upload::Buffers`.
     //
-    // 18520 + 5632 = 24152.
-    esp_alloc::heap_allocator!(size: 64 * 1024 - 24152);
+    // Then two more that were not buffers of their own but allocations per *request*:
+    // `http.rs`'s 8192-byte body `Vec` became a 2304-byte stack array in each of the two
+    // handler slots, and `websocket.rs`'s `to_allocvec` became `to_slice` into one 8192-byte
+    // buffer. Those live in their tasks' futures rather than in a `Buffers` struct, so they
+    // arrive as `POOL` growth: measured, `.bss` +13392 and `.stack` -13392 before this line
+    // was adjusted, which is the one-for-one competition stated exactly.
+    //
+    // 18520 + 5632 + 13392 = 37544.
+    //
+    // **This leaves 64 kB reclaimed + 27992 here = 92536 of heap, down from 122880.** That is
+    // a large reduction and it is deliberate, but note what it rests on: the demand removed
+    // across these four changes is bigger than the capacity removed -- the BLE driver boxes,
+    // the uplink's per-message pair, the uploader's 4 kB transmit buffer, an 8 kB body per
+    // POST and up to ~16 kB transiently per WebSocket frame, against 37544 of capacity. The
+    // arithmetic says there is more room than before, not less.
+    //
+    // **It has not been measured on the machine.** `Heap high-water` from the 1 Hz snapshot
+    // is the number that settles it, and the 82356 figure quoted above predates all of it.
+    // Read it before shrinking this line any further.
+    esp_alloc::heap_allocator!(size: 64 * 1024 - 37544);
 
     // Initialize application processor channels
     let status_channel = STATUS_CHANNEL.init(embassy_sync::pubsub::PubSubChannel::new());

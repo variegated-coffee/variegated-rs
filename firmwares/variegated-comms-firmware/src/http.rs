@@ -1,7 +1,5 @@
 //! HTTP server functionality
 
-use alloc::vec;
-use alloc::vec::Vec;
 use core::fmt::{Debug, Display};
 use core::net::SocketAddr;
 
@@ -44,6 +42,18 @@ const SHOT_LOG_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_se
 // remembering what that number is for: the far side stores through a 2 kB buffer, so a larger
 // body could not be saved whatever the transport said, and reading it would be work spent on
 // its way to a refusal.
+
+/// Ceiling on a `POST`/`PUT /schedules` body.
+///
+/// [`MAX_CLIENT_FRAME_LEN`] rather than a number of its own, for the reason the paragraph
+/// above gives about `ROUTINE_BODY_LIMIT`: the two ways into this machine should agree on what
+/// is too big, and reusing the constant is what keeps them agreeing without a second argument
+/// to maintain.
+///
+/// Generous by any measure -- a `ScheduleItem` is 92 bytes, so this is twenty-five of them.
+/// The predecessor was 8192, allocated on the heap per request, which was both the largest
+/// contiguous request in the firmware and eighty-nine times the payload.
+const SCHEDULE_BODY_LIMIT: usize = crate::ws_types::MAX_CLIENT_FRAME_LEN;
 
 /// Turn a refusal from the application processor into something worth showing a user.
 ///
@@ -190,15 +200,24 @@ impl HttpHandler {
         Self::send_text(conn, 500, "Internal Server Error", message).await
     }
 
-    // Read request body into a Vec
-    async fn read_body<T, const N: usize>(
+    /// Read a request body into `buf`, returning the bytes actually read.
+    ///
+    /// **Caller-supplied, and not a heap `Vec`.** This used to be `vec![0u8; max_size]` with
+    /// both callers passing 8192 -- the largest single contiguous allocation in this
+    /// firmware, on a heap where a *4096*-byte request has already panicked mid-upload
+    /// (`memory allocation of 4096 bytes failed`; see `upload::Buffers`). It was also
+    /// dramatically oversized: both callers deserialise a `ScheduleItem`, which is 92 bytes.
+    ///
+    /// Callers now pass a stack array of [`SCHEDULE_BODY_LIMIT`], so the body never reaches
+    /// the allocator at all and nothing here can fail for want of a contiguous run.
+    async fn read_body<'b, T, const N: usize>(
         conn: &mut ServerConnection<'_, T, N>,
-        max_size: usize,
-    ) -> Result<Vec<u8>, Error<T::Error>>
+        buf: &'b mut [u8],
+    ) -> Result<&'b [u8], Error<T::Error>>
     where
         T: Read + Write,
     {
-        let mut buf = vec![0u8; max_size];
+        let max_size = buf.len();
         let mut total_read = 0;
 
         loop {
@@ -214,8 +233,7 @@ impl HttpHandler {
             }
         }
 
-        buf.truncate(total_read);
-        Ok(buf)
+        Ok(&buf[..total_read])
     }
 
     // GET /status
@@ -309,7 +327,8 @@ impl HttpHandler {
     {
         log_info!("POST /schedules");
 
-        let body = Self::read_body(conn, 8192).await?;
+        let mut body_buf = [0u8; SCHEDULE_BODY_LIMIT];
+        let body = Self::read_body(conn, &mut body_buf).await?;
 
         let schedule_item: ScheduleItem = match postcard::from_bytes(&body) {
             Ok(item) => item,
@@ -343,7 +362,8 @@ impl HttpHandler {
     {
         log_info!("PUT /schedules/{}", index);
 
-        let body = Self::read_body(conn, 8192).await?;
+        let mut body_buf = [0u8; SCHEDULE_BODY_LIMIT];
+        let body = Self::read_body(conn, &mut body_buf).await?;
 
         let schedule_item: ScheduleItem = match postcard::from_bytes(&body) {
             Ok(item) => item,
